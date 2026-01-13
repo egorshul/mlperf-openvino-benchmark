@@ -7,17 +7,17 @@ A benchmark tool for measuring CPU inference performance using OpenVINO backend,
 - **MLPerf v5.1 Compatible**: Follows MLPerf Inference benchmark specifications
 - **OpenVINO Backend**: Optimized for Intel CPUs using OpenVINO runtime
 - **Multiple Scenarios**: Supports Offline and Server scenarios
-- **Extensible Architecture**: Designed to easily add new models
+- **Multiple Models**: ResNet50, BERT-Large, RetinaNet, Whisper Large v3
 
 ### Supported Models
 
-| Model | Task | Status |
-|-------|------|--------|
-| ResNet50 | Image Classification | ✅ Implemented |
-| BERT-Large | Question Answering | 🔜 Planned |
-| RetinaNet | Object Detection | 🔜 Planned |
-| Whisper | Speech to Text | 🔜 Planned |
-| Stable Diffusion XL | Text to Image | 🔜 Planned |
+| Model | Task | Dataset | Status |
+|-------|------|---------|--------|
+| ResNet50-v1.5 | Image Classification | ImageNet 2012 | ✅ Implemented |
+| BERT-Large | Question Answering | SQuAD v1.1 | ✅ Implemented |
+| RetinaNet | Object Detection | OpenImages | ✅ Implemented |
+| Whisper Large v3 | Speech Recognition | LibriSpeech | ✅ Implemented |
+| Stable Diffusion XL | Text to Image | COCO 2014 | 🔜 Planned |
 
 ### Supported Scenarios
 
@@ -103,7 +103,7 @@ mlperf-ov benchmark-latency \
 
 ```
 Options:
-  --model, -m          Model to benchmark [resnet50|bert|retinanet]
+  --model, -m          Model to benchmark [resnet50|bert|retinanet|whisper]
   --scenario, -s       Test scenario [Offline|Server]
   --mode               Test mode [accuracy|performance|both]
   --model-path         Path to model file (ONNX or OpenVINO IR)
@@ -216,19 +216,27 @@ mypy src/
 ```
 mlperf-openvino-benchmark/
 ├── src/mlperf_openvino/
-│   ├── core/           # Core components
-│   │   ├── config.py   # Configuration management
-│   │   ├── sut.py      # System Under Test
-│   │   └── benchmark_runner.py
-│   ├── backends/       # Inference backends
-│   │   └── openvino_backend.py
-│   ├── datasets/       # Dataset handlers
-│   │   └── imagenet.py
-│   ├── utils/          # Utilities
-│   └── cli.py          # Command line interface
-├── configs/            # Configuration files
-├── tests/              # Unit tests
-└── results/            # Benchmark results
+│   ├── core/                    # Core components
+│   │   ├── config.py            # Configuration management
+│   │   ├── sut.py               # ResNet50 System Under Test
+│   │   ├── bert_sut.py          # BERT System Under Test
+│   │   ├── retinanet_sut.py     # RetinaNet System Under Test
+│   │   ├── whisper_sut.py       # Whisper System Under Test
+│   │   └── benchmark_runner.py  # Main benchmark orchestrator
+│   ├── backends/                # Inference backends
+│   │   └── openvino_backend.py  # OpenVINO inference
+│   ├── datasets/                # Dataset handlers
+│   │   ├── imagenet.py          # ImageNet for ResNet50
+│   │   ├── squad.py             # SQuAD v1.1 for BERT
+│   │   ├── openimages.py        # OpenImages for RetinaNet
+│   │   └── librispeech.py       # LibriSpeech for Whisper
+│   ├── utils/                   # Utilities
+│   │   ├── dataset_downloader.py
+│   │   └── model_downloader.py
+│   └── cli.py                   # Command line interface
+├── configs/                     # Configuration files
+├── tests/                       # Unit tests
+└── results/                     # Benchmark results
 ```
 
 ## MLPerf Compliance
@@ -240,19 +248,22 @@ This benchmark follows MLPerf Inference v5.1 specifications:
 - Supports both Closed and Open division requirements
 - Follows accuracy and latency constraints
 
-### Accuracy Requirements
+### Accuracy Requirements (MLPerf v5.1)
 
-| Model | Metric | Target |
-|-------|--------|--------|
-| ResNet50 | Top-1 Accuracy | ≥ 75.70% (99% of 76.46%) |
-| BERT | F1 Score | ≥ 89.18% (99% of 90.08%) |
+| Model | Metric | Reference | Target (99%) |
+|-------|--------|-----------|--------------|
+| ResNet50-v1.5 | Top-1 Accuracy | 76.46% | ≥ 75.70% |
+| BERT-Large | F1 Score | 90.874% | ≥ 89.97% |
+| RetinaNet | mAP | 37.57% | ≥ 37.19% |
+| Whisper Large v3 | Word Accuracy | 97.93% | ≥ 96.95% |
 
 ### Scenario Requirements
 
-| Scenario | Metric | Constraint |
-|----------|--------|------------|
-| Offline | Throughput | Maximum samples/sec |
-| Server | Latency | 99th percentile ≤ 15ms (ResNet50) |
+| Scenario | Metric | ResNet50 | BERT | RetinaNet | Whisper |
+|----------|--------|----------|------|-----------|---------|
+| Offline | Min Duration | 60s | 60s | 60s | 60s |
+| Offline | Min Queries | 24,576 | 10,833 | 24,576 | 2,513 |
+| Server | Target Latency | 15ms | 130ms | 100ms | 1,000ms |
 
 ## License
 

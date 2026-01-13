@@ -517,7 +517,7 @@ def list_models():
 
     models = [
         {
-            'name': 'ResNet50',
+            'name': 'ResNet50-v1.5',
             'id': 'resnet50',
             'task': 'Image Classification',
             'dataset': 'ImageNet 2012',
@@ -530,23 +530,23 @@ def list_models():
             'task': 'Question Answering',
             'dataset': 'SQuAD v1.1',
             'metric': 'F1 Score',
-            'target': '90.08%',
+            'target': '90.874%',
         },
         {
             'name': 'RetinaNet',
             'id': 'retinanet',
             'task': 'Object Detection',
             'dataset': 'OpenImages',
-            'metric': 'mAP@0.5',
-            'target': '37.55%',
+            'metric': 'mAP',
+            'target': '37.57%',
         },
         {
             'name': 'Whisper Large v3',
             'id': 'whisper',
             'task': 'Speech Recognition',
             'dataset': 'LibriSpeech',
-            'metric': 'WER',
-            'target': '< 5%',
+            'metric': 'Word Accuracy',
+            'target': '97.93%',
         },
     ]
 

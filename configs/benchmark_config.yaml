@@ -56,14 +56,14 @@ models:
     name: "BERT-Large"
     task: "question_answering"
     dataset: "squad-1.1"
-    input_shape: 
+    input_shape:
       input_ids: [1, 384]
       attention_mask: [1, 384]
       token_type_ids: [1, 384]
     max_seq_length: 384
     dtype: "FP32"
-    
-    accuracy_target: 0.9008  # F1 score
+
+    accuracy_target: 0.90874  # F1 score (official MLPerf v5.1)
     accuracy_threshold: 0.99
     
     sources:
@@ -85,8 +85,8 @@ models:
     dataset: "openimages-800"
     input_shape: [1, 3, 800, 800]
     dtype: "FP32"
-    
-    accuracy_target: 0.3755  # mAP
+
+    accuracy_target: 0.3757  # mAP (official MLPerf v5.1)
     accuracy_threshold: 0.99
     
     offline:
@@ -123,8 +123,8 @@ models:
       task: "transcribe"
       no_timestamps: true
     
-    accuracy_target: 0.0  # WER target (lower is better)
-    accuracy_threshold: 1.0  # For WER, we check if WER <= threshold
+    accuracy_target: 0.979329  # Word Accuracy (official MLPerf v5.1)
+    accuracy_threshold: 0.99  # Must achieve 99% of reference accuracy
     
     sources:
       huggingface_model_id: "openai/whisper-large-v3"
