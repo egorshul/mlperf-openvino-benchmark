@@ -73,8 +73,8 @@ all = [
 mlperf-ov = "mlperf_openvino.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/mlperf-openvino-benchmark"
-Documentation = "https://github.com/mlperf-openvino-benchmark#readme"
+Homepage = "https://github.com/egorshul/mlperf-openvino-benchmark"
+Documentation = "https://github.com/egorshul/mlperf-openvino-benchmark#readme"
 
 [tool.setuptools.packages.find]
 where = ["src"]

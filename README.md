@@ -8,16 +8,16 @@ A benchmark tool for measuring CPU inference performance using OpenVINO backend,
 - **OpenVINO Backend**: Optimized for Intel CPUs using OpenVINO runtime
 - **Multiple Scenarios**: Supports Offline and Server scenarios
 - **Multiple Models**: ResNet50, BERT-Large, RetinaNet, Whisper Large v3
+- **Automated Setup**: Built-in model and dataset downloaders
 
 ### Supported Models
 
-| Model | Task | Dataset | Status |
-|-------|------|---------|--------|
-| ResNet50-v1.5 | Image Classification | ImageNet 2012 | ✅ Implemented |
-| BERT-Large | Question Answering | SQuAD v1.1 | ✅ Implemented |
-| RetinaNet | Object Detection | OpenImages | ✅ Implemented |
-| Whisper Large v3 | Speech Recognition | LibriSpeech | ✅ Implemented |
-| Stable Diffusion XL | Text to Image | COCO 2014 | 🔜 Planned |
+| Model | Task | Dataset | Metric | Target |
+|-------|------|---------|--------|--------|
+| ResNet50-v1.5 | Image Classification | ImageNet 2012 | Top-1 Accuracy | 76.46% |
+| BERT-Large | Question Answering | SQuAD v1.1 | F1 Score | 90.874% |
+| RetinaNet | Object Detection | OpenImages | mAP | 37.57% |
+| Whisper Large v3 | Speech Recognition | LibriSpeech | Word Accuracy | 97.93% |
 
 ### Supported Scenarios
 
@@ -34,59 +34,115 @@ A benchmark tool for measuring CPU inference performance using OpenVINO backend,
 ### Install from source
 
 ```bash
-git clone https://github.com/your-org/mlperf-openvino-benchmark.git
+git clone https://github.com/egorshul/mlperf-openvino-benchmark.git
 cd mlperf-openvino-benchmark
 pip install -e .
 ```
 
-### Install with development dependencies
+### Install with model-specific dependencies
 
 ```bash
-pip install -e ".[dev]"
-```
+# For ResNet50
+pip install -e ".[resnet]"
 
-### Install all optional dependencies
+# For BERT
+pip install -e ".[bert]"
 
-```bash
+# For RetinaNet
+pip install -e ".[retinanet]"
+
+# For Whisper
+pip install -e ".[whisper]"
+
+# All models + development tools
 pip install -e ".[all]"
 ```
 
 ## Quick Start
 
-### 1. Download the model
+### Option 1: One-command setup (recommended)
+
+The easiest way to get started is using the `setup` command which downloads both the model and dataset:
+
+```bash
+# Set up ResNet50 benchmark
+mlperf-ov setup --model resnet50
+
+# Set up BERT benchmark
+mlperf-ov setup --model bert
+
+# Set up RetinaNet benchmark
+mlperf-ov setup --model retinanet
+
+# Set up Whisper benchmark
+mlperf-ov setup --model whisper
+```
+
+After setup completes, follow the printed instructions to run the benchmark.
+
+### Option 2: Manual setup
+
+#### 1. Download the model
 
 ```bash
 mlperf-ov download --model resnet50 --output-dir ./models
+mlperf-ov download --model bert --output-dir ./models
+mlperf-ov download --model retinanet --output-dir ./models
+mlperf-ov download --model whisper --output-dir ./models --format openvino
 ```
 
-### 2. Prepare the dataset
-
-Download ImageNet 2012 validation dataset and create the val_map.txt file:
+#### 2. Download the dataset
 
 ```bash
-# After downloading ImageNet validation set
-ls /path/to/imagenet/val/*.JPEG > val_list.txt
-# Create val_map.txt with format: filename label
+mlperf-ov download-dataset --dataset imagenet --output-dir ./data
+mlperf-ov download-dataset --dataset squad --output-dir ./data
+mlperf-ov download-dataset --dataset openimages --output-dir ./data
+mlperf-ov download-dataset --dataset librispeech --output-dir ./data --subset dev-clean
 ```
 
-### 3. Run benchmark
+#### 3. Run benchmark
 
 ```bash
-# Performance test
 mlperf-ov run \
   --model resnet50 \
   --scenario Offline \
   --mode performance \
   --model-path ./models/resnet50_v1.onnx \
   --data-path ./data/imagenet
+```
+
+## CLI Commands
+
+### List available models
+
+```bash
+mlperf-ov list-models
+```
+
+### Show system information
+
+```bash
+mlperf-ov info
+```
+
+### Run benchmark
+
+```bash
+# Performance test
+mlperf-ov run --model resnet50 --mode performance
 
 # Accuracy test
+mlperf-ov run --model bert --mode accuracy
+
+# Both accuracy and performance
+mlperf-ov run --model retinanet --mode both
+
+# With custom settings
 mlperf-ov run \
-  --model resnet50 \
-  --scenario Offline \
-  --mode accuracy \
-  --model-path ./models/resnet50_v1.onnx \
-  --data-path ./data/imagenet
+  --model whisper \
+  --scenario Server \
+  --num-threads 8 \
+  --performance-hint LATENCY
 ```
 
 ### Quick latency benchmark (without LoadGen)
@@ -97,11 +153,11 @@ mlperf-ov benchmark-latency \
   --iterations 100
 ```
 
-## Configuration
-
-### Command Line Options
+## Command Line Options
 
 ```
+mlperf-ov run [OPTIONS]
+
 Options:
   --model, -m          Model to benchmark [resnet50|bert|retinanet|whisper]
   --scenario, -s       Test scenario [Offline|Server]
@@ -109,15 +165,19 @@ Options:
   --model-path         Path to model file (ONNX or OpenVINO IR)
   --data-path          Path to dataset directory
   --output-dir, -o     Output directory for results
+  --config, -c         Path to YAML configuration file
   --num-threads        Number of CPU threads (0 = auto)
   --num-streams        Number of inference streams
   --performance-hint   Performance hint [THROUGHPUT|LATENCY]
   --duration           Minimum test duration in ms
+  --count              Number of samples to use (0 = all)
+  --warmup             Number of warmup iterations
+  --verbose, -v        Enable verbose output
 ```
 
-### Configuration File
+## Configuration File
 
-You can also use a YAML configuration file:
+You can use a YAML configuration file for advanced settings:
 
 ```yaml
 # benchmark_config.yaml
@@ -155,8 +215,8 @@ mlperf-ov run --config benchmark_config.yaml --model resnet50
 from mlperf_openvino import BenchmarkRunner, BenchmarkConfig
 from mlperf_openvino.core import Scenario, TestMode
 
-# Create configuration
-config = BenchmarkConfig.default_resnet50()
+# Create configuration for any supported model
+config = BenchmarkConfig.default_resnet50()  # or default_bert(), default_retinanet(), default_whisper()
 config.model.model_path = "./models/resnet50_v1.onnx"
 config.dataset.path = "./data/imagenet"
 config.scenario = Scenario.OFFLINE
@@ -185,8 +245,14 @@ Results are saved in JSON format:
   "duration_seconds": 60.5,
   "samples_processed": 50000,
   "throughput_samples_per_sec": 826.45,
+  "accuracy": {
+    "top1_accuracy": 0.7648,
+    "correct": 38240,
+    "total": 50000
+  },
   "device": "CPU",
-  "timestamp": "2024-01-15T10:30:00"
+  "openvino_version": "2024.0.0",
+  "timestamp": "2025-01-13T10:30:00"
 }
 ```
 
@@ -252,10 +318,10 @@ This benchmark follows MLPerf Inference v5.1 specifications:
 
 | Model | Metric | Reference | Target (99%) |
 |-------|--------|-----------|--------------|
-| ResNet50-v1.5 | Top-1 Accuracy | 76.46% | ≥ 75.70% |
-| BERT-Large | F1 Score | 90.874% | ≥ 89.97% |
-| RetinaNet | mAP | 37.57% | ≥ 37.19% |
-| Whisper Large v3 | Word Accuracy | 97.93% | ≥ 96.95% |
+| ResNet50-v1.5 | Top-1 Accuracy | 76.46% | >= 75.70% |
+| BERT-Large | F1 Score | 90.874% | >= 89.97% |
+| RetinaNet | mAP | 37.57% | >= 37.19% |
+| Whisper Large v3 | Word Accuracy | 97.93% | >= 96.95% |
 
 ### Scenario Requirements
 
@@ -264,6 +330,32 @@ This benchmark follows MLPerf Inference v5.1 specifications:
 | Offline | Min Duration | 60s | 60s | 60s | 60s |
 | Offline | Min Queries | 24,576 | 10,833 | 24,576 | 2,513 |
 | Server | Target Latency | 15ms | 130ms | 100ms | 1,000ms |
+
+## Troubleshooting
+
+### Common Issues
+
+**Model not found error:**
+```bash
+# Download the model first
+mlperf-ov download --model <model_name>
+```
+
+**Dataset not found error:**
+```bash
+# Download the dataset first
+mlperf-ov download-dataset --dataset <dataset_name>
+```
+
+**OpenVINO not installed:**
+```bash
+pip install openvino>=2024.0.0
+```
+
+**MLPerf LoadGen not installed:**
+```bash
+pip install mlcommons-loadgen>=4.0
+```
 
 ## License
 
