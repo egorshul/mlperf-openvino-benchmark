@@ -1,0 +1,96 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mlperf-openvino-benchmark"
+version = "0.1.0"
+description = "MLPerf v5.1 compatible inference benchmark using OpenVINO backend for CPU performance testing"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.9"
+authors = [
+    {name = "MLPerf OpenVINO Benchmark Team"}
+]
+keywords = ["mlperf", "openvino", "benchmark", "inference", "cpu"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "openvino>=2024.0.0",
+    "numpy>=1.21.0",
+    "pillow>=9.0.0",
+    "onnx>=1.14.0",
+    "mlcommons-loadgen>=4.0",
+    "tqdm>=4.64.0",
+    "pyyaml>=6.0",
+    "click>=8.0.0",
+    "psutil>=5.9.0",
+    "tabulate>=0.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+]
+resnet = [
+    "torchvision>=0.15.0",
+]
+bert = [
+    "transformers>=4.30.0",
+    "tokenizers>=0.13.0",
+]
+whisper = [
+    "transformers>=4.30.0",
+    "soundfile>=0.12.0",
+    "librosa>=0.10.0",
+    "jiwer>=3.0.0",  # For WER calculation
+    "optimum[openvino]>=1.16.0",  # For OpenVINO export
+]
+all = [
+    "mlperf-openvino-benchmark[dev,resnet,bert,whisper]",
+]
+
+[project.scripts]
+mlperf-ov = "mlperf_openvino.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/mlperf-openvino-benchmark"
+Documentation = "https://github.com/mlperf-openvino-benchmark#readme"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"
+
+[tool.black]
+line-length = 100
+target-version = ["py39", "py310", "py311", "py312"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+select = ["E", "F", "W", "I", "N", "UP"]
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true

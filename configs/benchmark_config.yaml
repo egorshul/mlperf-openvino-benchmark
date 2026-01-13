@@ -1,0 +1,211 @@
+# MLPerf v5.1 OpenVINO Benchmark Configuration
+# This file contains all model and benchmark configurations
+
+# Global settings
+global:
+  mlperf_version: "5.1"
+  division: "open"  # open or closed
+  category: "datacenter"  # datacenter or edge
+
+# Supported scenarios
+scenarios:
+  - Offline
+  - Server
+
+# Model configurations
+models:
+  resnet50:
+    name: "ResNet50-v1.5"
+    task: "image_classification"
+    dataset: "imagenet2012"
+    input_shape: [1, 3, 224, 224]
+    input_name: "input"
+    output_name: "output"
+    data_format: "NCHW"
+    dtype: "FP32"
+    
+    # MLPerf requirements
+    accuracy_target: 0.7646  # 76.46% Top-1 accuracy
+    accuracy_threshold: 0.99  # Must achieve 99% of reference accuracy
+    
+    # Preprocessing
+    preprocessing:
+      resize: [256, 256]
+      center_crop: [224, 224]
+      mean: [123.68, 116.78, 103.94]  # RGB order
+      std: [1.0, 1.0, 1.0]
+      channel_order: "RGB"
+    
+    # Model sources
+    sources:
+      onnx_url: "https://zenodo.org/record/4735647/files/resnet50_v1.onnx"
+      onnx_md5: "b51de8b3c86c48bb7c1f6f8a7f8c72d7"
+    
+    # Scenario-specific settings
+    offline:
+      min_duration_ms: 60000  # 60 seconds minimum
+      min_query_count: 24576
+      samples_per_query: 50000  # All samples in one query
+    
+    server:
+      target_latency_ns: 15000000  # 15ms
+      min_duration_ms: 60000
+      min_query_count: 270336
+
+  bert:
+    name: "BERT-Large"
+    task: "question_answering"
+    dataset: "squad-1.1"
+    input_shape: 
+      input_ids: [1, 384]
+      attention_mask: [1, 384]
+      token_type_ids: [1, 384]
+    max_seq_length: 384
+    dtype: "FP32"
+    
+    accuracy_target: 0.9008  # F1 score
+    accuracy_threshold: 0.99
+    
+    sources:
+      onnx_url: "https://zenodo.org/record/3733910/files/model.onnx"
+    
+    offline:
+      min_duration_ms: 60000
+      min_query_count: 10833
+      samples_per_query: 10833
+    
+    server:
+      target_latency_ns: 130000000  # 130ms
+      min_duration_ms: 60000
+      min_query_count: 270336
+
+  retinanet:
+    name: "RetinaNet"
+    task: "object_detection"
+    dataset: "openimages-800"
+    input_shape: [1, 3, 800, 800]
+    dtype: "FP32"
+    
+    accuracy_target: 0.3755  # mAP
+    accuracy_threshold: 0.99
+    
+    offline:
+      min_duration_ms: 60000
+      min_query_count: 24576
+    
+    server:
+      target_latency_ns: 100000000  # 100ms
+      min_duration_ms: 60000
+      min_query_count: 270336
+
+  whisper:
+    name: "Whisper-Large-v3"
+    task: "speech_recognition"
+    dataset: "librispeech"
+    input_shape: [1, 80, 3000]  # (batch, n_mels, time_frames)
+    input_name: "input_features"
+    output_name: "sequences"
+    data_format: "NCT"  # batch, channels (mels), time
+    dtype: "FP32"
+    
+    # Audio preprocessing parameters
+    audio:
+      sample_rate: 16000
+      n_fft: 400
+      hop_length: 160
+      n_mels: 80
+      chunk_length_sec: 30
+    
+    # Generation parameters
+    generation:
+      max_new_tokens: 448
+      language: "en"
+      task: "transcribe"
+      no_timestamps: true
+    
+    accuracy_target: 0.0  # WER target (lower is better)
+    accuracy_threshold: 1.0  # For WER, we check if WER <= threshold
+    
+    sources:
+      huggingface_model_id: "openai/whisper-large-v3"
+    
+    offline:
+      min_duration_ms: 60000
+      min_query_count: 2513
+      samples_per_query: 2513
+    
+    server:
+      target_latency_ns: 1000000000  # 1 second for ASR
+      min_duration_ms: 60000
+      min_query_count: 2513
+
+# OpenVINO specific settings
+openvino:
+  device: "CPU"
+  num_streams: "AUTO"  # AUTO, or specific number
+  num_threads: 0  # 0 = auto-detect
+  enable_profiling: false
+  cache_dir: "./cache"
+  
+  # Performance hints
+  performance_hint: "THROUGHPUT"  # THROUGHPUT or LATENCY
+  
+  # Precision options
+  inference_precision: "FP32"  # FP32, FP16, INT8
+  
+  # CPU-specific options
+  cpu:
+    bind_thread: true
+    threads_per_stream: 0  # 0 = auto
+    enable_hyper_threading: true
+
+# LoadGen settings
+loadgen:
+  # Test modes
+  test_mode: "PerformanceOnly"  # AccuracyOnly, PerformanceOnly, FindPeakPerformance
+  
+  # Logging
+  log_output_path: "./results"
+  log_copy_summary: true
+  log_enable_trace: false
+  
+  # Performance settings
+  performance_sample_count: 1024
+  target_qps: 0  # 0 = auto-discover
+  
+  # Accuracy settings
+  accuracy_log_rng_seed: 0
+  accuracy_log_probability: 0.0
+  accuracy_log_sampling_target: 0
+
+# Dataset paths
+datasets:
+  imagenet2012:
+    path: "./data/imagenet"
+    val_map: "./data/imagenet/val_map.txt"
+    calibration_path: "./data/imagenet/calibration"
+  
+  squad:
+    path: "./data/squad"
+    dev_file: "dev-v1.1.json"
+    vocab_file: "vocab.txt"
+  
+  openimages:
+    path: "./data/openimages"
+    annotations: "annotations/validation-annotations-bbox.csv"
+  
+  librispeech:
+    path: "./data/librispeech"
+    subset: "dev-clean"  # dev-clean, dev-other, test-clean, test-other
+    transcript_file: "transcripts.txt"
+
+# Output settings
+output:
+  results_dir: "./results"
+  logs_dir: "./logs"
+  reports_dir: "./reports"
+  
+  # Report formats
+  generate_html_report: true
+  generate_json_report: true
+  generate_csv_report: true

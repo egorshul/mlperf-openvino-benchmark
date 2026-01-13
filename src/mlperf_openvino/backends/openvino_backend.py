@@ -1,0 +1,434 @@
+"""
+OpenVINO backend implementation for MLPerf Benchmark.
+"""
+
+import logging
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+
+try:
+    import openvino as ov
+    from openvino.runtime import Core, CompiledModel, InferRequest
+    OPENVINO_AVAILABLE = True
+except ImportError:
+    OPENVINO_AVAILABLE = False
+    Core = None
+    CompiledModel = None
+    InferRequest = None
+
+from .base import BaseBackend
+from ..core.config import OpenVINOConfig
+
+logger = logging.getLogger(__name__)
+
+
+class OpenVINOBackend(BaseBackend):
+    """
+    OpenVINO backend for inference.
+    
+    This backend supports:
+    - ONNX models (converted on-the-fly)
+    - OpenVINO IR models (.xml/.bin)
+    - Various precision modes (FP32, FP16, INT8)
+    - Automatic batching and streaming
+    """
+    
+    def __init__(
+        self,
+        model_path: str,
+        config: Optional[OpenVINOConfig] = None,
+        **kwargs
+    ):
+        """
+        Initialize OpenVINO backend.
+        
+        Args:
+            model_path: Path to ONNX or OpenVINO IR model
+            config: OpenVINO configuration
+            **kwargs: Additional options
+        """
+        if not OPENVINO_AVAILABLE:
+            raise ImportError(
+                "OpenVINO is not installed. Please install it with: "
+                "pip install openvino"
+            )
+        
+        super().__init__(model_path, **kwargs)
+        
+        self.config = config or OpenVINOConfig()
+        self._core: Optional[Core] = None
+        self._model: Optional[ov.Model] = None
+        self._compiled_model: Optional[CompiledModel] = None
+        self._infer_request: Optional[InferRequest] = None
+        
+        # For async inference
+        self._infer_requests: List[InferRequest] = []
+        self._num_streams: int = 1
+        
+        # Cache input/output info
+        self._input_names: List[str] = []
+        self._output_names: List[str] = []
+        self._input_shapes: Dict[str, Tuple[int, ...]] = {}
+        self._output_shapes: Dict[str, Tuple[int, ...]] = {}
+    
+    def load(self) -> None:
+        """Load and compile the model."""
+        if self._loaded:
+            logger.warning("Model already loaded, skipping...")
+            return
+        
+        logger.info(f"Loading model from {self.model_path}")
+        
+        # Initialize OpenVINO Core
+        self._core = Core()
+        
+        # Create cache directory if specified
+        if self.config.cache_dir:
+            cache_path = Path(self.config.cache_dir)
+            cache_path.mkdir(parents=True, exist_ok=True)
+            self._core.set_property({"CACHE_DIR": str(cache_path)})
+        
+        # Load the model
+        model_path = Path(self.model_path)
+        
+        if model_path.suffix.lower() == ".onnx":
+            logger.info("Loading ONNX model and converting to OpenVINO IR...")
+            self._model = self._core.read_model(str(model_path))
+        elif model_path.suffix.lower() == ".xml":
+            logger.info("Loading OpenVINO IR model...")
+            self._model = self._core.read_model(str(model_path))
+        else:
+            raise ValueError(f"Unsupported model format: {model_path.suffix}")
+        
+        # Get model info before compilation
+        self._extract_model_info()
+        
+        # Compile the model with optimizations
+        logger.info(f"Compiling model for device: {self.config.device}")
+        
+        # Build properties
+        properties = self._build_compile_properties()
+        
+        self._compiled_model = self._core.compile_model(
+            self._model, 
+            self.config.device,
+            properties
+        )
+        
+        # Get number of streams
+        try:
+            self._num_streams = self._compiled_model.get_property("NUM_STREAMS")
+            logger.info(f"Using {self._num_streams} inference streams")
+        except Exception:
+            self._num_streams = 1
+        
+        # Create inference requests
+        self._create_infer_requests()
+        
+        self._loaded = True
+        logger.info("Model loaded and compiled successfully")
+    
+    def _build_compile_properties(self) -> Dict[str, Any]:
+        """Build compilation properties from config."""
+        properties = {}
+        
+        # Performance hint
+        if self.config.performance_hint:
+            hint_enum = getattr(ov.properties.hint.PerformanceMode, 
+                              self.config.performance_hint, None)
+            if hint_enum:
+                properties[ov.properties.hint.performance_mode()] = hint_enum
+        
+        # Number of streams
+        if self.config.num_streams != "AUTO":
+            try:
+                properties[ov.properties.hint.num_requests()] = int(self.config.num_streams)
+            except ValueError:
+                pass  # Use AUTO
+        
+        # Number of threads
+        if self.config.num_threads > 0:
+            properties[ov.properties.inference_num_threads()] = self.config.num_threads
+        
+        # CPU-specific options
+        if self.config.device.upper() == "CPU":
+            if self.config.bind_thread:
+                properties[ov.properties.hint.enable_cpu_pinning()] = True
+        
+        # Enable profiling if requested
+        if self.config.enable_profiling:
+            properties[ov.properties.enable_profiling()] = True
+        
+        return properties
+    
+    def _extract_model_info(self) -> None:
+        """Extract input/output information from the model."""
+        # Get input info
+        self._input_names = []
+        self._input_shapes = {}
+        
+        for input_node in self._model.inputs:
+            name = input_node.any_name
+            self._input_names.append(name)
+            
+            shape = tuple(input_node.partial_shape.get_min_shape())
+            if any(d == 0 for d in shape):
+                # Dynamic shape, use default
+                shape = tuple(d if d > 0 else 1 for d in shape)
+            
+            self._input_shapes[name] = shape
+        
+        # Get output info
+        self._output_names = []
+        self._output_shapes = {}
+        
+        for output_node in self._model.outputs:
+            name = output_node.any_name
+            self._output_names.append(name)
+            
+            shape = tuple(output_node.partial_shape.get_min_shape())
+            if any(d == 0 for d in shape):
+                shape = tuple(d if d > 0 else 1 for d in shape)
+            
+            self._output_shapes[name] = shape
+        
+        logger.info(f"Model inputs: {self._input_names}")
+        logger.info(f"Model outputs: {self._output_names}")
+    
+    def _create_infer_requests(self) -> None:
+        """Create inference requests for async execution."""
+        self._infer_requests = []
+        
+        # Create one request per stream
+        for _ in range(max(1, self._num_streams)):
+            request = self._compiled_model.create_infer_request()
+            self._infer_requests.append(request)
+        
+        # Set default request
+        self._infer_request = self._infer_requests[0]
+    
+    def predict(self, inputs: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+        """
+        Run synchronous inference.
+        
+        Args:
+            inputs: Dictionary mapping input names to numpy arrays
+            
+        Returns:
+            Dictionary mapping output names to numpy arrays
+        """
+        if not self._loaded:
+            self.load()
+        
+        # Set input tensors
+        for name, data in inputs.items():
+            self._infer_request.set_tensor(name, ov.Tensor(data))
+        
+        # Run inference
+        self._infer_request.infer()
+        
+        # Get output tensors
+        outputs = {}
+        for name in self._output_names:
+            output_tensor = self._infer_request.get_tensor(name)
+            outputs[name] = output_tensor.data.copy()
+        
+        return outputs
+    
+    def predict_batch(
+        self, 
+        batch: List[Dict[str, np.ndarray]]
+    ) -> List[Dict[str, np.ndarray]]:
+        """
+        Run inference on a batch of inputs.
+        
+        For optimal throughput, this method uses multiple inference requests.
+        
+        Args:
+            batch: List of input dictionaries
+            
+        Returns:
+            List of output dictionaries
+        """
+        if not self._loaded:
+            self.load()
+        
+        results = []
+        num_requests = len(self._infer_requests)
+        
+        # Process in chunks matching the number of available requests
+        for i in range(0, len(batch), num_requests):
+            chunk = batch[i:i + num_requests]
+            
+            # Start all inferences
+            for j, inputs in enumerate(chunk):
+                request = self._infer_requests[j]
+                
+                for name, data in inputs.items():
+                    request.set_tensor(name, ov.Tensor(data))
+                
+                request.start_async()
+            
+            # Wait for all to complete
+            for j in range(len(chunk)):
+                request = self._infer_requests[j]
+                request.wait()
+                
+                outputs = {}
+                for name in self._output_names:
+                    output_tensor = request.get_tensor(name)
+                    outputs[name] = output_tensor.data.copy()
+                
+                results.append(outputs)
+        
+        return results
+    
+    def predict_async(
+        self,
+        inputs: Dict[str, np.ndarray],
+        request_id: int = 0
+    ) -> InferRequest:
+        """
+        Start asynchronous inference.
+        
+        Args:
+            inputs: Input data
+            request_id: ID of the inference request to use
+            
+        Returns:
+            The inference request (can be used to wait for completion)
+        """
+        if not self._loaded:
+            self.load()
+        
+        request = self._infer_requests[request_id % len(self._infer_requests)]
+        
+        for name, data in inputs.items():
+            request.set_tensor(name, ov.Tensor(data))
+        
+        request.start_async()
+        return request
+    
+    def get_results_async(self, request: InferRequest) -> Dict[str, np.ndarray]:
+        """
+        Get results from async inference request.
+        
+        Args:
+            request: The inference request
+            
+        Returns:
+            Output dictionary
+        """
+        request.wait()
+        
+        outputs = {}
+        for name in self._output_names:
+            output_tensor = request.get_tensor(name)
+            outputs[name] = output_tensor.data.copy()
+        
+        return outputs
+    
+    @property
+    def input_names(self) -> List[str]:
+        """Get list of input tensor names."""
+        return self._input_names
+    
+    @property
+    def output_names(self) -> List[str]:
+        """Get list of output tensor names."""
+        return self._output_names
+    
+    @property
+    def input_shapes(self) -> Dict[str, Tuple[int, ...]]:
+        """Get shapes of input tensors."""
+        return self._input_shapes
+    
+    @property
+    def output_shapes(self) -> Dict[str, Tuple[int, ...]]:
+        """Get shapes of output tensors."""
+        return self._output_shapes
+    
+    @property
+    def num_streams(self) -> int:
+        """Get number of inference streams."""
+        return self._num_streams
+    
+    def get_info(self) -> Dict[str, Any]:
+        """Get backend information."""
+        info = super().get_info()
+        
+        if OPENVINO_AVAILABLE:
+            info["openvino_version"] = ov.__version__
+        
+        if self._loaded:
+            info.update({
+                "device": self.config.device,
+                "num_streams": self._num_streams,
+                "performance_hint": self.config.performance_hint,
+                "inference_precision": self.config.inference_precision,
+            })
+            
+            # Get device info
+            if self._core:
+                try:
+                    info["device_full_name"] = self._core.get_property(
+                        self.config.device, 
+                        "FULL_DEVICE_NAME"
+                    )
+                except Exception:
+                    pass
+        
+        return info
+    
+    def benchmark(
+        self, 
+        num_iterations: int = 100,
+        warmup_iterations: int = 10
+    ) -> Dict[str, float]:
+        """
+        Run a simple latency benchmark.
+        
+        Args:
+            num_iterations: Number of benchmark iterations
+            warmup_iterations: Number of warmup iterations
+            
+        Returns:
+            Dictionary with benchmark results (latency in ms)
+        """
+        import time
+        
+        if not self._loaded:
+            self.load()
+        
+        # Create dummy input
+        dummy_inputs = {}
+        for name, shape in self.input_shapes.items():
+            dummy_inputs[name] = np.random.randn(*shape).astype(np.float32)
+        
+        # Warmup
+        for _ in range(warmup_iterations):
+            self.predict(dummy_inputs)
+        
+        # Benchmark
+        latencies = []
+        for _ in range(num_iterations):
+            start = time.perf_counter()
+            self.predict(dummy_inputs)
+            end = time.perf_counter()
+            latencies.append((end - start) * 1000)  # Convert to ms
+        
+        latencies = np.array(latencies)
+        
+        return {
+            "mean_latency_ms": float(np.mean(latencies)),
+            "median_latency_ms": float(np.median(latencies)),
+            "min_latency_ms": float(np.min(latencies)),
+            "max_latency_ms": float(np.max(latencies)),
+            "std_latency_ms": float(np.std(latencies)),
+            "p50_latency_ms": float(np.percentile(latencies, 50)),
+            "p90_latency_ms": float(np.percentile(latencies, 90)),
+            "p99_latency_ms": float(np.percentile(latencies, 99)),
+            "throughput_fps": float(1000.0 / np.mean(latencies)),
+        }

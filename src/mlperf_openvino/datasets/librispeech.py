@@ -1,0 +1,551 @@
+"""
+LibriSpeech dataset for Whisper ASR benchmark.
+
+This module provides dataset handling for the LibriSpeech dataset
+used in MLPerf Inference for Whisper model evaluation.
+"""
+
+import logging
+import os
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+import numpy as np
+
+from .base import BaseDataset, QuerySampleLibrary
+
+logger = logging.getLogger(__name__)
+
+# Audio processing constants
+SAMPLE_RATE = 16000  # Whisper expects 16kHz audio
+N_FFT = 400
+HOP_LENGTH = 160
+N_MELS = 80
+CHUNK_LENGTH = 30  # seconds
+N_SAMPLES = CHUNK_LENGTH * SAMPLE_RATE  # 480000 samples for 30 seconds
+
+
+def load_audio(file_path: str, sr: int = SAMPLE_RATE) -> np.ndarray:
+    """
+    Load audio file and resample to target sample rate.
+    
+    Args:
+        file_path: Path to audio file
+        sr: Target sample rate
+        
+    Returns:
+        Audio waveform as numpy array
+    """
+    try:
+        import soundfile as sf
+    except ImportError:
+        raise ImportError(
+            "soundfile is required for audio loading. "
+            "Install with: pip install soundfile"
+        )
+    
+    audio, file_sr = sf.read(file_path, dtype='float32')
+    
+    # Convert stereo to mono if needed
+    if len(audio.shape) > 1:
+        audio = audio.mean(axis=1)
+    
+    # Resample if needed
+    if file_sr != sr:
+        try:
+            import librosa
+            audio = librosa.resample(audio, orig_sr=file_sr, target_sr=sr)
+        except ImportError:
+            # Simple resampling without librosa
+            ratio = sr / file_sr
+            new_length = int(len(audio) * ratio)
+            indices = np.linspace(0, len(audio) - 1, new_length)
+            audio = np.interp(indices, np.arange(len(audio)), audio)
+    
+    return audio
+
+
+def pad_or_trim(array: np.ndarray, length: int = N_SAMPLES) -> np.ndarray:
+    """
+    Pad or trim audio to exact length.
+    
+    Args:
+        array: Audio waveform
+        length: Target length in samples
+        
+    Returns:
+        Padded or trimmed audio
+    """
+    if len(array) > length:
+        array = array[:length]
+    elif len(array) < length:
+        array = np.pad(array, (0, length - len(array)))
+    return array
+
+
+def log_mel_spectrogram(
+    audio: np.ndarray,
+    n_mels: int = N_MELS,
+    n_fft: int = N_FFT,
+    hop_length: int = HOP_LENGTH,
+) -> np.ndarray:
+    """
+    Compute log-Mel spectrogram from audio waveform.
+    
+    This matches the preprocessing used by Whisper.
+    
+    Args:
+        audio: Audio waveform (16kHz)
+        n_mels: Number of mel filterbanks
+        n_fft: FFT window size
+        hop_length: Hop length for STFT
+        
+    Returns:
+        Log-mel spectrogram of shape (n_mels, time_frames)
+    """
+    try:
+        import librosa
+        
+        # Compute mel spectrogram
+        mel_spec = librosa.feature.melspectrogram(
+            y=audio,
+            sr=SAMPLE_RATE,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            n_mels=n_mels,
+            fmin=0,
+            fmax=8000,
+        )
+        
+        # Convert to log scale
+        log_mel = np.log10(np.clip(mel_spec, a_min=1e-10, a_max=None))
+        
+        # Normalize
+        log_mel = np.maximum(log_mel, log_mel.max() - 8.0)
+        log_mel = (log_mel + 4.0) / 4.0
+        
+        return log_mel.astype(np.float32)
+        
+    except ImportError:
+        # Fallback without librosa - simplified mel spectrogram
+        logger.warning("librosa not available, using simplified mel spectrogram")
+        
+        # Compute STFT
+        window = np.hanning(n_fft)
+        num_frames = 1 + (len(audio) - n_fft) // hop_length
+        
+        stft = np.zeros((n_fft // 2 + 1, num_frames), dtype=np.complex64)
+        for i in range(num_frames):
+            start = i * hop_length
+            frame = audio[start:start + n_fft] * window
+            stft[:, i] = np.fft.rfft(frame)
+        
+        # Power spectrum
+        power = np.abs(stft) ** 2
+        
+        # Simplified mel filterbank
+        mel_freqs = np.linspace(0, 2595 * np.log10(1 + SAMPLE_RATE / 2 / 700), n_mels + 2)
+        mel_freqs = 700 * (10 ** (mel_freqs / 2595) - 1)
+        
+        fft_freqs = np.linspace(0, SAMPLE_RATE / 2, n_fft // 2 + 1)
+        
+        filterbank = np.zeros((n_mels, n_fft // 2 + 1))
+        for i in range(n_mels):
+            left = mel_freqs[i]
+            center = mel_freqs[i + 1]
+            right = mel_freqs[i + 2]
+            
+            for j, freq in enumerate(fft_freqs):
+                if left <= freq <= center:
+                    filterbank[i, j] = (freq - left) / (center - left)
+                elif center <= freq <= right:
+                    filterbank[i, j] = (right - freq) / (right - center)
+        
+        # Apply filterbank
+        mel_spec = np.dot(filterbank, power)
+        
+        # Log scale
+        log_mel = np.log10(np.clip(mel_spec, a_min=1e-10, a_max=None))
+        log_mel = np.maximum(log_mel, log_mel.max() - 8.0)
+        log_mel = (log_mel + 4.0) / 4.0
+        
+        return log_mel.astype(np.float32)
+
+
+class LibriSpeechDataset(BaseDataset):
+    """
+    LibriSpeech dataset for Whisper ASR benchmark.
+    
+    LibriSpeech is a corpus of read English speech derived from audiobooks.
+    For MLPerf, typically the dev-clean or test-clean subset is used.
+    
+    Expected directory structure:
+        data_path/
+        ├── audio/
+        │   ├── 1272-128104-0000.flac
+        │   ├── 1272-128104-0001.flac
+        │   └── ...
+        └── transcripts.txt (or dev-clean.txt)
+    
+    Transcript format (one per line):
+        1272-128104-0000 HE HOPED THERE WOULD BE STEW FOR DINNER
+    """
+    
+    def __init__(
+        self,
+        data_path: str,
+        transcript_path: Optional[str] = None,
+        count: Optional[int] = None,
+        max_duration: float = 30.0,
+    ):
+        """
+        Initialize LibriSpeech dataset.
+        
+        Args:
+            data_path: Path to dataset directory
+            transcript_path: Path to transcript file (optional)
+            count: Number of samples to use (None = all)
+            max_duration: Maximum audio duration in seconds
+        """
+        super().__init__(data_path=data_path, count=count)
+        
+        self.data_path = Path(data_path)
+        self.transcript_path = transcript_path
+        self.max_duration = max_duration
+        
+        self._samples: List[Dict[str, Any]] = []
+        self._cache: Dict[int, np.ndarray] = {}
+        self._is_loaded = False
+    
+    def load(self) -> None:
+        """Load dataset metadata."""
+        if self._is_loaded:
+            return
+        
+        logger.info(f"Loading LibriSpeech dataset from {self.data_path}")
+        
+        # Find transcript file
+        if self.transcript_path:
+            transcript_file = Path(self.transcript_path)
+        else:
+            # Try common names
+            for name in ["transcripts.txt", "dev-clean.txt", "test-clean.txt"]:
+                transcript_file = self.data_path / name
+                if transcript_file.exists():
+                    break
+            else:
+                # Scan for audio files without transcripts
+                logger.warning("No transcript file found, scanning for audio files")
+                transcript_file = None
+        
+        # Load samples
+        if transcript_file and transcript_file.exists():
+            self._load_from_transcript(transcript_file)
+        else:
+            self._scan_audio_files()
+        
+        # Limit count if specified
+        if self.count and self.count < len(self._samples):
+            self._samples = self._samples[:self.count]
+        
+        logger.info(f"Loaded {len(self._samples)} audio samples")
+        self._is_loaded = True
+    
+    def _load_from_transcript(self, transcript_file: Path) -> None:
+        """Load samples from transcript file."""
+        audio_dir = self.data_path / "audio"
+        if not audio_dir.exists():
+            audio_dir = self.data_path
+        
+        with open(transcript_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                parts = line.split(maxsplit=1)
+                if len(parts) < 2:
+                    continue
+                
+                audio_id = parts[0]
+                transcript = parts[1]
+                
+                # Find audio file
+                audio_file = None
+                for ext in ['.flac', '.wav', '.mp3', '.ogg']:
+                    candidate = audio_dir / f"{audio_id}{ext}"
+                    if candidate.exists():
+                        audio_file = candidate
+                        break
+                
+                if audio_file:
+                    self._samples.append({
+                        "id": audio_id,
+                        "audio_path": str(audio_file),
+                        "transcript": transcript,
+                    })
+    
+    def _scan_audio_files(self) -> None:
+        """Scan directory for audio files."""
+        audio_extensions = {'.flac', '.wav', '.mp3', '.ogg', '.m4a'}
+        
+        for root, _, files in os.walk(self.data_path):
+            for file in sorted(files):
+                if Path(file).suffix.lower() in audio_extensions:
+                    audio_path = Path(root) / file
+                    audio_id = Path(file).stem
+                    
+                    self._samples.append({
+                        "id": audio_id,
+                        "audio_path": str(audio_path),
+                        "transcript": "",  # Unknown
+                    })
+    
+    def __len__(self) -> int:
+        return len(self._samples)
+    
+    @property
+    def total_count(self) -> int:
+        return len(self._samples)
+    
+    @property
+    def sample_count(self) -> int:
+        return len(self._samples)
+    
+    def get_sample(self, index: int) -> Tuple[np.ndarray, str]:
+        """
+        Get preprocessed audio sample.
+        
+        Args:
+            index: Sample index
+            
+        Returns:
+            Tuple of (mel_spectrogram, transcript)
+            mel_spectrogram shape: (1, n_mels, time_frames)
+        """
+        if index in self._cache:
+            mel = self._cache[index]
+        else:
+            sample = self._samples[index]
+            audio = load_audio(sample["audio_path"])
+            
+            # Pad or trim to chunk length
+            audio = pad_or_trim(audio, N_SAMPLES)
+            
+            # Compute mel spectrogram
+            mel = log_mel_spectrogram(audio)
+            
+            self._cache[index] = mel
+        
+        # Add batch dimension
+        mel = mel[np.newaxis, ...]  # (1, n_mels, time_frames)
+        
+        return mel, self._samples[index]["transcript"]
+    
+    def get_samples(self, indices: List[int]) -> Tuple[np.ndarray, List[str]]:
+        """
+        Get batch of preprocessed audio samples.
+        
+        Args:
+            indices: List of sample indices
+            
+        Returns:
+            Tuple of (mel_spectrograms, transcripts)
+        """
+        mels = []
+        transcripts = []
+        
+        for idx in indices:
+            mel, transcript = self.get_sample(idx)
+            mels.append(mel[0])  # Remove batch dim for stacking
+            transcripts.append(transcript)
+        
+        return np.stack(mels), transcripts
+    
+    def get_transcript(self, index: int) -> str:
+        """Get transcript for sample."""
+        return self._samples[index]["transcript"]
+    
+    def get_audio_path(self, index: int) -> str:
+        """Get audio file path for sample."""
+        return self._samples[index]["audio_path"]
+    
+    def postprocess(
+        self,
+        results: Union[np.ndarray, List[str]],
+        indices: List[int]
+    ) -> List[str]:
+        """
+        Postprocess model outputs.
+        
+        For Whisper, the output is typically decoded text.
+        
+        Args:
+            results: Model outputs (decoded text or token IDs)
+            indices: Sample indices
+            
+        Returns:
+            List of transcribed texts
+        """
+        if isinstance(results, np.ndarray):
+            # Assume token IDs - would need tokenizer for decoding
+            # For now, return empty strings
+            return ["" for _ in indices]
+        return results
+    
+    def compute_accuracy(
+        self,
+        predictions: List[str],
+        ground_truth: List[str]
+    ) -> Dict[str, float]:
+        """
+        Compute Word Error Rate (WER).
+        
+        Args:
+            predictions: Predicted transcriptions
+            ground_truth: Ground truth transcriptions
+            
+        Returns:
+            Dictionary with WER and other metrics
+        """
+        try:
+            from jiwer import wer, cer
+            
+            # Normalize texts
+            predictions = [p.upper().strip() for p in predictions]
+            ground_truth = [g.upper().strip() for g in ground_truth]
+            
+            # Filter out empty references
+            valid_pairs = [
+                (p, g) for p, g in zip(predictions, ground_truth) if g
+            ]
+            
+            if not valid_pairs:
+                return {
+                    "wer": 0.0,
+                    "cer": 0.0,
+                    "num_samples": 0,
+                }
+            
+            preds, refs = zip(*valid_pairs)
+            
+            word_error_rate = wer(list(refs), list(preds))
+            char_error_rate = cer(list(refs), list(preds))
+            
+            return {
+                "wer": word_error_rate,
+                "cer": char_error_rate,
+                "num_samples": len(valid_pairs),
+            }
+            
+        except ImportError:
+            logger.warning("jiwer not installed, computing simple accuracy")
+            
+            # Simple exact match accuracy
+            correct = sum(
+                1 for p, g in zip(predictions, ground_truth)
+                if p.upper().strip() == g.upper().strip()
+            )
+            
+            return {
+                "exact_match": correct / len(predictions) if predictions else 0.0,
+                "num_samples": len(predictions),
+            }
+
+
+class LibriSpeechQSL(QuerySampleLibrary):
+    """
+    Query Sample Library for LibriSpeech dataset.
+    
+    Implements the MLPerf LoadGen QSL interface for Whisper benchmark.
+    """
+    
+    def __init__(
+        self,
+        data_path: str,
+        transcript_path: Optional[str] = None,
+        count: Optional[int] = None,
+        performance_sample_count: int = 2513,  # MLPerf default
+    ):
+        """
+        Initialize LibriSpeech QSL.
+        
+        Args:
+            data_path: Path to dataset directory
+            transcript_path: Path to transcript file
+            count: Number of samples to use
+            performance_sample_count: Number of samples for performance run
+        """
+        super().__init__()
+        
+        self.dataset = LibriSpeechDataset(
+            data_path=data_path,
+            transcript_path=transcript_path,
+            count=count,
+        )
+        
+        self._performance_sample_count = performance_sample_count
+        self._loaded_samples: Dict[int, np.ndarray] = {}
+    
+    def load(self) -> None:
+        """Load the dataset."""
+        self.dataset.load()
+    
+    @property
+    def total_sample_count(self) -> int:
+        return self.dataset.total_count
+    
+    @property
+    def performance_sample_count(self) -> int:
+        return min(self._performance_sample_count, self.total_sample_count)
+    
+    def load_query_samples(self, sample_indices: List[int]) -> None:
+        """
+        Load samples into memory.
+        
+        Args:
+            sample_indices: Indices of samples to load
+        """
+        for idx in sample_indices:
+            if idx not in self._loaded_samples:
+                mel, _ = self.dataset.get_sample(idx)
+                self._loaded_samples[idx] = mel
+    
+    def unload_query_samples(self, sample_indices: List[int]) -> None:
+        """
+        Unload samples from memory.
+        
+        Args:
+            sample_indices: Indices of samples to unload
+        """
+        for idx in sample_indices:
+            self._loaded_samples.pop(idx, None)
+    
+    def get_features(self, sample_index: int) -> Dict[str, np.ndarray]:
+        """
+        Get input features for a sample.
+        
+        Args:
+            sample_index: Sample index
+            
+        Returns:
+            Dictionary with input features
+        """
+        if sample_index in self._loaded_samples:
+            mel = self._loaded_samples[sample_index]
+        else:
+            mel, _ = self.dataset.get_sample(sample_index)
+        
+        return {"input_features": mel}
+    
+    def get_label(self, sample_index: int) -> str:
+        """
+        Get ground truth transcript for a sample.
+        
+        Args:
+            sample_index: Sample index
+            
+        Returns:
+            Ground truth transcript
+        """
+        return self.dataset.get_transcript(sample_index)
