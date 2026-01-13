@@ -206,24 +206,27 @@ class BenchmarkRunner:
         """Compute accuracy metrics from predictions."""
         if self.sut is None or self.qsl is None:
             return
-        
+
         predictions = self.sut.get_predictions()
-        
+
         predicted_labels = []
         ground_truth = []
-        
-        for sample_idx, result in predictions.items():
-            pred_class = int(np.argmax(result))
-            predicted_labels.append(pred_class)
-            
+
+        for sample_idx, result in sorted(predictions.items()):
+            # Use dataset's postprocess to correctly handle model output format
+            # This handles both argmax outputs (int64) and softmax outputs (float32)
+            # and correctly shifts indices for 1001-class models
+            pred_classes = self.qsl.dataset.postprocess(result, [sample_idx])
+            predicted_labels.append(pred_classes[0])
+
             gt_label = self.qsl.get_label(sample_idx)
             ground_truth.append(gt_label)
-        
+
         self._accuracy_results = self.qsl.dataset.compute_accuracy(
             predicted_labels,
             ground_truth
         )
-        
+
         logger.info(f"Accuracy: {self._accuracy_results['top1_accuracy']:.4f}")
     
     def run_accuracy(self) -> Dict[str, float]:
