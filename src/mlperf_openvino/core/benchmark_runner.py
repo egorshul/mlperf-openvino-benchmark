@@ -378,11 +378,11 @@ class BenchmarkRunner:
         logger.info(f"mAP: {self._accuracy_results.get('mAP', 0):.4f}")
 
     def _compute_whisper_accuracy(self) -> None:
-        """Compute Whisper accuracy (WER)."""
+        """Compute Whisper accuracy (Word Accuracy - MLPerf v5.1 metric)."""
         predictions = self.sut.get_predictions()
 
         if not predictions:
-            self._accuracy_results = {'wer': 0.0, 'num_samples': 0}
+            self._accuracy_results = {'word_accuracy': 0.0, 'wer': 0.0, 'num_samples': 0}
             return
 
         # Get predicted texts and ground truth
@@ -400,6 +400,7 @@ class BenchmarkRunner:
 
         self._accuracy_results = self.qsl.dataset.compute_accuracy(pred_texts, ground_truth)
 
+        logger.info(f"Word Accuracy: {self._accuracy_results.get('word_accuracy', 0):.4f}")
         logger.info(f"WER: {self._accuracy_results.get('wer', 0):.4f}")
 
     def run_accuracy(self) -> Dict[str, float]:
@@ -496,6 +497,7 @@ class BenchmarkRunner:
             elif model_type == 'retinanet':
                 print(f"mAP@0.5: {acc.get('mAP', 0):.4f}")
             elif model_type == 'whisper':
+                print(f"Word Accuracy: {acc.get('word_accuracy', 0):.4f}")
                 print(f"WER: {acc.get('wer', 0):.4f}")
 
         print("="*60 + "\n")

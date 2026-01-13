@@ -23,7 +23,7 @@ class TestBertConfig:
         assert config.model.name == "BERT-Large"
         assert config.model.model_type == ModelType.BERT
         assert config.model.task == "question_answering"
-        assert config.model.accuracy_target == 0.9008
+        assert config.model.accuracy_target == 0.90874
         assert config.dataset.name == "squad"
 
     def test_bert_scenario_config(self):
@@ -51,7 +51,7 @@ class TestRetinaNetConfig:
         assert config.model.name == "RetinaNet"
         assert config.model.model_type == ModelType.RETINANET
         assert config.model.task == "object_detection"
-        assert config.model.accuracy_target == 0.3755
+        assert config.model.accuracy_target == 0.3757
         assert config.dataset.name == "openimages"
 
     def test_retinanet_input_shape(self):

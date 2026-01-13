@@ -294,7 +294,7 @@ class BenchmarkConfig:
                 output_name="sequences",
                 data_format="NCT",  # batch, channels (mels), time
                 dtype="FP32",
-                accuracy_target=0.0,  # WER target TBD
+                accuracy_target=0.979329,  # Word Accuracy (official MLPerf v5.1)
                 accuracy_threshold=0.99,
                 preprocessing=PreprocessingConfig(),  # Not used for audio
                 offline=ScenarioConfig(
@@ -328,7 +328,7 @@ class BenchmarkConfig:
                 output_name="output",
                 data_format="NC",
                 dtype="FP32",
-                accuracy_target=0.9008,  # F1 score
+                accuracy_target=0.90874,  # F1 score (official MLPerf v5.1)
                 accuracy_threshold=0.99,
                 preprocessing=PreprocessingConfig(),  # Not used for text
                 offline=ScenarioConfig(
@@ -362,7 +362,7 @@ class BenchmarkConfig:
                 output_name="output",
                 data_format="NCHW",
                 dtype="FP32",
-                accuracy_target=0.3755,  # mAP
+                accuracy_target=0.3757,  # mAP (official MLPerf v5.1)
                 accuracy_threshold=0.99,
                 preprocessing=PreprocessingConfig(
                     resize=(800, 800),
