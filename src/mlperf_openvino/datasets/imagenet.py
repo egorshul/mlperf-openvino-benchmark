@@ -222,25 +222,54 @@ class ImageNetDataset(BaseDataset):
         return batch, labels
     
     def postprocess(
-        self, 
-        results: np.ndarray, 
+        self,
+        results: np.ndarray,
         indices: List[int]
     ) -> List[int]:
         """
         Postprocess inference results to get predicted classes.
-        
+
         Args:
-            results: Raw inference output (logits or probabilities)
+            results: Raw inference output - can be:
+                - Pre-computed argmax indices (shape [N] or [N,1], dtype int64)
+                - Logits/probabilities (shape [N, num_classes], dtype float32)
             indices: Sample indices (unused here)
-            
+
         Returns:
-            List of predicted class indices
+            List of predicted class indices (0-999 for ImageNet)
         """
-        # Get argmax for each sample in batch
-        if len(results.shape) == 1:
-            return [int(np.argmax(results))]
+        predictions = []
+
+        # Handle different output formats
+        if results.dtype in (np.int64, np.int32):
+            # Model already computed argmax (e.g., ArgMax:0 output)
+            # Results contain class indices directly
+            results = results.flatten()
+            for idx in results:
+                # MLPerf ResNet50 ONNX model uses 1001 classes (0=background, 1-1000=ImageNet)
+                # Subtract 1 to convert to 0-999 range for val_map.txt labels
+                pred = int(idx) - 1
+                # Clamp to valid range (in case of background prediction)
+                pred = max(0, min(999, pred))
+                predictions.append(pred)
         else:
-            return [int(np.argmax(results[i])) for i in range(results.shape[0])]
+            # Model outputs logits/probabilities, need to compute argmax
+            if len(results.shape) == 1:
+                results = results.reshape(1, -1)
+
+            num_classes = results.shape[1]
+
+            for i in range(results.shape[0]):
+                pred = int(np.argmax(results[i]))
+
+                # If model has 1001 classes (with background), subtract 1
+                if num_classes == 1001:
+                    pred = pred - 1
+                    pred = max(0, min(999, pred))
+
+                predictions.append(pred)
+
+        return predictions
     
     def compute_accuracy(
         self, 
