@@ -314,6 +314,80 @@ class BenchmarkConfig:
                 path="./data/librispeech",
             ),
         )
+
+    @classmethod
+    def default_bert(cls) -> "BenchmarkConfig":
+        """Create default BERT-Large configuration for SQuAD."""
+        return cls(
+            model=ModelConfig(
+                name="BERT-Large",
+                task="question_answering",
+                model_type=ModelType.BERT,
+                input_shape=[1, 384],  # (batch, seq_length)
+                input_name="input_ids",
+                output_name="output",
+                data_format="NC",
+                dtype="FP32",
+                accuracy_target=0.9008,  # F1 score
+                accuracy_threshold=0.99,
+                preprocessing=PreprocessingConfig(),  # Not used for text
+                offline=ScenarioConfig(
+                    min_duration_ms=60000,
+                    min_query_count=10833,  # MLPerf default
+                    samples_per_query=1,
+                ),
+                server=ScenarioConfig(
+                    min_duration_ms=60000,
+                    min_query_count=270336,
+                    target_latency_ns=130000000,  # 130ms
+                ),
+                onnx_url="https://zenodo.org/record/3733910/files/model.onnx",
+            ),
+            dataset=DatasetConfig(
+                name="squad",
+                path="./data/squad",
+            ),
+        )
+
+    @classmethod
+    def default_retinanet(cls) -> "BenchmarkConfig":
+        """Create default RetinaNet configuration for OpenImages."""
+        return cls(
+            model=ModelConfig(
+                name="RetinaNet",
+                task="object_detection",
+                model_type=ModelType.RETINANET,
+                input_shape=[1, 3, 800, 800],  # (batch, channels, height, width)
+                input_name="input",
+                output_name="output",
+                data_format="NCHW",
+                dtype="FP32",
+                accuracy_target=0.3755,  # mAP
+                accuracy_threshold=0.99,
+                preprocessing=PreprocessingConfig(
+                    resize=(800, 800),
+                    center_crop=(800, 800),
+                    mean=(0.485 * 255, 0.456 * 255, 0.406 * 255),
+                    std=(0.229 * 255, 0.224 * 255, 0.225 * 255),
+                    channel_order="RGB",
+                ),
+                offline=ScenarioConfig(
+                    min_duration_ms=60000,
+                    min_query_count=24576,  # MLPerf default
+                    samples_per_query=1,
+                ),
+                server=ScenarioConfig(
+                    min_duration_ms=60000,
+                    min_query_count=270336,
+                    target_latency_ns=100000000,  # 100ms
+                ),
+                onnx_url="https://zenodo.org/record/6617879/files/resnext50_32x4d_fpn.onnx",
+            ),
+            dataset=DatasetConfig(
+                name="openimages",
+                path="./data/openimages",
+            ),
+        )
     
     def get_scenario_config(self) -> ScenarioConfig:
         """Get configuration for the current scenario."""

@@ -1,0 +1,340 @@
+"""
+BERT-specific System Under Test implementation.
+
+This module provides SUT implementation for BERT Question Answering model
+on SQuAD dataset for MLPerf Inference benchmark.
+"""
+
+import array
+import logging
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+
+try:
+    import mlperf_loadgen as lg
+    LOADGEN_AVAILABLE = True
+except ImportError:
+    LOADGEN_AVAILABLE = False
+    lg = None
+
+from .config import BenchmarkConfig, Scenario
+from ..backends.base import BaseBackend
+from ..datasets.squad import SQuADQSL
+
+logger = logging.getLogger(__name__)
+
+
+class BertSUT:
+    """
+    System Under Test for BERT Question Answering model.
+
+    BERT for QA outputs:
+    - start_logits: Probability of each token being answer start
+    - end_logits: Probability of each token being answer end
+    """
+
+    def __init__(
+        self,
+        config: BenchmarkConfig,
+        backend: BaseBackend,
+        qsl: SQuADQSL,
+        scenario: Scenario = Scenario.OFFLINE,
+    ):
+        """
+        Initialize BERT SUT.
+
+        Args:
+            config: Benchmark configuration
+            backend: OpenVINO backend instance
+            qsl: Query Sample Library
+            scenario: MLPerf scenario
+        """
+        if not LOADGEN_AVAILABLE:
+            raise ImportError(
+                "MLPerf LoadGen is not installed. Please install with: "
+                "pip install mlcommons-loadgen"
+            )
+
+        self.config = config
+        self.backend = backend
+        self.qsl = qsl
+        self.scenario = scenario
+
+        # Ensure backend is loaded
+        if not self.backend.is_loaded:
+            self.backend.load()
+
+        # Map input names
+        self._map_input_names()
+
+        # Results storage
+        self._predictions: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
+        self._query_count = 0
+        self._sample_count = 0
+
+        # LoadGen handles
+        self._sut = None
+        self._qsl_handle = None
+
+    def _map_input_names(self) -> None:
+        """Map expected input names to model's actual input names."""
+        model_inputs = set(self.backend.input_names)
+
+        # Expected BERT inputs
+        self.input_ids_name = None
+        self.attention_mask_name = None
+        self.token_type_ids_name = None
+
+        # Common naming patterns
+        input_ids_patterns = ['input_ids', 'input_ids:0', 'input.1']
+        attention_patterns = ['attention_mask', 'input_mask', 'attention_mask:0', 'input.2']
+        token_type_patterns = ['token_type_ids', 'segment_ids', 'token_type_ids:0', 'input.3']
+
+        for name in model_inputs:
+            name_lower = name.lower()
+            if any(p in name_lower for p in ['input_id', 'input.1']):
+                self.input_ids_name = name
+            elif any(p in name_lower for p in ['attention', 'mask', 'input.2']):
+                self.attention_mask_name = name
+            elif any(p in name_lower for p in ['token_type', 'segment', 'input.3']):
+                self.token_type_ids_name = name
+
+        # Fallback: use first three inputs if not found
+        if not all([self.input_ids_name, self.attention_mask_name, self.token_type_ids_name]):
+            if len(self.backend.input_names) >= 3:
+                self.input_ids_name = self.backend.input_names[0]
+                self.attention_mask_name = self.backend.input_names[1]
+                self.token_type_ids_name = self.backend.input_names[2]
+            else:
+                raise ValueError(
+                    f"Could not map BERT inputs. Model inputs: {self.backend.input_names}"
+                )
+
+        logger.info(f"BERT input mapping: input_ids={self.input_ids_name}, "
+                   f"attention_mask={self.attention_mask_name}, "
+                   f"token_type_ids={self.token_type_ids_name}")
+
+        # Map output names
+        self.start_logits_name = None
+        self.end_logits_name = None
+
+        model_outputs = self.backend.output_names
+        if len(model_outputs) >= 2:
+            # Try to identify start/end outputs
+            for name in model_outputs:
+                name_lower = name.lower()
+                if 'start' in name_lower:
+                    self.start_logits_name = name
+                elif 'end' in name_lower:
+                    self.end_logits_name = name
+
+            # Fallback
+            if not self.start_logits_name:
+                self.start_logits_name = model_outputs[0]
+            if not self.end_logits_name:
+                self.end_logits_name = model_outputs[1] if len(model_outputs) > 1 else model_outputs[0]
+        else:
+            # Single output - assume concatenated
+            self.start_logits_name = model_outputs[0]
+            self.end_logits_name = model_outputs[0]
+
+        logger.info(f"BERT output mapping: start={self.start_logits_name}, end={self.end_logits_name}")
+
+    def _process_sample(self, sample_idx: int) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Process a single sample.
+
+        Args:
+            sample_idx: Sample index
+
+        Returns:
+            Tuple of (start_logits, end_logits)
+        """
+        features = self.qsl.get_features(sample_idx)
+
+        # Prepare inputs
+        inputs = {
+            self.input_ids_name: features['input_ids'],
+            self.attention_mask_name: features['attention_mask'],
+            self.token_type_ids_name: features['token_type_ids'],
+        }
+
+        # Run inference
+        outputs = self.backend.predict(inputs)
+
+        # Extract outputs
+        if self.start_logits_name == self.end_logits_name:
+            # Single output, need to split
+            output = outputs[self.start_logits_name]
+            if output.shape[-1] == 2:
+                start_logits = output[..., 0]
+                end_logits = output[..., 1]
+            else:
+                # Assume first half is start, second half is end
+                seq_len = output.shape[-1] // 2
+                start_logits = output[..., :seq_len]
+                end_logits = output[..., seq_len:]
+        else:
+            start_logits = outputs[self.start_logits_name]
+            end_logits = outputs[self.end_logits_name]
+
+        return start_logits, end_logits
+
+    def _process_batch(
+        self,
+        sample_ids: List[int]
+    ) -> List[Tuple[np.ndarray, np.ndarray]]:
+        """
+        Process a batch of samples.
+
+        Args:
+            sample_ids: List of sample indices
+
+        Returns:
+            List of (start_logits, end_logits) tuples
+        """
+        results = []
+
+        for sample_idx in sample_ids:
+            result = self._process_sample(sample_idx)
+            results.append(result)
+
+        return results
+
+    def _issue_query_offline(self, query_samples: List[Any]) -> None:
+        """Process queries in Offline mode."""
+        responses = []
+
+        sample_ids = [qs.id for qs in query_samples]
+        sample_indices = [qs.index for qs in query_samples]
+
+        # Process samples
+        for query_id, sample_idx in zip(sample_ids, sample_indices):
+            start_logits, end_logits = self._process_sample(sample_idx)
+
+            # Store prediction
+            self._predictions[sample_idx] = (start_logits, end_logits)
+
+            # Create response
+            # Combine start and end logits for response
+            combined = np.stack([start_logits.flatten(), end_logits.flatten()], axis=-1)
+            response_array = array.array('B', combined.tobytes())
+            bi = response_array.buffer_info()
+
+            response = lg.QuerySampleResponse(
+                query_id,
+                bi[0],
+                bi[1]
+            )
+            responses.append(response)
+
+        lg.QuerySamplesComplete(responses)
+
+        self._sample_count += len(query_samples)
+        self._query_count += 1
+
+    def _issue_query_server(self, query_samples: List[Any]) -> None:
+        """Process queries in Server mode."""
+        responses = []
+
+        for qs in query_samples:
+            sample_idx = qs.index
+
+            start_logits, end_logits = self._process_sample(sample_idx)
+
+            # Store prediction
+            self._predictions[sample_idx] = (start_logits, end_logits)
+
+            # Create response
+            combined = np.stack([start_logits.flatten(), end_logits.flatten()], axis=-1)
+            response_array = array.array('B', combined.tobytes())
+            bi = response_array.buffer_info()
+
+            response = lg.QuerySampleResponse(
+                qs.id,
+                bi[0],
+                bi[1]
+            )
+            responses.append(response)
+
+        lg.QuerySamplesComplete(responses)
+
+        self._sample_count += len(query_samples)
+        self._query_count += 1
+
+    def issue_queries(self, query_samples: List[Any]) -> None:
+        """
+        Process incoming queries.
+
+        Args:
+            query_samples: List of query samples from LoadGen
+        """
+        if self.scenario == Scenario.OFFLINE:
+            self._issue_query_offline(query_samples)
+        elif self.scenario == Scenario.SERVER:
+            self._issue_query_server(query_samples)
+        else:
+            raise ValueError(f"Unsupported scenario: {self.scenario}")
+
+    def flush_queries(self) -> None:
+        """Flush any pending queries."""
+        pass
+
+    def get_sut(self) -> Any:
+        """Get LoadGen SUT handle."""
+        if self._sut is None:
+            self._sut = lg.ConstructSUT(self.issue_queries, self.flush_queries)
+        return self._sut
+
+    def get_qsl(self) -> Any:
+        """Get LoadGen QSL handle."""
+        if self._qsl_handle is None:
+            self._qsl_handle = lg.ConstructQSL(
+                self.qsl.total_sample_count,
+                self.qsl.performance_sample_count,
+                self.qsl.load_query_samples,
+                self.qsl.unload_query_samples,
+            )
+        return self._qsl_handle
+
+    @property
+    def name(self) -> str:
+        """Get SUT name."""
+        return f"BERT-{self.config.model.name}"
+
+    def get_predictions(self) -> Dict[int, Tuple[np.ndarray, np.ndarray]]:
+        """Get all predictions."""
+        return self._predictions.copy()
+
+    def reset(self) -> None:
+        """Reset SUT state."""
+        self._predictions.clear()
+        self._query_count = 0
+        self._sample_count = 0
+
+    def compute_accuracy(self) -> Dict[str, float]:
+        """
+        Compute accuracy metrics.
+
+        Returns:
+            Dictionary with F1 and exact match scores
+        """
+        if not self._predictions:
+            return {'f1': 0.0, 'exact_match': 0.0, 'num_samples': 0}
+
+        # Extract predicted answer texts
+        predictions = []
+        indices = []
+
+        for sample_idx, (start_logits, end_logits) in sorted(self._predictions.items()):
+            indices.append(sample_idx)
+
+        # Use dataset's postprocess to get answer texts
+        pred_texts = self.qsl.dataset.postprocess(
+            [(self._predictions[idx][0], self._predictions[idx][1]) for idx in indices],
+            indices
+        )
+
+        # Compute F1 and EM
+        return self.qsl.dataset.compute_accuracy(pred_texts, indices)

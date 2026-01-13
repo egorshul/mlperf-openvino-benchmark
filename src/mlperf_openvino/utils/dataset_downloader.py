@@ -32,6 +32,41 @@ DATASET_REGISTRY: Dict[str, Dict] = {
         "num_samples": 50000,
         "val_map_url": "https://raw.githubusercontent.com/mlcommons/inference/master/vision/classification_and_detection/tools/val_map.txt",
     },
+    "squad": {
+        "description": "SQuAD v1.1 dataset for BERT Question Answering",
+        "dev": {
+            "url": "https://rajpurkar.github.io/SQuAD-explorer/dataset/dev-v1.1.json",
+            "filename": "dev-v1.1.json",
+            "size_mb": 4.9,
+            "num_samples": 10833,
+        },
+        "train": {
+            "url": "https://rajpurkar.github.io/SQuAD-explorer/dataset/train-v1.1.json",
+            "filename": "train-v1.1.json",
+            "size_mb": 30,
+            "num_samples": 87599,
+        },
+        "vocab": {
+            "url": "https://zenodo.org/record/3733868/files/vocab.txt",
+            "filename": "vocab.txt",
+            "size_mb": 0.2,
+        },
+    },
+    "openimages": {
+        "description": "OpenImages validation set for RetinaNet Object Detection",
+        "annotations": {
+            "url": "https://storage.googleapis.com/openimages/v6/oidv6-val-annotations-bbox.csv",
+            "filename": "validation-annotations-bbox.csv",
+            "size_mb": 30,
+        },
+        "class_descriptions": {
+            "url": "https://storage.googleapis.com/openimages/v6/oidv6-class-descriptions.csv",
+            "filename": "class-descriptions.csv",
+            "size_mb": 0.02,
+        },
+        "num_samples": 24576,
+        "note": "Images need to be downloaded separately from OpenImages website or via fiftyone",
+    },
     "librispeech": {
         "description": "LibriSpeech ASR corpus for Whisper (dev-clean + dev-other)",
         "dev-clean": {
@@ -524,6 +559,126 @@ def download_whisper_mlperf(output_dir: str) -> Dict[str, str]:
         return download_librispeech(output_dir, subset="mlperf")
 
 
+def download_squad(
+    output_dir: str,
+    subset: str = "dev",
+    force: bool = False
+) -> Dict[str, str]:
+    """
+    Download SQuAD v1.1 dataset for BERT Question Answering.
+
+    Args:
+        output_dir: Directory to save dataset
+        subset: "dev" or "train"
+        force: Force re-download
+
+    Returns:
+        Dictionary with dataset paths
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    data_dir = output_path / "squad"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    dataset_info = DATASET_REGISTRY["squad"]
+
+    # Download dev set by default
+    if subset in dataset_info:
+        subset_info = dataset_info[subset]
+        data_file = data_dir / subset_info["filename"]
+
+        if not data_file.exists() or force:
+            logger.info(f"Downloading SQuAD {subset} set...")
+            _download_file(
+                subset_info["url"],
+                str(data_file),
+                expected_size_mb=subset_info.get("size_mb")
+            )
+
+    # Also download vocab file
+    if "vocab" in dataset_info:
+        vocab_info = dataset_info["vocab"]
+        vocab_file = data_dir / vocab_info["filename"]
+
+        if not vocab_file.exists() or force:
+            logger.info("Downloading BERT vocab file...")
+            _download_file(vocab_info["url"], str(vocab_file))
+
+    logger.info(f"SQuAD dataset ready at {data_dir}")
+
+    return {
+        "data_path": str(data_dir),
+        "dev_file": str(data_dir / "dev-v1.1.json"),
+        "vocab_file": str(data_dir / "vocab.txt"),
+        "num_samples": dataset_info["dev"]["num_samples"],
+    }
+
+
+def download_openimages(
+    output_dir: str,
+    force: bool = False
+) -> Dict[str, str]:
+    """
+    Download OpenImages annotations for RetinaNet Object Detection.
+
+    Note: This only downloads annotations. Images need to be downloaded
+    separately from the OpenImages website or via fiftyone.
+
+    Args:
+        output_dir: Directory to save dataset
+        force: Force re-download
+
+    Returns:
+        Dictionary with dataset paths
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    data_dir = output_path / "openimages"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    annotations_dir = data_dir / "annotations"
+    annotations_dir.mkdir(parents=True, exist_ok=True)
+    images_dir = data_dir / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
+
+    dataset_info = DATASET_REGISTRY["openimages"]
+
+    # Download annotations
+    if "annotations" in dataset_info:
+        ann_info = dataset_info["annotations"]
+        ann_file = annotations_dir / ann_info["filename"]
+
+        if not ann_file.exists() or force:
+            logger.info("Downloading OpenImages annotations...")
+            _download_file(
+                ann_info["url"],
+                str(ann_file),
+                expected_size_mb=ann_info.get("size_mb")
+            )
+
+    # Download class descriptions
+    if "class_descriptions" in dataset_info:
+        class_info = dataset_info["class_descriptions"]
+        class_file = annotations_dir / class_info["filename"]
+
+        if not class_file.exists() or force:
+            logger.info("Downloading class descriptions...")
+            _download_file(class_info["url"], str(class_file))
+
+    logger.info(f"OpenImages annotations ready at {data_dir}")
+    logger.info("Note: Images need to be downloaded separately from OpenImages website")
+    logger.info("You can use: pip install fiftyone && fiftyone zoo download open-images-v6 --split validation")
+
+    return {
+        "data_path": str(data_dir),
+        "annotations_file": str(annotations_dir / "validation-annotations-bbox.csv"),
+        "images_dir": str(images_dir),
+        "num_samples": dataset_info.get("num_samples", 24576),
+        "note": "Images need to be downloaded separately",
+    }
+
+
 def download_dataset(
     dataset_name: str,
     output_dir: str,
@@ -532,18 +687,22 @@ def download_dataset(
 ) -> Dict[str, str]:
     """
     Download a dataset by name.
-    
+
     Args:
-        dataset_name: "imagenet" or "librispeech"
+        dataset_name: "imagenet", "squad", "openimages", or "librispeech"
         output_dir: Directory to save dataset
         subset: Optional subset name
         force: Force re-download
-        
+
     Returns:
         Dictionary with dataset paths
     """
     if dataset_name == "imagenet":
         return download_imagenet(output_dir, force)
+    elif dataset_name == "squad":
+        return download_squad(output_dir, subset or "dev", force)
+    elif dataset_name == "openimages":
+        return download_openimages(output_dir, force)
     elif dataset_name == "librispeech":
         return download_librispeech(output_dir, subset or "mlperf", force)
     elif dataset_name == "whisper-mlperf":
@@ -556,6 +715,8 @@ def list_available_datasets() -> Dict[str, str]:
     """List available datasets."""
     return {
         "imagenet": DATASET_REGISTRY["imagenet"]["description"],
+        "squad": DATASET_REGISTRY["squad"]["description"],
+        "openimages": DATASET_REGISTRY["openimages"]["description"],
         "librispeech": DATASET_REGISTRY["librispeech"]["description"],
     }
 
