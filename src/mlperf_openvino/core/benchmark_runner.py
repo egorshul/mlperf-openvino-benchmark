@@ -22,7 +22,7 @@ except ImportError:
     lg = None
 
 from .config import BenchmarkConfig, ModelType, Scenario, TestMode
-from .sut import OpenVINOSUT, AsyncOpenVINOSUT
+from .sut import OpenVINOSUT
 from ..backends.openvino_backend import OpenVINOBackend
 from ..datasets.base import QuerySampleLibrary
 
