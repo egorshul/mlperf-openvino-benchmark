@@ -387,12 +387,15 @@ class OpenVINOBackend(BaseBackend):
         if num_jobs is None:
             num_jobs = self._optimal_nireq
 
+        # Ensure we have enough parallel jobs for high throughput
+        num_jobs = max(num_jobs, self._optimal_nireq)
+
         async_queue = AsyncInferQueue(self._compiled_model, num_jobs)
 
         if callback:
             async_queue.set_callback(callback)
 
-        logger.info(f"Created AsyncInferQueue with {num_jobs} parallel jobs")
+        logger.info(f"Created AsyncInferQueue with {num_jobs} parallel jobs (optimal_nireq={self._optimal_nireq})")
         return async_queue
 
     def start_async_queue(

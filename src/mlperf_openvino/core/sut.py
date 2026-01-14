@@ -140,7 +140,11 @@ class OpenVINOSUT:
                 print(f"\rServer: issued={issued}, done={self._sample_count}, pending={pending}, {throughput:.1f} samples/sec", end="", flush=True)
                 self._last_progress_update = current_time
 
-        self._async_queue = self.backend.create_async_queue(callback=on_complete)
+        # Use many more parallel requests for Server mode to avoid blocking
+        # Default optimal_nireq may be too low for high-throughput Server mode
+        num_parallel = max(self.backend.num_streams * 4, 64)  # At least 64 parallel requests
+        logger.info(f"Server mode: using {num_parallel} parallel async inference requests")
+        self._async_queue = self.backend.create_async_queue(num_jobs=num_parallel, callback=on_complete)
 
     def _start_progress(self, total: int, desc: str = "Processing") -> None:
         """Start progress tracking."""
