@@ -114,10 +114,10 @@ class OpenVINOSUT:
         self._last_progress_update = time.time()
         self._issued_count = 0
 
-        # Use thread pool with enough workers for high parallelism
-        # Match the number of inference requests available
-        num_workers = max(self.backend.num_streams * 2, 32)
-        logger.info(f"Server mode: using ThreadPoolExecutor with {num_workers} workers")
+        # Use thread pool with workers matching available inference requests
+        # More workers than inference requests just adds overhead
+        num_workers = self.backend.num_streams  # optimal_nireq
+        logger.info(f"Server mode: using ThreadPoolExecutor with {num_workers} workers (matching inference requests)")
         self._thread_pool = ThreadPoolExecutor(max_workers=num_workers)
 
     def _process_server_query(self, query_id: int, sample_idx: int) -> None:
@@ -126,9 +126,9 @@ class OpenVINOSUT:
         features = self.qsl.get_features(sample_idx)
         input_data = features.get("input", features.get(self.input_name))
 
-        # Run synchronous inference
+        # Run thread-safe inference (uses separate infer requests per thread)
         inputs = {self.input_name: input_data}
-        outputs = self.backend.predict(inputs)
+        outputs = self.backend.predict_threadsafe(inputs)
         output = outputs.get(self.output_name, list(outputs.values())[0])
 
         # Store prediction (thread-safe with lock)

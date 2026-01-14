@@ -3,6 +3,8 @@ OpenVINO backend implementation for MLPerf Benchmark.
 """
 
 import logging
+import queue
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -67,6 +69,9 @@ class OpenVINOBackend(BaseBackend):
         # For async inference
         self._infer_requests: List[InferRequest] = []
         self._optimal_nireq: int = 1  # Optimal number of inference requests
+
+        # For thread-safe inference - queue of available requests
+        self._request_queue: Optional[queue.Queue] = None
 
         # Cache input/output info
         self._input_names: List[str] = []
@@ -219,6 +224,12 @@ class OpenVINOBackend(BaseBackend):
 
         # Set default request for sync inference
         self._infer_request = self._infer_requests[0]
+
+        # Create queue for thread-safe inference
+        self._request_queue = queue.Queue()
+        for req in self._infer_requests:
+            self._request_queue.put(req)
+
         logger.info(f"Created {nireq} inference requests")
     
     def _convert_to_model_dtype(self, name: str, data: np.ndarray) -> np.ndarray:
@@ -243,7 +254,7 @@ class OpenVINOBackend(BaseBackend):
 
     def predict(self, inputs: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
         """
-        Run synchronous inference.
+        Run synchronous inference (NOT thread-safe, use predict_threadsafe for multi-threaded).
 
         Args:
             inputs: Dictionary mapping input names to numpy arrays
@@ -269,6 +280,45 @@ class OpenVINOBackend(BaseBackend):
             outputs[name] = output_tensor.data.copy()
 
         return outputs
+
+    def predict_threadsafe(self, inputs: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+        """
+        Run synchronous inference in a thread-safe manner.
+
+        Uses a queue of inference requests - each thread gets exclusive
+        access to a request while running inference.
+
+        Args:
+            inputs: Dictionary mapping input names to numpy arrays
+
+        Returns:
+            Dictionary mapping output names to numpy arrays
+        """
+        if not self._loaded:
+            self.load()
+
+        # Get an available request from queue (blocks if none available)
+        request = self._request_queue.get()
+
+        try:
+            # Set input tensors with automatic dtype conversion
+            for name, data in inputs.items():
+                converted_data = self._convert_to_model_dtype(name, data)
+                request.set_tensor(name, ov.Tensor(converted_data))
+
+            # Run inference (this blocks until complete)
+            request.infer()
+
+            # Get output tensors
+            outputs = {}
+            for name in self._output_names:
+                output_tensor = request.get_tensor(name)
+                outputs[name] = output_tensor.data.copy()
+
+            return outputs
+        finally:
+            # Return request to queue for reuse
+            self._request_queue.put(request)
     
     def predict_batch(
         self, 
