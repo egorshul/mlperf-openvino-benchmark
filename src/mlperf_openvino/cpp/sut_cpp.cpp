@@ -178,8 +178,10 @@ void CppSUT::on_inference_complete(InferContext* ctx) {
     // This runs in OpenVINO's internal thread - NO GIL!
 
     try {
-        // Get output tensor
-        ov::Tensor output_tensor = ctx->request.get_output_tensor();
+        // Get softmax output tensor (index 1 for ResNet50 with ArgMax+Softmax outputs)
+        // Output 0 is ArgMax (i64), Output 1 is softmax_tensor (f32)
+        size_t output_idx = ctx->request.get_compiled_model().outputs().size() > 1 ? 1 : 0;
+        ov::Tensor output_tensor = ctx->request.get_output_tensor(output_idx);
         const float* output_data = output_tensor.data<float>();
         size_t output_size = output_tensor.get_byte_size();
 
