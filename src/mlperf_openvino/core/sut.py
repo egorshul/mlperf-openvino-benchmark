@@ -200,6 +200,8 @@ class OpenVINOSUT:
         In Offline mode, all samples are sent at once and processed
         as fast as possible for maximum throughput.
         """
+        logger.info(f"Offline: received {len(query_samples)} samples in issue_queries")
+
         responses = []
         response_arrays = []  # Keep arrays alive until QuerySamplesComplete!
 
@@ -253,40 +255,36 @@ class OpenVINOSUT:
         """
         Process queries in Server mode.
 
-        Uses the same efficient batch processing as Offline mode,
-        but sends responses immediately after each batch completes.
+        In Server mode, LoadGen sends 1 sample at a time, so we need
+        truly async processing to achieve high throughput.
         """
-        # Use batch processing like Offline for efficiency
-        batch_size = max(1, self.backend.num_streams)
+        # Log batch size for debugging (first few calls only)
+        if self._query_count < 5:
+            logger.info(f"Server: received {len(query_samples)} samples in issue_queries")
 
+        # Process each sample - use predict_batch for efficiency even with 1 sample
         sample_ids = [qs.id for qs in query_samples]
         sample_indices = [qs.index for qs in query_samples]
 
-        for i in range(0, len(sample_indices), batch_size):
-            batch_indices = sample_indices[i:i + batch_size]
-            batch_ids = sample_ids[i:i + batch_size]
+        # Process using batch inference
+        batch_results = self._process_batch(sample_indices)
 
-            # Process batch using efficient async inference
-            batch_results = self._process_batch(batch_indices)
+        # Send responses
+        responses = []
+        response_arrays = []
 
-            # Send responses immediately after batch completes
-            responses = []
-            response_arrays = []
+        for (idx, result), query_id in zip(batch_results, sample_ids):
+            self._predictions[idx] = result
 
-            for (idx, result), query_id in zip(batch_results, batch_ids):
-                self._predictions[idx] = result
+            response_array = array.array('B', result.tobytes())
+            response_arrays.append(response_array)
+            bi = response_array.buffer_info()
 
-                response_array = array.array('B', result.tobytes())
-                response_arrays.append(response_array)
-                bi = response_array.buffer_info()
+            response = lg.QuerySampleResponse(query_id, bi[0], bi[1])
+            responses.append(response)
 
-                response = lg.QuerySampleResponse(query_id, bi[0], bi[1])
-                responses.append(response)
-
-            # Send batch of responses
-            lg.QuerySamplesComplete(responses)
-            self._sample_count += len(batch_indices)
-
+        lg.QuerySamplesComplete(responses)
+        self._sample_count += len(sample_indices)
         self._query_count += 1
     
     def issue_queries(self, query_samples: List["lg.QuerySample"]) -> None:
