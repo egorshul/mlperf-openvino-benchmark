@@ -445,16 +445,11 @@ def create_sut(
         SUT instance
     """
     if CPP_AVAILABLE and not force_python:
-        if scenario == Scenario.SERVER:
-            logger.info("Using C++ Server SUT (async, batch=1)")
-            return CppSUTWrapper(config, model_path, qsl, scenario)
-        else:
-            # Offline mode - use batch inference
-            batch_size = config.openvino.batch_size
-            if batch_size <= 1:
-                batch_size = 32  # Default batch for Offline
-            logger.info(f"Using C++ Offline SUT (sync batch={batch_size})")
-            return CppOfflineSUTWrapper(config, model_path, qsl, batch_size)
+        # Use async C++ SUT for both modes - it has parallelism via InferRequest pool
+        # CppOfflineSUT (sync batch) is slower because it uses single InferRequest
+        mode_desc = "async" if scenario == Scenario.SERVER else "async-parallel"
+        logger.info(f"Using C++ SUT for {scenario.value} mode ({mode_desc})")
+        return CppSUTWrapper(config, model_path, qsl, scenario)
 
     # Fall back to Python SUT
     logger.info(f"Using Python SUT for {scenario.value} mode")
