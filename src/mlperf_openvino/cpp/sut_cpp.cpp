@@ -29,12 +29,21 @@ CppSUT::CppSUT(const std::string& model_path,
       issued_count_(0),
       completed_count_(0),
       pending_count_(0),
+      callbacks_running_(0),
+      output_idx_(0),
       store_predictions_(false),
       response_callback_(nullptr) {
 }
 
 CppSUT::~CppSUT() {
+    // Wait for all pending operations to complete
     wait_all();
+
+    // Clear callback to prevent any late calls to Python
+    {
+        std::lock_guard<std::mutex> lock(callback_mutex_);
+        response_callback_ = nullptr;
+    }
 }
 
 void CppSUT::load() {
@@ -56,12 +65,16 @@ void CppSUT::load() {
     }
 
     input_name_ = inputs[0].get_any_name();
-    output_name_ = outputs[0].get_any_name();
     input_shape_ = inputs[0].get_partial_shape().get_min_shape();
     input_type_ = inputs[0].get_element_type();
 
+    // Cache output index: for models with ArgMax+Softmax outputs, use softmax (index 1)
+    // For single-output models, use index 0
+    output_idx_ = outputs.size() > 1 ? 1 : 0;
+    output_name_ = outputs[output_idx_].get_any_name();
+
     std::cout << "[CppSUT] Input: " << input_name_ << ", shape: " << input_shape_ << std::endl;
-    std::cout << "[CppSUT] Output: " << output_name_ << std::endl;
+    std::cout << "[CppSUT] Output[" << output_idx_ << "]: " << output_name_ << std::endl;
 
     // Build compile properties
     ov::AnyMap properties;
@@ -189,12 +202,17 @@ void CppSUT::start_async(const float* input_data,
 
 void CppSUT::on_inference_complete(InferContext* ctx) {
     // This runs in OpenVINO's internal thread - NO GIL!
+    // Track that this callback is running (for proper shutdown)
+    callbacks_running_++;
+
+    // Save pool_id locally before any operations that might affect ctx
+    size_t pool_id = ctx->pool_id;
+    uint64_t query_id = ctx->query_id;
+    int sample_idx = ctx->sample_idx;
 
     try {
-        // Get softmax output tensor (index 1 for ResNet50 with ArgMax+Softmax outputs)
-        // Output 0 is ArgMax (i64), Output 1 is softmax_tensor (f32)
-        size_t output_idx = ctx->request.get_compiled_model().outputs().size() > 1 ? 1 : 0;
-        ov::Tensor output_tensor = ctx->request.get_output_tensor(output_idx);
+        // Use cached output_idx (set during load) for thread safety
+        ov::Tensor output_tensor = ctx->request.get_output_tensor(output_idx_);
         const float* output_data = output_tensor.data<float>();
         size_t output_size = output_tensor.get_byte_size();
 
@@ -204,7 +222,7 @@ void CppSUT::on_inference_complete(InferContext* ctx) {
                                           output_data + output_tensor.get_size());
             {
                 std::lock_guard<std::mutex> lock(predictions_mutex_);
-                predictions_[ctx->sample_idx] = std::move(prediction);
+                predictions_[sample_idx] = std::move(prediction);
             }
         }
 
@@ -213,7 +231,7 @@ void CppSUT::on_inference_complete(InferContext* ctx) {
         {
             std::lock_guard<std::mutex> lock(callback_mutex_);
             if (response_callback_) {
-                response_callback_(ctx->query_id, output_data, output_size);
+                response_callback_(query_id, output_data, output_size);
             }
         }
 
@@ -223,21 +241,26 @@ void CppSUT::on_inference_complete(InferContext* ctx) {
         {
             std::lock_guard<std::mutex> lock(callback_mutex_);
             if (response_callback_) {
-                response_callback_(ctx->query_id, nullptr, 0);
+                response_callback_(query_id, nullptr, 0);
             }
         }
     }
 
+    // Update counters and return request to pool
+    // Order is important: return_request BEFORE decrementing callbacks_running_
     completed_count_++;
     pending_count_--;
+    return_request(pool_id);
 
-    // Return request to pool
-    return_request(ctx->pool_id);
+    // Decrement at very end so wait_all() waits for all cleanup
+    callbacks_running_--;
 }
 
 void CppSUT::wait_all() {
-    // Wait for all pending requests to complete
-    while (pending_count_.load() > 0) {
+    // Wait for all pending requests AND all callbacks to complete
+    // This is critical: callbacks_running_ tracks callbacks that are still
+    // executing (including return_request calls), so we must wait for both
+    while (pending_count_.load() > 0 || callbacks_running_.load() > 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 }

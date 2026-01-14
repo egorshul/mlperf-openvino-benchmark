@@ -181,6 +181,10 @@ private:
     std::atomic<uint64_t> issued_count_;
     std::atomic<uint64_t> completed_count_;
     std::atomic<int> pending_count_;
+    std::atomic<int> callbacks_running_;  // Track callbacks still executing
+
+    // Cached output info (set during load for thread-safe access)
+    size_t output_idx_;  // Which output tensor to use (0 or 1)
 
     // Predictions storage (for accuracy mode)
     bool store_predictions_;
