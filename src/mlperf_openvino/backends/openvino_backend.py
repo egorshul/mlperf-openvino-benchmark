@@ -168,33 +168,39 @@ class OpenVINOBackend(BaseBackend):
         # Get input info
         self._input_names = []
         self._input_shapes = {}
-        
+        self._input_dtypes = {}
+
         for input_node in self._model.inputs:
             name = input_node.any_name
             self._input_names.append(name)
-            
+
             shape = tuple(input_node.partial_shape.get_min_shape())
             if any(d == 0 for d in shape):
                 # Dynamic shape, use default
                 shape = tuple(d if d > 0 else 1 for d in shape)
-            
+
             self._input_shapes[name] = shape
-        
+
+            # Get element type
+            element_type = input_node.element_type
+            self._input_dtypes[name] = element_type
+
         # Get output info
         self._output_names = []
         self._output_shapes = {}
-        
+
         for output_node in self._model.outputs:
             name = output_node.any_name
             self._output_names.append(name)
-            
+
             shape = tuple(output_node.partial_shape.get_min_shape())
             if any(d == 0 for d in shape):
                 shape = tuple(d if d > 0 else 1 for d in shape)
-            
+
             self._output_shapes[name] = shape
-        
+
         logger.info(f"Model inputs: {self._input_names}")
+        logger.info(f"Model input dtypes: {self._input_dtypes}")
         logger.info(f"Model outputs: {self._output_names}")
     
     def _create_infer_requests(self) -> None:
@@ -209,32 +215,53 @@ class OpenVINOBackend(BaseBackend):
         # Set default request
         self._infer_request = self._infer_requests[0]
     
+    def _convert_to_model_dtype(self, name: str, data: np.ndarray) -> np.ndarray:
+        """Convert input data to the dtype expected by the model."""
+        if name not in self._input_dtypes:
+            return data
+
+        element_type = self._input_dtypes[name]
+        element_type_str = str(element_type)
+
+        # Map OpenVINO element types to numpy dtypes
+        if 'i64' in element_type_str or 'int64' in element_type_str.lower():
+            return data.astype(np.int64)
+        elif 'i32' in element_type_str or 'int32' in element_type_str.lower():
+            return data.astype(np.int32)
+        elif 'f32' in element_type_str or 'float32' in element_type_str.lower():
+            return data.astype(np.float32)
+        elif 'f16' in element_type_str or 'float16' in element_type_str.lower():
+            return data.astype(np.float16)
+
+        return data
+
     def predict(self, inputs: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
         """
         Run synchronous inference.
-        
+
         Args:
             inputs: Dictionary mapping input names to numpy arrays
-            
+
         Returns:
             Dictionary mapping output names to numpy arrays
         """
         if not self._loaded:
             self.load()
-        
-        # Set input tensors
+
+        # Set input tensors with automatic dtype conversion
         for name, data in inputs.items():
-            self._infer_request.set_tensor(name, ov.Tensor(data))
-        
+            converted_data = self._convert_to_model_dtype(name, data)
+            self._infer_request.set_tensor(name, ov.Tensor(converted_data))
+
         # Run inference
         self._infer_request.infer()
-        
+
         # Get output tensors
         outputs = {}
         for name in self._output_names:
             output_tensor = self._infer_request.get_tensor(name)
             outputs[name] = output_tensor.data.copy()
-        
+
         return outputs
     
     def predict_batch(
@@ -265,10 +292,11 @@ class OpenVINOBackend(BaseBackend):
             # Start all inferences
             for j, inputs in enumerate(chunk):
                 request = self._infer_requests[j]
-                
+
                 for name, data in inputs.items():
-                    request.set_tensor(name, ov.Tensor(data))
-                
+                    converted_data = self._convert_to_model_dtype(name, data)
+                    request.set_tensor(name, ov.Tensor(converted_data))
+
                 request.start_async()
             
             # Wait for all to complete
@@ -304,10 +332,11 @@ class OpenVINOBackend(BaseBackend):
             self.load()
         
         request = self._infer_requests[request_id % len(self._infer_requests)]
-        
+
         for name, data in inputs.items():
-            request.set_tensor(name, ov.Tensor(data))
-        
+            converted_data = self._convert_to_model_dtype(name, data)
+            request.set_tensor(name, ov.Tensor(converted_data))
+
         request.start_async()
         return request
     
