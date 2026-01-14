@@ -77,8 +77,8 @@ def get_default_config(model: str) -> BenchmarkConfig:
               help='Number of inference streams')
 @click.option('--batch-size', '-b', type=int, default=1,
               help='Inference batch size')
-@click.option('--performance-hint', type=click.Choice(['THROUGHPUT', 'LATENCY']),
-              default='THROUGHPUT', help='Performance hint')
+@click.option('--performance-hint', type=click.Choice(['THROUGHPUT', 'LATENCY', 'AUTO']),
+              default='AUTO', help='Performance hint (AUTO selects based on scenario)')
 @click.option('--duration', type=int, default=60000,
               help='Minimum test duration in ms')
 @click.option('--target-qps', type=float, default=0,
@@ -130,9 +130,27 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
 
     if num_threads > 0:
         benchmark_config.openvino.num_threads = num_threads
+
+    # Auto-select optimal settings based on scenario
+    if performance_hint == 'AUTO':
+        if scenario == 'Offline':
+            # Offline: optimize for throughput
+            actual_hint = 'THROUGHPUT'
+            if batch_size == 1:  # User didn't specify batch size
+                click.echo("AUTO: Using optimized settings for Offline (throughput)")
+                batch_size = 32  # Larger batch for throughput
+        else:
+            # Server: optimize for latency
+            actual_hint = 'LATENCY'
+            if batch_size == 1 and num_streams == 'AUTO':
+                click.echo("AUTO: Using optimized settings for Server (latency)")
+                num_streams = '1'  # Single stream for lower latency
+    else:
+        actual_hint = performance_hint
+
     benchmark_config.openvino.num_streams = num_streams
     benchmark_config.openvino.batch_size = batch_size
-    benchmark_config.openvino.performance_hint = performance_hint
+    benchmark_config.openvino.performance_hint = actual_hint
 
     if model_path:
         benchmark_config.model.model_path = model_path
@@ -167,6 +185,8 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
     click.echo(f"Device: {benchmark_config.openvino.device}")
     click.echo(f"Threads: {benchmark_config.openvino.num_threads or 'auto'}")
     click.echo(f"Streams: {benchmark_config.openvino.num_streams}")
+    click.echo(f"Batch size: {benchmark_config.openvino.batch_size}")
+    click.echo(f"Performance hint: {benchmark_config.openvino.performance_hint}")
     click.echo("")
 
     # Create runner

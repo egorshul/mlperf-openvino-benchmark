@@ -362,9 +362,9 @@ mlperf-ov benchmark-throughput \
   --iterations 200
 ```
 
-### Maximum Performance Settings
+### Optimal Settings for Each Scenario
 
-For maximum throughput, use these settings:
+**Offline (Maximum Throughput):**
 
 ```bash
 mlperf-ov run \
@@ -378,15 +378,41 @@ mlperf-ov run \
   --data-path ./data/imagenet
 ```
 
+**Server (Minimum Latency):**
+
+```bash
+mlperf-ov run \
+  --model resnet50 \
+  --scenario Server \
+  --mode performance \
+  --batch-size 1 \
+  --num-streams 1 \
+  --performance-hint LATENCY \
+  --target-qps 200 \
+  --model-path ./models/resnet50_v1.onnx \
+  --data-path ./data/imagenet
+```
+
+**AUTO mode (recommended):**
+
+The CLI automatically selects optimal settings based on scenario:
+
+```bash
+# Automatically uses THROUGHPUT + batch_size=32 for Offline
+mlperf-ov run --model resnet50 --scenario Offline
+
+# Automatically uses LATENCY + streams=1 for Server
+mlperf-ov run --model resnet50 --scenario Server
+```
+
 ### Key Optimization Parameters
 
-| Parameter | Description | Recommended for Throughput |
-|-----------|-------------|---------------------------|
-| `--scenario` | Test mode | `Offline` (not Server!) |
-| `--batch-size` | Inference batch size | 8-64 (depends on model/RAM) |
-| `--num-streams` | Parallel inference streams | `AUTO` |
-| `--performance-hint` | OpenVINO optimization hint | `THROUGHPUT` |
-| `--num-threads` | CPU threads | 0 (auto-detect) |
+| Parameter | For Throughput (Offline) | For Latency (Server) |
+|-----------|--------------------------|----------------------|
+| `--batch-size` | 8-64 (larger = faster) | 1 (smaller = lower latency) |
+| `--num-streams` | `AUTO` (more parallelism) | `1` (less contention) |
+| `--performance-hint` | `THROUGHPUT` | `LATENCY` |
+| `--num-threads` | 0 (auto) | 0 (auto) |
 
 ### Recommended Batch Sizes
 
