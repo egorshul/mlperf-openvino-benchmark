@@ -108,6 +108,7 @@ class OpenVINOSUT:
         """Setup AsyncInferQueue for Server mode."""
         self._start_time = time.time()
         self._last_progress_update = time.time()
+        self._issued_count = 0  # Count of samples issued to queue
 
         def on_complete(infer_request, userdata):
             """Callback - send response immediately when inference completes."""
@@ -134,7 +135,9 @@ class OpenVINOSUT:
             if current_time - self._last_progress_update >= 1.0:
                 elapsed = current_time - self._start_time
                 throughput = self._sample_count / elapsed if elapsed > 0 else 0
-                print(f"\rServer progress: {self._sample_count} samples, {throughput:.1f} samples/sec", end="", flush=True)
+                issued = getattr(self, '_issued_count', 0)
+                pending = issued - self._sample_count
+                print(f"\rServer: issued={issued}, done={self._sample_count}, pending={pending}, {throughput:.1f} samples/sec", end="", flush=True)
                 self._last_progress_update = current_time
 
         self._async_queue = self.backend.create_async_queue(callback=on_complete)
@@ -301,17 +304,19 @@ class OpenVINOSUT:
             sample_idx = qs.index
             query_id = qs.id
 
-            # Get features
+            # Get features - data is already loaded by QSL
             features = self.qsl.get_features(sample_idx)
             input_data = features.get("input", features.get(self.input_name))
 
             # Submit to async queue - callback handles response
+            # Note: start_async may block if all slots are busy (backpressure)
             inputs = {self.input_name: input_data}
             self.backend.start_async_queue(
                 self._async_queue,
                 inputs,
                 userdata=(query_id, sample_idx)
             )
+            self._issued_count += 1
 
         self._query_count += 1
     
