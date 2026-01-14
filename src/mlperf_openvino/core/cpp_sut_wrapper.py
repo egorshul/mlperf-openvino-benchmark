@@ -106,6 +106,9 @@ class CppSUTWrapper:
         self._start_time = 0.0
         self._progress_thread_stop = False
 
+        # Enable storing predictions for accuracy mode
+        self._cpp_sut.set_store_predictions(True)
+
         # Set up response callback
         self._setup_response_callback()
 
@@ -309,6 +312,9 @@ class CppOfflineSUTWrapper:
         self._start_time = 0.0
         self._issued_count = 0
 
+        # Predictions storage for accuracy mode
+        self._predictions: Dict[int, Any] = {}
+
     def issue_queries(self, query_samples: List["lg.QuerySample"]) -> None:
         """
         Process queries using batch inference.
@@ -348,9 +354,14 @@ class CppOfflineSUTWrapper:
             # Run batch inference
             results = self._cpp_sut.infer_batch(batch_input.flatten(), num_in_batch)
 
-            # Send responses to LoadGen
+            # Send responses to LoadGen and store predictions
             responses = []
             for i, (query_id, result) in enumerate(zip(query_ids, results)):
+                sample_idx = batch_samples[i].index
+
+                # Store prediction for accuracy computation
+                self._predictions[sample_idx] = result.copy()
+
                 response = lg.QuerySampleResponse(
                     query_id,
                     result.ctypes.data,
@@ -401,11 +412,13 @@ class CppOfflineSUTWrapper:
         return self._issued_count
 
     def get_predictions(self) -> Dict[int, Any]:
-        return {}  # Not implemented for Offline
+        """Get stored predictions for accuracy computation."""
+        return self._predictions
 
     def reset(self) -> None:
         self._cpp_sut.reset_counters()
         self._issued_count = 0
+        self._predictions = {}
 
 
 def create_sut(
