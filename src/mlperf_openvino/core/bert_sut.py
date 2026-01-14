@@ -153,11 +153,11 @@ class BertSUT:
         """
         features = self.qsl.get_features(sample_idx)
 
-        # Prepare inputs
+        # Prepare inputs - ensure int64 dtype for BERT
         inputs = {
-            self.input_ids_name: features['input_ids'],
-            self.attention_mask_name: features['attention_mask'],
-            self.token_type_ids_name: features['token_type_ids'],
+            self.input_ids_name: features['input_ids'].astype(np.int64),
+            self.attention_mask_name: features['attention_mask'].astype(np.int64),
+            self.token_type_ids_name: features['token_type_ids'].astype(np.int64),
         }
 
         # Run inference
