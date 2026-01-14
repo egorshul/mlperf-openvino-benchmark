@@ -10,6 +10,8 @@
 #include <pybind11/functional.h>
 #include <pybind11/numpy.h>
 
+#include <cstring>
+
 #include "sut_cpp.hpp"
 
 namespace py = pybind11;
@@ -92,10 +94,12 @@ PYBIND11_MODULE(_cpp_sut, m) {
                          py::gil_scoped_acquire acquire;
 
                          if (data != nullptr && size > 0) {
-                             // Create numpy array view of data
-                             py::array_t<float> arr(size / sizeof(float),
-                                                    const_cast<float*>(data),
-                                                    py::cast(query_id));  // Keep alive
+                             // Create numpy array with COPY of data (not view!)
+                             // This is critical - the original data may be reused
+                             // by another inference after we return from callback
+                             size_t num_elements = size / sizeof(float);
+                             py::array_t<float> arr(num_elements);
+                             std::memcpy(arr.mutable_data(), data, size);
                              callback(query_id, arr);
                          } else {
                              // Error case - pass None
