@@ -99,6 +99,35 @@ class OpenVINOSUT:
         self._last_progress_update = 0.0
         self._progress_update_interval = 0.5  # seconds
 
+        # Server mode: async queue for parallel processing
+        self._async_queue = None
+        if scenario == Scenario.SERVER:
+            self._setup_async_queue()
+
+    def _setup_async_queue(self) -> None:
+        """Setup AsyncInferQueue for Server mode."""
+        def on_complete(infer_request, userdata):
+            """Callback - send response immediately when inference completes."""
+            query_id, sample_idx = userdata
+
+            # Get output - copy to ensure data stays valid
+            output = infer_request.get_output_tensor(0).data.copy()
+
+            # Store prediction (keeps array alive)
+            self._predictions[sample_idx] = output
+
+            # Send response using numpy array pointer directly
+            # output is stored in _predictions so won't be garbage collected
+            response = lg.QuerySampleResponse(
+                query_id,
+                output.ctypes.data,
+                output.nbytes
+            )
+            lg.QuerySamplesComplete([response])
+
+            self._sample_count += 1
+
+        self._async_queue = self.backend.create_async_queue(callback=on_complete)
 
     def _start_progress(self, total: int, desc: str = "Processing") -> None:
         """Start progress tracking."""
@@ -253,38 +282,27 @@ class OpenVINOSUT:
     
     def _issue_query_server(self, query_samples: List["lg.QuerySample"]) -> None:
         """
-        Process queries in Server mode.
+        Process queries in Server mode using async inference.
 
-        In Server mode, LoadGen sends 1 sample at a time, so we need
-        truly async processing to achieve high throughput.
+        LoadGen sends 1 sample at a time. We submit to async queue
+        and return immediately. Callback sends response when done.
         """
-        # Log batch size for debugging (first few calls only)
-        if self._query_count < 5:
-            logger.info(f"Server: received {len(query_samples)} samples in issue_queries")
+        for qs in query_samples:
+            sample_idx = qs.index
+            query_id = qs.id
 
-        # Process each sample - use predict_batch for efficiency even with 1 sample
-        sample_ids = [qs.id for qs in query_samples]
-        sample_indices = [qs.index for qs in query_samples]
+            # Get features
+            features = self.qsl.get_features(sample_idx)
+            input_data = features.get("input", features.get(self.input_name))
 
-        # Process using batch inference
-        batch_results = self._process_batch(sample_indices)
+            # Submit to async queue - callback handles response
+            inputs = {self.input_name: input_data}
+            self.backend.start_async_queue(
+                self._async_queue,
+                inputs,
+                userdata=(query_id, sample_idx)
+            )
 
-        # Send responses
-        responses = []
-        response_arrays = []
-
-        for (idx, result), query_id in zip(batch_results, sample_ids):
-            self._predictions[idx] = result
-
-            response_array = array.array('B', result.tobytes())
-            response_arrays.append(response_array)
-            bi = response_array.buffer_info()
-
-            response = lg.QuerySampleResponse(query_id, bi[0], bi[1])
-            responses.append(response)
-
-        lg.QuerySamplesComplete(responses)
-        self._sample_count += len(sample_indices)
         self._query_count += 1
     
     def issue_queries(self, query_samples: List["lg.QuerySample"]) -> None:
@@ -309,6 +327,10 @@ class OpenVINOSUT:
 
         This is called by LoadGen when all queries have been issued.
         """
+        # Wait for async queue to finish (Server mode)
+        if self._async_queue is not None:
+            self._async_queue.wait_all()
+
         # Close progress bar if still open
         if self._progress_bar is not None:
             self._close_progress()
