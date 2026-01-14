@@ -99,11 +99,21 @@ void CppSUT::load() {
     // Create InferRequest pool with 2x optimal requests for better pipelining
     int num_requests = std::max(optimal_nireq_ * 2, 16);
 
+    // Calculate actual shape (handle dynamic batch)
+    ov::Shape actual_shape = input_shape_;
+    if (actual_shape.size() > 0 && actual_shape[0] == 0) {
+        actual_shape[0] = 1;  // Set batch size to 1
+    }
+
     for (int i = 0; i < num_requests; ++i) {
         auto ctx = std::make_unique<InferContext>();
         ctx->request = compiled_model_.create_infer_request();
         ctx->pool_id = static_cast<size_t>(i);
         ctx->sut = this;
+
+        // Pre-allocate input tensor with correct shape (for dynamic batch models)
+        ov::Tensor input_tensor(input_type_, actual_shape);
+        ctx->request.set_input_tensor(input_tensor);
 
         // Set completion callback - this runs in OpenVINO thread WITHOUT GIL!
         InferContext* ctx_ptr = ctx.get();
@@ -164,8 +174,7 @@ void CppSUT::start_async(const float* input_data,
     ctx->query_id = query_id;
     ctx->sample_idx = sample_idx;
 
-    // Copy input data into the request's pre-allocated tensor
-    // This is safer than using external pointer which may be freed by Python
+    // Copy input data into pre-allocated tensor (set during load())
     ov::Tensor input_tensor = ctx->request.get_input_tensor();
     float* tensor_data = input_tensor.data<float>();
     size_t tensor_size = input_tensor.get_size();
