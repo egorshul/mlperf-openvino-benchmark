@@ -28,14 +28,14 @@ logger = logging.getLogger(__name__)
 class OpenVINOBackend(BaseBackend):
     """
     OpenVINO backend for inference.
-    
+
     This backend supports:
     - ONNX models (converted on-the-fly)
     - OpenVINO IR models (.xml/.bin)
     - Various precision modes (FP32, FP16, INT8)
     - Automatic batching and streaming
     """
-    
+
     def __init__(
         self,
         model_path: str,
@@ -44,7 +44,7 @@ class OpenVINOBackend(BaseBackend):
     ):
         """
         Initialize OpenVINO backend.
-        
+
         Args:
             model_path: Path to ONNX or OpenVINO IR model
             config: OpenVINO configuration
@@ -55,45 +55,45 @@ class OpenVINOBackend(BaseBackend):
                 "OpenVINO is not installed. Please install it with: "
                 "pip install openvino"
             )
-        
+
         super().__init__(model_path, **kwargs)
-        
+
         self.config = config or OpenVINOConfig()
         self._core: Optional[Core] = None
         self._model: Optional[ov.Model] = None
         self._compiled_model: Optional[CompiledModel] = None
         self._infer_request: Optional[InferRequest] = None
-        
+
         # For async inference
         self._infer_requests: List[InferRequest] = []
-        self._num_streams: int = 1
-        
+        self._optimal_nireq: int = 1  # Optimal number of inference requests
+
         # Cache input/output info
         self._input_names: List[str] = []
         self._output_names: List[str] = []
         self._input_shapes: Dict[str, Tuple[int, ...]] = {}
         self._output_shapes: Dict[str, Tuple[int, ...]] = {}
-    
+
     def load(self) -> None:
         """Load and compile the model."""
         if self._loaded:
             logger.warning("Model already loaded, skipping...")
             return
-        
+
         logger.info(f"Loading model from {self.model_path}")
-        
+
         # Initialize OpenVINO Core
         self._core = Core()
-        
+
         # Create cache directory if specified
         if self.config.cache_dir:
             cache_path = Path(self.config.cache_dir)
             cache_path.mkdir(parents=True, exist_ok=True)
             self._core.set_property({"CACHE_DIR": str(cache_path)})
-        
+
         # Load the model
         model_path = Path(self.model_path)
-        
+
         if model_path.suffix.lower() == ".onnx":
             logger.info("Loading ONNX model and converting to OpenVINO IR...")
             self._model = self._core.read_model(str(model_path))
@@ -102,32 +102,35 @@ class OpenVINOBackend(BaseBackend):
             self._model = self._core.read_model(str(model_path))
         else:
             raise ValueError(f"Unsupported model format: {model_path.suffix}")
-        
+
         # Get model info before compilation
         self._extract_model_info()
-        
+
         # Compile the model with optimizations
         logger.info(f"Compiling model for device: {self.config.device}")
-        
+
         # Build properties
         properties = self._build_compile_properties()
-        
+
         self._compiled_model = self._core.compile_model(
-            self._model, 
+            self._model,
             self.config.device,
             properties
         )
-        
-        # Get number of streams
+
+        # Get optimal number of inference requests - KEY for performance!
         try:
-            self._num_streams = self._compiled_model.get_property("NUM_STREAMS")
-            logger.info(f"Using {self._num_streams} inference streams")
+            self._optimal_nireq = self._compiled_model.get_property(
+                ov.properties.optimal_number_of_infer_requests()
+            )
+            logger.info(f"Optimal number of inference requests: {self._optimal_nireq}")
         except Exception:
-            self._num_streams = 1
-        
+            self._optimal_nireq = 4  # Fallback
+            logger.warning(f"Could not get optimal nireq, using {self._optimal_nireq}")
+
         # Create inference requests
         self._create_infer_requests()
-        
+
         self._loaded = True
         logger.info("Model loaded and compiled successfully")
     
@@ -207,14 +210,16 @@ class OpenVINOBackend(BaseBackend):
     def _create_infer_requests(self) -> None:
         """Create inference requests for async execution."""
         self._infer_requests = []
-        
-        # Create one request per stream
-        for _ in range(max(1, self._num_streams)):
+
+        # Create optimal number of requests for maximum throughput
+        nireq = max(1, self._optimal_nireq)
+        for _ in range(nireq):
             request = self._compiled_model.create_infer_request()
             self._infer_requests.append(request)
-        
-        # Set default request
+
+        # Set default request for sync inference
         self._infer_request = self._infer_requests[0]
+        logger.info(f"Created {nireq} inference requests")
     
     def _convert_to_model_dtype(self, name: str, data: np.ndarray) -> np.ndarray:
         """Convert input data to the dtype expected by the model."""
@@ -369,7 +374,7 @@ class OpenVINOBackend(BaseBackend):
         Create an AsyncInferQueue for high-throughput async inference.
 
         Args:
-            num_jobs: Number of parallel jobs (default: num_streams)
+            num_jobs: Number of parallel jobs (default: optimal_nireq)
             callback: Callback function called when inference completes.
                       Signature: callback(infer_request, userdata)
 
@@ -380,13 +385,14 @@ class OpenVINOBackend(BaseBackend):
             self.load()
 
         if num_jobs is None:
-            num_jobs = self._num_streams
+            num_jobs = self._optimal_nireq
 
         async_queue = AsyncInferQueue(self._compiled_model, num_jobs)
 
         if callback:
             async_queue.set_callback(callback)
 
+        logger.info(f"Created AsyncInferQueue with {num_jobs} parallel jobs")
         return async_queue
 
     def start_async_queue(
@@ -432,8 +438,8 @@ class OpenVINOBackend(BaseBackend):
     
     @property
     def num_streams(self) -> int:
-        """Get number of inference streams."""
-        return self._num_streams
+        """Get optimal number of inference requests."""
+        return self._optimal_nireq
     
     def get_info(self) -> Dict[str, Any]:
         """Get backend information."""
@@ -445,7 +451,7 @@ class OpenVINOBackend(BaseBackend):
         if self._loaded:
             info.update({
                 "device": self.config.device,
-                "num_streams": self._num_streams,
+                "optimal_nireq": self._optimal_nireq,
                 "performance_hint": self.config.performance_hint,
                 "inference_precision": self.config.inference_precision,
             })

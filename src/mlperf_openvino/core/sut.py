@@ -4,11 +4,9 @@ MLPerf System Under Test (SUT) implementation for OpenVINO.
 
 import array
 import logging
-import queue
 import sys
-import threading
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -86,12 +84,6 @@ class OpenVINOSUT:
         self.output_name = config.model.output_name
         if self.output_name not in self.backend.output_names:
             self.output_name = self.backend.output_names[0]
-
-        # For async processing
-        self._query_queue: queue.Queue = queue.Queue()
-        self._result_queue: queue.Queue = queue.Queue()
-        self._workers: List[threading.Thread] = []
-        self._stop_event = threading.Event()
 
         # Results storage
         self._predictions: Dict[int, Any] = {}
@@ -387,139 +379,3 @@ class OpenVINOSUT:
         self._predictions.clear()
         self._query_count = 0
         self._sample_count = 0
-
-
-class AsyncOpenVINOSUT(OpenVINOSUT):
-    """
-    Asynchronous SUT implementation for better throughput.
-    
-    Uses multiple inference requests and worker threads for
-    maximum utilization of CPU resources.
-    """
-    
-    def __init__(
-        self,
-        config: BenchmarkConfig,
-        backend: OpenVINOBackend,
-        qsl: QuerySampleLibrary,
-        scenario: Scenario = Scenario.OFFLINE,
-        num_workers: int = 0,
-    ):
-        """
-        Initialize async SUT.
-        
-        Args:
-            config: Benchmark configuration
-            backend: OpenVINO backend instance
-            qsl: Query Sample Library
-            scenario: Test scenario
-            num_workers: Number of worker threads (0 = auto)
-        """
-        super().__init__(config, backend, qsl, scenario)
-        
-        self.num_workers = num_workers if num_workers > 0 else backend.num_streams
-        self._response_callbacks: Dict[int, Callable] = {}
-    
-    def _worker_thread(self, worker_id: int) -> None:
-        """
-        Worker thread for processing queries.
-        
-        Args:
-            worker_id: Worker thread ID
-        """
-        logger.debug(f"Worker {worker_id} started")
-        
-        while not self._stop_event.is_set():
-            try:
-                # Get work item
-                work = self._query_queue.get(timeout=0.1)
-                
-                if work is None:
-                    break
-                
-                query_id, sample_idx = work
-                
-                # Process sample
-                _, result = self._process_sample(sample_idx)
-                
-                # Store prediction
-                self._predictions[sample_idx] = result
-                
-                # Create and send response
-                response_array = array.array('B', result.tobytes())
-                bi = response_array.buffer_info()
-                
-                response = lg.QuerySampleResponse(
-                    query_id,
-                    bi[0],
-                    bi[1]
-                )
-                
-                lg.QuerySamplesComplete([response])
-                
-            except queue.Empty:
-                continue
-            except Exception as e:
-                logger.error(f"Worker {worker_id} error: {e}")
-        
-        logger.debug(f"Worker {worker_id} stopped")
-    
-    def start_workers(self) -> None:
-        """Start worker threads."""
-        self._stop_event.clear()
-        self._workers = []
-        
-        for i in range(self.num_workers):
-            worker = threading.Thread(target=self._worker_thread, args=(i,))
-            worker.daemon = True
-            worker.start()
-            self._workers.append(worker)
-        
-        logger.info(f"Started {self.num_workers} worker threads")
-    
-    def stop_workers(self) -> None:
-        """Stop worker threads."""
-        self._stop_event.set()
-        
-        # Send stop signals
-        for _ in self._workers:
-            self._query_queue.put(None)
-        
-        # Wait for workers
-        for worker in self._workers:
-            worker.join(timeout=5.0)
-        
-        self._workers.clear()
-        logger.info("Workers stopped")
-    
-    def _issue_query_offline_async(
-        self, 
-        query_samples: List["lg.QuerySample"]
-    ) -> None:
-        """
-        Process queries asynchronously in Offline mode.
-        """
-        # Queue all samples
-        for qs in query_samples:
-            self._query_queue.put((qs.id, qs.index))
-        
-        self._sample_count += len(query_samples)
-        self._query_count += 1
-    
-    def issue_queries(self, query_samples: List["lg.QuerySample"]) -> None:
-        """Process incoming queries."""
-        if self.scenario == Scenario.OFFLINE:
-            self._issue_query_offline_async(query_samples)
-        elif self.scenario == Scenario.SERVER:
-            # For server mode, also use async processing
-            for qs in query_samples:
-                self._query_queue.put((qs.id, qs.index))
-            self._sample_count += len(query_samples)
-            self._query_count += 1
-        else:
-            raise ValueError(f"Unsupported scenario: {self.scenario}")
-    
-    def flush_queries(self) -> None:
-        """Wait for all pending queries to complete."""
-        # Wait for queue to empty
-        self._query_queue.join()
