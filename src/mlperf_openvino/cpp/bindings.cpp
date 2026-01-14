@@ -3,6 +3,10 @@
  *
  * This exposes the high-performance C++ SUT to Python while
  * ensuring the critical inference callbacks run without GIL.
+ *
+ * Two SUT types:
+ * - CppSUT (Server): async inference, batch=1, for Server scenario
+ * - CppOfflineSUT (Offline): sync batch inference, for Offline scenario
  */
 
 #include <pybind11/pybind11.h>
@@ -13,6 +17,7 @@
 #include <cstring>
 
 #include "sut_cpp.hpp"
+#include "offline_sut.hpp"
 
 namespace py = pybind11;
 
@@ -109,6 +114,67 @@ PYBIND11_MODULE(_cpp_sut, m) {
              },
              py::arg("callback"),
              "Set response callback (called when inference completes)");
+
+    // CppOfflineSUT - optimized for Offline scenario with batch inference
+    py::class_<mlperf_ov::CppOfflineSUT>(m, "CppOfflineSUT")
+        .def(py::init<const std::string&, const std::string&, int, int>(),
+             py::arg("model_path"),
+             py::arg("device") = "CPU",
+             py::arg("batch_size") = 32,
+             py::arg("num_streams") = 0,
+             "Create C++ Offline SUT instance with batch inference")
+
+        .def("load", &mlperf_ov::CppOfflineSUT::load,
+             py::call_guard<py::gil_scoped_release>(),
+             "Load and compile the model")
+
+        .def("is_loaded", &mlperf_ov::CppOfflineSUT::is_loaded,
+             "Check if model is loaded")
+
+        .def("get_batch_size", &mlperf_ov::CppOfflineSUT::get_batch_size,
+             "Get batch size")
+
+        .def("get_input_name", &mlperf_ov::CppOfflineSUT::get_input_name,
+             "Get input tensor name")
+
+        .def("get_output_name", &mlperf_ov::CppOfflineSUT::get_output_name,
+             "Get output tensor name")
+
+        .def("get_sample_size", &mlperf_ov::CppOfflineSUT::get_sample_size,
+             "Get single sample size in floats")
+
+        .def("infer_batch",
+             [](mlperf_ov::CppOfflineSUT& self,
+                py::array_t<float, py::array::c_style | py::array::forcecast> input,
+                int num_samples) {
+                 py::buffer_info buf = input.request();
+                 const float* data = static_cast<const float*>(buf.ptr);
+
+                 // Release GIL during inference
+                 std::vector<std::vector<float>> results;
+                 {
+                     py::gil_scoped_release release;
+                     results = self.infer_batch(data, num_samples);
+                 }
+
+                 // Convert results to list of numpy arrays
+                 py::list py_results;
+                 for (const auto& result : results) {
+                     py::array_t<float> arr(result.size());
+                     std::memcpy(arr.mutable_data(), result.data(), result.size() * sizeof(float));
+                     py_results.append(arr);
+                 }
+                 return py_results;
+             },
+             py::arg("input"),
+             py::arg("num_samples"),
+             "Infer a batch of samples (GIL released during inference)")
+
+        .def("get_completed_count", &mlperf_ov::CppOfflineSUT::get_completed_count,
+             "Get number of completed samples")
+
+        .def("reset_counters", &mlperf_ov::CppOfflineSUT::reset_counters,
+             "Reset counters");
 
     // Version info
     m.attr("__version__") = "1.0.0";

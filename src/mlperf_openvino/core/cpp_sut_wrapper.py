@@ -25,10 +25,11 @@ from ..core.config import BenchmarkConfig, Scenario
 
 # Try to import C++ extension
 try:
-    from ..cpp import CppSUT, CPP_AVAILABLE
+    from ..cpp import CppSUT, CppOfflineSUT, CPP_AVAILABLE
 except ImportError:
     CPP_AVAILABLE = False
     CppSUT = None
+    CppOfflineSUT = None
 
 logger = logging.getLogger(__name__)
 
@@ -253,6 +254,160 @@ class CppSUTWrapper:
         self._cpp_sut.reset_counters()
 
 
+class CppOfflineSUTWrapper:
+    """
+    Wrapper for C++ Offline SUT with batch inference.
+
+    Optimized for Offline scenario:
+    - Sync batch inference (multiple samples per call)
+    - No per-sample callback overhead
+    - Maximum throughput with large batches
+    """
+
+    def __init__(
+        self,
+        config: BenchmarkConfig,
+        model_path: str,
+        qsl: QuerySampleLibrary,
+        batch_size: int = 32,
+    ):
+        if not LOADGEN_AVAILABLE:
+            raise ImportError("MLPerf LoadGen is not installed")
+
+        if not CPP_AVAILABLE or CppOfflineSUT is None:
+            raise ImportError("C++ Offline SUT extension not available")
+
+        self.config = config
+        self.qsl = qsl
+        self.batch_size = batch_size
+        self.scenario = Scenario.OFFLINE
+
+        # Create C++ Offline SUT
+        device = config.openvino.device
+        num_streams = 0
+        if config.openvino.num_streams != "AUTO":
+            try:
+                num_streams = int(config.openvino.num_streams)
+            except ValueError:
+                pass
+
+        logger.info(f"Creating C++ Offline SUT: device={device}, batch_size={batch_size}")
+        self._cpp_sut = CppOfflineSUT(model_path, device, batch_size, num_streams)
+
+        # Load model
+        logger.info("Loading model in C++ Offline SUT...")
+        self._cpp_sut.load()
+
+        # Get input info
+        self.input_name = self._cpp_sut.get_input_name()
+        self.output_name = self._cpp_sut.get_output_name()
+        self.sample_size = self._cpp_sut.get_sample_size()
+
+        logger.info(f"C++ Offline SUT initialized: batch={batch_size}, sample_size={self.sample_size}")
+
+        # Statistics
+        self._start_time = 0.0
+        self._issued_count = 0
+
+    def issue_queries(self, query_samples: List["lg.QuerySample"]) -> None:
+        """
+        Process queries using batch inference.
+
+        For Offline mode, all samples come at once - process in batches.
+        """
+        self._start_time = time.time()
+        total_samples = len(query_samples)
+        self._issued_count = total_samples
+
+        logger.info(f"Offline: Processing {total_samples} samples in batches of {self.batch_size}")
+
+        # Process in batches
+        for batch_start in range(0, total_samples, self.batch_size):
+            batch_end = min(batch_start + self.batch_size, total_samples)
+            batch_samples = query_samples[batch_start:batch_end]
+            num_in_batch = len(batch_samples)
+
+            # Prepare batch input
+            batch_input = np.zeros((self.batch_size, self.sample_size), dtype=np.float32)
+
+            query_ids = []
+            for i, qs in enumerate(batch_samples):
+                sample_idx = qs.index
+                query_ids.append(qs.id)
+
+                # Get input data from QSL
+                if hasattr(self.qsl, '_loaded_samples') and sample_idx in self.qsl._loaded_samples:
+                    input_data = self.qsl._loaded_samples[sample_idx]
+                else:
+                    features = self.qsl.get_features(sample_idx)
+                    input_data = features.get("input", features.get(self.input_name))
+
+                # Flatten and copy to batch
+                batch_input[i] = input_data.flatten().astype(np.float32)
+
+            # Run batch inference
+            results = self._cpp_sut.infer_batch(batch_input.flatten(), num_in_batch)
+
+            # Send responses to LoadGen
+            responses = []
+            for i, (query_id, result) in enumerate(zip(query_ids, results)):
+                response = lg.QuerySampleResponse(
+                    query_id,
+                    result.ctypes.data,
+                    result.nbytes
+                )
+                responses.append(response)
+
+            lg.QuerySamplesComplete(responses)
+
+            # Progress
+            completed = batch_end
+            elapsed = time.time() - self._start_time
+            throughput = completed / elapsed if elapsed > 0 else 0
+            print(f"\rOffline: {completed}/{total_samples} samples, {throughput:.1f} samples/sec", end="", flush=True)
+
+        print()  # Newline after progress
+
+    def flush_queries(self) -> None:
+        """Flush completed - all done in issue_queries for Offline."""
+        elapsed = time.time() - self._start_time
+        completed = self._cpp_sut.get_completed_count()
+        throughput = completed / elapsed if elapsed > 0 else 0
+        logger.info(f"Offline completed: {completed} samples in {elapsed:.1f}s ({throughput:.1f} samples/sec)")
+
+    def get_sut(self) -> "lg.ConstructSUT":
+        """Get the LoadGen SUT object."""
+        return lg.ConstructSUT(self.issue_queries, self.flush_queries)
+
+    def get_qsl(self) -> "lg.ConstructQSL":
+        """Get the LoadGen QSL object."""
+        return lg.ConstructQSL(
+            self.qsl.total_sample_count,
+            self.qsl.performance_sample_count,
+            self.qsl.load_query_samples,
+            self.qsl.unload_query_samples,
+        )
+
+    @property
+    def name(self) -> str:
+        return f"OpenVINO-CppOffline-{self.config.model.name}"
+
+    @property
+    def _sample_count(self) -> int:
+        return self._cpp_sut.get_completed_count()
+
+    @property
+    def _query_count(self) -> int:
+        return self._issued_count
+
+    def get_predictions(self) -> Dict[int, Any]:
+        return {}  # Not implemented for Offline
+
+    def reset(self) -> None:
+        self._cpp_sut.reset_counters()
+        self._issued_count = 0
+
+
 def create_sut(
     config: BenchmarkConfig,
     model_path: str,
@@ -263,8 +418,8 @@ def create_sut(
     """
     Factory function to create the best available SUT.
 
-    - Server: C++ SUT with async inference, individual responses
-    - Offline: C++ SUT with async inference, batched responses
+    - Server: CppSUT with async inference (batch=1)
+    - Offline: CppOfflineSUT with sync batch inference
 
     Args:
         config: Benchmark configuration
@@ -274,13 +429,19 @@ def create_sut(
         force_python: Force Python SUT even if C++ is available
 
     Returns:
-        SUT instance (either CppSUTWrapper or OpenVINOSUT)
+        SUT instance
     """
-    # Use C++ SUT for both Server and Offline modes
     if CPP_AVAILABLE and not force_python:
-        mode = "async" if scenario == Scenario.SERVER else "async-batch"
-        logger.info(f"Using C++ SUT for {scenario.value} mode ({mode})")
-        return CppSUTWrapper(config, model_path, qsl, scenario)
+        if scenario == Scenario.SERVER:
+            logger.info("Using C++ Server SUT (async, batch=1)")
+            return CppSUTWrapper(config, model_path, qsl, scenario)
+        else:
+            # Offline mode - use batch inference
+            batch_size = config.openvino.batch_size
+            if batch_size <= 1:
+                batch_size = 32  # Default batch for Offline
+            logger.info(f"Using C++ Offline SUT (sync batch={batch_size})")
+            return CppOfflineSUTWrapper(config, model_path, qsl, batch_size)
 
     # Fall back to Python SUT
     logger.info(f"Using Python SUT for {scenario.value} mode")
