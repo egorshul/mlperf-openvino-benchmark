@@ -331,6 +331,72 @@ This benchmark follows MLPerf Inference v5.1 specifications:
 | Offline | Min Queries | 24,576 | 10,833 | 24,576 | 2,513 |
 | Server | Target Latency | 15ms | 130ms | 100ms | 1,000ms |
 
+## Performance Optimization
+
+### Understanding Scenarios
+
+**IMPORTANT**: For maximum throughput, use **Offline** mode, not Server mode!
+
+| Scenario | Purpose | Throughput | Use Case |
+|----------|---------|------------|----------|
+| **Offline** | Maximum throughput | Unlimited | Batch processing, benchmarking peak performance |
+| **Server** | Latency-constrained | Rate-limited | Real-time services, latency testing |
+
+Server mode intentionally limits throughput to test latency compliance. If your Server test is running slowly, that's by design!
+
+### Performance Tips Command
+
+```bash
+# Show performance optimization tips for your model
+mlperf-ov perf-tips --model resnet50
+```
+
+### Quick Throughput Benchmark
+
+Test your hardware's maximum inference speed without LoadGen overhead:
+
+```bash
+mlperf-ov benchmark-throughput \
+  --model-path ./models/resnet50_v1.onnx \
+  --batch-size 32 \
+  --iterations 200
+```
+
+### Maximum Performance Settings
+
+For maximum throughput, use these settings:
+
+```bash
+mlperf-ov run \
+  --model resnet50 \
+  --scenario Offline \
+  --mode performance \
+  --batch-size 32 \
+  --num-streams AUTO \
+  --performance-hint THROUGHPUT \
+  --model-path ./models/resnet50_v1.onnx \
+  --data-path ./data/imagenet
+```
+
+### Key Optimization Parameters
+
+| Parameter | Description | Recommended for Throughput |
+|-----------|-------------|---------------------------|
+| `--scenario` | Test mode | `Offline` (not Server!) |
+| `--batch-size` | Inference batch size | 8-64 (depends on model/RAM) |
+| `--num-streams` | Parallel inference streams | `AUTO` |
+| `--performance-hint` | OpenVINO optimization hint | `THROUGHPUT` |
+| `--num-threads` | CPU threads | 0 (auto-detect) |
+
+### Recommended Batch Sizes
+
+| Model | Recommended Batch Size | Notes |
+|-------|----------------------|-------|
+| ResNet50 | 32-64 | Small model, high parallelism |
+| BERT | 8-16 | Larger model, moderate batching |
+| RetinaNet | 4-8 | Large model, memory-limited |
+| Whisper | 1-4 | Sequential decoding limits batching |
+
 ## Troubleshooting
 
 ### Common Issues
