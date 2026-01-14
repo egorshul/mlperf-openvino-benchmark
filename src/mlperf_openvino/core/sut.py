@@ -7,7 +7,6 @@ import logging
 import sys
 import time
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -101,65 +100,53 @@ class OpenVINOSUT:
         self._last_progress_update = 0.0
         self._progress_update_interval = 0.5  # seconds
 
-        # Server mode: thread pool for parallel processing
-        self._thread_pool = None
-        self._async_queue = None  # Keep for compatibility
+        # Server mode: async inference queue (like OpenVINO MLPerf reference)
+        self._async_queue = None
         self._lock = threading.Lock()
         if scenario == Scenario.SERVER:
-            self._setup_thread_pool()
+            self._setup_async_queue()
 
-    def _setup_thread_pool(self) -> None:
-        """Setup thread pool for Server mode - similar to OpenVINO MLPerf reference."""
+    def _setup_async_queue(self) -> None:
+        """Setup AsyncInferQueue for Server mode - like OpenVINO MLPerf reference."""
         self._start_time = time.time()
         self._last_progress_update = time.time()
         self._issued_count = 0
 
-        # For Server mode, we need MORE inference requests than optimal_nireq
-        # because of thread pool overhead and queue contention
-        # Add 2x more requests for better parallelism
-        base_nireq = self.backend.num_streams
-        extra_requests = base_nireq * 2
-        self.backend.add_infer_requests(extra_requests)
+        def callback(infer_request, userdata):
+            """Callback when inference completes - send response immediately."""
+            query_id, sample_idx = userdata
 
-        # Use thread pool with workers matching total inference requests
-        num_workers = base_nireq + extra_requests
-        logger.info(f"Server mode: using ThreadPoolExecutor with {num_workers} workers")
-        self._thread_pool = ThreadPoolExecutor(max_workers=num_workers)
+            # Get output tensor and copy data
+            output = infer_request.get_output_tensor(0).data.copy()
 
-    def _process_server_query(self, query_id: int, sample_idx: int) -> None:
-        """Process a single query in a worker thread."""
-        # Get input features
-        features = self.qsl.get_features(sample_idx)
-        input_data = features.get("input", features.get(self.input_name))
+            # Store prediction
+            with self._lock:
+                self._predictions[sample_idx] = output
+                self._sample_count += 1
 
-        # Run thread-safe inference (uses separate infer requests per thread)
-        inputs = {self.input_name: input_data}
-        outputs = self.backend.predict_threadsafe(inputs)
-        output = outputs.get(self.output_name, list(outputs.values())[0])
+            # Send response immediately (like OpenVINO MLPerf reference)
+            response = lg.QuerySampleResponse(
+                query_id,
+                output.ctypes.data,
+                output.nbytes
+            )
+            lg.QuerySamplesComplete([response])
 
-        # Store prediction (thread-safe with lock)
-        with self._lock:
-            self._predictions[sample_idx] = output
+            # Update progress
+            with self._lock:
+                current_time = time.time()
+                if current_time - self._last_progress_update >= 1.0:
+                    elapsed = current_time - self._start_time
+                    throughput = self._sample_count / elapsed if elapsed > 0 else 0
+                    issued = self._issued_count
+                    pending = issued - self._sample_count
+                    print(f"\rServer: issued={issued}, done={self._sample_count}, pending={pending}, {throughput:.1f} samples/sec", end="", flush=True)
+                    self._last_progress_update = current_time
 
-        # Send response immediately
-        response = lg.QuerySampleResponse(
-            query_id,
-            output.ctypes.data,
-            output.nbytes
-        )
-        lg.QuerySamplesComplete([response])
-
-        # Update stats (thread-safe)
-        with self._lock:
-            self._sample_count += 1
-            current_time = time.time()
-            if current_time - self._last_progress_update >= 1.0:
-                elapsed = current_time - self._start_time
-                throughput = self._sample_count / elapsed if elapsed > 0 else 0
-                issued = self._issued_count
-                pending = issued - self._sample_count
-                print(f"\rServer: issued={issued}, done={self._sample_count}, pending={pending}, {throughput:.1f} samples/sec", end="", flush=True)
-                self._last_progress_update = current_time
+        # Create AsyncInferQueue with optimal number of requests
+        nireq = self.backend.num_streams
+        logger.info(f"Server mode: AsyncInferQueue with {nireq} parallel requests")
+        self._async_queue = self.backend.create_async_queue(num_jobs=nireq, callback=callback)
 
     def _start_progress(self, total: int, desc: str = "Processing") -> None:
         """Start progress tracking."""
@@ -314,18 +301,28 @@ class OpenVINOSUT:
     
     def _issue_query_server(self, query_samples: List["lg.QuerySample"]) -> None:
         """
-        Process queries in Server mode using thread pool.
+        Process queries in Server mode using AsyncInferQueue.
 
-        LoadGen sends queries according to Poisson process at server_target_qps.
-        We submit to thread pool and return immediately.
-        Workers process queries and send responses when done.
+        Like OpenVINO MLPerf reference:
+        - Get input data
+        - Submit to async queue (non-blocking if idle request available)
+        - Callback sends response when inference completes
         """
         for qs in query_samples:
             sample_idx = qs.index
             query_id = qs.id
 
-            # Submit to thread pool - worker handles inference and response
-            self._thread_pool.submit(self._process_server_query, query_id, sample_idx)
+            # Get input features
+            features = self.qsl.get_features(sample_idx)
+            input_data = features.get("input", features.get(self.input_name))
+
+            # Submit to async queue - callback handles response
+            inputs = {self.input_name: input_data}
+            self.backend.start_async_queue(
+                self._async_queue,
+                inputs,
+                userdata=(query_id, sample_idx)
+            )
             self._issued_count += 1
 
         self._query_count += 1
@@ -352,9 +349,9 @@ class OpenVINOSUT:
 
         This is called by LoadGen when all queries have been issued.
         """
-        # Wait for thread pool to finish (Server mode)
-        if self._thread_pool is not None:
-            self._thread_pool.shutdown(wait=True)
+        # Wait for async queue to finish (Server mode)
+        if self._async_queue is not None:
+            self._async_queue.wait_all()
             # Print final stats
             elapsed = time.time() - self._start_time
             throughput = self._sample_count / elapsed if elapsed > 0 else 0
