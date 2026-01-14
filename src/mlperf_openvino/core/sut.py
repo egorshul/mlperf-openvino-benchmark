@@ -1,5 +1,10 @@
 """
 MLPerf System Under Test (SUT) implementation for OpenVINO.
+
+Based on MLPerf reference implementation patterns:
+- QueueRunner pattern for Server mode (decouple issue_queries from inference)
+- Worker threads for parallel inference execution
+- Minimal Python overhead in critical path
 """
 
 import array
@@ -7,7 +12,9 @@ import logging
 import sys
 import time
 import threading
+from queue import Queue
 from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -32,16 +39,23 @@ from ..core.config import BenchmarkConfig, Scenario
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class WorkItem:
+    """Work item for the inference queue."""
+    query_id: int
+    sample_idx: int
+    input_data: np.ndarray
+
+
 class OpenVINOSUT:
     """
     System Under Test implementation using OpenVINO backend.
 
     This class implements the MLPerf LoadGen interface for inference testing.
-    It handles:
-    - Query dispatch
-    - Asynchronous inference
-    - Result collection
-    - Performance metrics
+    It uses the QueueRunner pattern from MLPerf reference implementation:
+    - issue_queries() enqueues work items and returns immediately
+    - Worker threads execute inference in parallel
+    - Each worker calls QuerySamplesComplete after inference
     """
 
     def __init__(
@@ -100,74 +114,71 @@ class OpenVINOSUT:
         self._last_progress_update = 0.0
         self._progress_update_interval = 0.5  # seconds
 
-        # Server mode: async inference queue (like OpenVINO MLPerf reference)
-        self._async_queue = None
-        self._lock = threading.Lock()
+        # Server mode: QueueRunner pattern (like MLPerf reference)
+        self._task_queue: Optional[Queue] = None
+        self._workers: List[threading.Thread] = []
+        self._stop_workers = False
+
         if scenario == Scenario.SERVER:
-            self._setup_async_queue()
+            self._setup_queue_runner()
 
-    def _setup_async_queue(self) -> None:
-        """Setup AsyncInferQueue for Server mode - optimized for minimal Python overhead."""
-        try:
-            import openvino as ov
-            from openvino import AsyncInferQueue
-        except ImportError:
-            raise ImportError("OpenVINO is required for Server mode")
+    def _setup_queue_runner(self) -> None:
+        """
+        Setup QueueRunner pattern for Server mode.
 
+        Like MLPerf reference implementation:
+        - Create task queue with sufficient buffer
+        - Spawn worker threads (one per inference stream)
+        - Each worker pulls from queue and executes inference
+        """
         self._start_time = time.time()
         self._issued_count = 0
+        self._stop_workers = False
 
-        # Get compiled model directly for faster access
-        compiled_model = self.backend._compiled_model
+        # Get optimal number of workers (= number of inference streams)
+        num_workers = self.backend.num_streams
+        queue_size = num_workers * 4  # Buffer for burst absorption
 
-        # Use 4x optimal for maximum parallelism
-        nireq = self.backend.num_streams * 4
-        logger.info(f"Server mode: AsyncInferQueue with {nireq} parallel requests (4x optimal)")
+        logger.info(f"Server mode: QueueRunner with {num_workers} workers, queue_size={queue_size}")
 
-        # Create AsyncInferQueue directly (bypass wrapper)
-        self._async_queue = AsyncInferQueue(compiled_model, nireq)
+        # Create task queue
+        self._task_queue = Queue(maxsize=queue_size)
 
-        # Pre-get input/output tensor info for direct access
-        self._input_idx = 0  # First input
-
-        # Minimal callback - send response immediately
-        def callback(infer_request, userdata):
-            """Ultra-minimal callback - direct response, no copies."""
-            query_id, sample_idx = userdata
-
-            # Get output tensor - direct access
-            output_tensor = infer_request.get_output_tensor(0)
-            output_data = output_tensor.data
-
-            # Store prediction (reference, not copy for speed)
-            self._predictions[sample_idx] = output_data.copy()
-
-            # Send response immediately using numpy array directly
-            response = lg.QuerySampleResponse(
-                query_id,
-                output_data.ctypes.data,
-                output_data.nbytes
-            )
-            lg.QuerySamplesComplete([response])
-            self._sample_count += 1
-
-        self._async_queue.set_callback(callback)
-
-        # Pre-convert dtype once (cache it)
-        self._input_dtype = None
-        input_element_type = str(compiled_model.input(0).element_type)
-        if 'f32' in input_element_type.lower():
-            self._input_dtype = np.float32
-        elif 'f16' in input_element_type.lower():
-            self._input_dtype = np.float16
-        elif 'i64' in input_element_type.lower():
-            self._input_dtype = np.int64
-        elif 'i32' in input_element_type.lower():
-            self._input_dtype = np.int32
+        # Pre-cache input dtype for fast conversion
+        try:
+            import openvino as ov
+            compiled_model = self.backend._compiled_model
+            input_element_type = str(compiled_model.input(0).element_type)
+            if 'f32' in input_element_type.lower():
+                self._input_dtype = np.float32
+            elif 'f16' in input_element_type.lower():
+                self._input_dtype = np.float16
+            elif 'i64' in input_element_type.lower():
+                self._input_dtype = np.int64
+            elif 'i32' in input_element_type.lower():
+                self._input_dtype = np.int32
+            else:
+                self._input_dtype = None
+        except Exception:
+            self._input_dtype = None
 
         logger.info(f"Server mode: input dtype = {self._input_dtype}")
 
-        # Start progress thread
+        # Create worker threads
+        self._workers = []
+        for i in range(num_workers):
+            worker = threading.Thread(
+                target=self._worker_thread,
+                args=(i,),
+                daemon=True,
+                name=f"InferWorker-{i}"
+            )
+            worker.start()
+            self._workers.append(worker)
+
+        logger.info(f"Started {num_workers} inference worker threads")
+
+        # Start progress monitoring thread
         self._progress_thread_stop = False
         def progress_thread():
             while not self._progress_thread_stop:
@@ -176,10 +187,59 @@ class OpenVINOSUT:
                 throughput = self._sample_count / elapsed if elapsed > 0 else 0
                 issued = self._issued_count
                 pending = issued - self._sample_count
-                print(f"\rServer: issued={issued}, done={self._sample_count}, pending={pending}, {throughput:.1f} samples/sec", end="", flush=True)
+                qsize = self._task_queue.qsize() if self._task_queue else 0
+                print(f"\rServer: issued={issued}, done={self._sample_count}, pending={pending}, queue={qsize}, {throughput:.1f} samples/sec", end="", flush=True)
 
         self._progress_thread = threading.Thread(target=progress_thread, daemon=True)
         self._progress_thread.start()
+
+    def _worker_thread(self, worker_id: int) -> None:
+        """
+        Worker thread that processes items from the queue.
+
+        Each worker:
+        1. Gets an item from the queue
+        2. Runs inference using thread-safe predict
+        3. Sends response via QuerySamplesComplete
+        """
+        input_name = self.input_name
+
+        while not self._stop_workers:
+            try:
+                # Get work item with timeout (to check stop flag)
+                item: WorkItem = self._task_queue.get(timeout=0.1)
+            except:
+                continue
+
+            try:
+                # Run inference using thread-safe predict
+                inputs = {input_name: item.input_data}
+                outputs = self.backend.predict_threadsafe(inputs)
+
+                # Get output
+                output = list(outputs.values())[0]
+
+                # Store prediction
+                self._predictions[item.sample_idx] = output
+
+                # Send response immediately
+                response = lg.QuerySampleResponse(
+                    item.query_id,
+                    output.ctypes.data,
+                    output.nbytes
+                )
+                lg.QuerySamplesComplete([response])
+                self._sample_count += 1
+
+            except Exception as e:
+                logger.error(f"Worker {worker_id} error: {e}")
+                # Send empty response on error to avoid LoadGen hang
+                response = lg.QuerySampleResponse(item.query_id, 0, 0)
+                lg.QuerySamplesComplete([response])
+                self._sample_count += 1
+            finally:
+                # Signal that task is done (for join() to work)
+                self._task_queue.task_done()
 
     def _start_progress(self, total: int, desc: str = "Processing") -> None:
         """Start progress tracking."""
@@ -222,37 +282,37 @@ class OpenVINOSUT:
     def _process_sample(self, sample_id: int) -> Tuple[int, np.ndarray]:
         """
         Process a single sample.
-        
+
         Args:
             sample_id: Sample index
-            
+
         Returns:
             Tuple of (sample_id, result)
         """
         # Get input features
         features = self.qsl.get_features(sample_id)
-        
+
         # Prepare input for backend
         inputs = {self.input_name: features.get("input", features.get(self.input_name))}
-        
+
         # Run inference
         outputs = self.backend.predict(inputs)
-        
+
         # Get output
         result = outputs.get(self.output_name, list(outputs.values())[0])
-        
+
         return sample_id, result
-    
+
     def _process_batch(
-        self, 
+        self,
         sample_ids: List[int]
     ) -> List[Tuple[int, np.ndarray]]:
         """
         Process a batch of samples.
-        
+
         Args:
             sample_ids: List of sample indices
-            
+
         Returns:
             List of (sample_id, result) tuples
         """
@@ -262,18 +322,18 @@ class OpenVINOSUT:
             features = self.qsl.get_features(sample_id)
             data = features.get("input", features.get(self.input_name))
             batch_inputs.append({self.input_name: data})
-        
+
         # Run batch inference
         batch_outputs = self.backend.predict_batch(batch_inputs)
-        
+
         # Collect results
         results = []
         for i, (sample_id, output) in enumerate(zip(sample_ids, batch_outputs)):
             result = output.get(self.output_name, list(output.values())[0])
             results.append((sample_id, result))
-        
+
         return results
-    
+
     def _issue_query_offline(self, query_samples: List["lg.QuerySample"]) -> None:
         """
         Process queries in Offline mode.
@@ -331,19 +391,18 @@ class OpenVINOSUT:
         lg.QuerySamplesComplete(responses)
 
         self._query_count += 1
-    
+
     def _issue_query_server(self, query_samples: List["lg.QuerySample"]) -> None:
         """
-        Process queries in Server mode using AsyncInferQueue.
+        Process queries in Server mode using QueueRunner pattern.
 
-        Optimized for minimal Python overhead:
-        - Direct tensor access
-        - No dictionary creation in hot path
-        - Pre-cached dtype conversion
+        Like MLPerf reference implementation:
+        - Enqueue work items and return immediately (non-blocking)
+        - Worker threads handle inference and responses
         """
         # Cache references for faster access in loop
         qsl = self.qsl
-        async_queue = self._async_queue
+        task_queue = self._task_queue
         input_name = self.input_name
         input_dtype = self._input_dtype
 
@@ -352,29 +411,30 @@ class OpenVINOSUT:
             query_id = qs.id
 
             # Get input data directly from QSL cache
-            # Using _loaded_samples directly to avoid dict creation in get_features()
             if hasattr(qsl, '_loaded_samples') and sample_idx in qsl._loaded_samples:
                 input_data = qsl._loaded_samples[sample_idx]
             else:
                 features = qsl.get_features(sample_idx)
                 input_data = features.get("input", features.get(input_name))
 
-            # Convert dtype if needed (pre-cached check)
+            # Convert dtype if needed
             if input_dtype is not None and input_data.dtype != input_dtype:
                 input_data = input_data.astype(input_dtype, copy=False)
 
-            # Submit directly to async queue - minimal wrapper
-            async_queue.start_async({input_name: input_data}, (query_id, sample_idx))
+            # Enqueue work item (non-blocking if queue has space)
+            # put() will block only if queue is full, providing backpressure
+            item = WorkItem(query_id=query_id, sample_idx=sample_idx, input_data=input_data)
+            task_queue.put(item)
             self._issued_count += 1
 
         self._query_count += 1
-    
+
     def issue_queries(self, query_samples: List["lg.QuerySample"]) -> None:
         """
         Process incoming queries.
-        
+
         This method is called by LoadGen when queries need to be processed.
-        
+
         Args:
             query_samples: List of query samples from LoadGen
         """
@@ -384,16 +444,22 @@ class OpenVINOSUT:
             self._issue_query_server(query_samples)
         else:
             raise ValueError(f"Unsupported scenario: {self.scenario}")
-    
+
     def flush_queries(self) -> None:
         """
         Flush any pending queries.
 
         This is called by LoadGen when all queries have been issued.
         """
-        # Wait for async queue to finish (Server mode)
-        if self._async_queue is not None:
-            self._async_queue.wait_all()
+        # Server mode: wait for all workers to complete
+        if self._task_queue is not None:
+            # Wait for queue to empty
+            self._task_queue.join()
+
+            # Stop workers
+            self._stop_workers = True
+            for worker in self._workers:
+                worker.join(timeout=2.0)
 
             # Stop progress thread
             if hasattr(self, '_progress_thread_stop'):
@@ -407,20 +473,20 @@ class OpenVINOSUT:
         # Close progress bar if still open
         if self._progress_bar is not None:
             self._close_progress()
-    
+
     def get_sut(self) -> "lg.ConstructSUT":
         """
         Get the LoadGen SUT object.
-        
+
         Returns:
             LoadGen SUT handle
         """
         return lg.ConstructSUT(self.issue_queries, self.flush_queries)
-    
+
     def get_qsl(self) -> "lg.ConstructQSL":
         """
         Get the LoadGen QSL object.
-        
+
         Returns:
             LoadGen QSL handle
         """
@@ -430,16 +496,16 @@ class OpenVINOSUT:
             self.qsl.load_query_samples,
             self.qsl.unload_query_samples,
         )
-    
+
     @property
     def name(self) -> str:
         """Get SUT name."""
         return f"OpenVINO-{self.config.model.name}"
-    
+
     def get_predictions(self) -> Dict[int, Any]:
         """Get all predictions."""
         return self._predictions
-    
+
     def reset(self) -> None:
         """Reset SUT state."""
         self._predictions.clear()
