@@ -234,6 +234,16 @@ class CppSUTWrapper:
         """Get SUT name."""
         return f"OpenVINO-Cpp-{self.config.model.name}"
 
+    @property
+    def _sample_count(self) -> int:
+        """Get number of completed samples (for compatibility with benchmark_runner)."""
+        return self._cpp_sut.get_completed_count()
+
+    @property
+    def _query_count(self) -> int:
+        """Get number of issued queries (for compatibility with benchmark_runner)."""
+        return self._cpp_sut.get_issued_count()
+
     def get_predictions(self) -> Dict[int, Any]:
         """Get all predictions (for accuracy mode)."""
         return self._cpp_sut.get_predictions()
