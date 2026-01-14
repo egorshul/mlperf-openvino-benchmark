@@ -107,74 +107,65 @@ class OpenVINOSUT:
             self._setup_async_queue()
 
     def _setup_async_queue(self) -> None:
-        """Setup AsyncInferQueue for Server mode - like OpenVINO MLPerf reference."""
-        import queue as q
+        """Setup AsyncInferQueue for Server mode - optimized for minimal Python overhead."""
+        try:
+            import openvino as ov
+            from openvino import AsyncInferQueue
+        except ImportError:
+            raise ImportError("OpenVINO is required for Server mode")
 
         self._start_time = time.time()
-        self._last_progress_update = time.time()
         self._issued_count = 0
 
-        # Queue for completed results - callback pushes, worker thread pops and sends
-        self._response_queue = q.Queue()
-        self._worker_stop = False
+        # Get compiled model directly for faster access
+        compiled_model = self.backend._compiled_model
 
+        # Use 4x optimal for maximum parallelism
+        nireq = self.backend.num_streams * 4
+        logger.info(f"Server mode: AsyncInferQueue with {nireq} parallel requests (4x optimal)")
+
+        # Create AsyncInferQueue directly (bypass wrapper)
+        self._async_queue = AsyncInferQueue(compiled_model, nireq)
+
+        # Pre-get input/output tensor info for direct access
+        self._input_idx = 0  # First input
+
+        # Minimal callback - send response immediately
         def callback(infer_request, userdata):
-            """Minimal callback - just queue result for response thread."""
+            """Ultra-minimal callback - direct response, no copies."""
             query_id, sample_idx = userdata
-            # Get raw pointer to tensor data (no copy in callback!)
-            tensor = infer_request.get_output_tensor(0)
-            # Queue the tensor data pointer and size for immediate response
-            self._response_queue.put((query_id, sample_idx, tensor.data, tensor.data.nbytes))
 
-        def response_worker():
-            """Worker thread that sends responses - can batch multiple responses."""
-            batch = []
-            batch_arrays = []  # Keep arrays alive
+            # Get output tensor - direct access
+            output_tensor = infer_request.get_output_tensor(0)
+            output_data = output_tensor.data
 
-            while not self._worker_stop or not self._response_queue.empty():
-                try:
-                    # Non-blocking get with timeout
-                    item = self._response_queue.get(timeout=0.001)
-                    query_id, sample_idx, data, nbytes = item
+            # Store prediction (reference, not copy for speed)
+            self._predictions[sample_idx] = output_data.copy()
 
-                    # Copy data here (outside callback)
-                    output = data.copy()
-                    self._predictions[sample_idx] = output
+            # Send response immediately using numpy array directly
+            response = lg.QuerySampleResponse(
+                query_id,
+                output_data.ctypes.data,
+                output_data.nbytes
+            )
+            lg.QuerySamplesComplete([response])
+            self._sample_count += 1
 
-                    # Create response
-                    response = lg.QuerySampleResponse(query_id, output.ctypes.data, nbytes)
-                    batch.append(response)
-                    batch_arrays.append(output)
+        self._async_queue.set_callback(callback)
 
-                    # Send batch when we have enough or queue is empty
-                    if len(batch) >= 64 or self._response_queue.empty():
-                        lg.QuerySamplesComplete(batch)
-                        self._sample_count += len(batch)
-                        batch = []
-                        batch_arrays = []
+        # Pre-convert dtype once (cache it)
+        self._input_dtype = None
+        input_element_type = str(compiled_model.input(0).element_type)
+        if 'f32' in input_element_type.lower():
+            self._input_dtype = np.float32
+        elif 'f16' in input_element_type.lower():
+            self._input_dtype = np.float16
+        elif 'i64' in input_element_type.lower():
+            self._input_dtype = np.int64
+        elif 'i32' in input_element_type.lower():
+            self._input_dtype = np.int32
 
-                except q.Empty:
-                    # Send any remaining responses
-                    if batch:
-                        lg.QuerySamplesComplete(batch)
-                        self._sample_count += len(batch)
-                        batch = []
-                        batch_arrays = []
-
-            # Final flush
-            if batch:
-                lg.QuerySamplesComplete(batch)
-                self._sample_count += len(batch)
-
-        # Create AsyncInferQueue with MORE requests for better pipelining
-        # Use 3x optimal to ensure we always have idle requests
-        nireq = self.backend.num_streams * 3
-        logger.info(f"Server mode: AsyncInferQueue with {nireq} parallel requests (3x optimal)")
-        self._async_queue = self.backend.create_async_queue(num_jobs=nireq, callback=callback)
-
-        # Start response worker thread
-        self._response_thread = threading.Thread(target=response_worker, daemon=True)
-        self._response_thread.start()
+        logger.info(f"Server mode: input dtype = {self._input_dtype}")
 
         # Start progress thread
         self._progress_thread_stop = False
@@ -185,8 +176,7 @@ class OpenVINOSUT:
                 throughput = self._sample_count / elapsed if elapsed > 0 else 0
                 issued = self._issued_count
                 pending = issued - self._sample_count
-                qsize = self._response_queue.qsize()
-                print(f"\rServer: issued={issued}, done={self._sample_count}, pending={pending}, queue={qsize}, {throughput:.1f} samples/sec", end="", flush=True)
+                print(f"\rServer: issued={issued}, done={self._sample_count}, pending={pending}, {throughput:.1f} samples/sec", end="", flush=True)
 
         self._progress_thread = threading.Thread(target=progress_thread, daemon=True)
         self._progress_thread.start()
@@ -346,26 +336,35 @@ class OpenVINOSUT:
         """
         Process queries in Server mode using AsyncInferQueue.
 
-        Like OpenVINO MLPerf reference:
-        - Get input data
-        - Submit to async queue (non-blocking if idle request available)
-        - Callback sends response when inference completes
+        Optimized for minimal Python overhead:
+        - Direct tensor access
+        - No dictionary creation in hot path
+        - Pre-cached dtype conversion
         """
+        # Cache references for faster access in loop
+        qsl = self.qsl
+        async_queue = self._async_queue
+        input_name = self.input_name
+        input_dtype = self._input_dtype
+
         for qs in query_samples:
             sample_idx = qs.index
             query_id = qs.id
 
-            # Get input features
-            features = self.qsl.get_features(sample_idx)
-            input_data = features.get("input", features.get(self.input_name))
+            # Get input data directly from QSL cache
+            # Using _loaded_samples directly to avoid dict creation in get_features()
+            if hasattr(qsl, '_loaded_samples') and sample_idx in qsl._loaded_samples:
+                input_data = qsl._loaded_samples[sample_idx]
+            else:
+                features = qsl.get_features(sample_idx)
+                input_data = features.get("input", features.get(input_name))
 
-            # Submit to async queue - callback handles response
-            inputs = {self.input_name: input_data}
-            self.backend.start_async_queue(
-                self._async_queue,
-                inputs,
-                userdata=(query_id, sample_idx)
-            )
+            # Convert dtype if needed (pre-cached check)
+            if input_dtype is not None and input_data.dtype != input_dtype:
+                input_data = input_data.astype(input_dtype, copy=False)
+
+            # Submit directly to async queue - minimal wrapper
+            async_queue.start_async({input_name: input_data}, (query_id, sample_idx))
             self._issued_count += 1
 
         self._query_count += 1
@@ -395,12 +394,6 @@ class OpenVINOSUT:
         # Wait for async queue to finish (Server mode)
         if self._async_queue is not None:
             self._async_queue.wait_all()
-
-            # Signal worker to stop and wait for it
-            if hasattr(self, '_worker_stop'):
-                self._worker_stop = True
-            if hasattr(self, '_response_thread'):
-                self._response_thread.join(timeout=5.0)
 
             # Stop progress thread
             if hasattr(self, '_progress_thread_stop'):
