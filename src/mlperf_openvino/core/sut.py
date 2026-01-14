@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 class OpenVINOSUT:
     """
     System Under Test implementation using OpenVINO backend.
-    
+
     This class implements the MLPerf LoadGen interface for inference testing.
     It handles:
     - Query dispatch
@@ -44,7 +44,7 @@ class OpenVINOSUT:
     - Result collection
     - Performance metrics
     """
-    
+
     def __init__(
         self,
         config: BenchmarkConfig,
@@ -54,7 +54,7 @@ class OpenVINOSUT:
     ):
         """
         Initialize the SUT.
-        
+
         Args:
             config: Benchmark configuration
             backend: OpenVINO backend instance
@@ -66,36 +66,36 @@ class OpenVINOSUT:
                 "MLPerf LoadGen is not installed. Please install with: "
                 "pip install mlcommons-loadgen"
             )
-        
+
         self.config = config
         self.backend = backend
         self.qsl = qsl
         self.scenario = scenario
-        
+
         # Ensure backend is loaded
         if not self.backend.is_loaded:
             self.backend.load()
-        
+
         # Get input name
         self.input_name = config.model.input_name
         if self.input_name not in self.backend.input_names:
             # Use first input if configured name not found
             self.input_name = self.backend.input_names[0]
-        
+
         # Get output name
         self.output_name = config.model.output_name
         if self.output_name not in self.backend.output_names:
             self.output_name = self.backend.output_names[0]
-        
+
         # For async processing
         self._query_queue: queue.Queue = queue.Queue()
         self._result_queue: queue.Queue = queue.Queue()
         self._workers: List[threading.Thread] = []
         self._stop_event = threading.Event()
-        
+
         # Results storage
         self._predictions: Dict[int, Any] = {}
-        
+
         # Statistics
         self._query_count = 0
         self._sample_count = 0
@@ -106,7 +106,44 @@ class OpenVINOSUT:
         self._progress_bar: Optional[Any] = None
         self._last_progress_update = 0.0
         self._progress_update_interval = 0.5  # seconds
-    
+
+        # Server mode: persistent async queue with immediate response callback
+        self._server_async_queue = None
+        if scenario == Scenario.SERVER:
+            self._init_server_async_queue()
+
+    def _init_server_async_queue(self) -> None:
+        """Initialize persistent async queue for Server mode."""
+        def on_infer_complete(infer_request, userdata):
+            """
+            Callback called immediately when inference completes.
+            Sends response to LoadGen right away - this is the key for Server mode!
+            """
+            query_id, sample_idx = userdata
+
+            # Get output from completed inference
+            output = infer_request.get_output_tensor(0).data.copy()
+
+            # Store prediction
+            self._predictions[sample_idx] = output
+
+            # Create response array - must stay alive during QuerySamplesComplete
+            response_array = array.array('B', output.tobytes())
+            bi = response_array.buffer_info()
+
+            # Create and send response IMMEDIATELY
+            response = lg.QuerySampleResponse(query_id, bi[0], bi[1])
+            lg.QuerySamplesComplete([response])
+
+            # Update stats
+            self._sample_count += 1
+
+        # Create async queue with callback
+        self._server_async_queue = self.backend.create_async_queue(
+            callback=on_infer_complete
+        )
+        logger.info(f"Server mode: AsyncInferQueue initialized with {self.backend.num_streams} streams")
+
     def _start_progress(self, total: int, desc: str = "Processing") -> None:
         """Start progress tracking."""
         self._start_time = time.time()
@@ -260,80 +297,25 @@ class OpenVINOSUT:
         """
         Process queries in Server mode using async inference.
 
-        In Server mode, queries arrive continuously and must be
-        processed with low latency. We use AsyncInferQueue for parallelism.
+        In Server mode, queries arrive continuously. We submit them to
+        the async queue and return immediately. The callback handles
+        sending responses to LoadGen as soon as each inference completes.
         """
-        # Start progress tracking if first query
-        if self._sample_count == 0:
-            self._start_progress(0, desc="Server inference (async)")
-
-        num_samples = len(query_samples)
-
-        # Prepare all inputs and metadata
-        sample_data = []
         for qs in query_samples:
             sample_idx = qs.index
+            query_id = qs.id
+
+            # Get features and prepare input
             features = self.qsl.get_features(sample_idx)
             inputs = {self.input_name: features.get("input", features.get(self.input_name))}
-            sample_data.append({
-                'query_id': qs.id,
-                'sample_idx': sample_idx,
-                'inputs': inputs,
-            })
 
-        # Results storage for this batch
-        results = [None] * num_samples
-        results_lock = threading.Lock()
-        completed = [0]  # Use list for mutable counter in closure
-
-        def on_complete(infer_request, userdata):
-            """Callback when inference completes."""
-            idx, query_id, sample_idx = userdata
-
-            # Get output
-            output = infer_request.get_output_tensor(0).data.copy()
-
-            with results_lock:
-                results[idx] = (query_id, sample_idx, output)
-                completed[0] += 1
-
-        # Create async queue with callback
-        async_queue = self.backend.create_async_queue(callback=on_complete)
-
-        # Start all inferences asynchronously
-        for i, data in enumerate(sample_data):
-            userdata = (i, data['query_id'], data['sample_idx'])
-            self.backend.start_async_queue(async_queue, data['inputs'], userdata)
-
-        # Wait for all to complete
-        async_queue.wait_all()
-
-        # Build responses
-        responses = []
-        response_arrays = []  # Keep arrays alive until QuerySamplesComplete!
-
-        for query_id, sample_idx, result in results:
-            # Store prediction
-            self._predictions[sample_idx] = result
-
-            # Create response
-            response_array = array.array('B', result.tobytes())
-            response_arrays.append(response_array)  # Keep alive!
-            bi = response_array.buffer_info()
-
-            response = lg.QuerySampleResponse(
-                query_id,
-                bi[0],
-                bi[1]
+            # Submit to async queue - callback will handle response
+            # userdata = (query_id, sample_idx) passed to callback
+            self.backend.start_async_queue(
+                self._server_async_queue,
+                inputs,
+                userdata=(query_id, sample_idx)
             )
-            responses.append(response)
-
-            # Update progress
-            self._sample_count += 1
-            self._update_progress(1)
-
-        # Report responses
-        lg.QuerySamplesComplete(responses)
 
         self._query_count += 1
     
@@ -358,8 +340,13 @@ class OpenVINOSUT:
         Flush any pending queries.
 
         This is called by LoadGen when all queries have been issued.
+        For Server mode, wait for all async inferences to complete.
         """
-        # Close progress bar if still open (for Server mode)
+        # Wait for all pending Server mode inferences
+        if self._server_async_queue is not None:
+            self._server_async_queue.wait_all()
+
+        # Close progress bar if still open
         if self._progress_bar is not None:
             self._close_progress()
     
