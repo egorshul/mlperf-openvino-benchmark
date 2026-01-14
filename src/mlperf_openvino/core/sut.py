@@ -5,11 +5,19 @@ MLPerf System Under Test (SUT) implementation for OpenVINO.
 import array
 import logging
 import queue
+import sys
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
+
+try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
+    tqdm = None
 
 try:
     import mlperf_loadgen as lg
@@ -93,7 +101,50 @@ class OpenVINOSUT:
         self._sample_count = 0
         self._start_time = 0.0
         self._end_time = 0.0
+
+        # Progress tracking
+        self._progress_bar: Optional[Any] = None
+        self._last_progress_update = 0.0
+        self._progress_update_interval = 0.5  # seconds
     
+    def _start_progress(self, total: int, desc: str = "Processing") -> None:
+        """Start progress tracking."""
+        self._start_time = time.time()
+        if TQDM_AVAILABLE:
+            self._progress_bar = tqdm(
+                total=total,
+                desc=desc,
+                unit="samples",
+                file=sys.stderr,
+                dynamic_ncols=True,
+            )
+        else:
+            logger.info(f"Starting: {desc} ({total} samples)")
+            self._last_progress_update = time.time()
+
+    def _update_progress(self, n: int = 1) -> None:
+        """Update progress by n samples."""
+        if TQDM_AVAILABLE and self._progress_bar is not None:
+            self._progress_bar.update(n)
+        else:
+            # Simple text-based progress update
+            current_time = time.time()
+            if current_time - self._last_progress_update >= self._progress_update_interval:
+                elapsed = current_time - self._start_time
+                throughput = self._sample_count / elapsed if elapsed > 0 else 0
+                logger.info(f"Progress: {self._sample_count} samples, {throughput:.1f} samples/sec")
+                self._last_progress_update = current_time
+
+    def _close_progress(self) -> None:
+        """Close progress tracking."""
+        if TQDM_AVAILABLE and self._progress_bar is not None:
+            self._progress_bar.close()
+            self._progress_bar = None
+        else:
+            elapsed = time.time() - self._start_time
+            throughput = self._sample_count / elapsed if elapsed > 0 else 0
+            logger.info(f"Completed: {self._sample_count} samples in {elapsed:.1f}s ({throughput:.1f} samples/sec)")
+
     def _process_sample(self, sample_id: int) -> Tuple[int, np.ndarray]:
         """
         Process a single sample.
@@ -152,81 +203,99 @@ class OpenVINOSUT:
     def _issue_query_offline(self, query_samples: List["lg.QuerySample"]) -> None:
         """
         Process queries in Offline mode.
-        
+
         In Offline mode, all samples are sent at once and processed
         as fast as possible for maximum throughput.
         """
         responses = []
-        
+
         # Process in batches for efficiency
         batch_size = self.config.openvino.batch_size if self.config.openvino.batch_size > 0 else 1
-        
+
         sample_ids = [qs.id for qs in query_samples]
         sample_indices = [qs.index for qs in query_samples]
-        
+
+        # Start progress tracking
+        total_samples = len(sample_indices)
+        self._start_progress(total_samples, desc="Offline inference")
+
         for i in range(0, len(sample_indices), batch_size):
             batch_indices = sample_indices[i:i + batch_size]
             batch_ids = sample_ids[i:i + batch_size]
-            
+
             # Process batch
             batch_results = self._process_batch(batch_indices)
-            
+
             # Create responses
             for (idx, result), query_id in zip(batch_results, batch_ids):
                 # Store prediction
                 self._predictions[idx] = result
-                
+
                 # Create response
                 response_array = array.array('B', result.tobytes())
                 bi = response_array.buffer_info()
-                
+
                 response = lg.QuerySampleResponse(
                     query_id,
                     bi[0],
                     bi[1]
                 )
                 responses.append(response)
-        
+
+            # Update progress
+            self._sample_count += len(batch_indices)
+            self._update_progress(len(batch_indices))
+
+        # Close progress
+        self._close_progress()
+
         # Report all responses at once
         lg.QuerySamplesComplete(responses)
-        
-        self._sample_count += len(query_samples)
+
         self._query_count += 1
     
     def _issue_query_server(self, query_samples: List["lg.QuerySample"]) -> None:
         """
         Process queries in Server mode.
-        
+
         In Server mode, queries arrive continuously and must be
         processed with low latency.
         """
         responses = []
-        
+
+        # Start progress tracking if first query
+        if self._query_count == 0:
+            # Server mode has continuous queries, estimate total for progress
+            self._start_progress(0, desc="Server inference")
+
         for qs in query_samples:
             sample_id = qs.id
             sample_idx = qs.index
-            
+
             # Process single sample
             _, result = self._process_sample(sample_idx)
-            
+
             # Store prediction
             self._predictions[sample_idx] = result
-            
+
             # Create response
             response_array = array.array('B', result.tobytes())
             bi = response_array.buffer_info()
-            
+
             response = lg.QuerySampleResponse(
                 sample_id,
                 bi[0],
                 bi[1]
             )
             responses.append(response)
-        
+
+            # Update progress
+            self._sample_count += 1
+            self._update_progress(1)
+
         # Report responses
         lg.QuerySamplesComplete(responses)
-        
-        self._sample_count += len(query_samples)
+
         self._query_count += 1
     
     def issue_queries(self, query_samples: List["lg.QuerySample"]) -> None:
@@ -248,10 +317,12 @@ class OpenVINOSUT:
     def flush_queries(self) -> None:
         """
         Flush any pending queries.
-        
+
         This is called by LoadGen when all queries have been issued.
         """
-        pass  # All queries are processed synchronously
+        # Close progress bar if still open (for Server mode)
+        if self._progress_bar is not None:
+            self._close_progress()
     
     def get_sut(self) -> "lg.ConstructSUT":
         """

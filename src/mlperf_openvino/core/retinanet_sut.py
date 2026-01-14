@@ -7,9 +7,18 @@ on OpenImages dataset for MLPerf Inference benchmark.
 
 import array
 import logging
+import sys
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+
+try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
+    tqdm = None
 
 try:
     import mlperf_loadgen as lg
@@ -137,9 +146,53 @@ class RetinaNetSUT:
         self._query_count = 0
         self._sample_count = 0
 
+        # Progress tracking
+        self._progress_bar: Optional[Any] = None
+        self._start_time = 0.0
+        self._last_progress_update = 0.0
+        self._progress_update_interval = 0.5  # seconds
+
         # LoadGen handles
         self._sut = None
         self._qsl_handle = None
+
+    def _start_progress(self, total: int, desc: str = "Processing") -> None:
+        """Start progress tracking."""
+        self._start_time = time.time()
+        if TQDM_AVAILABLE:
+            self._progress_bar = tqdm(
+                total=total,
+                desc=desc,
+                unit="samples",
+                file=sys.stderr,
+                dynamic_ncols=True,
+            )
+        else:
+            logger.info(f"Starting: {desc} ({total} samples)")
+            self._last_progress_update = time.time()
+
+    def _update_progress(self, n: int = 1) -> None:
+        """Update progress by n samples."""
+        if TQDM_AVAILABLE and self._progress_bar is not None:
+            self._progress_bar.update(n)
+        else:
+            # Simple text-based progress update
+            current_time = time.time()
+            if current_time - self._last_progress_update >= self._progress_update_interval:
+                elapsed = current_time - self._start_time
+                throughput = self._sample_count / elapsed if elapsed > 0 else 0
+                logger.info(f"Progress: {self._sample_count} samples, {throughput:.1f} samples/sec")
+                self._last_progress_update = current_time
+
+    def _close_progress(self) -> None:
+        """Close progress tracking."""
+        if TQDM_AVAILABLE and self._progress_bar is not None:
+            self._progress_bar.close()
+            self._progress_bar = None
+        else:
+            elapsed = time.time() - self._start_time
+            throughput = self._sample_count / elapsed if elapsed > 0 else 0
+            logger.info(f"Completed: {self._sample_count} samples in {elapsed:.1f}s ({throughput:.1f} samples/sec)")
 
     def _map_io_names(self) -> None:
         """Map expected input/output names to model's actual names."""
@@ -295,6 +348,10 @@ class RetinaNetSUT:
         """Process queries in Offline mode."""
         responses = []
 
+        # Start progress tracking
+        total_samples = len(query_samples)
+        self._start_progress(total_samples, desc="RetinaNet Offline inference")
+
         for qs in query_samples:
             sample_idx = qs.index
 
@@ -317,15 +374,25 @@ class RetinaNetSUT:
             )
             responses.append(response)
 
+            # Update progress
+            self._sample_count += 1
+            self._update_progress(1)
+
+        # Close progress
+        self._close_progress()
+
         lg.QuerySamplesComplete(responses)
 
-        self._sample_count += len(query_samples)
         self._query_count += 1
 
     def _issue_query_server(self, query_samples: List[Any]) -> None:
         """Process queries in Server mode."""
         responses = []
 
+        # Start progress tracking if first query
+        if self._query_count == 0:
+            self._start_progress(0, desc="RetinaNet Server inference")
+
         for qs in query_samples:
             sample_idx = qs.index
 
@@ -348,9 +415,12 @@ class RetinaNetSUT:
             )
             responses.append(response)
 
+            # Update progress
+            self._sample_count += 1
+            self._update_progress(1)
+
         lg.QuerySamplesComplete(responses)
 
-        self._sample_count += len(query_samples)
         self._query_count += 1
 
     def issue_queries(self, query_samples: List[Any]) -> None:
@@ -369,7 +439,9 @@ class RetinaNetSUT:
 
     def flush_queries(self) -> None:
         """Flush any pending queries."""
-        pass
+        # Close progress bar if still open (for Server mode)
+        if self._progress_bar is not None:
+            self._close_progress()
 
     def get_sut(self) -> Any:
         """Get LoadGen SUT handle."""

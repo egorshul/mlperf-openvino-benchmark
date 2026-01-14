@@ -6,10 +6,18 @@ handling encoder-decoder architecture and tokenization.
 """
 
 import logging
+import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+
+try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
+    tqdm = None
 
 try:
     import mlperf_loadgen as lg
@@ -77,14 +85,64 @@ class WhisperSUT:
         self._predictions: Dict[int, str] = {}
         self._query_count = 0
         self._sample_count = 0
-        
+
+        # Progress tracking
+        self._progress_bar: Optional[Any] = None
+        self._start_time = 0.0
+        self._last_progress_update = 0.0
+        self._progress_update_interval = 0.5  # seconds
+
         # Create LoadGen handles
         self._sut = None
         self._qsl = None
-        
+
         # Tokenizer for decoding (lazy loaded)
         self._tokenizer = None
     
+    def _start_progress(self, total: int, desc: str = "Processing") -> None:
+        """Start progress tracking."""
+        self._start_time = time.time()
+        if TQDM_AVAILABLE:
+            self._progress_bar = tqdm(
+                total=total,
+                desc=desc,
+                unit="samples",
+                file=sys.stderr,
+                dynamic_ncols=True,
+            )
+        else:
+            logger.info(f"Starting: {desc} ({total} samples)")
+            self._last_progress_update = time.time()
+
+    def _update_progress(self, n: int = 1) -> None:
+        """Update progress by n samples."""
+        if TQDM_AVAILABLE and self._progress_bar is not None:
+            self._progress_bar.update(n)
+        else:
+            # Simple text-based progress update
+            current_time = time.time()
+            if current_time - self._last_progress_update >= self._progress_update_interval:
+                elapsed = current_time - self._start_time
+                throughput = self._sample_count / elapsed if elapsed > 0 else 0
+                logger.info(f"Progress: {self._sample_count} samples, {throughput:.1f} samples/sec")
+                self._last_progress_update = current_time
+
+    def _close_progress(self) -> None:
+        """Close progress tracking."""
+        if TQDM_AVAILABLE and self._progress_bar is not None:
+            self._progress_bar.close()
+            self._progress_bar = None
+        else:
+            elapsed = time.time() - self._start_time
+            throughput = self._sample_count / elapsed if elapsed > 0 else 0
+            logger.info(f"Completed: {self._sample_count} samples in {elapsed:.1f}s ({throughput:.1f} samples/sec)")
+
+    def flush_queries(self) -> None:
+        """Flush any pending queries."""
+        # Close progress bar if still open (for Server mode)
+        if self._progress_bar is not None:
+            self._close_progress()
+
     def _load_tokenizer(self):
         """Load Whisper tokenizer."""
         if self._tokenizer is not None:
@@ -252,15 +310,19 @@ class WhisperSUT:
     def _issue_query_offline(self, query_samples: List[Any]) -> None:
         """Process queries for Offline scenario."""
         responses = []
-        
+
+        # Start progress tracking
+        total_samples = len(query_samples)
+        self._start_progress(total_samples, desc="Whisper Offline inference")
+
         for sample in query_samples:
             sample_idx = sample.index
             self._sample_count += 1
-            
+
             # Process sample
             text = self._process_sample(sample_idx)
             self._predictions[sample_idx] = text
-            
+
             # Create response (using dummy data for LoadGen)
             response_array = np.array([len(text)], dtype=np.int64)
             response = lg.QuerySampleResponse(
@@ -269,19 +331,29 @@ class WhisperSUT:
                 response_array.nbytes
             )
             responses.append(response)
-        
+
+            # Update progress
+            self._update_progress(1)
+
+        # Close progress
+        self._close_progress()
+
         lg.QuerySamplesComplete(responses)
     
     def _issue_query_server(self, query_samples: List[Any]) -> None:
         """Process queries for Server scenario."""
+        # Start progress tracking if first query
+        if self._query_count == 0:
+            self._start_progress(0, desc="Whisper Server inference")
+
         for sample in query_samples:
             sample_idx = sample.index
             self._sample_count += 1
-            
+
             # Process sample
             text = self._process_sample(sample_idx)
             self._predictions[sample_idx] = text
-            
+
             # Create response
             response_array = np.array([len(text)], dtype=np.int64)
             response = lg.QuerySampleResponse(
@@ -290,13 +362,16 @@ class WhisperSUT:
                 response_array.nbytes
             )
             lg.QuerySamplesComplete([response])
+
+            # Update progress
+            self._update_progress(1)
     
     def get_sut(self):
         """Get LoadGen SUT handle."""
         if self._sut is None:
             self._sut = lg.ConstructSUT(
                 self.issue_queries,
-                lambda: None  # flush_queries
+                self.flush_queries
             )
         return self._sut
     
@@ -357,31 +432,85 @@ class WhisperEncoderOnlySUT:
         self._predictions: Dict[int, np.ndarray] = {}
         self._query_count = 0
         self._sample_count = 0
-        
+
+        # Progress tracking
+        self._progress_bar: Optional[Any] = None
+        self._start_time = 0.0
+        self._last_progress_update = 0.0
+        self._progress_update_interval = 0.5  # seconds
+
         self._sut = None
         self._qsl = None
-    
+
+    def _start_progress(self, total: int, desc: str = "Processing") -> None:
+        """Start progress tracking."""
+        self._start_time = time.time()
+        if TQDM_AVAILABLE:
+            self._progress_bar = tqdm(
+                total=total,
+                desc=desc,
+                unit="samples",
+                file=sys.stderr,
+                dynamic_ncols=True,
+            )
+        else:
+            logger.info(f"Starting: {desc} ({total} samples)")
+            self._last_progress_update = time.time()
+
+    def _update_progress(self, n: int = 1) -> None:
+        """Update progress by n samples."""
+        if TQDM_AVAILABLE and self._progress_bar is not None:
+            self._progress_bar.update(n)
+        else:
+            # Simple text-based progress update
+            current_time = time.time()
+            if current_time - self._last_progress_update >= self._progress_update_interval:
+                elapsed = current_time - self._start_time
+                throughput = self._sample_count / elapsed if elapsed > 0 else 0
+                logger.info(f"Progress: {self._sample_count} samples, {throughput:.1f} samples/sec")
+                self._last_progress_update = current_time
+
+    def _close_progress(self) -> None:
+        """Close progress tracking."""
+        if TQDM_AVAILABLE and self._progress_bar is not None:
+            self._progress_bar.close()
+            self._progress_bar = None
+        else:
+            elapsed = time.time() - self._start_time
+            throughput = self._sample_count / elapsed if elapsed > 0 else 0
+            logger.info(f"Completed: {self._sample_count} samples in {elapsed:.1f}s ({throughput:.1f} samples/sec)")
+
+    def flush_queries(self) -> None:
+        """Flush any pending queries."""
+        # Close progress bar if still open
+        if self._progress_bar is not None:
+            self._close_progress()
+
     def issue_queries(self, query_samples: List[Any]) -> None:
         """Process queries from LoadGen."""
         self._query_count += len(query_samples)
-        
+
+        # Start progress tracking
+        total_samples = len(query_samples)
+        self._start_progress(total_samples, desc="Whisper encoder inference")
+
         responses = []
-        
+
         for sample in query_samples:
             sample_idx = sample.index
             self._sample_count += 1
-            
+
             # Get input features
             features = self.qsl.get_features(sample_idx)
             mel_features = features["input_features"]
-            
+
             # Run encoder
             inputs = {self.backend.input_names[0]: mel_features}
             outputs = self.backend.predict(inputs)
             encoder_output = list(outputs.values())[0]
-            
+
             self._predictions[sample_idx] = encoder_output
-            
+
             # Create response
             response = lg.QuerySampleResponse(
                 sample.id,
@@ -389,15 +518,21 @@ class WhisperEncoderOnlySUT:
                 encoder_output.nbytes
             )
             responses.append(response)
-        
+
+            # Update progress
+            self._update_progress(1)
+
+        # Close progress
+        self._close_progress()
+
         lg.QuerySamplesComplete(responses)
-    
+
     def get_sut(self):
         """Get LoadGen SUT handle."""
         if self._sut is None:
             self._sut = lg.ConstructSUT(
                 self.issue_queries,
-                lambda: None
+                self.flush_queries
             )
         return self._sut
     
