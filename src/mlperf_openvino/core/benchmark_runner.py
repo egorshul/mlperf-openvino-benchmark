@@ -249,6 +249,11 @@ class BenchmarkRunner:
         settings.min_duration_ms = scenario_config.min_duration_ms
         settings.min_query_count = scenario_config.min_query_count
 
+        # Set MLPerf seeds for reproducibility
+        settings.qsl_rng_seed = scenario_config.qsl_rng_seed
+        settings.sample_index_rng_seed = scenario_config.sample_index_rng_seed
+        settings.schedule_rng_seed = scenario_config.schedule_rng_seed
+
         if self.config.scenario == Scenario.OFFLINE:
             # LoadGen requires expected_qps for Offline scenario
             # Use configured value or a reasonable default
@@ -259,6 +264,8 @@ class BenchmarkRunner:
                 settings.server_target_latency_ns = scenario_config.target_latency_ns
             if scenario_config.target_qps > 0:
                 settings.server_target_qps = scenario_config.target_qps
+                logger.info(f"Server target QPS: {scenario_config.target_qps}")
+            logger.info(f"Server target latency: {scenario_config.target_latency_ns / 1e6:.1f}ms")
 
         return settings
 
@@ -287,6 +294,16 @@ class BenchmarkRunner:
 
         test_settings = self._get_test_settings()
         log_settings = self._get_log_settings()
+
+        # Log LoadGen settings for debugging
+        scenario_config = self.config.get_scenario_config()
+        logger.info(f"LoadGen settings:")
+        logger.info(f"  min_duration_ms: {scenario_config.min_duration_ms}")
+        logger.info(f"  min_query_count: {scenario_config.min_query_count}")
+        if self.config.scenario == Scenario.SERVER:
+            logger.info(f"  server_target_qps: {scenario_config.target_qps}")
+            logger.info(f"  server_target_latency_ns: {scenario_config.target_latency_ns}")
+        logger.info(f"  qsl_rng_seed: {scenario_config.qsl_rng_seed}")
 
         sut_handle = self.sut.get_sut()
         qsl_handle = self.sut.get_qsl()

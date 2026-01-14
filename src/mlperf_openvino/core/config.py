@@ -199,7 +199,11 @@ class BenchmarkConfig:
             min_duration_ms=server_data.get("min_duration_ms", 60000),
             min_query_count=server_data.get("min_query_count", 24576),
             target_latency_ns=server_data.get("target_latency_ns", 15000000),
-            target_qps=server_data.get("target_qps", 100.0),
+            target_qps=server_data.get("target_qps", 10000.0),  # High default for max throughput
+            # MLPerf seeds for reproducibility
+            qsl_rng_seed=server_data.get("qsl_rng_seed", 13281865557512327830),
+            sample_index_rng_seed=server_data.get("sample_index_rng_seed", 198141574272810017),
+            schedule_rng_seed=server_data.get("schedule_rng_seed", 7575108116881280410),
         )
         
         sources = model_data.get("sources", {})

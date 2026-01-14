@@ -140,12 +140,13 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
                 click.echo("AUTO: Using optimized settings for Offline (throughput)")
                 batch_size = 32  # Larger batch for throughput
         else:
-            # Server: optimize for latency with good throughput
-            actual_hint = 'LATENCY'
+            # Server: also use THROUGHPUT to maximize parallelism
+            # Latency is bounded by single-sample inference time
+            # Throughput hint gives more inference streams for parallelism
+            actual_hint = 'THROUGHPUT'
             if batch_size == 1:
-                click.echo("AUTO: Using optimized settings for Server (low latency + parallelism)")
-                # Keep batch_size=1 for low latency per request
-                # Keep num_streams=AUTO for parallelism (NOT 1!)
+                click.echo("AUTO: Using optimized settings for Server (THROUGHPUT hint for max parallelism)")
+                # Keep batch_size=1 for Server (each query = 1 sample)
     else:
         actual_hint = performance_hint
 
@@ -167,11 +168,14 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
     scenario_config.min_duration_ms = duration
     if target_qps > 0:
         scenario_config.target_qps = target_qps
+        click.echo(f"Server mode: target_qps={target_qps}")
     elif scenario == 'Server':
         # For Server mode, set high target_qps if not specified
         # This allows LoadGen to send queries as fast as the system can handle
-        scenario_config.target_qps = 10000.0
-        click.echo(f"Server mode: Using target_qps={scenario_config.target_qps} (use --target-qps to override)")
+        scenario_config.target_qps = 50000.0  # Very high to not be the bottleneck
+        click.echo(f"Server mode: target_qps={scenario_config.target_qps} (use --target-qps to set)")
+        click.echo("NOTE: Server mode measures latency-bounded throughput.")
+        click.echo("      For maximum throughput, use --scenario Offline")
 
     # Validate configuration
     if not benchmark_config.model.model_path:

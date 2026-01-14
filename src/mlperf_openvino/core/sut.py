@@ -297,9 +297,12 @@ class OpenVINOSUT:
         """
         Process queries in Server mode using async inference.
 
-        LoadGen sends 1 sample at a time. We submit to async queue
-        and return immediately. Callback sends response when done.
+        LoadGen sends queries according to Poisson process at server_target_qps.
+        We submit to async queue and return immediately.
+        Callback sends response when inference completes.
         """
+        batch_size = len(query_samples)
+
         for qs in query_samples:
             sample_idx = qs.index
             query_id = qs.id
@@ -319,6 +322,10 @@ class OpenVINOSUT:
             self._issued_count += 1
 
         self._query_count += 1
+
+        # Log first few batches for debugging
+        if self._query_count <= 5:
+            logger.debug(f"Server query #{self._query_count}: received {batch_size} samples")
     
     def issue_queries(self, query_samples: List["lg.QuerySample"]) -> None:
         """
