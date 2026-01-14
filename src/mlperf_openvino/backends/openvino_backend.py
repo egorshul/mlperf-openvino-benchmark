@@ -10,13 +10,14 @@ import numpy as np
 
 try:
     import openvino as ov
-    from openvino import Core, CompiledModel, InferRequest
+    from openvino import Core, CompiledModel, InferRequest, AsyncInferQueue
     OPENVINO_AVAILABLE = True
 except ImportError:
     OPENVINO_AVAILABLE = False
     Core = None
     CompiledModel = None
     InferRequest = None
+    AsyncInferQueue = None
 
 from .base import BaseBackend
 from ..core.config import OpenVINOConfig
@@ -358,7 +359,57 @@ class OpenVINOBackend(BaseBackend):
             outputs[name] = output_tensor.data.copy()
         
         return outputs
-    
+
+    def create_async_queue(
+        self,
+        num_jobs: Optional[int] = None,
+        callback: Optional[callable] = None
+    ) -> "AsyncInferQueue":
+        """
+        Create an AsyncInferQueue for high-throughput async inference.
+
+        Args:
+            num_jobs: Number of parallel jobs (default: num_streams)
+            callback: Callback function called when inference completes.
+                      Signature: callback(infer_request, userdata)
+
+        Returns:
+            AsyncInferQueue instance
+        """
+        if not self._loaded:
+            self.load()
+
+        if num_jobs is None:
+            num_jobs = self._num_streams
+
+        async_queue = AsyncInferQueue(self._compiled_model, num_jobs)
+
+        if callback:
+            async_queue.set_callback(callback)
+
+        return async_queue
+
+    def start_async_queue(
+        self,
+        async_queue: "AsyncInferQueue",
+        inputs: Dict[str, np.ndarray],
+        userdata: Any = None
+    ) -> None:
+        """
+        Start async inference on the queue.
+
+        Args:
+            async_queue: The AsyncInferQueue
+            inputs: Input tensors
+            userdata: User data passed to callback
+        """
+        # Convert inputs to proper dtypes
+        converted = {}
+        for name, data in inputs.items():
+            converted[name] = self._convert_to_model_dtype(name, data)
+
+        async_queue.start_async(converted, userdata)
+
     @property
     def input_names(self) -> List[str]:
         """Get list of input tensor names."""

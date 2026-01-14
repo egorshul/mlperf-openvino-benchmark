@@ -258,26 +258,61 @@ class OpenVINOSUT:
     
     def _issue_query_server(self, query_samples: List["lg.QuerySample"]) -> None:
         """
-        Process queries in Server mode.
+        Process queries in Server mode using async inference.
 
         In Server mode, queries arrive continuously and must be
-        processed with low latency.
+        processed with low latency. We use AsyncInferQueue for parallelism.
         """
+        # Start progress tracking if first query
+        if self._sample_count == 0:
+            self._start_progress(0, desc="Server inference (async)")
+
+        num_samples = len(query_samples)
+
+        # Prepare all inputs and metadata
+        sample_data = []
+        for qs in query_samples:
+            sample_idx = qs.index
+            features = self.qsl.get_features(sample_idx)
+            inputs = {self.input_name: features.get("input", features.get(self.input_name))}
+            sample_data.append({
+                'query_id': qs.id,
+                'sample_idx': sample_idx,
+                'inputs': inputs,
+            })
+
+        # Results storage for this batch
+        results = [None] * num_samples
+        results_lock = threading.Lock()
+        completed = [0]  # Use list for mutable counter in closure
+
+        def on_complete(infer_request, userdata):
+            """Callback when inference completes."""
+            idx, query_id, sample_idx = userdata
+
+            # Get output
+            output = infer_request.get_output_tensor(0).data.copy()
+
+            with results_lock:
+                results[idx] = (query_id, sample_idx, output)
+                completed[0] += 1
+
+        # Create async queue with callback
+        async_queue = self.backend.create_async_queue(callback=on_complete)
+
+        # Start all inferences asynchronously
+        for i, data in enumerate(sample_data):
+            userdata = (i, data['query_id'], data['sample_idx'])
+            self.backend.start_async_queue(async_queue, data['inputs'], userdata)
+
+        # Wait for all to complete
+        async_queue.wait_all()
+
+        # Build responses
         responses = []
         response_arrays = []  # Keep arrays alive until QuerySamplesComplete!
 
-        # Start progress tracking if first query
-        if self._query_count == 0:
-            # Server mode has continuous queries, estimate total for progress
-            self._start_progress(0, desc="Server inference")
-
-        for qs in query_samples:
-            sample_id = qs.id
-            sample_idx = qs.index
-
-            # Process single sample
-            _, result = self._process_sample(sample_idx)
-
+        for query_id, sample_idx, result in results:
             # Store prediction
             self._predictions[sample_idx] = result
 
@@ -287,7 +322,7 @@ class OpenVINOSUT:
             bi = response_array.buffer_info()
 
             response = lg.QuerySampleResponse(
-                sample_id,
+                query_id,
                 bi[0],
                 bi[1]
             )
