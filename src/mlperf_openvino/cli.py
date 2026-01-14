@@ -80,6 +80,8 @@ def get_default_config(model: str) -> BenchmarkConfig:
               default='THROUGHPUT', help='Performance hint')
 @click.option('--duration', type=int, default=60000,
               help='Minimum test duration in ms')
+@click.option('--target-qps', type=float, default=0,
+              help='Target QPS (queries per second)')
 @click.option('--count', type=int, default=0,
               help='Number of samples to use (0 = all)')
 @click.option('--warmup', type=int, default=10,
@@ -88,7 +90,7 @@ def get_default_config(model: str) -> BenchmarkConfig:
 def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         data_path: Optional[str], output_dir: str, config: Optional[str],
         num_threads: int, num_streams: str, batch_size: int, performance_hint: str,
-        duration: int, count: int, warmup: int, verbose: bool):
+        duration: int, target_qps: float, count: int, warmup: int, verbose: bool):
     """
     Run MLPerf benchmark.
 
@@ -140,9 +142,11 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
     if count > 0:
         benchmark_config.dataset.num_samples = count
 
-    # Update duration
+    # Update scenario config
     scenario_config = benchmark_config.get_scenario_config()
     scenario_config.min_duration_ms = duration
+    if target_qps > 0:
+        scenario_config.target_qps = target_qps
 
     # Validate configuration
     if not benchmark_config.model.model_path:
