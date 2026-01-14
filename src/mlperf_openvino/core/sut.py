@@ -99,42 +99,6 @@ class OpenVINOSUT:
         self._last_progress_update = 0.0
         self._progress_update_interval = 0.5  # seconds
 
-        # Server mode: persistent async queue with immediate response callback
-        self._server_async_queue = None
-        if scenario == Scenario.SERVER:
-            self._init_server_async_queue()
-
-    def _init_server_async_queue(self) -> None:
-        """Initialize persistent async queue for Server mode."""
-        def on_infer_complete(infer_request, userdata):
-            """
-            Callback called immediately when inference completes.
-            Sends response to LoadGen right away - this is the key for Server mode!
-            """
-            query_id, sample_idx = userdata
-
-            # Get output from completed inference
-            output = infer_request.get_output_tensor(0).data.copy()
-
-            # Store prediction
-            self._predictions[sample_idx] = output
-
-            # Create response array - must stay alive during QuerySamplesComplete
-            response_array = array.array('B', output.tobytes())
-            bi = response_array.buffer_info()
-
-            # Create and send response IMMEDIATELY
-            response = lg.QuerySampleResponse(query_id, bi[0], bi[1])
-            lg.QuerySamplesComplete([response])
-
-            # Update stats
-            self._sample_count += 1
-
-        # Create async queue with callback
-        self._server_async_queue = self.backend.create_async_queue(
-            callback=on_infer_complete
-        )
-        logger.info(f"Server mode: AsyncInferQueue initialized with {self.backend.num_streams} streams")
 
     def _start_progress(self, total: int, desc: str = "Processing") -> None:
         """Start progress tracking."""
@@ -287,27 +251,41 @@ class OpenVINOSUT:
     
     def _issue_query_server(self, query_samples: List["lg.QuerySample"]) -> None:
         """
-        Process queries in Server mode using async inference.
+        Process queries in Server mode.
 
-        In Server mode, queries arrive continuously. We submit them to
-        the async queue and return immediately. The callback handles
-        sending responses to LoadGen as soon as each inference completes.
+        Uses the same efficient batch processing as Offline mode,
+        but sends responses immediately after each batch completes.
         """
-        for qs in query_samples:
-            sample_idx = qs.index
-            query_id = qs.id
+        # Use batch processing like Offline for efficiency
+        batch_size = max(1, self.backend.num_streams)
 
-            # Get features and prepare input
-            features = self.qsl.get_features(sample_idx)
-            inputs = {self.input_name: features.get("input", features.get(self.input_name))}
+        sample_ids = [qs.id for qs in query_samples]
+        sample_indices = [qs.index for qs in query_samples]
 
-            # Submit to async queue - callback will handle response
-            # userdata = (query_id, sample_idx) passed to callback
-            self.backend.start_async_queue(
-                self._server_async_queue,
-                inputs,
-                userdata=(query_id, sample_idx)
-            )
+        for i in range(0, len(sample_indices), batch_size):
+            batch_indices = sample_indices[i:i + batch_size]
+            batch_ids = sample_ids[i:i + batch_size]
+
+            # Process batch using efficient async inference
+            batch_results = self._process_batch(batch_indices)
+
+            # Send responses immediately after batch completes
+            responses = []
+            response_arrays = []
+
+            for (idx, result), query_id in zip(batch_results, batch_ids):
+                self._predictions[idx] = result
+
+                response_array = array.array('B', result.tobytes())
+                response_arrays.append(response_array)
+                bi = response_array.buffer_info()
+
+                response = lg.QuerySampleResponse(query_id, bi[0], bi[1])
+                responses.append(response)
+
+            # Send batch of responses
+            lg.QuerySamplesComplete(responses)
+            self._sample_count += len(batch_indices)
 
         self._query_count += 1
     
@@ -332,12 +310,7 @@ class OpenVINOSUT:
         Flush any pending queries.
 
         This is called by LoadGen when all queries have been issued.
-        For Server mode, wait for all async inferences to complete.
         """
-        # Wait for all pending Server mode inferences
-        if self._server_async_queue is not None:
-            self._server_async_queue.wait_all()
-
         # Close progress bar if still open
         if self._progress_bar is not None:
             self._close_progress()
