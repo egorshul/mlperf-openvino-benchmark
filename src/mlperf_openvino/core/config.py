@@ -286,7 +286,7 @@ class BenchmarkConfig:
                     min_duration_ms=60000,
                     min_query_count=24576,
                     target_latency_ns=15000000,  # 15ms
-                    target_qps=100.0,  # Adjust based on system
+                    target_qps=10000.0,  # High default for max throughput
                 ),
             ),
             dataset=DatasetConfig(
@@ -320,6 +320,7 @@ class BenchmarkConfig:
                     min_duration_ms=60000,
                     min_query_count=2513,
                     target_latency_ns=1000000000,  # 1 second for ASR
+                    target_qps=500.0,  # High default for max throughput
                 ),
                 onnx_url="https://huggingface.co/openai/whisper-large-v3/resolve/main/model.onnx",
             ),
@@ -354,6 +355,7 @@ class BenchmarkConfig:
                     min_duration_ms=60000,
                     min_query_count=270336,
                     target_latency_ns=130000000,  # 130ms
+                    target_qps=5000.0,  # High default for max throughput
                 ),
                 onnx_url="https://zenodo.org/record/3733910/files/model.onnx",
             ),
@@ -394,6 +396,7 @@ class BenchmarkConfig:
                     min_duration_ms=60000,
                     min_query_count=270336,
                     target_latency_ns=100000000,  # 100ms
+                    target_qps=1000.0,  # High default for max throughput
                 ),
                 onnx_url="https://zenodo.org/record/6617879/files/resnext50_32x4d_fpn.onnx",
             ),

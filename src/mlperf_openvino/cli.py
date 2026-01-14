@@ -167,6 +167,11 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
     scenario_config.min_duration_ms = duration
     if target_qps > 0:
         scenario_config.target_qps = target_qps
+    elif scenario == 'Server':
+        # For Server mode, set high target_qps if not specified
+        # This allows LoadGen to send queries as fast as the system can handle
+        scenario_config.target_qps = 10000.0
+        click.echo(f"Server mode: Using target_qps={scenario_config.target_qps} (use --target-qps to override)")
 
     # Validate configuration
     if not benchmark_config.model.model_path:
