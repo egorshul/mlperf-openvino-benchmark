@@ -10,6 +10,7 @@
 
 #include "sut_cpp.hpp"
 
+#include <cstring>
 #include <iostream>
 #include <stdexcept>
 
@@ -163,9 +164,12 @@ void CppSUT::start_async(const float* input_data,
     ctx->query_id = query_id;
     ctx->sample_idx = sample_idx;
 
-    // Set input tensor directly from data pointer (zero-copy when possible)
-    ov::Tensor input_tensor(input_type_, input_shape_, const_cast<float*>(input_data));
-    ctx->request.set_input_tensor(input_tensor);
+    // Copy input data into the request's pre-allocated tensor
+    // This is safer than using external pointer which may be freed by Python
+    ov::Tensor input_tensor = ctx->request.get_input_tensor();
+    float* tensor_data = input_tensor.data<float>();
+    size_t tensor_size = input_tensor.get_size();
+    std::memcpy(tensor_data, input_data, tensor_size * sizeof(float));
 
     // Start async inference
     pending_count_++;
