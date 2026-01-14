@@ -51,7 +51,10 @@ models:
       target_latency_ns: 15000000  # 15ms
       target_qps: 10000.0  # High default for max throughput
       min_duration_ms: 60000
-      min_query_count: 24576  # Reduced for faster testing
+      min_query_count: 270336  # MLPerf v5.1 requirement
+      qsl_rng_seed: 13281865557512327830
+      sample_index_rng_seed: 198141574272810017
+      schedule_rng_seed: 7575108116881280410
 
   bert:
     name: "BERT-Large"

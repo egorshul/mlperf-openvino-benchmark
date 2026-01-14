@@ -88,6 +88,10 @@ class ScenarioConfig:
     samples_per_query: int = 1
     target_latency_ns: int = 0
     target_qps: float = 0.0
+    # MLPerf seeds for reproducibility
+    qsl_rng_seed: int = 13281865557512327830
+    sample_index_rng_seed: int = 198141574272810017
+    schedule_rng_seed: int = 7575108116881280410
 
 
 @dataclass
@@ -284,7 +288,7 @@ class BenchmarkConfig:
                 ),
                 server=ScenarioConfig(
                     min_duration_ms=60000,
-                    min_query_count=24576,
+                    min_query_count=270336,  # MLPerf v5.1 requirement
                     target_latency_ns=15000000,  # 15ms
                     target_qps=10000.0,  # High default for max throughput
                 ),

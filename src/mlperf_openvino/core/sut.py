@@ -106,6 +106,9 @@ class OpenVINOSUT:
 
     def _setup_async_queue(self) -> None:
         """Setup AsyncInferQueue for Server mode."""
+        self._start_time = time.time()
+        self._last_progress_update = time.time()
+
         def on_complete(infer_request, userdata):
             """Callback - send response immediately when inference completes."""
             query_id, sample_idx = userdata
@@ -125,7 +128,14 @@ class OpenVINOSUT:
             )
             lg.QuerySamplesComplete([response])
 
+            # Update stats and show progress
             self._sample_count += 1
+            current_time = time.time()
+            if current_time - self._last_progress_update >= 1.0:
+                elapsed = current_time - self._start_time
+                throughput = self._sample_count / elapsed if elapsed > 0 else 0
+                print(f"\rServer progress: {self._sample_count} samples, {throughput:.1f} samples/sec", end="", flush=True)
+                self._last_progress_update = current_time
 
         self._async_queue = self.backend.create_async_queue(callback=on_complete)
 
@@ -330,6 +340,10 @@ class OpenVINOSUT:
         # Wait for async queue to finish (Server mode)
         if self._async_queue is not None:
             self._async_queue.wait_all()
+            # Print final stats
+            elapsed = time.time() - self._start_time
+            throughput = self._sample_count / elapsed if elapsed > 0 else 0
+            print(f"\nServer completed: {self._sample_count} samples in {elapsed:.1f}s ({throughput:.1f} samples/sec)")
 
         # Close progress bar if still open
         if self._progress_bar is not None:
