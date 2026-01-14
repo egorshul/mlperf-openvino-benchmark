@@ -231,6 +231,18 @@ class OpenVINOBackend(BaseBackend):
             self._request_queue.put(req)
 
         logger.info(f"Created {nireq} inference requests")
+
+    def add_infer_requests(self, count: int) -> None:
+        """Add more inference requests for higher parallelism (e.g., Server mode)."""
+        if not self._loaded:
+            self.load()
+
+        for _ in range(count):
+            request = self._compiled_model.create_infer_request()
+            self._infer_requests.append(request)
+            self._request_queue.put(request)
+
+        logger.info(f"Added {count} inference requests, total: {len(self._infer_requests)}")
     
     def _convert_to_model_dtype(self, name: str, data: np.ndarray) -> np.ndarray:
         """Convert input data to the dtype expected by the model."""

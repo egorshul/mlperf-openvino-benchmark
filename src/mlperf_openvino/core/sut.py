@@ -114,10 +114,16 @@ class OpenVINOSUT:
         self._last_progress_update = time.time()
         self._issued_count = 0
 
-        # Use thread pool with workers matching available inference requests
-        # More workers than inference requests just adds overhead
-        num_workers = self.backend.num_streams  # optimal_nireq
-        logger.info(f"Server mode: using ThreadPoolExecutor with {num_workers} workers (matching inference requests)")
+        # For Server mode, we need MORE inference requests than optimal_nireq
+        # because of thread pool overhead and queue contention
+        # Add 2x more requests for better parallelism
+        base_nireq = self.backend.num_streams
+        extra_requests = base_nireq * 2
+        self.backend.add_infer_requests(extra_requests)
+
+        # Use thread pool with workers matching total inference requests
+        num_workers = base_nireq + extra_requests
+        logger.info(f"Server mode: using ThreadPoolExecutor with {num_workers} workers")
         self._thread_pool = ThreadPoolExecutor(max_workers=num_workers)
 
     def _process_server_query(self, query_id: int, sample_idx: int) -> None:
