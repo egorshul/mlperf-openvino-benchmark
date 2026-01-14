@@ -51,7 +51,7 @@ class CppSUTWrapper:
         config: BenchmarkConfig,
         model_path: str,
         qsl: QuerySampleLibrary,
-        scenario: Scenario = Scenario.SERVER,
+        scenario: Scenario = Scenario.OFFLINE,
     ):
         """
         Initialize the C++ SUT wrapper.
@@ -60,7 +60,7 @@ class CppSUTWrapper:
             config: Benchmark configuration
             model_path: Path to ONNX or OpenVINO IR model
             qsl: Query Sample Library
-            scenario: Test scenario (should be SERVER for C++ SUT)
+            scenario: Test scenario (SERVER or OFFLINE)
         """
         if not LOADGEN_AVAILABLE:
             raise ImportError(
@@ -253,7 +253,9 @@ def create_sut(
     """
     Factory function to create the best available SUT.
 
-    Uses C++ SUT for Server mode when available, falls back to Python SUT.
+    Uses C++ SUT for both Server and Offline modes when available.
+    - Server: C++ SUT with LATENCY hint for minimum latency
+    - Offline: C++ SUT with THROUGHPUT hint for maximum throughput
 
     Args:
         config: Benchmark configuration
@@ -265,13 +267,14 @@ def create_sut(
     Returns:
         SUT instance (either CppSUTWrapper or OpenVINOSUT)
     """
-    # Use C++ SUT for Server mode if available
-    if scenario == Scenario.SERVER and CPP_AVAILABLE and not force_python:
-        logger.info("Using C++ SUT for maximum Server mode throughput")
+    # Use C++ SUT for both Server and Offline modes if available
+    if CPP_AVAILABLE and not force_python:
+        mode_desc = "LATENCY" if scenario == Scenario.SERVER else "THROUGHPUT"
+        logger.info(f"Using C++ SUT for {scenario.value} mode (optimized for {mode_desc})")
         return CppSUTWrapper(config, model_path, qsl, scenario)
 
     # Fall back to Python SUT
-    logger.info("Using Python SUT")
+    logger.info("Using Python SUT (C++ extension not available)")
     from .sut import OpenVINOSUT
     from ..backends.openvino_backend import OpenVINOBackend
 

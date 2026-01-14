@@ -134,19 +134,18 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
     # Auto-select optimal settings based on scenario
     if performance_hint == 'AUTO':
         if scenario == 'Offline':
-            # Offline: optimize for throughput
+            # Offline: optimize for maximum THROUGHPUT
             actual_hint = 'THROUGHPUT'
             if batch_size == 1:  # User didn't specify batch size
-                click.echo("AUTO: Using optimized settings for Offline (throughput)")
+                click.echo("AUTO: Using optimized settings for Offline (THROUGHPUT)")
                 batch_size = 32  # Larger batch for throughput
         else:
-            # Server: also use THROUGHPUT to maximize parallelism
-            # Latency is bounded by single-sample inference time
-            # Throughput hint gives more inference streams for parallelism
-            actual_hint = 'THROUGHPUT'
-            if batch_size == 1:
-                click.echo("AUTO: Using optimized settings for Server (THROUGHPUT hint for max parallelism)")
-                # Keep batch_size=1 for Server (each query = 1 sample)
+            # Server: optimize for minimum LATENCY
+            # Server mode measures latency-bounded throughput
+            # LATENCY hint minimizes single-sample inference time
+            actual_hint = 'LATENCY'
+            click.echo("AUTO: Using optimized settings for Server (LATENCY)")
+            # Keep batch_size=1 for Server (each query = 1 sample)
     else:
         actual_hint = performance_hint
 
