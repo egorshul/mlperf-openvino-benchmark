@@ -10,7 +10,7 @@ import numpy as np
 
 try:
     import openvino as ov
-    from openvino.runtime import Core, CompiledModel, InferRequest
+    from openvino import Core, CompiledModel, InferRequest
     OPENVINO_AVAILABLE = True
 except ImportError:
     OPENVINO_AVAILABLE = False
