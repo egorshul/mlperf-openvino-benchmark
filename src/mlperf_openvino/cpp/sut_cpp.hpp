@@ -37,6 +37,7 @@ class CppSUT;
  */
 struct InferContext {
     ov::InferRequest request;
+    ov::Tensor input_tensor;  // Keep tensor alive during inference
     uint64_t query_id = 0;
     int sample_idx = 0;
     size_t pool_id = 0;

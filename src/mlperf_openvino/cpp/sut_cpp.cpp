@@ -112,8 +112,9 @@ void CppSUT::load() {
         ctx->sut = this;
 
         // Pre-allocate input tensor with correct shape (for dynamic batch models)
-        ov::Tensor input_tensor(input_type_, actual_shape);
-        ctx->request.set_input_tensor(input_tensor);
+        // Store in context to ensure it stays alive during inference
+        ctx->input_tensor = ov::Tensor(input_type_, actual_shape);
+        ctx->request.set_input_tensor(ctx->input_tensor);
 
         // Set completion callback - this runs in OpenVINO thread WITHOUT GIL!
         InferContext* ctx_ptr = ctx.get();
@@ -174,10 +175,9 @@ void CppSUT::start_async(const float* input_data,
     ctx->query_id = query_id;
     ctx->sample_idx = sample_idx;
 
-    // Copy input data into pre-allocated tensor (set during load())
-    ov::Tensor input_tensor = ctx->request.get_input_tensor();
-    float* tensor_data = input_tensor.data<float>();
-    size_t tensor_size = input_tensor.get_size();
+    // Copy input data into pre-allocated tensor (stored in context)
+    float* tensor_data = ctx->input_tensor.data<float>();
+    size_t tensor_size = ctx->input_tensor.get_size();
     std::memcpy(tensor_data, input_data, tensor_size * sizeof(float));
 
     // Start async inference
