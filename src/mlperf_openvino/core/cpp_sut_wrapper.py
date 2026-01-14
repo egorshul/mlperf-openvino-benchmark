@@ -263,9 +263,8 @@ def create_sut(
     """
     Factory function to create the best available SUT.
 
-    Uses C++ SUT for both Server and Offline modes when available.
-    - Server: C++ SUT with THROUGHPUT hint (batch=1) for max parallelism
-    - Offline: C++ SUT with THROUGHPUT hint (batch=N) for max throughput
+    - Server: C++ SUT with async inference (samples arrive one at a time)
+    - Offline: Python SUT with batch processing (all samples known upfront)
 
     Args:
         config: Benchmark configuration
@@ -277,14 +276,14 @@ def create_sut(
     Returns:
         SUT instance (either CppSUTWrapper or OpenVINOSUT)
     """
-    # Use C++ SUT for both Server and Offline modes if available
-    if CPP_AVAILABLE and not force_python:
-        batch_desc = "batch=1" if scenario == Scenario.SERVER else "batch=N"
-        logger.info(f"Using C++ SUT for {scenario.value} mode (THROUGHPUT, {batch_desc})")
+    # Server mode: Use C++ SUT for async inference (bypass GIL)
+    if scenario == Scenario.SERVER and CPP_AVAILABLE and not force_python:
+        logger.info("Using C++ SUT for Server mode (async, batch=1)")
         return CppSUTWrapper(config, model_path, qsl, scenario)
 
-    # Fall back to Python SUT
-    logger.info("Using Python SUT (C++ extension not available)")
+    # Offline mode: Use Python SUT with batch processing (more efficient)
+    # All samples are known upfront, so we can process in large batches
+    logger.info(f"Using Python SUT for {scenario.value} mode (sync batches)")
     from .sut import OpenVINOSUT
     from ..backends.openvino_backend import OpenVINOBackend
 
