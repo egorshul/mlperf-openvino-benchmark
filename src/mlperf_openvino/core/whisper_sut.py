@@ -5,6 +5,7 @@ This module provides SUT implementation optimized for Whisper ASR model,
 handling encoder-decoder architecture and tokenization.
 """
 
+import array
 import logging
 import sys
 import time
@@ -310,6 +311,7 @@ class WhisperSUT:
     def _issue_query_offline(self, query_samples: List[Any]) -> None:
         """Process queries for Offline scenario."""
         responses = []
+        response_arrays = []  # Keep arrays alive until QuerySamplesComplete!
 
         # Start progress tracking
         total_samples = len(query_samples)
@@ -324,11 +326,15 @@ class WhisperSUT:
             self._predictions[sample_idx] = text
 
             # Create response (using dummy data for LoadGen)
-            response_array = np.array([len(text)], dtype=np.int64)
+            response_data = np.array([len(text)], dtype=np.int64)
+            response_array = array.array('B', response_data.tobytes())
+            response_arrays.append(response_array)  # Keep alive!
+            bi = response_array.buffer_info()
+
             response = lg.QuerySampleResponse(
                 sample.id,
-                response_array.ctypes.data,
-                response_array.nbytes
+                bi[0],
+                bi[1]
             )
             responses.append(response)
 
@@ -342,8 +348,11 @@ class WhisperSUT:
     
     def _issue_query_server(self, query_samples: List[Any]) -> None:
         """Process queries for Server scenario."""
+        responses = []
+        response_arrays = []  # Keep arrays alive until QuerySamplesComplete!
+
         # Start progress tracking if first query
-        if self._query_count == 0:
+        if self._sample_count == 0:
             self._start_progress(0, desc="Whisper Server inference")
 
         for sample in query_samples:
@@ -355,16 +364,22 @@ class WhisperSUT:
             self._predictions[sample_idx] = text
 
             # Create response
-            response_array = np.array([len(text)], dtype=np.int64)
+            response_data = np.array([len(text)], dtype=np.int64)
+            response_array = array.array('B', response_data.tobytes())
+            response_arrays.append(response_array)  # Keep alive!
+            bi = response_array.buffer_info()
+
             response = lg.QuerySampleResponse(
                 sample.id,
-                response_array.ctypes.data,
-                response_array.nbytes
+                bi[0],
+                bi[1]
             )
-            lg.QuerySamplesComplete([response])
+            responses.append(response)
 
             # Update progress
             self._update_progress(1)
+
+        lg.QuerySamplesComplete(responses)
     
     def get_sut(self):
         """Get LoadGen SUT handle."""
@@ -495,6 +510,7 @@ class WhisperEncoderOnlySUT:
         self._start_progress(total_samples, desc="Whisper encoder inference")
 
         responses = []
+        response_arrays = []  # Keep arrays alive until QuerySamplesComplete!
 
         for sample in query_samples:
             sample_idx = sample.index
@@ -511,11 +527,15 @@ class WhisperEncoderOnlySUT:
 
             self._predictions[sample_idx] = encoder_output
 
-            # Create response
+            # Create response - use array.array for safe memory handling
+            response_array = array.array('B', encoder_output.tobytes())
+            response_arrays.append(response_array)  # Keep alive!
+            bi = response_array.buffer_info()
+
             response = lg.QuerySampleResponse(
                 sample.id,
-                encoder_output.ctypes.data,
-                encoder_output.nbytes
+                bi[0],
+                bi[1]
             )
             responses.append(response)
 

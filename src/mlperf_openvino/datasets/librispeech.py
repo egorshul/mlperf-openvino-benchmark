@@ -503,6 +503,8 @@ class LibriSpeechQSL(QuerySampleLibrary):
     
     @property
     def total_sample_count(self) -> int:
+        if not self.dataset._is_loaded:
+            self.dataset.load()
         return self.dataset.total_count
     
     @property
