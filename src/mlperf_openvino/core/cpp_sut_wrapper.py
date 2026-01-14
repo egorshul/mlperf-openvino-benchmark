@@ -250,7 +250,9 @@ class CppSUTWrapper:
 
     def get_predictions(self) -> Dict[int, Any]:
         """Get all predictions (for accuracy mode)."""
-        return self._cpp_sut.get_predictions()
+        # C++ returns Dict[int, List[float]], convert to numpy arrays
+        raw_predictions = self._cpp_sut.get_predictions()
+        return {idx: np.array(pred, dtype=np.float32) for idx, pred in raw_predictions.items()}
 
     def reset(self) -> None:
         """Reset SUT state."""
