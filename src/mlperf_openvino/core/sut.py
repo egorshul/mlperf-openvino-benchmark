@@ -108,45 +108,88 @@ class OpenVINOSUT:
 
     def _setup_async_queue(self) -> None:
         """Setup AsyncInferQueue for Server mode - like OpenVINO MLPerf reference."""
+        import queue as q
+
         self._start_time = time.time()
         self._last_progress_update = time.time()
         self._issued_count = 0
 
+        # Queue for completed results - callback pushes, worker thread pops and sends
+        self._response_queue = q.Queue()
+        self._worker_stop = False
+
         def callback(infer_request, userdata):
-            """Callback when inference completes - send response immediately."""
+            """Minimal callback - just queue result for response thread."""
             query_id, sample_idx = userdata
+            # Get raw pointer to tensor data (no copy in callback!)
+            tensor = infer_request.get_output_tensor(0)
+            # Queue the tensor data pointer and size for immediate response
+            self._response_queue.put((query_id, sample_idx, tensor.data, tensor.data.nbytes))
 
-            # Get output tensor and copy data
-            output = infer_request.get_output_tensor(0).data.copy()
+        def response_worker():
+            """Worker thread that sends responses - can batch multiple responses."""
+            batch = []
+            batch_arrays = []  # Keep arrays alive
 
-            # Store prediction
-            with self._lock:
-                self._predictions[sample_idx] = output
-                self._sample_count += 1
+            while not self._worker_stop or not self._response_queue.empty():
+                try:
+                    # Non-blocking get with timeout
+                    item = self._response_queue.get(timeout=0.001)
+                    query_id, sample_idx, data, nbytes = item
 
-            # Send response immediately (like OpenVINO MLPerf reference)
-            response = lg.QuerySampleResponse(
-                query_id,
-                output.ctypes.data,
-                output.nbytes
-            )
-            lg.QuerySamplesComplete([response])
+                    # Copy data here (outside callback)
+                    output = data.copy()
+                    self._predictions[sample_idx] = output
 
-            # Update progress
-            with self._lock:
-                current_time = time.time()
-                if current_time - self._last_progress_update >= 1.0:
-                    elapsed = current_time - self._start_time
-                    throughput = self._sample_count / elapsed if elapsed > 0 else 0
-                    issued = self._issued_count
-                    pending = issued - self._sample_count
-                    print(f"\rServer: issued={issued}, done={self._sample_count}, pending={pending}, {throughput:.1f} samples/sec", end="", flush=True)
-                    self._last_progress_update = current_time
+                    # Create response
+                    response = lg.QuerySampleResponse(query_id, output.ctypes.data, nbytes)
+                    batch.append(response)
+                    batch_arrays.append(output)
 
-        # Create AsyncInferQueue with optimal number of requests
-        nireq = self.backend.num_streams
-        logger.info(f"Server mode: AsyncInferQueue with {nireq} parallel requests")
+                    # Send batch when we have enough or queue is empty
+                    if len(batch) >= 64 or self._response_queue.empty():
+                        lg.QuerySamplesComplete(batch)
+                        self._sample_count += len(batch)
+                        batch = []
+                        batch_arrays = []
+
+                except q.Empty:
+                    # Send any remaining responses
+                    if batch:
+                        lg.QuerySamplesComplete(batch)
+                        self._sample_count += len(batch)
+                        batch = []
+                        batch_arrays = []
+
+            # Final flush
+            if batch:
+                lg.QuerySamplesComplete(batch)
+                self._sample_count += len(batch)
+
+        # Create AsyncInferQueue with MORE requests for better pipelining
+        # Use 3x optimal to ensure we always have idle requests
+        nireq = self.backend.num_streams * 3
+        logger.info(f"Server mode: AsyncInferQueue with {nireq} parallel requests (3x optimal)")
         self._async_queue = self.backend.create_async_queue(num_jobs=nireq, callback=callback)
+
+        # Start response worker thread
+        self._response_thread = threading.Thread(target=response_worker, daemon=True)
+        self._response_thread.start()
+
+        # Start progress thread
+        self._progress_thread_stop = False
+        def progress_thread():
+            while not self._progress_thread_stop:
+                time.sleep(1.0)
+                elapsed = time.time() - self._start_time
+                throughput = self._sample_count / elapsed if elapsed > 0 else 0
+                issued = self._issued_count
+                pending = issued - self._sample_count
+                qsize = self._response_queue.qsize()
+                print(f"\rServer: issued={issued}, done={self._sample_count}, pending={pending}, queue={qsize}, {throughput:.1f} samples/sec", end="", flush=True)
+
+        self._progress_thread = threading.Thread(target=progress_thread, daemon=True)
+        self._progress_thread.start()
 
     def _start_progress(self, total: int, desc: str = "Processing") -> None:
         """Start progress tracking."""
@@ -352,6 +395,17 @@ class OpenVINOSUT:
         # Wait for async queue to finish (Server mode)
         if self._async_queue is not None:
             self._async_queue.wait_all()
+
+            # Signal worker to stop and wait for it
+            if hasattr(self, '_worker_stop'):
+                self._worker_stop = True
+            if hasattr(self, '_response_thread'):
+                self._response_thread.join(timeout=5.0)
+
+            # Stop progress thread
+            if hasattr(self, '_progress_thread_stop'):
+                self._progress_thread_stop = True
+
             # Print final stats
             elapsed = time.time() - self._start_time
             throughput = self._sample_count / elapsed if elapsed > 0 else 0
