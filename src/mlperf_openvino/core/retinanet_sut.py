@@ -347,6 +347,7 @@ class RetinaNetSUT:
     def _issue_query_offline(self, query_samples: List[Any]) -> None:
         """Process queries in Offline mode."""
         responses = []
+        response_arrays = []  # Keep arrays alive until QuerySamplesComplete!
 
         # Start progress tracking
         total_samples = len(query_samples)
@@ -365,6 +366,7 @@ class RetinaNetSUT:
             num_detections = len(detections['boxes'])
             response_data = np.array([num_detections], dtype=np.int64)
             response_array = array.array('B', response_data.tobytes())
+            response_arrays.append(response_array)  # Keep alive!
             bi = response_array.buffer_info()
 
             response = lg.QuerySampleResponse(
@@ -388,6 +390,7 @@ class RetinaNetSUT:
     def _issue_query_server(self, query_samples: List[Any]) -> None:
         """Process queries in Server mode."""
         responses = []
+        response_arrays = []  # Keep arrays alive until QuerySamplesComplete!
 
         # Start progress tracking if first query
         if self._query_count == 0:
@@ -406,6 +409,7 @@ class RetinaNetSUT:
             num_detections = len(detections['boxes'])
             response_data = np.array([num_detections], dtype=np.int64)
             response_array = array.array('B', response_data.tobytes())
+            response_arrays.append(response_array)  # Keep alive!
             bi = response_array.buffer_info()
 
             response = lg.QuerySampleResponse(

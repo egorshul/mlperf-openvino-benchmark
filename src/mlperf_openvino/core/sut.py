@@ -208,6 +208,7 @@ class OpenVINOSUT:
         as fast as possible for maximum throughput.
         """
         responses = []
+        response_arrays = []  # Keep arrays alive until QuerySamplesComplete!
 
         # Process in batches for efficiency
         batch_size = self.config.openvino.batch_size if self.config.openvino.batch_size > 0 else 1
@@ -233,6 +234,7 @@ class OpenVINOSUT:
 
                 # Create response
                 response_array = array.array('B', result.tobytes())
+                response_arrays.append(response_array)  # Keep alive!
                 bi = response_array.buffer_info()
 
                 response = lg.QuerySampleResponse(
@@ -262,6 +264,7 @@ class OpenVINOSUT:
         processed with low latency.
         """
         responses = []
+        response_arrays = []  # Keep arrays alive until QuerySamplesComplete!
 
         # Start progress tracking if first query
         if self._query_count == 0:
@@ -280,6 +283,7 @@ class OpenVINOSUT:
 
             # Create response
             response_array = array.array('B', result.tobytes())
+            response_arrays.append(response_array)  # Keep alive!
             bi = response_array.buffer_info()
 
             response = lg.QuerySampleResponse(

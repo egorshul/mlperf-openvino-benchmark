@@ -258,6 +258,7 @@ class BertSUT:
     def _issue_query_offline(self, query_samples: List[Any]) -> None:
         """Process queries in Offline mode."""
         responses = []
+        response_arrays = []  # Keep arrays alive until QuerySamplesComplete!
 
         sample_ids = [qs.id for qs in query_samples]
         sample_indices = [qs.index for qs in query_samples]
@@ -277,6 +278,7 @@ class BertSUT:
             # Combine start and end logits for response
             combined = np.stack([start_logits.flatten(), end_logits.flatten()], axis=-1)
             response_array = array.array('B', combined.tobytes())
+            response_arrays.append(response_array)  # Keep alive!
             bi = response_array.buffer_info()
 
             response = lg.QuerySampleResponse(
@@ -300,6 +302,7 @@ class BertSUT:
     def _issue_query_server(self, query_samples: List[Any]) -> None:
         """Process queries in Server mode."""
         responses = []
+        response_arrays = []  # Keep arrays alive until QuerySamplesComplete!
 
         # Start progress tracking if first query
         if self._query_count == 0:
@@ -316,6 +319,7 @@ class BertSUT:
             # Create response
             combined = np.stack([start_logits.flatten(), end_logits.flatten()], axis=-1)
             response_array = array.array('B', combined.tobytes())
+            response_arrays.append(response_array)  # Keep alive!
             bi = response_array.buffer_info()
 
             response = lg.QuerySampleResponse(
