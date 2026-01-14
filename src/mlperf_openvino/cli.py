@@ -140,11 +140,12 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
                 click.echo("AUTO: Using optimized settings for Offline (throughput)")
                 batch_size = 32  # Larger batch for throughput
         else:
-            # Server: optimize for latency
+            # Server: optimize for latency with good throughput
             actual_hint = 'LATENCY'
-            if batch_size == 1 and num_streams == 'AUTO':
-                click.echo("AUTO: Using optimized settings for Server (latency)")
-                num_streams = '1'  # Single stream for lower latency
+            if batch_size == 1:
+                click.echo("AUTO: Using optimized settings for Server (low latency + parallelism)")
+                # Keep batch_size=1 for low latency per request
+                # Keep num_streams=AUTO for parallelism (NOT 1!)
     else:
         actual_hint = performance_hint
 

@@ -378,7 +378,7 @@ mlperf-ov run \
   --data-path ./data/imagenet
 ```
 
-**Server (Minimum Latency):**
+**Server (Low Latency + High Throughput):**
 
 ```bash
 mlperf-ov run \
@@ -386,33 +386,37 @@ mlperf-ov run \
   --scenario Server \
   --mode performance \
   --batch-size 1 \
-  --num-streams 1 \
+  --num-streams AUTO \
   --performance-hint LATENCY \
-  --target-qps 200 \
+  --target-qps 1000 \
   --model-path ./models/resnet50_v1.onnx \
   --data-path ./data/imagenet
 ```
+
+Key insight: `num_streams=AUTO` enables parallelism while `batch_size=1` + `LATENCY` hint keeps per-request latency low.
 
 **AUTO mode (recommended):**
 
 The CLI automatically selects optimal settings based on scenario:
 
 ```bash
-# Automatically uses THROUGHPUT + batch_size=32 for Offline
+# Automatically uses THROUGHPUT + batch_size=32 + streams=AUTO for Offline
 mlperf-ov run --model resnet50 --scenario Offline
 
-# Automatically uses LATENCY + streams=1 for Server
+# Automatically uses LATENCY + batch_size=1 + streams=AUTO for Server
 mlperf-ov run --model resnet50 --scenario Server
 ```
 
 ### Key Optimization Parameters
 
-| Parameter | For Throughput (Offline) | For Latency (Server) |
-|-----------|--------------------------|----------------------|
-| `--batch-size` | 8-64 (larger = faster) | 1 (smaller = lower latency) |
-| `--num-streams` | `AUTO` (more parallelism) | `1` (less contention) |
+| Parameter | For Throughput (Offline) | For Low Latency (Server) |
+|-----------|--------------------------|--------------------------|
+| `--batch-size` | 32-64 (larger batches) | 1 (single sample) |
+| `--num-streams` | `AUTO` (parallelism) | `AUTO` (parallelism!) |
 | `--performance-hint` | `THROUGHPUT` | `LATENCY` |
 | `--num-threads` | 0 (auto) | 0 (auto) |
+
+**Important for Server mode:** Use `num_streams=AUTO`, NOT `1`! Multiple streams allow parallel request processing while `LATENCY` hint ensures each request is fast.
 
 ### Recommended Batch Sizes
 
