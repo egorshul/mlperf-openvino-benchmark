@@ -49,8 +49,9 @@ models:
     
     server:
       target_latency_ns: 15000000  # 15ms
+      target_qps: 100.0  # Adjust based on your system performance
       min_duration_ms: 60000
-      min_query_count: 270336
+      min_query_count: 24576  # Reduced for faster testing
 
   bert:
     name: "BERT-Large"

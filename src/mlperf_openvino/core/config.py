@@ -192,8 +192,9 @@ class BenchmarkConfig:
         server_data = model_data.get("server", {})
         server = ScenarioConfig(
             min_duration_ms=server_data.get("min_duration_ms", 60000),
-            min_query_count=server_data.get("min_query_count", 270336),
+            min_query_count=server_data.get("min_query_count", 24576),
             target_latency_ns=server_data.get("target_latency_ns", 15000000),
+            target_qps=server_data.get("target_qps", 100.0),
         )
         
         sources = model_data.get("sources", {})
@@ -274,6 +275,17 @@ class BenchmarkConfig:
                 accuracy_target=0.7646,
                 accuracy_threshold=0.99,
                 onnx_url="https://zenodo.org/record/4735647/files/resnet50_v1.onnx",
+                offline=ScenarioConfig(
+                    min_duration_ms=60000,
+                    min_query_count=24576,
+                    samples_per_query=1,
+                ),
+                server=ScenarioConfig(
+                    min_duration_ms=60000,
+                    min_query_count=24576,
+                    target_latency_ns=15000000,  # 15ms
+                    target_qps=100.0,  # Adjust based on system
+                ),
             ),
             dataset=DatasetConfig(
                 name="imagenet2012",
