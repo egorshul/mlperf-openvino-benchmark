@@ -254,8 +254,8 @@ def create_sut(
     Factory function to create the best available SUT.
 
     Uses C++ SUT for both Server and Offline modes when available.
-    - Server: C++ SUT with LATENCY hint for minimum latency
-    - Offline: C++ SUT with THROUGHPUT hint for maximum throughput
+    - Server: C++ SUT with THROUGHPUT hint (batch=1) for max parallelism
+    - Offline: C++ SUT with THROUGHPUT hint (batch=N) for max throughput
 
     Args:
         config: Benchmark configuration
@@ -269,8 +269,8 @@ def create_sut(
     """
     # Use C++ SUT for both Server and Offline modes if available
     if CPP_AVAILABLE and not force_python:
-        mode_desc = "LATENCY" if scenario == Scenario.SERVER else "THROUGHPUT"
-        logger.info(f"Using C++ SUT for {scenario.value} mode (optimized for {mode_desc})")
+        batch_desc = "batch=1" if scenario == Scenario.SERVER else "batch=N"
+        logger.info(f"Using C++ SUT for {scenario.value} mode (THROUGHPUT, {batch_desc})")
         return CppSUTWrapper(config, model_path, qsl, scenario)
 
     # Fall back to Python SUT
