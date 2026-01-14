@@ -145,6 +145,7 @@ openvino:
   device: "CPU"
   num_streams: "AUTO"  # AUTO, or specific number
   num_threads: 0  # 0 = auto-detect
+  batch_size: 1  # Inference batch size (increase for higher throughput)
   enable_profiling: false
   cache_dir: "./cache"
   

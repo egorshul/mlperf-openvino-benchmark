@@ -159,7 +159,7 @@ class OpenVINOSUT:
         responses = []
         
         # Process in batches for efficiency
-        batch_size = self.config.openvino.num_threads if self.config.openvino.num_threads > 0 else 8
+        batch_size = self.config.openvino.batch_size if self.config.openvino.batch_size > 0 else 1
         
         sample_ids = [qs.id for qs in query_samples]
         sample_indices = [qs.index for qs in query_samples]

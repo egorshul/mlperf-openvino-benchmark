@@ -74,6 +74,8 @@ def get_default_config(model: str) -> BenchmarkConfig:
               help='Number of threads (0 = auto)')
 @click.option('--num-streams', type=str, default='AUTO',
               help='Number of inference streams')
+@click.option('--batch-size', '-b', type=int, default=1,
+              help='Inference batch size')
 @click.option('--performance-hint', type=click.Choice(['THROUGHPUT', 'LATENCY']),
               default='THROUGHPUT', help='Performance hint')
 @click.option('--duration', type=int, default=60000,
@@ -85,7 +87,7 @@ def get_default_config(model: str) -> BenchmarkConfig:
 @click.option('--verbose', '-v', is_flag=True, help='Enable verbose output')
 def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         data_path: Optional[str], output_dir: str, config: Optional[str],
-        num_threads: int, num_streams: str, performance_hint: str,
+        num_threads: int, num_streams: str, batch_size: int, performance_hint: str,
         duration: int, count: int, warmup: int, verbose: bool):
     """
     Run MLPerf benchmark.
@@ -126,6 +128,7 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
     if num_threads > 0:
         benchmark_config.openvino.num_threads = num_threads
     benchmark_config.openvino.num_streams = num_streams
+    benchmark_config.openvino.batch_size = batch_size
     benchmark_config.openvino.performance_hint = performance_hint
 
     if model_path:

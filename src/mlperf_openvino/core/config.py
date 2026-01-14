@@ -52,6 +52,7 @@ class OpenVINOConfig:
     device: str = "CPU"
     num_streams: str = "AUTO"
     num_threads: int = 0  # 0 = auto-detect
+    batch_size: int = 1  # Inference batch size
     enable_profiling: bool = False
     cache_dir: str = "./cache"
     performance_hint: str = "THROUGHPUT"  # THROUGHPUT or LATENCY
@@ -224,6 +225,7 @@ class BenchmarkConfig:
             device=ov_data.get("device", "CPU"),
             num_streams=str(ov_data.get("num_streams", "AUTO")),
             num_threads=ov_data.get("num_threads", 0),
+            batch_size=ov_data.get("batch_size", 1),
             enable_profiling=ov_data.get("enable_profiling", False),
             cache_dir=ov_data.get("cache_dir", "./cache"),
             performance_hint=ov_data.get("performance_hint", "THROUGHPUT"),
