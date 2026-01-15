@@ -425,23 +425,32 @@ class SQuADDataset(BaseDataset):
 
     def postprocess(
         self,
-        results: Union[np.ndarray, Tuple[np.ndarray, np.ndarray]],
+        results: Union[np.ndarray, Tuple[np.ndarray, np.ndarray], List[Tuple[np.ndarray, np.ndarray]]],
         indices: List[int]
     ) -> List[str]:
         """
         Postprocess BERT outputs to extract answer spans.
 
         Args:
-            results: Model outputs (start_logits, end_logits)
+            results: Model outputs - can be:
+                - tuple (start_logits, end_logits) with batch dimension
+                - list of tuples [(start, end), ...] per sample
+                - numpy array with shape [batch, 2, seq_len] or [batch, seq_len, 2]
             indices: Sample indices
 
         Returns:
             List of predicted answer texts
         """
-        if isinstance(results, tuple):
+        # Handle different result formats
+        if isinstance(results, list):
+            # List of tuples from C++ SUT: [(start, end), (start, end), ...]
+            start_logits = np.array([r[0] for r in results])
+            end_logits = np.array([r[1] for r in results])
+        elif isinstance(results, tuple):
+            # Single tuple with batch arrays
             start_logits, end_logits = results
         else:
-            # Assume results has shape [batch, 2, seq_len] or [batch, seq_len, 2]
+            # Numpy array - assume shape [batch, 2, seq_len] or [batch, seq_len, 2]
             if results.shape[-1] == 2:
                 start_logits = results[..., 0]
                 end_logits = results[..., 1]
