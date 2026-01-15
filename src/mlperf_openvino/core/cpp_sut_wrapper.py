@@ -104,7 +104,7 @@ class CppSUTWrapper:
 
         # Statistics
         self._start_time = 0.0
-        self._progress_thread_stop = False
+        self._progress_stop_event = threading.Event()
 
         # Enable storing predictions for accuracy mode
         self._cpp_sut.set_store_predictions(True)
@@ -151,11 +151,13 @@ class CppSUTWrapper:
     def _start_progress_monitor(self):
         """Start progress monitoring thread."""
         self._start_time = time.time()
-        self._progress_thread_stop = False
+        self._progress_stop_event.clear()
 
         def progress_thread():
-            while not self._progress_thread_stop:
-                time.sleep(1.0)
+            while not self._progress_stop_event.is_set():
+                self._progress_stop_event.wait(timeout=1.0)
+                if self._progress_stop_event.is_set():
+                    break
                 elapsed = time.time() - self._start_time
                 completed = self._cpp_sut.get_completed_count()
                 issued = self._cpp_sut.get_issued_count()
@@ -212,7 +214,7 @@ class CppSUTWrapper:
         self._cpp_sut.wait_all()
 
         # Stop progress monitor
-        self._progress_thread_stop = True
+        self._progress_stop_event.set()
 
         # Print final stats
         elapsed = time.time() - self._start_time

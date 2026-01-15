@@ -188,7 +188,7 @@ private:
 
     // Predictions storage (for accuracy mode)
     bool store_predictions_;
-    std::mutex predictions_mutex_;
+    mutable std::mutex predictions_mutex_;  // mutable for const get_predictions()
     std::unordered_map<int, std::vector<float>> predictions_;
 
     // Response callback (calls Python's QuerySamplesComplete)

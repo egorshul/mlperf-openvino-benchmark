@@ -266,8 +266,12 @@ void CppSUT::wait_all() {
 }
 
 void CppSUT::reset_counters() {
+    // Wait for any pending operations before resetting
+    wait_all();
+
     issued_count_ = 0;
     completed_count_ = 0;
+    callbacks_running_ = 0;
     {
         std::lock_guard<std::mutex> lock(predictions_mutex_);
         predictions_.clear();
@@ -275,7 +279,7 @@ void CppSUT::reset_counters() {
 }
 
 std::unordered_map<int, std::vector<float>> CppSUT::get_predictions() const {
-    std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(predictions_mutex_));
+    std::lock_guard<std::mutex> lock(predictions_mutex_);
     return predictions_;
 }
 

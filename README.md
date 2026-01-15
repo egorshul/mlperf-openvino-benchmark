@@ -6,6 +6,7 @@ A benchmark tool for measuring CPU inference performance using OpenVINO backend,
 
 - **MLPerf v5.1 Compatible**: Follows MLPerf Inference benchmark specifications
 - **OpenVINO Backend**: Optimized for Intel CPUs using OpenVINO runtime
+- **C++ Accelerated SUT**: High-performance C++ implementation bypassing Python GIL
 - **Multiple Scenarios**: Supports Offline and Server scenarios
 - **Multiple Models**: ResNet50, BERT-Large, RetinaNet, Whisper Large v3
 - **Automated Setup**: Built-in model and dataset downloaders
@@ -57,6 +58,27 @@ pip install -e ".[whisper]"
 # All models + development tools
 pip install -e ".[all]"
 ```
+
+### Build C++ SUT Extension (Recommended)
+
+For maximum performance, build the C++ SUT extension which bypasses Python GIL limitations:
+
+```bash
+# Build the C++ extension
+./build_cpp.sh
+
+# Verify installation
+python -c "from mlperf_openvino.cpp import CPP_AVAILABLE; print(f'C++ SUT: {CPP_AVAILABLE}')"
+```
+
+**Requirements for C++ build:**
+- CMake 3.14+
+- C++17 compiler (GCC 7+ or Clang 5+)
+- pybind11 (`pip install pybind11`)
+
+The C++ SUT provides significant performance improvements:
+- **Server mode**: Async inference with GIL released, pool of InferRequests
+- **Offline mode**: Same async approach for maximum parallelism
 
 ## Quick Start
 
@@ -284,11 +306,16 @@ mlperf-openvino-benchmark/
 ├── src/mlperf_openvino/
 │   ├── core/                    # Core components
 │   │   ├── config.py            # Configuration management
-│   │   ├── sut.py               # ResNet50 System Under Test
+│   │   ├── sut.py               # Python System Under Test
+│   │   ├── cpp_sut_wrapper.py   # C++ SUT Python wrapper
 │   │   ├── bert_sut.py          # BERT System Under Test
 │   │   ├── retinanet_sut.py     # RetinaNet System Under Test
 │   │   ├── whisper_sut.py       # Whisper System Under Test
 │   │   └── benchmark_runner.py  # Main benchmark orchestrator
+│   ├── cpp/                     # C++ accelerated components
+│   │   ├── sut_cpp.cpp/hpp      # C++ SUT (async, GIL-free)
+│   │   ├── offline_sut.cpp/hpp  # C++ Offline SUT (batch)
+│   │   └── bindings.cpp         # pybind11 bindings
 │   ├── backends/                # Inference backends
 │   │   └── openvino_backend.py  # OpenVINO inference
 │   ├── datasets/                # Dataset handlers
@@ -304,6 +331,37 @@ mlperf-openvino-benchmark/
 ├── tests/                       # Unit tests
 └── results/                     # Benchmark results
 ```
+
+### C++ SUT Architecture
+
+The C++ SUT bypasses Python GIL for maximum inference throughput:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Python (LoadGen)                        │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────────┐ │
+│  │ issue_query │───▶│ CppSUT      │───▶│ QuerySamples    │ │
+│  │             │    │ Wrapper     │    │ Complete        │ │
+│  └─────────────┘    └──────┬──────┘    └─────────────────┘ │
+└────────────────────────────┼────────────────────────────────┘
+                             │ GIL Released
+┌────────────────────────────▼────────────────────────────────┐
+│                        C++ SUT                              │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────────┐ │
+│  │ InferRequest│    │ InferRequest│    │ InferRequest    │ │
+│  │ Pool (async)│    │ Pool (async)│    │ Pool (async)    │ │
+│  └──────┬──────┘    └──────┬──────┘    └───────┬─────────┘ │
+│         │                  │                    │           │
+│         └──────────────────┼────────────────────┘           │
+│                            ▼                                │
+│                    OpenVINO Runtime                         │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Key benefits:**
+- Inference callbacks run without Python GIL
+- Pool of async InferRequests for parallel execution
+- Minimal Python ↔ C++ data copying
 
 ## MLPerf Compliance
 
@@ -387,13 +445,13 @@ mlperf-ov run \
   --mode performance \
   --batch-size 1 \
   --num-streams AUTO \
-  --performance-hint LATENCY \
+  --performance-hint THROUGHPUT \
   --target-qps 1000 \
   --model-path ./models/resnet50_v1.onnx \
   --data-path ./data/imagenet
 ```
 
-Key insight: `num_streams=AUTO` enables parallelism while `batch_size=1` + `LATENCY` hint keeps per-request latency low.
+Key insight: `num_streams=AUTO` with `THROUGHPUT` hint enables maximum parallelism. `batch_size=1` ensures each query is processed immediately (required by Server mode).
 
 **AUTO mode (recommended):**
 
@@ -403,20 +461,22 @@ The CLI automatically selects optimal settings based on scenario:
 # Automatically uses THROUGHPUT + batch_size=32 + streams=AUTO for Offline
 mlperf-ov run --model resnet50 --scenario Offline
 
-# Automatically uses LATENCY + batch_size=1 + streams=AUTO for Server
+# Automatically uses THROUGHPUT + batch_size=1 + streams=AUTO for Server
 mlperf-ov run --model resnet50 --scenario Server
 ```
 
+Both scenarios use `THROUGHPUT` hint for maximum parallelism. The key difference is batch size.
+
 ### Key Optimization Parameters
 
-| Parameter | For Throughput (Offline) | For Low Latency (Server) |
+| Parameter | For Throughput (Offline) | For Server |
 |-----------|--------------------------|--------------------------|
-| `--batch-size` | 32-64 (larger batches) | 1 (single sample) |
-| `--num-streams` | `AUTO` (parallelism) | `AUTO` (parallelism!) |
-| `--performance-hint` | `THROUGHPUT` | `LATENCY` |
+| `--batch-size` | 32-64 (larger batches) | 1 (single sample per query) |
+| `--num-streams` | `AUTO` (parallelism) | `AUTO` (parallelism) |
+| `--performance-hint` | `THROUGHPUT` | `THROUGHPUT` |
 | `--num-threads` | 0 (auto) | 0 (auto) |
 
-**Important for Server mode:** Use `num_streams=AUTO`, NOT `1`! Multiple streams allow parallel request processing while `LATENCY` hint ensures each request is fast.
+**Important:** Both scenarios use `THROUGHPUT` hint for parallelism. `LATENCY` hint uses only 1 stream which severely limits throughput.
 
 ### Recommended Batch Sizes
 
