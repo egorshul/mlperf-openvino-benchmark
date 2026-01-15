@@ -652,9 +652,8 @@ def download_openimages(
     """
     Download OpenImages validation set for RetinaNet Object Detection.
 
-    Downloads both annotations and images from the official sources:
-    - Annotations from Google Storage
-    - Images from AWS S3 (open-images-dataset bucket)
+    Uses FiftyOne library for reliable download from official sources.
+    Falls back to direct S3 download if FiftyOne is not available.
 
     Args:
         output_dir: Directory to save dataset
@@ -665,11 +664,101 @@ def download_openimages(
     Returns:
         Dictionary with dataset paths
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
+    data_dir = output_path / "openimages"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    images_dir = data_dir / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    annotations_dir = data_dir / "annotations"
+    annotations_dir.mkdir(parents=True, exist_ok=True)
+
+    # Check if already downloaded
+    existing_images = list(images_dir.glob("*.jpg"))
+    if len(existing_images) >= 24000 and not force:
+        logger.info(f"OpenImages already downloaded: {len(existing_images)} images")
+        ann_file = annotations_dir / "openimages-mlperf.json"
+        return {
+            "data_path": str(data_dir),
+            "annotations_file": str(ann_file) if ann_file.exists() else "",
+            "images_dir": str(images_dir),
+            "num_samples": len(existing_images),
+        }
+
+    # Try FiftyOne first (most reliable method)
+    try:
+        import fiftyone as fo
+        import fiftyone.zoo as foz
+
+        logger.info("Downloading OpenImages using FiftyOne...")
+        logger.info("This may take a while (downloading ~24k images)...")
+
+        # Download validation split
+        dataset = foz.load_zoo_dataset(
+            name="open-images-v6",
+            split="validation",
+            label_types=["detections"],
+            dataset_dir=str(data_dir / "fiftyone"),
+            max_samples=max_images,
+        )
+
+        # Export to COCO format
+        logger.info("Exporting to COCO format...")
+        coco_labels_path = annotations_dir / "openimages-mlperf.json"
+
+        dataset.export(
+            labels_path=str(coco_labels_path),
+            dataset_type=fo.types.COCODetectionDataset,
+            label_field="detections",
+        )
+
+        # Add iscrowd field for MLPerf compatibility
+        import json
+        with open(coco_labels_path) as fp:
+            labels = json.load(fp)
+        for annotation in labels.get("annotations", []):
+            annotation["iscrowd"] = int(annotation.get("IsGroupOf", 0))
+        with open(coco_labels_path, "w") as fp:
+            json.dump(labels, fp)
+
+        # Move images to expected location
+        fiftyone_images = data_dir / "fiftyone" / "validation" / "data"
+        if fiftyone_images.exists():
+            import shutil
+            for img in fiftyone_images.glob("*.jpg"):
+                dest = images_dir / img.name
+                if not dest.exists():
+                    shutil.copy2(img, dest)
+
+        final_count = len(list(images_dir.glob("*.jpg")))
+        logger.info(f"OpenImages ready: {final_count} images")
+
+        return {
+            "data_path": str(data_dir),
+            "annotations_file": str(coco_labels_path),
+            "images_dir": str(images_dir),
+            "num_samples": final_count,
+        }
+
+    except ImportError:
+        logger.warning("FiftyOne not installed. Install with: pip install fiftyone")
+        logger.info("Falling back to direct S3 download...")
+
+    # Fallback: Direct S3 download
+    return _download_openimages_s3(output_dir, force, max_images, num_workers)
+
+
+def _download_openimages_s3(
+    output_dir: str,
+    force: bool = False,
+    max_images: Optional[int] = None,
+    num_workers: int = 8
+) -> Dict[str, str]:
+    """Fallback: Download OpenImages directly from S3."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    output_path = Path(output_dir)
     data_dir = output_path / "openimages"
     data_dir.mkdir(parents=True, exist_ok=True)
     annotations_dir = data_dir / "annotations"
@@ -720,7 +809,6 @@ def download_openimages(
             for line in f:
                 line = line.strip()
                 if line:
-                    # Remove .jpg extension if present
                     image_id = line.replace('.jpg', '')
                     image_ids.add(image_id)
         logger.info(f"Found {len(image_ids)} images in MLPerf list")
@@ -750,7 +838,6 @@ def download_openimages(
     else:
         logger.info(f"Downloading {len(to_download)} images ({len(existing)} already exist)...")
 
-        # Download images in parallel
         downloaded = 0
         failed = 0
 
@@ -771,10 +858,9 @@ def download_openimages(
                     print(f"\rDownloaded: {downloaded}/{len(to_download)}, failed: {failed}",
                           end="", flush=True)
 
-        print()  # newline
+        print()
         logger.info(f"Downloaded {downloaded} images, {failed} failed")
 
-    # Count final images
     final_count = len(list(images_dir.glob("*.jpg")))
     logger.info(f"OpenImages dataset ready: {final_count} images at {data_dir}")
 
