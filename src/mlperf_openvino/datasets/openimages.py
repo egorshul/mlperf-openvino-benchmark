@@ -107,7 +107,7 @@ def compute_map(
     predictions: List[Dict],
     ground_truths: List[Dict],
     iou_threshold: float = 0.5,
-    num_classes: int = 80
+    num_classes: int = 601  # OpenImages has up to 601 classes
 ) -> Dict[str, float]:
     """
     Compute mean Average Precision.
@@ -116,7 +116,7 @@ def compute_map(
         predictions: List of prediction dicts with 'boxes', 'scores', 'labels'
         ground_truths: List of ground truth dicts with 'boxes', 'labels'
         iou_threshold: IoU threshold for matching
-        num_classes: Number of classes
+        num_classes: Number of classes (601 for OpenImages)
 
     Returns:
         Dictionary with mAP and per-class AP
@@ -124,12 +124,15 @@ def compute_map(
     # Organize detections and ground truths by class
     all_detections = defaultdict(list)
     all_ground_truths = defaultdict(list)
+    all_classes = set()  # Track all classes we see
 
     for img_idx, (pred, gt) in enumerate(zip(predictions, ground_truths)):
         # Detections
         if pred is not None and len(pred.get('boxes', [])) > 0:
             for box, score, label in zip(pred['boxes'], pred['scores'], pred['labels']):
-                all_detections[int(label)].append({
+                class_id = int(label)
+                all_classes.add(class_id)
+                all_detections[class_id].append({
                     'image_idx': img_idx,
                     'box': box,
                     'score': score,
@@ -138,15 +141,17 @@ def compute_map(
         # Ground truths
         if gt is not None and len(gt.get('boxes', [])) > 0:
             for box, label in zip(gt['boxes'], gt['labels']):
-                all_ground_truths[int(label)].append({
+                class_id = int(label)
+                all_classes.add(class_id)
+                all_ground_truths[class_id].append({
                     'image_idx': img_idx,
                     'box': box,
                     'matched': False,
                 })
 
-    # Compute AP for each class
+    # Compute AP for each class that has ground truths
     aps = {}
-    for class_id in range(num_classes):
+    for class_id in all_classes:
         detections = all_detections[class_id]
         gts = all_ground_truths[class_id]
 
@@ -269,22 +274,29 @@ class OpenImagesDataset(BaseDataset):
         if not images_dir.exists():
             images_dir = self.data_path
 
-        # Find annotations file
+        # Find annotations file (prefer COCO JSON over CSV)
+        annotations_path = None
         if self.annotations_file:
             annotations_path = Path(self.annotations_file)
         else:
+            # Prefer COCO JSON format (has correct class mapping)
             for name in [
+                "annotations/openimages-mlperf.json",
+                "openimages-mlperf.json",
                 "annotations/validation-annotations-bbox.csv",
                 "validation-annotations-bbox.csv",
-                "annotations.csv",
             ]:
-                annotations_path = self.data_path / name
-                if annotations_path.exists():
+                path = self.data_path / name
+                if path.exists():
+                    annotations_path = path
                     break
 
         # Load annotations
-        if annotations_path.exists():
-            self._load_annotations(annotations_path)
+        if annotations_path and annotations_path.exists():
+            if annotations_path.suffix == '.json':
+                self._load_coco_annotations(annotations_path)
+            else:
+                self._load_annotations(annotations_path)
         else:
             logger.warning("No annotations file found, using images only")
 
@@ -440,6 +452,59 @@ class OpenImagesDataset(BaseDataset):
         except Exception as e:
             logger.warning(f"Auto-fix failed: {e}")
             return 0
+
+    def _load_coco_annotations(self, annotations_path: Path) -> None:
+        """Load annotations from COCO JSON file (preferred format with class mapping)."""
+        import json
+
+        logger.info(f"Loading COCO annotations from {annotations_path}")
+
+        with open(annotations_path, 'r') as f:
+            coco = json.load(f)
+
+        # Build category mapping
+        self._categories = {}
+        for cat in coco.get('categories', []):
+            self._categories[cat['id']] = cat['name']
+
+        logger.info(f"Loaded {len(self._categories)} categories")
+
+        # Build image id to filename mapping
+        image_info = {}
+        for img in coco.get('images', []):
+            image_info[img['id']] = {
+                'file_name': img['file_name'],
+                'width': img.get('width', 800),
+                'height': img.get('height', 600),
+            }
+
+        # Load annotations grouped by image
+        for ann in coco.get('annotations', []):
+            img_id = ann['image_id']
+            if img_id not in image_info:
+                continue
+
+            info = image_info[img_id]
+            image_id = info['file_name'].replace('.jpg', '').replace('.jpeg', '').replace('.png', '')
+            width, height = info['width'], info['height']
+
+            # COCO bbox is [x, y, width, height] in pixels
+            bbox = ann['bbox']
+            x_min = bbox[0] / width
+            y_min = bbox[1] / height
+            x_max = (bbox[0] + bbox[2]) / width
+            y_max = (bbox[1] + bbox[3]) / height
+
+            self._annotations[image_id].append({
+                'box': [x_min, y_min, x_max, y_max],  # Normalized
+                'category_id': ann['category_id'],  # Proper class ID!
+                'label_name': self._categories.get(ann['category_id'], ''),
+                'is_group_of': ann.get('iscrowd', 0) == 1,
+                'is_occluded': False,
+                'is_truncated': False,
+            })
+
+        logger.info(f"Loaded annotations for {len(self._annotations)} images")
 
     def _load_annotations(self, annotations_path: Path) -> None:
         """Load annotations from CSV file."""
@@ -694,7 +759,7 @@ class OpenImagesDataset(BaseDataset):
             index: Sample index
 
         Returns:
-            Dictionary with 'boxes' and 'labels'
+            Dictionary with 'boxes' (normalized) and 'labels'
         """
         sample = self._samples[index]
         annotations = sample.get('annotations', [])
@@ -709,10 +774,13 @@ class OpenImagesDataset(BaseDataset):
             if ann.get('is_group_of', False):
                 continue
 
-            # Convert normalized coords to pixel coords
+            # Box is in normalized coords [x_min, y_min, x_max, y_max]
             box = ann['box']
             boxes.append(box)
-            labels.append(0)  # Placeholder - need class mapping
+
+            # Get category_id (from COCO JSON) or default to 0
+            category_id = ann.get('category_id', 0)
+            labels.append(category_id)
 
         return {
             'boxes': np.array(boxes) if boxes else np.array([]),

@@ -895,6 +895,10 @@ class RetinaNetCppSUTWrapper:
         """Get all predictions as dict of {sample_idx: {boxes, scores, labels}}."""
         raw_preds = self._cpp_sut.get_predictions()
         result = {}
+
+        # Input size for normalization (RetinaNet uses 800x800)
+        input_size = 800.0
+
         for idx, pred in raw_preds.items():
             boxes = np.array(pred['boxes'], dtype=np.float32)
             scores = np.array(pred['scores'], dtype=np.float32)
@@ -903,6 +907,9 @@ class RetinaNetCppSUTWrapper:
             # Reshape boxes to [N, 4]
             if len(boxes) > 0 and len(boxes) % 4 == 0:
                 boxes = boxes.reshape(-1, 4)
+                # Normalize boxes from pixel coords [0, 800] to [0, 1]
+                # to match ground truth format
+                boxes = boxes / input_size
 
             result[idx] = {
                 'boxes': boxes,
