@@ -65,7 +65,7 @@ DATASET_REGISTRY: Dict[str, Dict] = {
             "filename": "class-descriptions-boxable.csv",
             "size_mb": 0.02,
         },
-        "num_samples": 24576,
+        "num_samples": 24781,  # Official MLPerf count from 365 class filtering
         "note": "Images downloaded from AWS S3 open-images-dataset bucket",
     },
     "librispeech": {
