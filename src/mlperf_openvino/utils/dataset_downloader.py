@@ -708,7 +708,7 @@ def download_openimages(
         _download_file(CLASS_NAMES_URL, str(class_names_file))
 
     # Step 2: Get MLPerf classes and filter annotations
-    # Official MLPerf uses these 264 classes from openimages_mlperf.sh
+    # Official MLPerf uses these 365 classes from openimages_mlperf.sh
     MLPERF_CLASSES = [
         "Airplane", "Antelope", "Apple", "Backpack", "Balloon", "Banana",
         "Barrel", "Baseball bat", "Baseball glove", "Bee", "Beer", "Bench",
@@ -716,56 +716,48 @@ def download_openimages(
         "Bookcase", "Boot", "Bottle", "Bowl", "Bowling equipment", "Box",
         "Boy", "Brassiere", "Bread", "Broccoli", "Bronze sculpture",
         "Bull", "Bus", "Bust", "Butterfly", "Cabinetry", "Cake",
-        "Camel", "Camera", "Candle", "Candy", "Cannon", "Canoe", "Car",
+        "Camel", "Camera", "Candle", "Candy", "Cannon", "Canoe",
         "Carrot", "Cart", "Castle", "Cat", "Cattle", "Cello", "Chair",
         "Cheese", "Chest of drawers", "Chicken", "Christmas tree", "Coat",
         "Cocktail", "Coffee", "Coffee cup", "Coffee table", "Coin",
         "Common sunflower", "Computer keyboard", "Computer monitor",
-        "Computer mouse", "Cookie", "Countertop", "Cowboy hat", "Crab",
-        "Crocodile", "Crow", "Crown", "Crutch", "Cucumber", "Cup",
-        "Curtain", "Deer", "Desk", "Dinosaur", "Dog", "Doll",
-        "Dolphin", "Door", "Dragonfly", "Drawer", "Dress", "Drum",
-        "Duck", "Eagle", "Earrings", "Egg", "Elephant", "Falcon",
-        "Fedora", "Flag", "Flowerpot", "Football", "Football helmet",
-        "Fork", "Fountain", "French fries", "French horn", "Frog",
-        "Giraffe", "Girl", "Glasses", "Goat", "Goggles", "Goldfish",
-        "Golf ball", "Golf cart", "Gondola", "Goose", "Grape", "Grapefruit",
-        "Guitar", "Hamburger", "Hammer", "Hamster", "Handbag", "Handgun",
-        "Harbor seal", "Headphones", "Helicopter", "High heels", "Hiking equipment",
-        "Hippopotamus", "Horse", "House", "Houseplant", "Human arm",
-        "Human beard", "Human body", "Human ear", "Human eye", "Human face",
-        "Human foot", "Human hair", "Human hand", "Human head", "Human leg",
-        "Human mouth", "Human nose", "Ice cream", "Jacket", "Jeans",
-        "Jellyfish", "Juice", "Kangaroo", "Kettle", "Kitchen knife",
-        "Kite", "Knife", "Ladder", "Ladybug", "Lamp", "Laptop",
-        "Lavender", "Lemon", "Leopard", "Light bulb", "Lighthouse",
-        "Lily", "Lion", "Lipstick", "Lizard", "Man", "Mango",
-        "Maple", "Microphone", "Microwave oven", "Miniskirt", "Mirror",
-        "Missile", "Monkey", "Motorcycle", "Mouse", "Mushroom",
-        "Musical keyboard", "Nail", "Necklace", "Nightstand", "Office building",
-        "Orange", "Organ", "Ostrich", "Otter", "Owl", "Oyster",
-        "Paddle", "Palm tree", "Parachute", "Parrot", "Pasta", "Peach",
-        "Pear", "Pen", "Penguin", "Person", "Piano", "Picnic basket",
-        "Picture frame", "Pig", "Pillow", "Pineapple", "Pitcher",
-        "Pizza", "Plastic bag", "Plate", "Platter", "Porch", "Poster",
-        "Pumpkin", "Rabbit", "Raccoon", "Raven", "Refrigerator",
-        "Rhinoceros", "Rifle", "Ring binder", "Rocket", "Roller skates",
-        "Rose", "Rugby ball", "Salad", "Sandal", "Saucer", "Saxophone",
-        "Scarf", "Scissors", "Scorpion", "Sculpture", "Sea lion", "Sea turtle",
-        "Shark", "Sheep", "Shelf", "Shirt", "Shorts", "Shrimp",
-        "Sink", "Skateboard", "Ski", "Skull", "Skyscraper", "Snake",
-        "Sock", "Sofa bed", "Sparrow", "Spider", "Spoon", "Sports uniform",
-        "Squirrel", "Stairs", "Stool", "Strawberry", "Street light",
-        "Studio couch", "Suit", "Suitcase", "Sunflower", "Sunglasses",
+        "Convenience store", "Cookie", "Countertop", "Cowboy hat", "Crab",
+        "Crocodile", "Cucumber", "Cupboard", "Curtain", "Deer", "Desk",
+        "Dinosaur", "Dog", "Doll", "Dolphin", "Door", "Dragonfly",
+        "Drawer", "Dress", "Drum", "Duck", "Eagle", "Earrings",
+        "Egg (Food)", "Elephant", "Falcon", "Fedora", "Flag", "Flowerpot",
+        "Football", "Football helmet", "Fork", "Fountain", "French fries",
+        "French horn", "Frog", "Giraffe", "Girl", "Glasses", "Goat",
+        "Goggles", "Goldfish", "Gondola", "Goose", "Grape", "Grapefruit",
+        "Guitar", "Hamburger", "Handbag", "Harbor seal", "Headphones",
+        "Helicopter", "High heels", "Hiking equipment", "Horse", "House",
+        "Houseplant", "Human arm", "Human beard", "Human body", "Human ear",
+        "Human eye", "Human face", "Human foot", "Human hair", "Human hand",
+        "Human head", "Human leg", "Human mouth", "Human nose", "Ice cream",
+        "Jacket", "Jeans", "Jellyfish", "Juice", "Kitchen & dining room table",
+        "Kite", "Lamp", "Lantern", "Laptop", "Lavender (Plant)", "Lemon",
+        "Light bulb", "Lighthouse", "Lily", "Lion", "Lipstick", "Lizard",
+        "Man", "Maple", "Microphone", "Mirror", "Mixing bowl", "Mobile phone",
+        "Monkey", "Motorcycle", "Muffin", "Mug", "Mule", "Mushroom",
+        "Musical keyboard", "Necklace", "Nightstand", "Office building",
+        "Orange", "Owl", "Oyster", "Paddle", "Palm tree", "Parachute",
+        "Parrot", "Pen", "Penguin", "Personal flotation device", "Piano",
+        "Picture frame", "Pig", "Pillow", "Pizza", "Plate", "Platter",
+        "Porch", "Poster", "Pumpkin", "Rabbit", "Rifle", "Roller skates",
+        "Rose", "Salad", "Sandal", "Saucer", "Saxophone", "Scarf",
+        "Sea lion", "Sea turtle", "Sheep", "Shelf", "Shirt", "Shorts",
+        "Shrimp", "Sink", "Skateboard", "Ski", "Skull", "Skyscraper",
+        "Snake", "Sock", "Sofa bed", "Sparrow", "Spider", "Spoon",
+        "Sports uniform", "Squirrel", "Stairs", "Stool", "Strawberry",
+        "Street light", "Studio couch", "Suit", "Sun hat", "Sunglasses",
         "Surfboard", "Sushi", "Swan", "Swimming pool", "Swimwear", "Tank",
-        "Tap", "Taxi", "Tea", "Teddy bear", "Television", "Tennis ball",
-        "Tennis racket", "Tent", "Tie", "Tiger", "Tin can", "Tire",
-        "Toilet", "Tomato", "Tortoise", "Tower", "Traffic light",
-        "Train", "Tripod", "Truck", "Trumpet", "Umbrella", "Van",
-        "Vase", "Vehicle registration plate", "Violin", "Wall clock",
-        "Washing machine", "Waste container", "Watch", "Watermelon",
-        "Whale", "Wheel", "Wheelchair", "Window", "Wine", "Wine glass",
-        "Woman", "Woodpecker", "Zebra", "Zucchini",
+        "Tap", "Taxi", "Tea", "Teddy bear", "Television", "Tent", "Tie",
+        "Tiger", "Tin can", "Tire", "Toilet", "Tomato", "Tortoise",
+        "Tower", "Traffic light", "Train", "Tripod", "Truck", "Trumpet",
+        "Umbrella", "Van", "Vase", "Vehicle registration plate", "Violin",
+        "Wall clock", "Waste container", "Watch", "Whale", "Wheel",
+        "Wheelchair", "Whiteboard", "Window", "Wine", "Wine glass",
+        "Woman", "Zebra", "Zucchini",
     ]
 
     import csv
@@ -805,16 +797,10 @@ def download_openimages(
 
     logger.info(f"Found {len(image_ids)} images with MLPerf classes")
 
-    # MLPerf official subset is exactly 24781 images
-    MLPERF_SUBSET_SIZE = 24781
-    if max_images:
-        target_count = min(max_images, len(image_ids))
-    else:
-        target_count = min(MLPERF_SUBSET_SIZE, len(image_ids))
-
-    if len(image_ids) > target_count:
-        image_ids = image_ids[:target_count]
-        logger.info(f"Limited to {target_count} images (MLPerf official subset)")
+    # Apply max_images limit only if explicitly specified
+    if max_images and max_images < len(image_ids):
+        image_ids = image_ids[:max_images]
+        logger.info(f"Limited to {max_images} images (user specified)")
 
     # Step 3: Download images from S3
     existing = set(p.stem for p in images_dir.glob("*.jpg"))
