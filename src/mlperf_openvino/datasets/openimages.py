@@ -326,24 +326,34 @@ class OpenImagesDataset(BaseDataset):
         """Preprocess all images and save to disk (like NVIDIA submissions)."""
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        def process_and_save(idx: int) -> bool:
+        failed_images = []
+
+        def process_and_save(idx: int) -> Tuple[bool, Optional[str]]:
             sample = self._samples[idx]
             image_id = sample['image_id']
+            image_path = sample['image_path']
             cache_path = self._preprocessed_dir / f"{image_id}.npy"
 
             if cache_path.exists():
-                return True
+                return True, None
 
             try:
-                img_array, _ = self._preprocess_image(sample['image_path'])
+                img_array, _ = self._preprocess_image(image_path)
                 np.save(cache_path, img_array.astype(np.float32))
-                return True
+                return True, None
             except Exception as e:
-                logger.warning(f"Failed to preprocess {image_id}: {e}")
-                return False
+                # Check if image file is corrupted/empty
+                try:
+                    file_size = Path(image_path).stat().st_size
+                    if file_size < 1000:  # Likely corrupted if < 1KB
+                        return False, f"{image_id} (corrupted, {file_size} bytes)"
+                except:
+                    pass
+                return False, f"{image_id}: {e}"
 
         total = len(self._samples)
         completed = 0
+        failed_count = 0
 
         print(f"Preprocessing {total} images to disk cache...")
         print("(This only happens once, subsequent runs will be fast)")
@@ -353,12 +363,26 @@ class OpenImagesDataset(BaseDataset):
             futures = {executor.submit(process_and_save, i): i for i in range(total)}
 
             for future in as_completed(futures):
+                success, error_msg = future.result()
                 completed += 1
+                if not success and error_msg:
+                    failed_images.append(error_msg)
+                    failed_count += 1
                 if completed % 500 == 0 or completed == total:
                     print(f"\rPreprocessing: {completed}/{total} ({100*completed/total:.1f}%)", end="", flush=True)
 
         print()
-        logger.info(f"Disk cache created: {completed} files")
+
+        if failed_images:
+            logger.warning(f"Failed to preprocess {failed_count} images (corrupted downloads)")
+            # Save list of failed images for re-download
+            failed_file = self._preprocessed_dir / "failed_images.txt"
+            with open(failed_file, 'w') as f:
+                f.write('\n'.join(failed_images))
+            logger.warning(f"List saved to: {failed_file}")
+            logger.warning("Delete corrupted images and re-run dataset download to fix")
+
+        logger.info(f"Disk cache created: {completed - failed_count}/{total} files")
 
     def _load_annotations(self, annotations_path: Path) -> None:
         """Load annotations from CSV file."""

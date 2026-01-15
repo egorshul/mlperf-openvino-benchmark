@@ -1090,3 +1090,71 @@ def get_dataset_info(dataset_name: str) -> Dict:
     if dataset_name not in DATASET_REGISTRY:
         raise ValueError(f"Unknown dataset: {dataset_name}")
     return DATASET_REGISTRY[dataset_name]
+
+
+def redownload_corrupted_openimages(data_path: str, num_workers: int = 8) -> int:
+    """
+    Re-download corrupted OpenImages files.
+
+    Checks for corrupted images (< 1KB or unreadable) and re-downloads them.
+
+    Args:
+        data_path: Path to OpenImages dataset directory
+        num_workers: Number of parallel download workers
+
+    Returns:
+        Number of files re-downloaded
+    """
+    from PIL import Image
+
+    data_dir = Path(data_path)
+    images_dir = data_dir / "validation" / "data"
+    if not images_dir.exists():
+        images_dir = data_dir / "images"
+
+    if not images_dir.exists():
+        logger.error(f"Images directory not found in {data_path}")
+        return 0
+
+    # Find corrupted images
+    corrupted = []
+    logger.info("Checking for corrupted images...")
+
+    for img_path in images_dir.glob("*.jpg"):
+        try:
+            # Check file size
+            if img_path.stat().st_size < 1000:
+                corrupted.append(img_path.stem)
+                continue
+
+            # Try to open image
+            with Image.open(img_path) as img:
+                img.verify()
+        except Exception:
+            corrupted.append(img_path.stem)
+
+    if not corrupted:
+        logger.info("No corrupted images found")
+        return 0
+
+    logger.info(f"Found {len(corrupted)} corrupted images, re-downloading...")
+
+    # Delete corrupted files
+    for image_id in corrupted:
+        img_path = images_dir / f"{image_id}.jpg"
+        if img_path.exists():
+            img_path.unlink()
+
+    # Re-download
+    _download_openimages_from_s3(corrupted, images_dir, num_workers)
+
+    # Also clear preprocessed cache for these images
+    cache_dir = data_dir / "preprocessed_cache"
+    if cache_dir.exists():
+        for image_id in corrupted:
+            cache_file = cache_dir / f"{image_id}.npy"
+            if cache_file.exists():
+                cache_file.unlink()
+        logger.info(f"Cleared {len(corrupted)} cached preprocessed files")
+
+    return len(corrupted)
