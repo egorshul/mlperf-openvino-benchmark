@@ -166,6 +166,78 @@ class BertTokenizer:
             tokens.append(self._inv_vocab.get(idx, '[UNK]'))
         return tokens
 
+    def encode_with_mapping(
+        self,
+        question: str,
+        context: str,
+        max_length: int = MAX_SEQ_LENGTH,
+        padding: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Encode question and context for BERT with token-to-original mapping.
+
+        Returns:
+            Dictionary with input_ids, attention_mask, token_type_ids,
+            and mapping information for answer extraction.
+        """
+        # Split context into whitespace-separated doc_tokens
+        doc_tokens = context.split()
+
+        # Build char_to_word mapping
+        char_to_word_offset = []
+        for i, word in enumerate(doc_tokens):
+            # Find word position in original context
+            start = context.find(word, len(''.join(doc_tokens[:i])) + i)
+            for _ in range(len(word)):
+                char_to_word_offset.append(i)
+            char_to_word_offset.append(i)  # for space after word
+
+        # Tokenize question
+        question_tokens = ['[CLS]'] + self.tokenize(question) + ['[SEP]']
+
+        # Tokenize context with mapping to doc_tokens
+        tok_to_orig_index = []
+        all_doc_tokens = []
+
+        for i, word in enumerate(doc_tokens):
+            sub_tokens = self.tokenize(word)
+            for sub_token in sub_tokens:
+                tok_to_orig_index.append(i)
+                all_doc_tokens.append(sub_token)
+
+        # Truncate if needed
+        max_context_len = max_length - len(question_tokens) - 1  # -1 for [SEP]
+        if len(all_doc_tokens) > max_context_len:
+            all_doc_tokens = all_doc_tokens[:max_context_len]
+            tok_to_orig_index = tok_to_orig_index[:max_context_len]
+
+        context_tokens = all_doc_tokens + ['[SEP]']
+        tokens = question_tokens + context_tokens
+
+        # Create token-to-orig mapping for full sequence
+        # -1 for question tokens (no mapping to context)
+        full_tok_to_orig = [-1] * len(question_tokens) + tok_to_orig_index + [-1]  # -1 for [SEP]
+
+        input_ids = self.convert_tokens_to_ids(tokens)
+        attention_mask = [1] * len(input_ids)
+        token_type_ids = [0] * len(question_tokens) + [1] * len(context_tokens)
+
+        # Padding
+        if padding:
+            pad_len = max_length - len(input_ids)
+            input_ids = input_ids + [0] * pad_len
+            attention_mask = attention_mask + [0] * pad_len
+            token_type_ids = token_type_ids + [0] * pad_len
+            full_tok_to_orig = full_tok_to_orig + [-1] * pad_len
+
+        return {
+            'input_ids': np.array(input_ids, dtype=np.int64),
+            'attention_mask': np.array(attention_mask, dtype=np.int64),
+            'token_type_ids': np.array(token_type_ids, dtype=np.int64),
+            'tok_to_orig_index': full_tok_to_orig,
+            'doc_tokens': doc_tokens,
+        }
+
     def encode(
         self,
         question: str,
@@ -179,47 +251,11 @@ class BertTokenizer:
         Returns:
             Dictionary with input_ids, attention_mask, token_type_ids
         """
-        if hasattr(self, '_hf_tokenizer') and self._hf_tokenizer is not None:
-            encoding = self._hf_tokenizer.encode_plus(
-                question,
-                context,
-                max_length=max_length,
-                padding='max_length' if padding else False,
-                truncation='only_second',
-                return_tensors='np'
-            )
-            return {
-                'input_ids': encoding['input_ids'][0].astype(np.int64),
-                'attention_mask': encoding['attention_mask'][0].astype(np.int64),
-                'token_type_ids': encoding['token_type_ids'][0].astype(np.int64),
-            }
-
-        # Basic encoding
-        question_tokens = ['[CLS]'] + self.tokenize(question) + ['[SEP]']
-        context_tokens = self.tokenize(context) + ['[SEP]']
-
-        # Truncate context if needed
-        max_context_len = max_length - len(question_tokens) - 1
-        if len(context_tokens) > max_context_len:
-            context_tokens = context_tokens[:max_context_len]
-
-        tokens = question_tokens + context_tokens
-
-        input_ids = self.convert_tokens_to_ids(tokens)
-        attention_mask = [1] * len(input_ids)
-        token_type_ids = [0] * len(question_tokens) + [1] * len(context_tokens)
-
-        # Padding
-        if padding:
-            pad_len = max_length - len(input_ids)
-            input_ids = input_ids + [0] * pad_len
-            attention_mask = attention_mask + [0] * pad_len
-            token_type_ids = token_type_ids + [0] * pad_len
-
+        result = self.encode_with_mapping(question, context, max_length, padding)
         return {
-            'input_ids': np.array(input_ids, dtype=np.int64),
-            'attention_mask': np.array(attention_mask, dtype=np.int64),
-            'token_type_ids': np.array(token_type_ids, dtype=np.int64),
+            'input_ids': result['input_ids'],
+            'attention_mask': result['attention_mask'],
+            'token_type_ids': result['token_type_ids'],
         }
 
     def decode(self, token_ids: List[int]) -> str:
@@ -348,11 +384,11 @@ class SQuADDataset(BaseDataset):
                     })
 
     def _create_features(self) -> None:
-        """Create tokenized features from examples."""
+        """Create tokenized features from examples with token-to-original mapping."""
         self._features = []
 
         for idx, sample in enumerate(self._samples):
-            encoding = self._tokenizer.encode(
+            encoding = self._tokenizer.encode_with_mapping(
                 sample['question'],
                 sample['context'],
                 max_length=self.max_seq_length,
@@ -365,6 +401,8 @@ class SQuADDataset(BaseDataset):
                 'input_ids': encoding['input_ids'],
                 'attention_mask': encoding['attention_mask'],
                 'token_type_ids': encoding['token_type_ids'],
+                'tok_to_orig_index': encoding['tok_to_orig_index'],
+                'doc_tokens': encoding['doc_tokens'],
             }
 
             self._features.append(feature)
@@ -471,8 +509,9 @@ class SQuADDataset(BaseDataset):
 
         for i, idx in enumerate(indices):
             feature = self._features[idx]
-            input_ids = feature['input_ids']
             token_type_ids = feature['token_type_ids']
+            tok_to_orig_index = feature.get('tok_to_orig_index', None)
+            doc_tokens = feature.get('doc_tokens', None)
 
             # Get current sample logits
             s_logits = start_logits[i]
@@ -510,6 +549,10 @@ class SQuADDataset(BaseDataset):
                     # Must be within context (not question or special tokens)
                     if start_index < context_start or end_index > context_end:
                         continue
+                    # Must have valid mapping to original tokens
+                    if tok_to_orig_index is not None:
+                        if tok_to_orig_index[start_index] == -1 or tok_to_orig_index[end_index] == -1:
+                            continue
 
                     score = s_logits[start_index] + e_logits[end_index]
                     if score > best_score:
@@ -517,12 +560,24 @@ class SQuADDataset(BaseDataset):
                         best_start = start_index
                         best_end = end_index
 
-            # Decode answer from best span
-            answer_ids = input_ids[best_start:best_end + 1].tolist()
-            answer_text = self._tokenizer.decode(answer_ids)
+            # Extract answer text using mapping to original doc_tokens
+            if tok_to_orig_index is not None and doc_tokens is not None:
+                # Map token positions to original word positions
+                orig_start = tok_to_orig_index[best_start]
+                orig_end = tok_to_orig_index[best_end]
 
-            # Clean up tokenization artifacts
-            answer_text = answer_text.replace(" ##", "").replace("##", "")
+                if orig_start != -1 and orig_end != -1:
+                    # Get original words and join
+                    answer_text = ' '.join(doc_tokens[orig_start:orig_end + 1])
+                else:
+                    answer_text = ""
+            else:
+                # Fallback: decode from token IDs
+                input_ids = feature['input_ids']
+                answer_ids = input_ids[best_start:best_end + 1].tolist()
+                answer_text = self._tokenizer.decode(answer_ids)
+                answer_text = answer_text.replace(" ##", "").replace("##", "")
+
             answer_text = answer_text.strip()
 
             predictions.append(answer_text)
