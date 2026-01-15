@@ -78,10 +78,34 @@ def evaluate_openimages_accuracy(
     # Check if annotations have correct category_id range (1-365 for MLPerf)
     # If we see category_ids > 365, the annotations file needs regeneration
     max_cat_id = max(cat_ids) if cat_ids else 0
+    min_cat_id = min(cat_ids) if cat_ids else 0
     if max_cat_id > 400:  # Old format used all ~600 OpenImages classes
         logger.warning(f"COCO annotations have category_ids up to {max_cat_id}")
         logger.warning("This suggests the annotations file was created with OLD format.")
         logger.warning("Please delete openimages-mlperf.json and re-run to regenerate with correct category_ids (1-365).")
+
+    # Auto-detect label format by analyzing first predictions
+    # Check what label values the model outputs
+    all_model_labels = []
+    for pred in list(predictions.values())[:100]:  # Sample first 100 predictions
+        labels = pred.get('labels', np.array([]))
+        if len(labels) > 0:
+            all_model_labels.extend(labels[:10].tolist())  # First 10 labels per image
+
+    if all_model_labels:
+        min_label = int(min(all_model_labels))
+        max_label = int(max(all_model_labels))
+        logger.info(f"Model label range: {min_label} to {max_label}")
+        logger.info(f"COCO category_id range: {min_cat_id} to {max_cat_id}")
+
+        # Auto-detect if we need to adjust label indexing
+        if model_labels_zero_indexed:
+            # If model outputs 0-indexed and min is 0, we add +1
+            if min_label == 0 and min_cat_id == 1:
+                logger.info("Auto-detected: Model uses 0-indexed labels, will add +1")
+            elif min_label >= 1 and min_cat_id == 1:
+                logger.warning(f"Model labels start at {min_label}, but model_labels_zero_indexed=True")
+                logger.warning("Labels may already be 1-indexed. Consider setting model_labels_zero_indexed=False")
 
     # Convert predictions to COCO format
     # COCO format: [{'image_id': int, 'category_id': int, 'bbox': [x,y,w,h], 'score': float}]
@@ -165,9 +189,28 @@ def evaluate_openimages_accuracy(
     if skipped_categories:
         logger.warning(f"Skipped {len(skipped_categories)} invalid category IDs: {sorted(skipped_categories)[:20]}")
 
+        # If we skipped too many and they look like off-by-one error, suggest fix
+        if 0 in skipped_categories and model_labels_zero_indexed:
+            logger.warning("Category 0 was skipped - model might output 0-indexed labels starting from 0")
+        if len(skipped_categories) > 100:
+            skipped_list = sorted(skipped_categories)
+            if skipped_list[0] == 0 or (skipped_list[0] > max_cat_id):
+                logger.error("Many predictions skipped! Check model_labels_zero_indexed parameter.")
+                logger.error(f"Expected category_ids: {min_cat_id}-{max_cat_id}, got labels that map to: {skipped_list[:10]}...")
+
     if not coco_results:
-        logger.warning("No predictions to evaluate")
-        logger.warning("This may indicate a category_id mismatch between model and annotations")
+        logger.error("No predictions to evaluate!")
+        logger.error("This indicates a category_id mismatch between model and annotations.")
+        if skipped_categories:
+            logger.error(f"All {len(skipped_categories)} unique label values were invalid.")
+            logger.error(f"Model label values (after +1 if applied): {sorted(skipped_categories)[:20]}")
+            logger.error(f"Valid COCO category_ids: {min_cat_id} to {max_cat_id}")
+
+            # Suggest fix
+            if all(c > max_cat_id for c in skipped_categories):
+                logger.error("FIX: Model labels are too high. Try model_labels_zero_indexed=False")
+            elif all(c < min_cat_id for c in skipped_categories):
+                logger.error("FIX: Model labels are too low. Try model_labels_zero_indexed=True")
         return {'mAP': 0.0, 'num_predictions': 0}
 
     logger.info(f"Evaluating {len(coco_results)} predictions")
