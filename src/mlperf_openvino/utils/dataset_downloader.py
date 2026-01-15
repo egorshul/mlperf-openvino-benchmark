@@ -682,8 +682,9 @@ def download_openimages(
     # Check if already downloaded
     existing_images = list(images_dir.glob("*.jpg"))
     coco_annotations = annotations_dir / "openimages-mlperf.json"
-    target_count = max_images if max_images else 24000
-    if len(existing_images) >= target_count and coco_annotations.exists() and not force:
+    # Only use quick check if max_images is explicitly specified
+    # Otherwise, we need to filter by MLPerf classes to determine actual count
+    if max_images and len(existing_images) >= max_images and coco_annotations.exists() and not force:
         logger.info(f"OpenImages already downloaded: {len(existing_images)} images")
         return {
             "data_path": str(data_dir),
@@ -802,8 +803,18 @@ def download_openimages(
         image_ids = image_ids[:max_images]
         logger.info(f"Limited to {max_images} images (user specified)")
 
-    # Step 3: Download images from S3
+    # Check if already complete (all filtered images downloaded)
     existing = set(p.stem for p in images_dir.glob("*.jpg"))
+    if len(existing) >= len(image_ids) and coco_annotations.exists() and not force:
+        logger.info(f"OpenImages already complete: {len(existing)} images (MLPerf filtered: {len(image_ids)})")
+        return {
+            "data_path": str(data_dir),
+            "annotations_file": str(coco_annotations),
+            "images_dir": str(images_dir),
+            "num_samples": len(existing),
+        }
+
+    # Step 3: Download images from S3
     to_download = [img_id for img_id in image_ids if img_id not in existing]
 
     if to_download:
