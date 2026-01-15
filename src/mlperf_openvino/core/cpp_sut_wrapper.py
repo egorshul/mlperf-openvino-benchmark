@@ -9,6 +9,7 @@ The actual inference runs in C++ without GIL for maximum throughput.
 import logging
 import time
 import threading
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -923,19 +924,48 @@ class RetinaNetCppSUTWrapper:
         self._cpp_sut.reset_counters()
 
     def compute_accuracy(self) -> Dict[str, float]:
-        """Compute mAP accuracy."""
+        """Compute mAP accuracy using pycocotools (official MLPerf method)."""
         predictions = self.get_predictions()
 
         if not predictions:
             return {'mAP': 0.0, 'num_samples': 0}
 
+        # Try to use pycocotools for accurate mAP calculation
+        try:
+            from ..datasets.coco_eval import evaluate_openimages_accuracy, PYCOCOTOOLS_AVAILABLE
+
+            if PYCOCOTOOLS_AVAILABLE:
+                # Find COCO annotations file
+                coco_file = None
+                data_path = Path(self.qsl.dataset.data_path)
+
+                for name in [
+                    "annotations/openimages-mlperf.json",
+                    "openimages-mlperf.json",
+                ]:
+                    path = data_path / name
+                    if path.exists():
+                        coco_file = str(path)
+                        break
+
+                if coco_file:
+                    logger.info(f"Using pycocotools with {coco_file}")
+                    return evaluate_openimages_accuracy(
+                        predictions=predictions,
+                        coco_annotations_file=coco_file,
+                        input_size=800,
+                    )
+                else:
+                    logger.warning("COCO annotations file not found, using fallback mAP calculation")
+        except Exception as e:
+            logger.warning(f"pycocotools evaluation failed: {e}, using fallback")
+
+        # Fallback to our mAP calculation
         pred_list = []
-        gt_list = []
         indices = sorted(predictions.keys())
 
         for idx in indices:
             pred_list.append(predictions[idx])
-            gt_list.append(self.qsl.get_label(idx))
 
         return self.qsl.dataset.compute_accuracy(pred_list, indices)
 
