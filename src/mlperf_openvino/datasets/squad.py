@@ -23,6 +23,15 @@ logger = logging.getLogger(__name__)
 MAX_SEQ_LENGTH = 384
 MAX_QUERY_LENGTH = 64
 DOC_STRIDE = 128
+MAX_ANSWER_LENGTH = 30
+N_BEST_SIZE = 20
+
+
+def _get_best_indexes(logits: np.ndarray, n_best: int = N_BEST_SIZE) -> List[int]:
+    """Get the n-best logit indices sorted by score."""
+    # Get indices sorted by logit values (descending)
+    index_and_score = sorted(enumerate(logits), key=lambda x: x[1], reverse=True)
+    return [idx for idx, _ in index_and_score[:n_best]]
 
 
 def normalize_answer(s: str) -> str:
@@ -462,37 +471,59 @@ class SQuADDataset(BaseDataset):
 
         for i, idx in enumerate(indices):
             feature = self._features[idx]
-            example_idx = feature['example_index']
-            sample = self._samples[example_idx]
-
-            # Get best start/end positions
-            start_idx = int(np.argmax(start_logits[i]))
-            end_idx = int(np.argmax(end_logits[i]))
-
-            # Ensure valid span
-            if end_idx < start_idx:
-                end_idx = start_idx
-
-            # Extract tokens
             input_ids = feature['input_ids']
             token_type_ids = feature['token_type_ids']
 
-            # Find context tokens (token_type_id = 1)
+            # Get current sample logits
+            s_logits = start_logits[i]
+            e_logits = end_logits[i]
+
+            # Find context boundaries (token_type_id = 1 is context)
+            # token_type_id: 0 = [CLS] question [SEP], 1 = context [SEP]
             context_start = 0
+            context_end = len(token_type_ids) - 1
             for j, tid in enumerate(token_type_ids):
                 if tid == 1:
                     context_start = j
                     break
+            for j in range(len(token_type_ids) - 1, -1, -1):
+                if token_type_ids[j] == 1:
+                    context_end = j
+                    break
 
-            # Validate positions are in context
-            if start_idx < context_start:
-                start_idx = context_start
-            if end_idx < context_start:
-                end_idx = context_start
+            # Get n-best start and end indices
+            start_indexes = _get_best_indexes(s_logits, N_BEST_SIZE)
+            end_indexes = _get_best_indexes(e_logits, N_BEST_SIZE)
 
-            # Decode answer
-            answer_ids = input_ids[start_idx:end_idx + 1].tolist()
+            # Find best valid span using n-best candidates
+            best_score = float('-inf')
+            best_start = context_start
+            best_end = context_start
+
+            for start_index in start_indexes:
+                for end_index in end_indexes:
+                    # Skip invalid spans
+                    if start_index > end_index:
+                        continue
+                    if end_index - start_index + 1 > MAX_ANSWER_LENGTH:
+                        continue
+                    # Must be within context (not question or special tokens)
+                    if start_index < context_start or end_index > context_end:
+                        continue
+
+                    score = s_logits[start_index] + e_logits[end_index]
+                    if score > best_score:
+                        best_score = score
+                        best_start = start_index
+                        best_end = end_index
+
+            # Decode answer from best span
+            answer_ids = input_ids[best_start:best_end + 1].tolist()
             answer_text = self._tokenizer.decode(answer_ids)
+
+            # Clean up tokenization artifacts
+            answer_text = answer_text.replace(" ##", "").replace("##", "")
+            answer_text = answer_text.strip()
 
             predictions.append(answer_text)
 
