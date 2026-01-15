@@ -805,10 +805,16 @@ def download_openimages(
 
     logger.info(f"Found {len(image_ids)} images with MLPerf classes")
 
-    # Apply max_images limit if specified
-    if max_images and max_images < len(image_ids):
-        image_ids = image_ids[:max_images]
-        logger.info(f"Limiting to {max_images} images")
+    # MLPerf official subset is exactly 24781 images
+    MLPERF_SUBSET_SIZE = 24781
+    if max_images:
+        target_count = min(max_images, len(image_ids))
+    else:
+        target_count = min(MLPERF_SUBSET_SIZE, len(image_ids))
+
+    if len(image_ids) > target_count:
+        image_ids = image_ids[:target_count]
+        logger.info(f"Limited to {target_count} images (MLPerf official subset)")
 
     # Step 3: Download images from S3
     existing = set(p.stem for p in images_dir.glob("*.jpg"))
