@@ -707,32 +707,108 @@ def download_openimages(
         logger.info("Downloading class descriptions...")
         _download_file(CLASS_NAMES_URL, str(class_names_file))
 
-    # Step 2: Extract unique image IDs from annotations
-    logger.info("Extracting image IDs from annotations...")
+    # Step 2: Get MLPerf classes and filter annotations
+    # Official MLPerf uses these 264 classes from openimages_mlperf.sh
+    MLPERF_CLASSES = [
+        "Airplane", "Antelope", "Apple", "Backpack", "Balloon", "Banana",
+        "Barrel", "Baseball bat", "Baseball glove", "Bee", "Beer", "Bench",
+        "Bicycle", "Bicycle helmet", "Bicycle wheel", "Billboard", "Book",
+        "Bookcase", "Boot", "Bottle", "Bowl", "Bowling equipment", "Box",
+        "Boy", "Brassiere", "Bread", "Broccoli", "Bronze sculpture",
+        "Bull", "Bus", "Bust", "Butterfly", "Cabinetry", "Cake",
+        "Camel", "Camera", "Candle", "Candy", "Cannon", "Canoe", "Car",
+        "Carrot", "Cart", "Castle", "Cat", "Cattle", "Cello", "Chair",
+        "Cheese", "Chest of drawers", "Chicken", "Christmas tree", "Coat",
+        "Cocktail", "Coffee", "Coffee cup", "Coffee table", "Coin",
+        "Common sunflower", "Computer keyboard", "Computer monitor",
+        "Computer mouse", "Cookie", "Countertop", "Cowboy hat", "Crab",
+        "Crocodile", "Crow", "Crown", "Crutch", "Cucumber", "Cup",
+        "Curtain", "Deer", "Desk", "Dinosaur", "Dog", "Doll",
+        "Dolphin", "Door", "Dragonfly", "Drawer", "Dress", "Drum",
+        "Duck", "Eagle", "Earrings", "Egg", "Elephant", "Falcon",
+        "Fedora", "Flag", "Flowerpot", "Football", "Football helmet",
+        "Fork", "Fountain", "French fries", "French horn", "Frog",
+        "Giraffe", "Girl", "Glasses", "Goat", "Goggles", "Goldfish",
+        "Golf ball", "Golf cart", "Gondola", "Goose", "Grape", "Grapefruit",
+        "Guitar", "Hamburger", "Hammer", "Hamster", "Handbag", "Handgun",
+        "Harbor seal", "Headphones", "Helicopter", "High heels", "Hiking equipment",
+        "Hippopotamus", "Horse", "House", "Houseplant", "Human arm",
+        "Human beard", "Human body", "Human ear", "Human eye", "Human face",
+        "Human foot", "Human hair", "Human hand", "Human head", "Human leg",
+        "Human mouth", "Human nose", "Ice cream", "Jacket", "Jeans",
+        "Jellyfish", "Juice", "Kangaroo", "Kettle", "Kitchen knife",
+        "Kite", "Knife", "Ladder", "Ladybug", "Lamp", "Laptop",
+        "Lavender", "Lemon", "Leopard", "Light bulb", "Lighthouse",
+        "Lily", "Lion", "Lipstick", "Lizard", "Man", "Mango",
+        "Maple", "Microphone", "Microwave oven", "Miniskirt", "Mirror",
+        "Missile", "Monkey", "Motorcycle", "Mouse", "Mushroom",
+        "Musical keyboard", "Nail", "Necklace", "Nightstand", "Office building",
+        "Orange", "Organ", "Ostrich", "Otter", "Owl", "Oyster",
+        "Paddle", "Palm tree", "Parachute", "Parrot", "Pasta", "Peach",
+        "Pear", "Pen", "Penguin", "Person", "Piano", "Picnic basket",
+        "Picture frame", "Pig", "Pillow", "Pineapple", "Pitcher",
+        "Pizza", "Plastic bag", "Plate", "Platter", "Porch", "Poster",
+        "Pumpkin", "Rabbit", "Raccoon", "Raven", "Refrigerator",
+        "Rhinoceros", "Rifle", "Ring binder", "Rocket", "Roller skates",
+        "Rose", "Rugby ball", "Salad", "Sandal", "Saucer", "Saxophone",
+        "Scarf", "Scissors", "Scorpion", "Sculpture", "Sea lion", "Sea turtle",
+        "Shark", "Sheep", "Shelf", "Shirt", "Shorts", "Shrimp",
+        "Sink", "Skateboard", "Ski", "Skull", "Skyscraper", "Snake",
+        "Sock", "Sofa bed", "Sparrow", "Spider", "Spoon", "Sports uniform",
+        "Squirrel", "Stairs", "Stool", "Strawberry", "Street light",
+        "Studio couch", "Suit", "Suitcase", "Sunflower", "Sunglasses",
+        "Surfboard", "Sushi", "Swan", "Swimming pool", "Swimwear", "Tank",
+        "Tap", "Taxi", "Tea", "Teddy bear", "Television", "Tennis ball",
+        "Tennis racket", "Tent", "Tie", "Tiger", "Tin can", "Tire",
+        "Toilet", "Tomato", "Tortoise", "Tower", "Traffic light",
+        "Train", "Tripod", "Truck", "Trumpet", "Umbrella", "Van",
+        "Vase", "Vehicle registration plate", "Violin", "Wall clock",
+        "Washing machine", "Waste container", "Watch", "Watermelon",
+        "Whale", "Wheel", "Wheelchair", "Window", "Wine", "Wine glass",
+        "Woman", "Woodpecker", "Zebra", "Zucchini",
+    ]
+
+    import csv
+
+    # Load class name to LabelName mapping
+    logger.info("Loading class descriptions...")
+    class_name_to_label = {}
+    with open(class_names_file, 'r') as f:
+        reader = csv.reader(f)
+        for row in reader:
+            if len(row) >= 2:
+                label_name, display_name = row[0], row[1]
+                class_name_to_label[display_name] = label_name
+
+    # Get LabelNames for MLPerf classes
+    mlperf_labels = set()
+    for class_name in MLPERF_CLASSES:
+        if class_name in class_name_to_label:
+            mlperf_labels.add(class_name_to_label[class_name])
+
+    logger.info(f"Found {len(mlperf_labels)} MLPerf class labels")
+
+    # Extract image IDs that have MLPerf class annotations
+    logger.info("Extracting image IDs with MLPerf classes...")
     image_ids = []
     seen_ids = set()
 
-    import csv
     with open(annotations_file, 'r') as f:
         reader = csv.DictReader(f)
         for row in reader:
-            image_id = row['ImageID']
-            if image_id not in seen_ids:
-                seen_ids.add(image_id)
-                image_ids.append(image_id)
+            label_name = row['LabelName']
+            if label_name in mlperf_labels:
+                image_id = row['ImageID']
+                if image_id not in seen_ids:
+                    seen_ids.add(image_id)
+                    image_ids.append(image_id)
 
-    logger.info(f"Found {len(image_ids)} unique images in annotations")
+    logger.info(f"Found {len(image_ids)} images with MLPerf classes")
 
-    # MLPerf uses 24781 images - limit to this subset
-    MLPERF_IMAGE_COUNT = 24781
-    if max_images:
-        target_count = min(max_images, len(image_ids))
-    else:
-        target_count = min(MLPERF_IMAGE_COUNT, len(image_ids))
-
-    if target_count < len(image_ids):
-        image_ids = image_ids[:target_count]
-        logger.info(f"Using {target_count} images (MLPerf subset)")
+    # Apply max_images limit if specified
+    if max_images and max_images < len(image_ids):
+        image_ids = image_ids[:max_images]
+        logger.info(f"Limiting to {max_images} images")
 
     # Step 3: Download images from S3
     existing = set(p.stem for p in images_dir.glob("*.jpg"))
