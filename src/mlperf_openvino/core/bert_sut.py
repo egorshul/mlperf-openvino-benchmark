@@ -9,9 +9,12 @@ import array
 import logging
 import sys
 import time
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+
+from openvino.runtime import AsyncInferQueue
 
 try:
     from tqdm import tqdm
@@ -91,6 +94,65 @@ class BertSUT:
         # LoadGen handles
         self._sut = None
         self._qsl_handle = None
+
+        # Async inference queue for Server mode
+        self._async_queue = None
+        self._issued_count = 0
+        self._progress_stop_event = threading.Event()
+        self._setup_async_server()
+
+    def _setup_async_server(self) -> None:
+        """Setup AsyncInferQueue for Server mode."""
+        # Get optimal number of inference requests
+        num_requests = self.backend.num_streams
+        # Double for better pipelining
+        num_requests = max(num_requests * 2, 16)
+
+        logger.info(f"BERT Server mode: AsyncInferQueue with {num_requests} requests")
+
+        # Create AsyncInferQueue
+        compiled_model = self.backend._compiled_model
+        self._async_queue = AsyncInferQueue(compiled_model, num_requests)
+
+        # Set callback
+        def inference_callback(infer_request, userdata):
+            """Callback when async inference completes."""
+            query_id, sample_idx = userdata
+
+            try:
+                # Get outputs
+                if self.start_logits_name == self.end_logits_name:
+                    output = infer_request.get_output_tensor(0).data
+                    if output.shape[-1] == 2:
+                        start_logits = output[..., 0].copy()
+                        end_logits = output[..., 1].copy()
+                    else:
+                        seq_len = output.shape[-1] // 2
+                        start_logits = output[..., :seq_len].copy()
+                        end_logits = output[..., seq_len:].copy()
+                else:
+                    start_logits = infer_request.get_tensor(self.start_logits_name).data.copy()
+                    end_logits = infer_request.get_tensor(self.end_logits_name).data.copy()
+
+                # Store prediction
+                self._predictions[sample_idx] = (start_logits, end_logits)
+
+                # Create response - use array.array to keep data alive
+                combined = np.stack([start_logits.flatten(), end_logits.flatten()], axis=-1)
+                response_array = array.array('B', combined.astype(np.float32).tobytes())
+                bi = response_array.buffer_info()
+
+                response = lg.QuerySampleResponse(query_id, bi[0], bi[1])
+                lg.QuerySamplesComplete([response])
+
+                self._sample_count += 1
+
+            except Exception as e:
+                logger.error(f"BERT callback error: {e}")
+                response = lg.QuerySampleResponse(query_id, 0, 0)
+                lg.QuerySamplesComplete([response])
+
+        self._async_queue.set_callback(inference_callback)
 
     def _start_progress(self, total: int, desc: str = "Processing") -> None:
         """Start progress tracking."""
@@ -256,86 +318,103 @@ class BertSUT:
         return results
 
     def _issue_query_offline(self, query_samples: List[Any]) -> None:
-        """Process queries in Offline mode."""
-        responses = []
-        response_arrays = []  # Keep arrays alive until QuerySamplesComplete!
+        """Process queries in Offline mode using async inference for maximum throughput."""
+        total_samples = len(query_samples)
 
-        sample_ids = [qs.id for qs in query_samples]
-        sample_indices = [qs.index for qs in query_samples]
+        # Start progress monitoring
+        self._start_time = time.time()
+        self._progress_stop_event.clear()
+        self._issued_count = 0
+        self._sample_count = 0
 
-        # Start progress tracking
-        total_samples = len(sample_indices)
-        self._start_progress(total_samples, desc="BERT Offline inference")
+        # Start progress thread
+        def progress_thread():
+            while not self._progress_stop_event.is_set():
+                self._progress_stop_event.wait(timeout=1.0)
+                if self._progress_stop_event.is_set():
+                    break
+                elapsed = time.time() - self._start_time
+                throughput = self._sample_count / elapsed if elapsed > 0 else 0
+                pending = self._issued_count - self._sample_count
+                print(f"\rBERT Offline: issued={self._issued_count}, done={self._sample_count}, pending={pending}, {throughput:.1f} samples/sec", end="", flush=True)
 
-        # Process samples
-        for query_id, sample_idx in zip(sample_ids, sample_indices):
-            start_logits, end_logits = self._process_sample(sample_idx)
+        self._progress_thread = threading.Thread(target=progress_thread, daemon=True)
+        self._progress_thread.start()
 
-            # Store prediction
-            self._predictions[sample_idx] = (start_logits, end_logits)
+        # Submit all samples for async inference
+        for qs in query_samples:
+            sample_idx = qs.index
+            query_id = qs.id
 
-            # Create response
-            # Combine start and end logits for response
-            combined = np.stack([start_logits.flatten(), end_logits.flatten()], axis=-1)
-            response_array = array.array('B', combined.tobytes())
-            response_arrays.append(response_array)  # Keep alive!
-            bi = response_array.buffer_info()
+            # Get features
+            features = self.qsl.get_features(sample_idx)
 
-            response = lg.QuerySampleResponse(
-                query_id,
-                bi[0],
-                bi[1]
-            )
-            responses.append(response)
+            # Prepare inputs
+            inputs = {
+                self.input_ids_name: features['input_ids'].astype(np.int64),
+                self.attention_mask_name: features['attention_mask'].astype(np.int64),
+                self.token_type_ids_name: features['token_type_ids'].astype(np.int64),
+            }
 
-            # Update progress
-            self._sample_count += 1
-            self._update_progress(1)
+            # Start async inference with userdata
+            self._async_queue.start_async(inputs, userdata=(query_id, sample_idx))
+            self._issued_count += 1
 
-        # Close progress
-        self._close_progress()
+        # Wait for all async operations to complete
+        self._async_queue.wait_all()
 
-        lg.QuerySamplesComplete(responses)
+        # Stop progress thread
+        self._progress_stop_event.set()
+
+        # Print final stats
+        elapsed = time.time() - self._start_time
+        throughput = self._sample_count / elapsed if elapsed > 0 else 0
+        print(f"\nBERT Offline completed: {self._sample_count} samples in {elapsed:.1f}s ({throughput:.1f} samples/sec)")
 
         self._query_count += 1
 
     def _issue_query_server(self, query_samples: List[Any]) -> None:
-        """Process queries in Server mode."""
-        responses = []
-        response_arrays = []  # Keep arrays alive until QuerySamplesComplete!
-
-        # Start progress tracking if first query
-        if self._query_count == 0:
-            self._start_progress(0, desc="BERT Server inference")
+        """Process queries in Server mode using async inference."""
+        # Start progress monitoring thread if first query
+        if self._issued_count == 0:
+            self._start_time = time.time()
+            self._progress_stop_event.clear()
+            self._start_server_progress_thread()
 
         for qs in query_samples:
             sample_idx = qs.index
+            query_id = qs.id
 
-            start_logits, end_logits = self._process_sample(sample_idx)
+            # Get features
+            features = self.qsl.get_features(sample_idx)
 
-            # Store prediction
-            self._predictions[sample_idx] = (start_logits, end_logits)
+            # Prepare inputs
+            inputs = {
+                self.input_ids_name: features['input_ids'].astype(np.int64),
+                self.attention_mask_name: features['attention_mask'].astype(np.int64),
+                self.token_type_ids_name: features['token_type_ids'].astype(np.int64),
+            }
 
-            # Create response
-            combined = np.stack([start_logits.flatten(), end_logits.flatten()], axis=-1)
-            response_array = array.array('B', combined.tobytes())
-            response_arrays.append(response_array)  # Keep alive!
-            bi = response_array.buffer_info()
-
-            response = lg.QuerySampleResponse(
-                qs.id,
-                bi[0],
-                bi[1]
-            )
-            responses.append(response)
-
-            # Update progress
-            self._sample_count += 1
-            self._update_progress(1)
-
-        lg.QuerySamplesComplete(responses)
+            # Start async inference with userdata
+            self._async_queue.start_async(inputs, userdata=(query_id, sample_idx))
+            self._issued_count += 1
 
         self._query_count += 1
+
+    def _start_server_progress_thread(self) -> None:
+        """Start progress monitoring thread for Server mode."""
+        def progress_thread():
+            while not self._progress_stop_event.is_set():
+                self._progress_stop_event.wait(timeout=1.0)
+                if self._progress_stop_event.is_set():
+                    break
+                elapsed = time.time() - self._start_time
+                throughput = self._sample_count / elapsed if elapsed > 0 else 0
+                pending = self._issued_count - self._sample_count
+                print(f"\rBERT Server: issued={self._issued_count}, done={self._sample_count}, pending={pending}, {throughput:.1f} samples/sec", end="", flush=True)
+
+        self._progress_thread = threading.Thread(target=progress_thread, daemon=True)
+        self._progress_thread.start()
 
     def issue_queries(self, query_samples: List[Any]) -> None:
         """
@@ -353,9 +432,18 @@ class BertSUT:
 
     def flush_queries(self) -> None:
         """Flush any pending queries."""
-        # Close progress bar if still open (for Server mode)
-        if self._progress_bar is not None:
-            self._close_progress()
+        # For Server mode - wait for async queue and print stats
+        # (Offline mode already waits inside _issue_query_offline)
+        if self._async_queue is not None and self.scenario == Scenario.SERVER:
+            self._async_queue.wait_all()
+
+            # Stop progress thread
+            self._progress_stop_event.set()
+
+            # Print final stats
+            elapsed = time.time() - self._start_time
+            throughput = self._sample_count / elapsed if elapsed > 0 else 0
+            print(f"\nBERT Server completed: {self._sample_count} samples in {elapsed:.1f}s ({throughput:.1f} samples/sec)")
 
     def get_sut(self) -> Any:
         """Get LoadGen SUT handle."""
@@ -388,6 +476,7 @@ class BertSUT:
         self._predictions.clear()
         self._query_count = 0
         self._sample_count = 0
+        self._issued_count = 0
 
     def compute_accuracy(self) -> Dict[str, float]:
         """
