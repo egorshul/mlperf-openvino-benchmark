@@ -647,13 +647,17 @@ def download_openimages(
     output_dir: str,
     force: bool = False,
     max_images: Optional[int] = None,
-    num_workers: int = 8
+    num_workers: int = 16
 ) -> Dict[str, str]:
     """
     Download OpenImages validation set for RetinaNet Object Detection.
 
-    Uses FiftyOne library for reliable download from official sources.
-    Falls back to direct S3 download if FiftyOne is not available.
+    Uses official MLCommons approach:
+    1. Download MLPerf image list (24,781 images)
+    2. Download images from AWS S3 open-images-dataset bucket
+    3. Download annotations and convert to COCO format
+
+    Based on: https://github.com/mlcommons/inference/tree/master/vision/classification_and_detection
 
     Args:
         output_dir: Directory to save dataset
@@ -669,208 +673,257 @@ def download_openimages(
 
     data_dir = output_path / "openimages"
     data_dir.mkdir(parents=True, exist_ok=True)
-    images_dir = data_dir / "images"
+    images_dir = data_dir / "validation" / "data"
     images_dir.mkdir(parents=True, exist_ok=True)
     annotations_dir = data_dir / "annotations"
     annotations_dir.mkdir(parents=True, exist_ok=True)
 
     # Check if already downloaded
     existing_images = list(images_dir.glob("*.jpg"))
-    if len(existing_images) >= 24000 and not force:
+    coco_annotations = annotations_dir / "openimages-mlperf.json"
+    if len(existing_images) >= 24000 and coco_annotations.exists() and not force:
         logger.info(f"OpenImages already downloaded: {len(existing_images)} images")
-        ann_file = annotations_dir / "openimages-mlperf.json"
         return {
             "data_path": str(data_dir),
-            "annotations_file": str(ann_file) if ann_file.exists() else "",
+            "annotations_file": str(coco_annotations),
             "images_dir": str(images_dir),
             "num_samples": len(existing_images),
         }
 
-    # Try FiftyOne first (most reliable method)
-    # Based on: https://github.com/egorshul/MLPerf/tree/master/datasets/openimages
-    try:
-        import json
-        import fiftyone as fo
-        import fiftyone.zoo as foz
+    # URLs for MLPerf OpenImages
+    MLPERF_IMAGE_LIST_URL = "https://raw.githubusercontent.com/mlcommons/inference/master/vision/classification_and_detection/tools/openimages_mlperf.txt"
+    ANNOTATIONS_URL = "https://storage.googleapis.com/openimages/v5/validation-annotations-bbox.csv"
+    CLASS_NAMES_URL = "https://storage.googleapis.com/openimages/v5/class-descriptions-boxable.csv"
 
-        logger.info("Downloading OpenImages using FiftyOne...")
-        logger.info("This may take a while (downloading ~24k images)...")
-
-        # Download validation split - exact API from reference implementation
-        dataset = foz.load_zoo_dataset(
-            name="open-images-v6",
-            split="validation",
-            label_types="detections",
-            dataset_name="open-images",
-            dataset_dir=str(data_dir / "fiftyone"),
-        )
-
-        # Export to COCO format
-        logger.info("Converting dataset to COCO format...")
-        coco_labels_path = annotations_dir / "openimages-mlperf.json"
-
-        dataset.export(
-            labels_path=str(coco_labels_path),
-            dataset_type=fo.types.COCODetectionDataset,
-            label_field="detections",
-        )
-
-        # Add iscrowd label to openimages annotations (required for MLPerf)
-        with open(coco_labels_path) as fp:
-            labels = json.load(fp)
-        for annotation in labels["annotations"]:
-            annotation["iscrowd"] = int(annotation.get("IsGroupOf", 0))
-        with open(coco_labels_path, "w") as fp:
-            json.dump(labels, fp)
-
-        # Copy images to expected location
-        fiftyone_images = data_dir / "fiftyone" / "validation" / "data"
-        if fiftyone_images.exists():
-            import shutil
-            for img in fiftyone_images.glob("*.jpg"):
-                dest = images_dir / img.name
-                if not dest.exists():
-                    shutil.copy2(img, dest)
-
-        final_count = len(list(images_dir.glob("*.jpg")))
-        logger.info(f"OpenImages ready: {final_count} images")
-
-        return {
-            "data_path": str(data_dir),
-            "annotations_file": str(coco_labels_path),
-            "images_dir": str(images_dir),
-            "num_samples": final_count,
-        }
-
-    except ImportError:
-        logger.warning("FiftyOne not installed. Install with: pip install fiftyone")
-        logger.info("Falling back to direct S3 download...")
-
-    # Fallback: Direct S3 download
-    return _download_openimages_s3(output_dir, force, max_images, num_workers)
-
-
-def _download_openimages_s3(
-    output_dir: str,
-    force: bool = False,
-    max_images: Optional[int] = None,
-    num_workers: int = 8
-) -> Dict[str, str]:
-    """Fallback: Download OpenImages directly from S3."""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    output_path = Path(output_dir)
-    data_dir = output_path / "openimages"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    annotations_dir = data_dir / "annotations"
-    annotations_dir.mkdir(parents=True, exist_ok=True)
-    images_dir = data_dir / "images"
-    images_dir.mkdir(parents=True, exist_ok=True)
-
-    dataset_info = DATASET_REGISTRY["openimages"]
-
-    # Download annotations
-    ann_file = annotations_dir / "validation-annotations-bbox.csv"
-    if not ann_file.exists() or force:
-        logger.info("Downloading OpenImages annotations...")
-        _download_file(
-            dataset_info["annotations"]["url"],
-            str(ann_file),
-            expected_size_mb=dataset_info["annotations"].get("size_mb")
-        )
-
-    # Download class descriptions
-    class_filename = dataset_info["class_descriptions"]["filename"]
-    class_file = annotations_dir / class_filename
-    if not class_file.exists() or force:
-        logger.info("Downloading class descriptions...")
-        _download_file(
-            dataset_info["class_descriptions"]["url"],
-            str(class_file)
-        )
-
-    # Download MLPerf image list (official subset)
-    mlperf_list_url = "https://raw.githubusercontent.com/mlcommons/inference/master/vision/classification_and_detection/tools/openimages_mlperf.txt"
+    # Step 1: Download MLPerf image list
     mlperf_list_file = annotations_dir / "openimages_mlperf.txt"
+    if not mlperf_list_file.exists() or force:
+        logger.info("Downloading MLPerf image list...")
+        _download_file(MLPERF_IMAGE_LIST_URL, str(mlperf_list_file), show_progress=False)
 
-    try:
-        if not mlperf_list_file.exists() or force:
-            logger.info("Downloading MLPerf image list...")
-            _download_file(mlperf_list_url, str(mlperf_list_file), show_progress=False)
-    except Exception as e:
-        logger.warning(f"Could not download MLPerf image list: {e}")
-        mlperf_list_file = None
+    # Read image IDs from MLPerf list
+    image_ids = []
+    with open(mlperf_list_file, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                # Remove .jpg extension if present
+                image_id = line.replace('.jpg', '')
+                image_ids.append(image_id)
 
-    # Get list of images to download
-    image_ids = set()
+    logger.info(f"MLPerf list contains {len(image_ids)} images")
 
-    # Use MLPerf list if available
-    if mlperf_list_file and mlperf_list_file.exists():
-        with open(mlperf_list_file, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    image_id = line.replace('.jpg', '')
-                    image_ids.add(image_id)
-        logger.info(f"Found {len(image_ids)} images in MLPerf list")
-    else:
-        # Parse annotations to get image IDs
-        logger.info("Parsing annotations for image IDs...")
-        with open(ann_file, 'r') as f:
-            import csv
-            reader = csv.DictReader(f)
-            for row in reader:
-                image_id = row.get('ImageID', '')
-                if image_id:
-                    image_ids.add(image_id)
-        logger.info(f"Found {len(image_ids)} unique images in annotations")
-
-    # Limit number of images if specified
     if max_images and max_images < len(image_ids):
-        image_ids = set(list(image_ids)[:max_images])
+        image_ids = image_ids[:max_images]
         logger.info(f"Limiting to {max_images} images")
 
-    # Check existing images
+    # Step 2: Download annotations
+    annotations_file = annotations_dir / "validation-annotations-bbox.csv"
+    if not annotations_file.exists() or force:
+        logger.info("Downloading annotations...")
+        _download_file(ANNOTATIONS_URL, str(annotations_file))
+
+    class_names_file = annotations_dir / "class-descriptions-boxable.csv"
+    if not class_names_file.exists() or force:
+        logger.info("Downloading class descriptions...")
+        _download_file(CLASS_NAMES_URL, str(class_names_file))
+
+    # Step 3: Download images from S3
     existing = set(p.stem for p in images_dir.glob("*.jpg"))
-    to_download = image_ids - existing
+    to_download = [img_id for img_id in image_ids if img_id not in existing]
 
-    if not to_download:
-        logger.info(f"All {len(image_ids)} images already downloaded")
-    else:
+    if to_download:
         logger.info(f"Downloading {len(to_download)} images ({len(existing)} already exist)...")
+        _download_openimages_from_s3(to_download, images_dir, num_workers)
 
-        downloaded = 0
-        failed = 0
-
-        with ThreadPoolExecutor(max_workers=num_workers) as executor:
-            args_list = [(img_id, images_dir) for img_id in to_download]
-            futures = {executor.submit(_download_openimages_image, args): args[0]
-                      for args in args_list}
-
-            for future in as_completed(futures):
-                result = future.result()
-                if result:
-                    downloaded += 1
-                else:
-                    failed += 1
-
-                total = downloaded + failed
-                if total % 100 == 0 or total == len(to_download):
-                    print(f"\rDownloaded: {downloaded}/{len(to_download)}, failed: {failed}",
-                          end="", flush=True)
-
-        print()
-        logger.info(f"Downloaded {downloaded} images, {failed} failed")
+    # Step 4: Convert to COCO format
+    logger.info("Converting annotations to COCO format...")
+    _convert_openimages_to_coco(
+        annotations_file=annotations_file,
+        class_names_file=class_names_file,
+        image_ids=image_ids,
+        images_dir=images_dir,
+        output_file=coco_annotations,
+    )
 
     final_count = len(list(images_dir.glob("*.jpg")))
-    logger.info(f"OpenImages dataset ready: {final_count} images at {data_dir}")
+    logger.info(f"OpenImages ready: {final_count} images")
 
     return {
         "data_path": str(data_dir),
-        "annotations_file": str(ann_file),
+        "annotations_file": str(coco_annotations),
         "images_dir": str(images_dir),
         "num_samples": final_count,
     }
+
+
+def _download_openimages_from_s3(
+    image_ids: List[str],
+    images_dir: Path,
+    num_workers: int = 16
+) -> None:
+    """Download images from AWS S3 open-images-dataset bucket."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    try:
+        import boto3
+        from botocore import UNSIGNED
+        from botocore.config import Config
+
+        s3_client = boto3.client('s3', config=Config(signature_version=UNSIGNED))
+        use_boto3 = True
+    except ImportError:
+        logger.warning("boto3 not installed, using HTTP fallback (slower)")
+        use_boto3 = False
+
+    def download_one(image_id: str) -> Optional[str]:
+        dest = images_dir / f"{image_id}.jpg"
+        if dest.exists():
+            return image_id
+
+        try:
+            if use_boto3:
+                s3_client.download_file(
+                    'open-images-dataset',
+                    f'validation/{image_id}.jpg',
+                    str(dest)
+                )
+            else:
+                url = f"https://s3.amazonaws.com/open-images-dataset/validation/{image_id}.jpg"
+                urllib.request.urlretrieve(url, str(dest))
+            return image_id
+        except Exception as e:
+            logger.debug(f"Failed to download {image_id}: {e}")
+            return None
+
+    downloaded = 0
+    failed = 0
+
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = {executor.submit(download_one, img_id): img_id for img_id in image_ids}
+
+        for future in as_completed(futures):
+            result = future.result()
+            if result:
+                downloaded += 1
+            else:
+                failed += 1
+
+            total = downloaded + failed
+            if total % 500 == 0 or total == len(image_ids):
+                print(f"\rDownloaded: {downloaded}/{len(image_ids)}, failed: {failed}", end="", flush=True)
+
+    print()
+    logger.info(f"Downloaded {downloaded} images, {failed} failed")
+
+
+def _convert_openimages_to_coco(
+    annotations_file: Path,
+    class_names_file: Path,
+    image_ids: List[str],
+    images_dir: Path,
+    output_file: Path,
+) -> None:
+    """Convert OpenImages annotations to COCO format."""
+    import csv
+    import json
+
+    # Load class names
+    class_map = {}  # LabelName -> class_id
+    class_names = {}  # class_id -> display_name
+    with open(class_names_file, 'r') as f:
+        reader = csv.reader(f)
+        for i, row in enumerate(reader):
+            if len(row) >= 2:
+                label_name, display_name = row[0], row[1]
+                class_map[label_name] = i + 1  # 1-indexed
+                class_names[i + 1] = display_name
+
+    # Load annotations
+    image_id_set = set(image_ids)
+    annotations_by_image = {}
+
+    with open(annotations_file, 'r') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            image_id = row['ImageID']
+            if image_id not in image_id_set:
+                continue
+
+            if image_id not in annotations_by_image:
+                annotations_by_image[image_id] = []
+
+            annotations_by_image[image_id].append({
+                'LabelName': row['LabelName'],
+                'XMin': float(row['XMin']),
+                'YMin': float(row['YMin']),
+                'XMax': float(row['XMax']),
+                'YMax': float(row['YMax']),
+                'IsOccluded': int(row.get('IsOccluded', 0)),
+                'IsTruncated': int(row.get('IsTruncated', 0)),
+                'IsGroupOf': int(row.get('IsGroupOf', 0)),
+            })
+
+    # Build COCO format
+    coco = {
+        'images': [],
+        'annotations': [],
+        'categories': [{'id': cid, 'name': name} for cid, name in class_names.items()],
+    }
+
+    annotation_id = 1
+
+    for img_idx, image_id in enumerate(image_ids):
+        img_path = images_dir / f"{image_id}.jpg"
+        if not img_path.exists():
+            continue
+
+        # Get image dimensions
+        try:
+            from PIL import Image
+            with Image.open(img_path) as img:
+                width, height = img.size
+        except Exception:
+            # Default dimensions if can't read
+            width, height = 800, 600
+
+        coco['images'].append({
+            'id': img_idx + 1,
+            'file_name': f"{image_id}.jpg",
+            'width': width,
+            'height': height,
+        })
+
+        # Add annotations for this image
+        for ann in annotations_by_image.get(image_id, []):
+            label_name = ann['LabelName']
+            if label_name not in class_map:
+                continue
+
+            # Convert normalized coords to pixels
+            x_min = ann['XMin'] * width
+            y_min = ann['YMin'] * height
+            x_max = ann['XMax'] * width
+            y_max = ann['YMax'] * height
+
+            bbox_width = x_max - x_min
+            bbox_height = y_max - y_min
+
+            coco['annotations'].append({
+                'id': annotation_id,
+                'image_id': img_idx + 1,
+                'category_id': class_map[label_name],
+                'bbox': [x_min, y_min, bbox_width, bbox_height],
+                'area': bbox_width * bbox_height,
+                'iscrowd': ann['IsGroupOf'],
+            })
+            annotation_id += 1
+
+    # Write COCO JSON
+    with open(output_file, 'w') as f:
+        json.dump(coco, f)
+
+    logger.info(f"COCO annotations: {len(coco['images'])} images, {len(coco['annotations'])} annotations")
 
 
 def download_dataset(
