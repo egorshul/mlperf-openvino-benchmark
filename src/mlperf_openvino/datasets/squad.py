@@ -591,14 +591,27 @@ class SQuADQSL(QuerySampleLibrary):
         return min(self._performance_sample_count, self.total_sample_count)
 
     def load_query_samples(self, sample_indices: List[int]) -> None:
-        """Load samples into memory."""
+        """Load samples into memory with optimized int64 format for C++ SUT."""
         if not self.dataset._is_loaded:
             self.dataset.load()
 
         for idx in sample_indices:
             if idx not in self._loaded_samples:
                 features, _ = self.dataset.get_sample(idx)
-                self._loaded_samples[idx] = features
+                # Pre-convert to int64 and make contiguous for C++ SUT
+                # This avoids conversion overhead during inference
+                optimized = {
+                    'input_ids': np.ascontiguousarray(
+                        features['input_ids'].flatten(), dtype=np.int64
+                    ),
+                    'attention_mask': np.ascontiguousarray(
+                        features['attention_mask'].flatten(), dtype=np.int64
+                    ),
+                    'token_type_ids': np.ascontiguousarray(
+                        features['token_type_ids'].flatten(), dtype=np.int64
+                    ),
+                }
+                self._loaded_samples[idx] = optimized
 
     def unload_query_samples(self, sample_indices: List[int]) -> None:
         """Unload samples from memory."""
