@@ -687,25 +687,26 @@ def download_openimages(
         }
 
     # Try FiftyOne first (most reliable method)
+    # Based on: https://github.com/egorshul/MLPerf/tree/master/datasets/openimages
     try:
+        import json
         import fiftyone as fo
         import fiftyone.zoo as foz
 
         logger.info("Downloading OpenImages using FiftyOne...")
         logger.info("This may take a while (downloading ~24k images)...")
 
-        # Download validation split
-        # Note: name_or_url is positional, split is keyword
+        # Download validation split - exact API from reference implementation
         dataset = foz.load_zoo_dataset(
-            "open-images-v6",
+            name="open-images-v6",
             split="validation",
-            label_types=["detections"],
+            label_types="detections",
+            dataset_name="open-images",
             dataset_dir=str(data_dir / "fiftyone"),
-            max_samples=max_images,
         )
 
         # Export to COCO format
-        logger.info("Exporting to COCO format...")
+        logger.info("Converting dataset to COCO format...")
         coco_labels_path = annotations_dir / "openimages-mlperf.json"
 
         dataset.export(
@@ -714,16 +715,15 @@ def download_openimages(
             label_field="detections",
         )
 
-        # Add iscrowd field for MLPerf compatibility
-        import json
+        # Add iscrowd label to openimages annotations (required for MLPerf)
         with open(coco_labels_path) as fp:
             labels = json.load(fp)
-        for annotation in labels.get("annotations", []):
+        for annotation in labels["annotations"]:
             annotation["iscrowd"] = int(annotation.get("IsGroupOf", 0))
         with open(coco_labels_path, "w") as fp:
             json.dump(labels, fp)
 
-        # Move images to expected location
+        # Copy images to expected location
         fiftyone_images = data_dir / "fiftyone" / "validation" / "data"
         if fiftyone_images.exists():
             import shutil
