@@ -695,8 +695,9 @@ def download_openimages(
         logger.info("This may take a while (downloading ~24k images)...")
 
         # Download validation split
+        # Note: name_or_url is positional, split is keyword
         dataset = foz.load_zoo_dataset(
-            name="open-images-v6",
+            "open-images-v6",
             split="validation",
             label_types=["detections"],
             dataset_dir=str(data_dir / "fiftyone"),
