@@ -30,7 +30,7 @@ def evaluate_openimages_accuracy(
     image_sizes: Optional[Dict[int, Tuple[int, int]]] = None,
     input_size: int = 800,
     model_labels_zero_indexed: bool = True,
-    boxes_yxyx_format: bool = True,
+    boxes_yxyx_format: bool = False,
 ) -> Dict[str, float]:
     """
     Evaluate RetinaNet predictions using COCO API (official MLPerf method).
@@ -44,8 +44,8 @@ def evaluate_openimages_accuracy(
         input_size: Model input size (default 800 for RetinaNet)
         model_labels_zero_indexed: If True, model outputs 0-indexed labels (0-364)
                                    which need +1 to match COCO category_ids (1-365)
-        boxes_yxyx_format: If True, model outputs boxes in [ymin, xmin, ymax, xmax] format
-                          (MLPerf standard). If False, assumes [x1, y1, x2, y2] format.
+        boxes_yxyx_format: If True, model outputs boxes in [ymin, xmin, ymax, xmax] format.
+                          If False, assumes [xmin, ymin, xmax, ymax] format (MLPerf RetinaNet standard).
 
     Returns:
         Dictionary with mAP metrics
@@ -118,14 +118,14 @@ def evaluate_openimages_accuracy(
 
         for box, score, label in zip(boxes, scores, labels):
             # Handle box coordinate format
-            # MLPerf RetinaNet outputs [ymin, xmin, ymax, xmax] (normalized)
+            # MLPerf RetinaNet outputs [xmin, ymin, xmax, ymax] (normalized after our preprocessing)
             # We need to convert to COCO format: [x, y, width, height] in pixels
             if boxes_yxyx_format:
-                # MLPerf format: [ymin, xmin, ymax, xmax]
+                # Some models use [ymin, xmin, ymax, xmax] format
                 ymin, xmin, ymax, xmax = box
                 x1, y1, x2, y2 = xmin, ymin, xmax, ymax
             else:
-                # Standard format: [x1, y1, x2, y2]
+                # MLPerf RetinaNet format: [xmin, ymin, xmax, ymax]
                 x1, y1, x2, y2 = box
 
             # Denormalize to pixels
