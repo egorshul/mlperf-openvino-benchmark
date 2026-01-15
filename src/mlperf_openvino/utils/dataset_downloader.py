@@ -647,22 +647,23 @@ def download_openimages(
     output_dir: str,
     force: bool = False,
     max_images: Optional[int] = None,
-    num_workers: int = 16
+    num_workers: int = 8
 ) -> Dict[str, str]:
     """
     Download OpenImages validation set for RetinaNet Object Detection.
 
     Uses official MLCommons approach:
-    1. Download MLPerf image list (24,781 images)
-    2. Download images from AWS S3 open-images-dataset bucket
-    3. Download annotations and convert to COCO format
+    1. Download annotations from Google Cloud Storage
+    2. Extract image IDs from annotations
+    3. Download images from AWS S3 open-images-dataset bucket
+    4. Convert annotations to COCO format
 
     Based on: https://github.com/mlcommons/inference/tree/master/vision/classification_and_detection
 
     Args:
         output_dir: Directory to save dataset
         force: Force re-download
-        max_images: Maximum number of images to download (None = all ~24k)
+        max_images: Maximum number of images to download (None = all validation images)
         num_workers: Number of parallel download workers
 
     Returns:
@@ -681,7 +682,8 @@ def download_openimages(
     # Check if already downloaded
     existing_images = list(images_dir.glob("*.jpg"))
     coco_annotations = annotations_dir / "openimages-mlperf.json"
-    if len(existing_images) >= 24000 and coco_annotations.exists() and not force:
+    target_count = max_images if max_images else 24000
+    if len(existing_images) >= target_count and coco_annotations.exists() and not force:
         logger.info(f"OpenImages already downloaded: {len(existing_images)} images")
         return {
             "data_path": str(data_dir),
@@ -690,34 +692,11 @@ def download_openimages(
             "num_samples": len(existing_images),
         }
 
-    # URLs for MLPerf OpenImages
-    MLPERF_IMAGE_LIST_URL = "https://raw.githubusercontent.com/mlcommons/inference/master/vision/classification_and_detection/tools/openimages_mlperf.txt"
+    # URLs for OpenImages v5 annotations (compatible with MLPerf)
     ANNOTATIONS_URL = "https://storage.googleapis.com/openimages/v5/validation-annotations-bbox.csv"
     CLASS_NAMES_URL = "https://storage.googleapis.com/openimages/v5/class-descriptions-boxable.csv"
 
-    # Step 1: Download MLPerf image list
-    mlperf_list_file = annotations_dir / "openimages_mlperf.txt"
-    if not mlperf_list_file.exists() or force:
-        logger.info("Downloading MLPerf image list...")
-        _download_file(MLPERF_IMAGE_LIST_URL, str(mlperf_list_file), show_progress=False)
-
-    # Read image IDs from MLPerf list
-    image_ids = []
-    with open(mlperf_list_file, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                # Remove .jpg extension if present
-                image_id = line.replace('.jpg', '')
-                image_ids.append(image_id)
-
-    logger.info(f"MLPerf list contains {len(image_ids)} images")
-
-    if max_images and max_images < len(image_ids):
-        image_ids = image_ids[:max_images]
-        logger.info(f"Limiting to {max_images} images")
-
-    # Step 2: Download annotations
+    # Step 1: Download annotations
     annotations_file = annotations_dir / "validation-annotations-bbox.csv"
     if not annotations_file.exists() or force:
         logger.info("Downloading annotations...")
@@ -727,6 +706,26 @@ def download_openimages(
     if not class_names_file.exists() or force:
         logger.info("Downloading class descriptions...")
         _download_file(CLASS_NAMES_URL, str(class_names_file))
+
+    # Step 2: Extract unique image IDs from annotations
+    logger.info("Extracting image IDs from annotations...")
+    image_ids = []
+    seen_ids = set()
+
+    import csv
+    with open(annotations_file, 'r') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            image_id = row['ImageID']
+            if image_id not in seen_ids:
+                seen_ids.add(image_id)
+                image_ids.append(image_id)
+
+    logger.info(f"Found {len(image_ids)} unique images in annotations")
+
+    if max_images and max_images < len(image_ids):
+        image_ids = image_ids[:max_images]
+        logger.info(f"Limiting to {max_images} images")
 
     # Step 3: Download images from S3
     existing = set(p.stem for p in images_dir.glob("*.jpg"))
