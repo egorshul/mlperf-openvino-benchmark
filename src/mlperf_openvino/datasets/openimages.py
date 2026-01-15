@@ -224,6 +224,7 @@ class OpenImagesDataset(BaseDataset):
         count: Optional[int] = None,
         input_size: int = INPUT_SIZE,
         cache_preprocessed: bool = True,
+        use_disk_cache: bool = True,  # Use preprocessed numpy files
     ):
         """
         Initialize OpenImages dataset.
@@ -233,7 +234,8 @@ class OpenImagesDataset(BaseDataset):
             annotations_file: Path to annotations CSV file
             count: Number of samples to use (None = all)
             input_size: Input image size
-            cache_preprocessed: Whether to cache preprocessed images
+            cache_preprocessed: Whether to cache preprocessed images in memory
+            use_disk_cache: Whether to use/create preprocessed numpy cache on disk
         """
         if not PIL_AVAILABLE:
             raise ImportError("Pillow is required. Install with: pip install Pillow")
@@ -244,12 +246,14 @@ class OpenImagesDataset(BaseDataset):
         self.annotations_file = annotations_file
         self.input_size = input_size
         self.cache_preprocessed = cache_preprocessed
+        self.use_disk_cache = use_disk_cache
 
         self._samples: List[Dict[str, Any]] = []
         self._annotations: Dict[str, List[Dict]] = defaultdict(list)
         self._cache: Dict[int, np.ndarray] = {}
         self._cache_lock = None  # Lazy init for thread safety
         self._is_loaded = False
+        self._preprocessed_dir: Optional[Path] = None
 
     def load(self) -> None:
         """Load dataset metadata and annotations."""
@@ -292,7 +296,69 @@ class OpenImagesDataset(BaseDataset):
             self._samples = self._samples[:self.count]
 
         logger.info(f"Loaded {len(self._samples)} images")
+
+        # Set up preprocessed cache directory
+        if self.use_disk_cache:
+            self._preprocessed_dir = self.data_path / "preprocessed_cache"
+            self._preprocessed_dir.mkdir(exist_ok=True)
+            self._check_or_create_disk_cache()
+
         self._is_loaded = True
+
+    def _check_or_create_disk_cache(self) -> None:
+        """Check if disk cache exists, create if needed."""
+        if not self._preprocessed_dir:
+            return
+
+        # Check how many cached files exist
+        cached_files = list(self._preprocessed_dir.glob("*.npy"))
+        num_cached = len(cached_files)
+        num_samples = len(self._samples)
+
+        if num_cached >= num_samples:
+            logger.info(f"Disk cache found: {num_cached} preprocessed files")
+            return
+
+        logger.info(f"Creating disk cache: {num_cached}/{num_samples} files exist")
+        self._create_disk_cache()
+
+    def _create_disk_cache(self) -> None:
+        """Preprocess all images and save to disk (like NVIDIA submissions)."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def process_and_save(idx: int) -> bool:
+            sample = self._samples[idx]
+            image_id = sample['image_id']
+            cache_path = self._preprocessed_dir / f"{image_id}.npy"
+
+            if cache_path.exists():
+                return True
+
+            try:
+                img_array, _ = self._preprocess_image(sample['image_path'])
+                np.save(cache_path, img_array.astype(np.float32))
+                return True
+            except Exception as e:
+                logger.warning(f"Failed to preprocess {image_id}: {e}")
+                return False
+
+        total = len(self._samples)
+        completed = 0
+
+        print(f"Preprocessing {total} images to disk cache...")
+        print("(This only happens once, subsequent runs will be fast)")
+
+        num_workers = min(8, total)
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = {executor.submit(process_and_save, i): i for i in range(total)}
+
+            for future in as_completed(futures):
+                completed += 1
+                if completed % 500 == 0 or completed == total:
+                    print(f"\rPreprocessing: {completed}/{total} ({100*completed/total:.1f}%)", end="", flush=True)
+
+        print()
+        logger.info(f"Disk cache created: {completed} files")
 
     def _load_annotations(self, annotations_path: Path) -> None:
         """Load annotations from CSV file."""
@@ -404,6 +470,8 @@ class OpenImagesDataset(BaseDataset):
         """
         Get preprocessed sample (thread-safe).
 
+        Uses disk cache (numpy files) if available for fast loading.
+
         Args:
             index: Sample index
 
@@ -420,21 +488,38 @@ class OpenImagesDataset(BaseDataset):
 
         sample = self._samples[index]
 
-        # Check cache with lock
+        # Check memory cache first
         with self._cache_lock:
             if self.cache_preprocessed and index in self._cache:
-                img_array = self._cache[index]
-                preprocess_info = sample.get('preprocess_info', {})
+                return self._cache[index], sample
+
+        # Try disk cache (fast numpy load)
+        if self.use_disk_cache and self._preprocessed_dir:
+            cache_path = self._preprocessed_dir / f"{sample['image_id']}.npy"
+            if cache_path.exists():
+                img_array = np.load(cache_path)
+                # Store in memory cache
+                with self._cache_lock:
+                    if self.cache_preprocessed:
+                        self._cache[index] = img_array
                 return img_array, sample
 
-        # Preprocess outside lock (expensive operation)
+        # Fallback: preprocess from original image
         img_array, preprocess_info = self._preprocess_image(sample['image_path'])
 
-        # Store in cache with lock
+        # Store in caches
         with self._cache_lock:
             sample['preprocess_info'] = preprocess_info
             if self.cache_preprocessed:
                 self._cache[index] = img_array
+
+        # Also save to disk cache for next time
+        if self.use_disk_cache and self._preprocessed_dir:
+            cache_path = self._preprocessed_dir / f"{sample['image_id']}.npy"
+            try:
+                np.save(cache_path, img_array.astype(np.float32))
+            except Exception:
+                pass  # Non-critical, ignore errors
 
         return img_array, sample
 
