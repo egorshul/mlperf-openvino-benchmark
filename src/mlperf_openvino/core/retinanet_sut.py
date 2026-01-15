@@ -33,8 +33,8 @@ from ..datasets.openimages import OpenImagesQSL
 
 logger = logging.getLogger(__name__)
 
-# RetinaNet constants
-NUM_CLASSES = 80
+# RetinaNet constants for OpenImages (MLPerf uses 365 classes, not COCO's 80)
+NUM_CLASSES = 365  # MLPerf OpenImages classes
 SCORE_THRESHOLD = 0.05
 NMS_THRESHOLD = 0.5
 MAX_DETECTIONS = 100

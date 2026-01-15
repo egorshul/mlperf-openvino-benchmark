@@ -29,19 +29,23 @@ def evaluate_openimages_accuracy(
     coco_annotations_file: str,
     image_sizes: Optional[Dict[int, Tuple[int, int]]] = None,
     input_size: int = 800,
-    use_inv_map: bool = False,
+    model_labels_zero_indexed: bool = True,
+    boxes_yxyx_format: bool = True,
 ) -> Dict[str, float]:
     """
     Evaluate RetinaNet predictions using COCO API (official MLPerf method).
 
     Args:
         predictions: Dict of {sample_idx: {'boxes': [N,4], 'scores': [N], 'labels': [N]}}
-                    boxes in normalized [0,1] format [x1, y1, x2, y2]
+                    boxes in normalized [0,1] format
         coco_annotations_file: Path to COCO format annotations JSON
         image_sizes: Dict of {sample_idx: (width, height)} for denormalization
                     If None, assumes input_size x input_size
         input_size: Model input size (default 800 for RetinaNet)
-        use_inv_map: Whether to apply inverse label mapping
+        model_labels_zero_indexed: If True, model outputs 0-indexed labels (0-364)
+                                   which need +1 to match COCO category_ids (1-365)
+        boxes_yxyx_format: If True, model outputs boxes in [ymin, xmin, ymax, xmax] format
+                          (MLPerf standard). If False, assumes [x1, y1, x2, y2] format.
 
     Returns:
         Dictionary with mAP metrics
@@ -70,6 +74,14 @@ def evaluate_openimages_accuracy(
     # Log available categories for debugging
     cat_ids = sorted(coco_gt.cats.keys())
     logger.debug(f"Category IDs: {cat_ids[:10]}... (total {len(cat_ids)})")
+
+    # Check if annotations have correct category_id range (1-365 for MLPerf)
+    # If we see category_ids > 365, the annotations file needs regeneration
+    max_cat_id = max(cat_ids) if cat_ids else 0
+    if max_cat_id > 400:  # Old format used all ~600 OpenImages classes
+        logger.warning(f"COCO annotations have category_ids up to {max_cat_id}")
+        logger.warning("This suggests the annotations file was created with OLD format.")
+        logger.warning("Please delete openimages-mlperf.json and re-run to regenerate with correct category_ids (1-365).")
 
     # Convert predictions to COCO format
     # COCO format: [{'image_id': int, 'category_id': int, 'bbox': [x,y,w,h], 'score': float}]
@@ -105,9 +117,16 @@ def evaluate_openimages_accuracy(
             img_width = img_height = input_size
 
         for box, score, label in zip(boxes, scores, labels):
-            # boxes are in normalized [x1, y1, x2, y2] format
-            # Convert to COCO format: [x, y, width, height] in pixels
-            x1, y1, x2, y2 = box
+            # Handle box coordinate format
+            # MLPerf RetinaNet outputs [ymin, xmin, ymax, xmax] (normalized)
+            # We need to convert to COCO format: [x, y, width, height] in pixels
+            if boxes_yxyx_format:
+                # MLPerf format: [ymin, xmin, ymax, xmax]
+                ymin, xmin, ymax, xmax = box
+                x1, y1, x2, y2 = xmin, ymin, xmax, ymax
+            else:
+                # Standard format: [x1, y1, x2, y2]
+                x1, y1, x2, y2 = box
 
             # Denormalize to pixels
             x1_px = x1 * img_width
@@ -119,8 +138,11 @@ def evaluate_openimages_accuracy(
             bbox_width = x2_px - x1_px
             bbox_height = y2_px - y1_px
 
-            # Category ID - check if valid
+            # Category ID - convert from model output to COCO format
+            # Model outputs 0-indexed labels (0-364), COCO uses 1-indexed (1-365)
             category_id = int(label)
+            if model_labels_zero_indexed:
+                category_id = category_id + 1  # Convert 0-indexed to 1-indexed
 
             # Skip invalid categories
             if category_id not in valid_cat_ids:
@@ -132,13 +154,6 @@ def evaluate_openimages_accuracy(
                 logger.info(f"Pred {debug_count}: img={image_id}, cat={category_id}, "
                            f"box=[{x1_px:.1f},{y1_px:.1f},{bbox_width:.1f},{bbox_height:.1f}], score={score:.3f}")
                 debug_count += 1
-
-            # COCO categories might be 1-indexed
-            # Check if we need to add 1
-            if category_id == 0:
-                # If model outputs 0-indexed, may need to adjust
-                # But OpenImages COCO format uses category_id as-is
-                pass
 
             coco_results.append({
                 'image_id': int(image_id),

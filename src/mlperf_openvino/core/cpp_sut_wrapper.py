@@ -954,6 +954,8 @@ class RetinaNetCppSUTWrapper:
                         predictions=predictions,
                         coco_annotations_file=coco_file,
                         input_size=800,
+                        model_labels_zero_indexed=True,  # Model outputs 0-364, COCO uses 1-365
+                        boxes_yxyx_format=True,  # MLPerf RetinaNet outputs [ymin,xmin,ymax,xmax]
                     )
                 else:
                     logger.warning("COCO annotations file not found, using fallback mAP calculation")
