@@ -760,47 +760,81 @@ def download_openimages(
 def _download_openimages_from_s3(
     image_ids: List[str],
     images_dir: Path,
-    num_workers: int = 16
+    num_workers: int = 8  # Reduced to avoid rate limiting
 ) -> None:
-    """Download images from AWS S3 open-images-dataset bucket."""
+    """Download images from AWS S3 open-images-dataset bucket with retry logic."""
+    import time
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
+    # Try to use requests for better SSL handling
+    try:
+        import requests
+        use_requests = True
+    except ImportError:
+        use_requests = False
+
+    # Try boto3
+    s3_client = None
     try:
         import boto3
         from botocore import UNSIGNED
         from botocore.config import Config
 
-        s3_client = boto3.client('s3', config=Config(signature_version=UNSIGNED))
-        use_boto3 = True
+        s3_client = boto3.client(
+            's3',
+            config=Config(
+                signature_version=UNSIGNED,
+                retries={'max_attempts': 3, 'mode': 'adaptive'}
+            )
+        )
     except ImportError:
-        logger.warning("boto3 not installed, using HTTP fallback (slower)")
-        use_boto3 = False
+        logger.info("boto3 not installed, using HTTP fallback")
 
-    def download_one(image_id: str) -> Optional[str]:
+    def download_one_with_retry(image_id: str, max_retries: int = 3) -> Optional[str]:
         dest = images_dir / f"{image_id}.jpg"
         if dest.exists():
             return image_id
 
-        try:
-            if use_boto3:
-                s3_client.download_file(
-                    'open-images-dataset',
-                    f'validation/{image_id}.jpg',
-                    str(dest)
-                )
-            else:
-                url = f"https://s3.amazonaws.com/open-images-dataset/validation/{image_id}.jpg"
-                urllib.request.urlretrieve(url, str(dest))
-            return image_id
-        except Exception as e:
-            logger.debug(f"Failed to download {image_id}: {e}")
-            return None
+        url = f"https://s3.amazonaws.com/open-images-dataset/validation/{image_id}.jpg"
+
+        for attempt in range(max_retries):
+            try:
+                if s3_client is not None:
+                    s3_client.download_file(
+                        'open-images-dataset',
+                        f'validation/{image_id}.jpg',
+                        str(dest)
+                    )
+                elif use_requests:
+                    response = requests.get(url, timeout=30)
+                    response.raise_for_status()
+                    with open(dest, 'wb') as f:
+                        f.write(response.content)
+                else:
+                    urllib.request.urlretrieve(url, str(dest))
+
+                return image_id
+
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    # Exponential backoff: 1s, 2s, 4s
+                    sleep_time = 2 ** attempt
+                    time.sleep(sleep_time)
+                else:
+                    logger.debug(f"Failed to download {image_id} after {max_retries} attempts: {e}")
+                    # Clean up partial download
+                    if dest.exists():
+                        dest.unlink()
+                    return None
+
+        return None
 
     downloaded = 0
     failed = 0
 
+    # Use smaller batches to avoid overwhelming the connection
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        futures = {executor.submit(download_one, img_id): img_id for img_id in image_ids}
+        futures = {executor.submit(download_one_with_retry, img_id): img_id for img_id in image_ids}
 
         for future in as_completed(futures):
             result = future.result()
@@ -810,7 +844,7 @@ def _download_openimages_from_s3(
                 failed += 1
 
             total = downloaded + failed
-            if total % 500 == 0 or total == len(image_ids):
+            if total % 100 == 0 or total == len(image_ids):
                 print(f"\rDownloaded: {downloaded}/{len(image_ids)}, failed: {failed}", end="", flush=True)
 
     print()
