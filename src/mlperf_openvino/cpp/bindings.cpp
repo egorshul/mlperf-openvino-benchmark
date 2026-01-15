@@ -4,9 +4,10 @@
  * This exposes the high-performance C++ SUT to Python while
  * ensuring the critical inference callbacks run without GIL.
  *
- * Two SUT types:
- * - CppSUT (Server): async inference, batch=1, for Server scenario
- * - CppOfflineSUT (Offline): sync batch inference, for Offline scenario
+ * SUT types:
+ * - CppSUT: async inference for ResNet50 (single float32 input)
+ * - CppOfflineSUT: sync batch inference for Offline scenario
+ * - BertCppSUT: async inference for BERT (3x int64 inputs, 2x float32 outputs)
  */
 
 #include <pybind11/pybind11.h>
@@ -18,6 +19,7 @@
 
 #include "sut_cpp.hpp"
 #include "offline_sut.hpp"
+#include "bert_sut_cpp.hpp"
 
 namespace py = pybind11;
 
@@ -176,6 +178,138 @@ PYBIND11_MODULE(_cpp_sut, m) {
         .def("reset_counters", &mlperf_ov::CppOfflineSUT::reset_counters,
              "Reset counters");
 
+    // BertCppSUT - optimized for BERT with 3 int64 inputs and 2 float outputs
+    py::class_<mlperf_ov::BertCppSUT>(m, "BertCppSUT")
+        .def(py::init<const std::string&, const std::string&, int, const std::string&>(),
+             py::arg("model_path"),
+             py::arg("device") = "CPU",
+             py::arg("num_streams") = 0,
+             py::arg("performance_hint") = "THROUGHPUT",
+             "Create BERT C++ SUT instance")
+
+        .def("load", &mlperf_ov::BertCppSUT::load,
+             py::call_guard<py::gil_scoped_release>(),
+             "Load and compile the model")
+
+        .def("is_loaded", &mlperf_ov::BertCppSUT::is_loaded,
+             "Check if model is loaded")
+
+        .def("get_optimal_nireq", &mlperf_ov::BertCppSUT::get_optimal_nireq,
+             "Get optimal number of inference requests")
+
+        .def("get_input_ids_name", &mlperf_ov::BertCppSUT::get_input_ids_name,
+             "Get input_ids tensor name")
+
+        .def("get_attention_mask_name", &mlperf_ov::BertCppSUT::get_attention_mask_name,
+             "Get attention_mask tensor name")
+
+        .def("get_token_type_ids_name", &mlperf_ov::BertCppSUT::get_token_type_ids_name,
+             "Get token_type_ids tensor name")
+
+        .def("get_start_logits_name", &mlperf_ov::BertCppSUT::get_start_logits_name,
+             "Get start_logits output name")
+
+        .def("get_end_logits_name", &mlperf_ov::BertCppSUT::get_end_logits_name,
+             "Get end_logits output name")
+
+        .def("get_seq_length", &mlperf_ov::BertCppSUT::get_seq_length,
+             "Get sequence length")
+
+        .def("start_async",
+             [](mlperf_ov::BertCppSUT& self,
+                py::array_t<int64_t, py::array::c_style | py::array::forcecast> input_ids,
+                py::array_t<int64_t, py::array::c_style | py::array::forcecast> attention_mask,
+                py::array_t<int64_t, py::array::c_style | py::array::forcecast> token_type_ids,
+                uint64_t query_id,
+                int sample_idx) {
+                 py::buffer_info ids_buf = input_ids.request();
+                 py::buffer_info mask_buf = attention_mask.request();
+                 py::buffer_info type_buf = token_type_ids.request();
+
+                 const int64_t* ids_data = static_cast<const int64_t*>(ids_buf.ptr);
+                 const int64_t* mask_data = static_cast<const int64_t*>(mask_buf.ptr);
+                 const int64_t* type_data = static_cast<const int64_t*>(type_buf.ptr);
+                 int seq_length = static_cast<int>(ids_buf.size);
+
+                 // Release GIL during async inference
+                 py::gil_scoped_release release;
+                 self.start_async(ids_data, mask_data, type_data, seq_length, query_id, sample_idx);
+             },
+             py::arg("input_ids"),
+             py::arg("attention_mask"),
+             py::arg("token_type_ids"),
+             py::arg("query_id"),
+             py::arg("sample_idx"),
+             "Start async BERT inference (GIL released)")
+
+        .def("wait_all", &mlperf_ov::BertCppSUT::wait_all,
+             py::call_guard<py::gil_scoped_release>(),
+             "Wait for all pending inferences")
+
+        .def("get_completed_count", &mlperf_ov::BertCppSUT::get_completed_count,
+             "Get number of completed samples")
+
+        .def("get_issued_count", &mlperf_ov::BertCppSUT::get_issued_count,
+             "Get number of issued samples")
+
+        .def("reset_counters", &mlperf_ov::BertCppSUT::reset_counters,
+             "Reset counters")
+
+        .def("set_store_predictions", &mlperf_ov::BertCppSUT::set_store_predictions,
+             py::arg("store"),
+             "Enable/disable storing predictions")
+
+        .def("get_predictions",
+             [](mlperf_ov::BertCppSUT& self) {
+                 // Convert C++ predictions to Python dict
+                 auto cpp_preds = self.get_predictions();
+                 py::dict py_preds;
+
+                 for (const auto& [idx, pred] : cpp_preds) {
+                     py::dict entry;
+                     py::array_t<float> start_arr(pred.start_logits.size());
+                     py::array_t<float> end_arr(pred.end_logits.size());
+
+                     std::memcpy(start_arr.mutable_data(), pred.start_logits.data(),
+                                pred.start_logits.size() * sizeof(float));
+                     std::memcpy(end_arr.mutable_data(), pred.end_logits.data(),
+                                pred.end_logits.size() * sizeof(float));
+
+                     entry["start_logits"] = start_arr;
+                     entry["end_logits"] = end_arr;
+                     py_preds[py::int_(idx)] = entry;
+                 }
+                 return py_preds;
+             },
+             "Get stored predictions as dict of {sample_idx: {start_logits, end_logits}}")
+
+        .def("set_response_callback",
+             [](mlperf_ov::BertCppSUT& self, py::function callback) {
+                 self.set_response_callback(
+                     [callback](uint64_t query_id,
+                               const float* start_data,
+                               const float* end_data,
+                               size_t logits_size) {
+                         // Acquire GIL to call Python
+                         py::gil_scoped_acquire acquire;
+
+                         if (start_data != nullptr && end_data != nullptr && logits_size > 0) {
+                             // Copy data to numpy arrays
+                             py::array_t<float> start_arr(logits_size);
+                             py::array_t<float> end_arr(logits_size);
+
+                             std::memcpy(start_arr.mutable_data(), start_data, logits_size * sizeof(float));
+                             std::memcpy(end_arr.mutable_data(), end_data, logits_size * sizeof(float));
+
+                             callback(query_id, start_arr, end_arr);
+                         } else {
+                             callback(query_id, py::none(), py::none());
+                         }
+                     });
+             },
+             py::arg("callback"),
+             "Set response callback (receives query_id, start_logits, end_logits)");
+
     // Version info
-    m.attr("__version__") = "1.0.0";
+    m.attr("__version__") = "1.1.0";
 }

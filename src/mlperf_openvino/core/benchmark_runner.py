@@ -126,7 +126,7 @@ class BenchmarkRunner:
     def _setup_bert(self) -> None:
         """Set up BERT benchmark."""
         from ..datasets.squad import SQuADQSL
-        from .bert_sut import BertSUT
+        from .cpp_sut_wrapper import create_bert_sut
 
         logger.info(f"Loading SQuAD dataset from {self.config.dataset.path}")
         self.qsl = SQuADQSL(
@@ -138,9 +138,10 @@ class BenchmarkRunner:
         self.qsl.load()
 
         logger.info(f"Creating BERT SUT for scenario: {self.config.scenario}")
-        self.sut = BertSUT(
+        # Use create_bert_sut to automatically select C++ or Python SUT
+        self.sut = create_bert_sut(
             config=self.config,
-            backend=self.backend,
+            model_path=self.config.model.model_path,
             qsl=self.qsl,
             scenario=self.config.scenario,
         )

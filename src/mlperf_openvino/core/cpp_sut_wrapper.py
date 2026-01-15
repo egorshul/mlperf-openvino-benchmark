@@ -25,11 +25,13 @@ from ..core.config import BenchmarkConfig, Scenario
 
 # Try to import C++ extension
 try:
-    from ..cpp import CppSUT, CppOfflineSUT, CPP_AVAILABLE
+    from ..cpp import CppSUT, CppOfflineSUT, BertCppSUT, CPP_AVAILABLE, BERT_CPP_AVAILABLE
 except ImportError:
     CPP_AVAILABLE = False
+    BERT_CPP_AVAILABLE = False
     CppSUT = None
     CppOfflineSUT = None
+    BertCppSUT = None
 
 logger = logging.getLogger(__name__)
 
@@ -425,6 +427,228 @@ class CppOfflineSUTWrapper:
         self._predictions = {}
 
 
+class BertCppSUTWrapper:
+    """
+    Wrapper for BERT C++ SUT with 3 int64 inputs and 2 float32 outputs.
+
+    Optimized for BERT Question Answering:
+    - input_ids, attention_mask, token_type_ids (int64)
+    - start_logits, end_logits (float32)
+    """
+
+    def __init__(
+        self,
+        config: BenchmarkConfig,
+        model_path: str,
+        qsl: "QuerySampleLibrary",
+        scenario: Scenario = Scenario.OFFLINE,
+    ):
+        if not LOADGEN_AVAILABLE:
+            raise ImportError("MLPerf LoadGen is not installed")
+
+        if not BERT_CPP_AVAILABLE or BertCppSUT is None:
+            raise ImportError(
+                "BERT C++ SUT extension not available. "
+                "Build it with: ./build_cpp.sh"
+            )
+
+        self.config = config
+        self.qsl = qsl
+        self.scenario = scenario
+
+        # Create BERT C++ SUT
+        device = config.openvino.device
+        num_streams = 0
+        if config.openvino.num_streams != "AUTO":
+            try:
+                num_streams = int(config.openvino.num_streams)
+            except ValueError:
+                pass
+
+        performance_hint = config.openvino.performance_hint
+
+        logger.info(f"Creating BERT C++ SUT: device={device}, num_streams={num_streams}, hint={performance_hint}")
+        self._cpp_sut = BertCppSUT(model_path, device, num_streams, performance_hint)
+
+        # Load model
+        logger.info("Loading model in BERT C++ SUT...")
+        self._cpp_sut.load()
+
+        # Get input/output names
+        self.input_ids_name = self._cpp_sut.get_input_ids_name()
+        self.attention_mask_name = self._cpp_sut.get_attention_mask_name()
+        self.token_type_ids_name = self._cpp_sut.get_token_type_ids_name()
+        self.start_logits_name = self._cpp_sut.get_start_logits_name()
+        self.end_logits_name = self._cpp_sut.get_end_logits_name()
+        self.seq_length = self._cpp_sut.get_seq_length()
+
+        logger.info(f"BERT inputs: {self.input_ids_name}, {self.attention_mask_name}, {self.token_type_ids_name}")
+        logger.info(f"BERT outputs: {self.start_logits_name}, {self.end_logits_name}")
+        logger.info(f"Sequence length: {self.seq_length}")
+
+        # Statistics
+        self._start_time = 0.0
+        self._progress_stop_event = threading.Event()
+
+        # Enable storing predictions for accuracy mode
+        self._cpp_sut.set_store_predictions(True)
+
+        # Set up response callback
+        self._setup_response_callback()
+
+        # Start progress monitoring
+        self._start_progress_monitor()
+
+        logger.info(f"BERT C++ SUT initialized with {self._cpp_sut.get_optimal_nireq()} optimal requests")
+
+    def _setup_response_callback(self):
+        """Set up the callback that C++ uses to notify LoadGen."""
+        import array
+
+        def response_callback(query_id: int, start_logits, end_logits):
+            try:
+                if start_logits is not None and end_logits is not None:
+                    # Combine start and end logits for response
+                    combined = np.stack([start_logits.flatten(), end_logits.flatten()], axis=-1)
+                    response_array = array.array('B', combined.astype(np.float32).tobytes())
+                    bi = response_array.buffer_info()
+
+                    response = lg.QuerySampleResponse(query_id, bi[0], bi[1])
+                else:
+                    response = lg.QuerySampleResponse(query_id, 0, 0)
+
+                lg.QuerySamplesComplete([response])
+            except Exception as e:
+                logger.error(f"BERT response callback error: {e}")
+                response = lg.QuerySampleResponse(query_id, 0, 0)
+                lg.QuerySamplesComplete([response])
+
+        self._cpp_sut.set_response_callback(response_callback)
+
+    def _start_progress_monitor(self):
+        """Start progress monitoring thread."""
+        self._start_time = time.time()
+        self._progress_stop_event.clear()
+
+        def progress_thread():
+            while not self._progress_stop_event.is_set():
+                self._progress_stop_event.wait(timeout=1.0)
+                if self._progress_stop_event.is_set():
+                    break
+                elapsed = time.time() - self._start_time
+                completed = self._cpp_sut.get_completed_count()
+                issued = self._cpp_sut.get_issued_count()
+                throughput = completed / elapsed if elapsed > 0 else 0
+                pending = issued - completed
+                print(f"\rBERT C++ SUT: issued={issued}, done={completed}, pending={pending}, {throughput:.1f} samples/sec", end="", flush=True)
+
+        self._progress_thread = threading.Thread(target=progress_thread, daemon=True)
+        self._progress_thread.start()
+
+    def issue_queries(self, query_samples: List[Any]) -> None:
+        """Process incoming queries using BERT C++ SUT."""
+        for qs in query_samples:
+            sample_idx = qs.index
+            query_id = qs.id
+
+            # Get features from QSL
+            features = self.qsl.get_features(sample_idx)
+
+            # Get input tensors (ensure int64)
+            input_ids = features['input_ids'].astype(np.int64).flatten()
+            attention_mask = features['attention_mask'].astype(np.int64).flatten()
+            token_type_ids = features['token_type_ids'].astype(np.int64).flatten()
+
+            # Ensure contiguous arrays
+            if not input_ids.flags['C_CONTIGUOUS']:
+                input_ids = np.ascontiguousarray(input_ids)
+            if not attention_mask.flags['C_CONTIGUOUS']:
+                attention_mask = np.ascontiguousarray(attention_mask)
+            if not token_type_ids.flags['C_CONTIGUOUS']:
+                token_type_ids = np.ascontiguousarray(token_type_ids)
+
+            # Start async inference in C++ (GIL released!)
+            self._cpp_sut.start_async(input_ids, attention_mask, token_type_ids, query_id, sample_idx)
+
+    def flush_queries(self) -> None:
+        """Flush any pending queries."""
+        # Wait for all C++ inferences to complete
+        self._cpp_sut.wait_all()
+
+        # Stop progress monitor
+        self._progress_stop_event.set()
+
+        # Print final stats
+        elapsed = time.time() - self._start_time
+        completed = self._cpp_sut.get_completed_count()
+        throughput = completed / elapsed if elapsed > 0 else 0
+        print(f"\nBERT C++ SUT completed: {completed} samples in {elapsed:.1f}s ({throughput:.1f} samples/sec)")
+
+    def get_sut(self) -> "lg.ConstructSUT":
+        """Get the LoadGen SUT object."""
+        return lg.ConstructSUT(self.issue_queries, self.flush_queries)
+
+    def get_qsl(self) -> "lg.ConstructQSL":
+        """Get the LoadGen QSL object."""
+        return lg.ConstructQSL(
+            self.qsl.total_sample_count,
+            self.qsl.performance_sample_count,
+            self.qsl.load_query_samples,
+            self.qsl.unload_query_samples,
+        )
+
+    @property
+    def name(self) -> str:
+        return f"OpenVINO-BertCpp-{self.config.model.name}"
+
+    @property
+    def _sample_count(self) -> int:
+        return self._cpp_sut.get_completed_count()
+
+    @property
+    def _query_count(self) -> int:
+        return self._cpp_sut.get_issued_count()
+
+    def get_predictions(self) -> Dict[int, tuple]:
+        """Get all predictions as dict of {sample_idx: (start_logits, end_logits)}."""
+        raw_preds = self._cpp_sut.get_predictions()
+        # Convert from dict with 'start_logits' and 'end_logits' keys to tuple
+        result = {}
+        for idx, pred in raw_preds.items():
+            start_logits = np.array(pred['start_logits'], dtype=np.float32)
+            end_logits = np.array(pred['end_logits'], dtype=np.float32)
+            result[idx] = (start_logits, end_logits)
+        return result
+
+    def reset(self) -> None:
+        """Reset SUT state."""
+        self._cpp_sut.reset_counters()
+
+    def compute_accuracy(self) -> Dict[str, float]:
+        """
+        Compute BERT accuracy metrics (F1 and Exact Match).
+
+        Returns:
+            Dictionary with f1, exact_match, and num_samples
+        """
+        predictions = self.get_predictions()
+
+        if not predictions:
+            return {'f1': 0.0, 'exact_match': 0.0, 'num_samples': 0}
+
+        # Extract indices in sorted order
+        indices = sorted(predictions.keys())
+
+        # Use dataset's postprocess to get answer texts
+        pred_texts = self.qsl.dataset.postprocess(
+            [(predictions[idx][0], predictions[idx][1]) for idx in indices],
+            indices
+        )
+
+        # Compute F1 and EM using dataset's method
+        return self.qsl.dataset.compute_accuracy(pred_texts, indices)
+
+
 def create_sut(
     config: BenchmarkConfig,
     model_path: str,
@@ -462,3 +686,38 @@ def create_sut(
 
     backend = OpenVINOBackend(model_path, config.openvino)
     return OpenVINOSUT(config, backend, qsl, scenario)
+
+
+def create_bert_sut(
+    config: BenchmarkConfig,
+    model_path: str,
+    qsl: "QuerySampleLibrary",
+    scenario: Scenario = Scenario.OFFLINE,
+    force_python: bool = False,
+):
+    """
+    Factory function to create BERT SUT.
+
+    Uses C++ SUT if available for maximum performance.
+
+    Args:
+        config: Benchmark configuration
+        model_path: Path to BERT model file
+        qsl: Query Sample Library (SQuADQSL)
+        scenario: Test scenario
+        force_python: Force Python SUT even if C++ is available
+
+    Returns:
+        BERT SUT instance
+    """
+    if BERT_CPP_AVAILABLE and not force_python:
+        logger.info(f"Using BERT C++ SUT for {scenario.value} mode")
+        return BertCppSUTWrapper(config, model_path, qsl, scenario)
+
+    # Fall back to Python BertSUT
+    logger.info(f"Using Python BERT SUT for {scenario.value} mode")
+    from .bert_sut import BertSUT
+    from ..backends.openvino_backend import OpenVINOBackend
+
+    backend = OpenVINOBackend(model_path, config.openvino)
+    return BertSUT(config, backend, qsl, scenario)

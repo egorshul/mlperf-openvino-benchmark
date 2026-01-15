@@ -31,6 +31,7 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
 pybind11_add_module(_cpp_sut
     sut_cpp.cpp
     offline_sut.cpp
+    bert_sut_cpp.cpp
     bindings.cpp
 )
 
