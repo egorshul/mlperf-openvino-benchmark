@@ -55,17 +55,18 @@ DATASET_REGISTRY: Dict[str, Dict] = {
     "openimages": {
         "description": "OpenImages validation set for RetinaNet Object Detection",
         "annotations": {
-            "url": "https://storage.googleapis.com/openimages/v6/oidv6-val-annotations-bbox.csv",
+            # V5 validation annotations work for V6 as well
+            "url": "https://storage.googleapis.com/openimages/v5/validation-annotations-bbox.csv",
             "filename": "validation-annotations-bbox.csv",
-            "size_mb": 30,
+            "size_mb": 24,
         },
         "class_descriptions": {
-            "url": "https://storage.googleapis.com/openimages/v6/oidv6-class-descriptions.csv",
-            "filename": "class-descriptions.csv",
+            "url": "https://storage.googleapis.com/openimages/v5/class-descriptions-boxable.csv",
+            "filename": "class-descriptions-boxable.csv",
             "size_mb": 0.02,
         },
         "num_samples": 24576,
-        "note": "Images need to be downloaded separately from OpenImages website or via fiftyone",
+        "note": "Images downloaded from AWS S3 open-images-dataset bucket",
     },
     "librispeech": {
         "description": "LibriSpeech ASR corpus for Whisper (dev-clean + dev-other)",
@@ -689,7 +690,8 @@ def download_openimages(
         )
 
     # Download class descriptions
-    class_file = annotations_dir / "class-descriptions.csv"
+    class_filename = dataset_info["class_descriptions"]["filename"]
+    class_file = annotations_dir / class_filename
     if not class_file.exists() or force:
         logger.info("Downloading class descriptions...")
         _download_file(
