@@ -248,6 +248,7 @@ class OpenImagesDataset(BaseDataset):
         self._samples: List[Dict[str, Any]] = []
         self._annotations: Dict[str, List[Dict]] = defaultdict(list)
         self._cache: Dict[int, np.ndarray] = {}
+        self._cache_lock = None  # Lazy init for thread safety
         self._is_loaded = False
 
     def load(self) -> None:
@@ -401,7 +402,7 @@ class OpenImagesDataset(BaseDataset):
 
     def get_sample(self, index: int) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
-        Get preprocessed sample.
+        Get preprocessed sample (thread-safe).
 
         Args:
             index: Sample index
@@ -412,15 +413,26 @@ class OpenImagesDataset(BaseDataset):
         if not self._is_loaded:
             self.load()
 
+        # Lazy init lock for thread safety during parallel loading
+        if self._cache_lock is None:
+            import threading
+            self._cache_lock = threading.Lock()
+
         sample = self._samples[index]
 
-        if self.cache_preprocessed and index in self._cache:
-            img_array = self._cache[index]
-            preprocess_info = sample.get('preprocess_info', {})
-        else:
-            img_array, preprocess_info = self._preprocess_image(sample['image_path'])
-            sample['preprocess_info'] = preprocess_info
+        # Check cache with lock
+        with self._cache_lock:
+            if self.cache_preprocessed and index in self._cache:
+                img_array = self._cache[index]
+                preprocess_info = sample.get('preprocess_info', {})
+                return img_array, sample
 
+        # Preprocess outside lock (expensive operation)
+        img_array, preprocess_info = self._preprocess_image(sample['image_path'])
+
+        # Store in cache with lock
+        with self._cache_lock:
+            sample['preprocess_info'] = preprocess_info
             if self.cache_preprocessed:
                 self._cache[index] = img_array
 
@@ -600,14 +612,43 @@ class OpenImagesQSL(QuerySampleLibrary):
         return min(self._performance_sample_count, self.total_sample_count)
 
     def load_query_samples(self, sample_indices: List[int]) -> None:
-        """Load samples into memory."""
+        """Load samples into memory with progress tracking and parallel loading."""
         if not self.dataset._is_loaded:
             self.dataset.load()
 
-        for idx in sample_indices:
-            if idx not in self._loaded_samples:
-                img, _ = self.dataset.get_sample(idx)
+        # Filter indices that need to be loaded
+        to_load = [idx for idx in sample_indices if idx not in self._loaded_samples]
+
+        if not to_load:
+            return
+
+        logger.info(f"Loading {len(to_load)} OpenImages samples into memory...")
+
+        # Use parallel loading for faster preprocessing
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import sys
+
+        def load_single(idx):
+            img, _ = self.dataset.get_sample(idx)
+            return idx, img
+
+        num_workers = min(8, len(to_load))
+        completed = 0
+
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = {executor.submit(load_single, idx): idx for idx in to_load}
+
+            for future in as_completed(futures):
+                idx, img = future.result()
                 self._loaded_samples[idx] = img
+                completed += 1
+
+                # Progress update every 500 samples
+                if completed % 500 == 0 or completed == len(to_load):
+                    print(f"\rLoading samples: {completed}/{len(to_load)} ({100*completed/len(to_load):.1f}%)", end="", flush=True)
+
+        print()  # Newline after progress
+        logger.info(f"Loaded {len(to_load)} samples into memory")
 
     def unload_query_samples(self, sample_indices: List[int]) -> None:
         """Unload samples from memory."""
