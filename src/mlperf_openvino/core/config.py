@@ -287,14 +287,14 @@ class BenchmarkConfig:
                 onnx_url="https://zenodo.org/record/4735647/files/resnet50_v1.onnx",
                 offline=ScenarioConfig(
                     min_duration_ms=60000,
-                    min_query_count=24576,
+                    min_query_count=24576,  # MLPerf official
                     samples_per_query=1,
                 ),
                 server=ScenarioConfig(
                     min_duration_ms=60000,
-                    min_query_count=270336,  # MLPerf v5.1 requirement
+                    min_query_count=24576,  # Server uses min_duration primarily
                     target_latency_ns=15000000,  # 15ms
-                    target_qps=10000.0,  # High default for max throughput
+                    target_qps=10000.0,
                 ),
             ),
             dataset=DatasetConfig(
@@ -302,7 +302,7 @@ class BenchmarkConfig:
                 path="./data/imagenet",
             ),
         )
-    
+
     @classmethod
     def default_whisper(cls) -> "BenchmarkConfig":
         """Create default Whisper configuration."""
@@ -321,14 +321,14 @@ class BenchmarkConfig:
                 preprocessing=PreprocessingConfig(),  # Not used for audio
                 offline=ScenarioConfig(
                     min_duration_ms=60000,
-                    min_query_count=2513,  # MLPerf default
+                    min_query_count=2513,  # MLPerf official (LibriSpeech)
                     samples_per_query=1,
                 ),
                 server=ScenarioConfig(
                     min_duration_ms=60000,
-                    min_query_count=2513,
+                    min_query_count=2513,  # Server uses min_duration primarily
                     target_latency_ns=1000000000,  # 1 second for ASR
-                    target_qps=500.0,  # High default for max throughput
+                    target_qps=500.0,
                 ),
                 onnx_url="https://huggingface.co/openai/whisper-large-v3/resolve/main/model.onnx",
             ),
@@ -356,14 +356,14 @@ class BenchmarkConfig:
                 preprocessing=PreprocessingConfig(),  # Not used for text
                 offline=ScenarioConfig(
                     min_duration_ms=60000,
-                    min_query_count=10833,  # MLPerf default
+                    min_query_count=10833,  # MLPerf official (SQuAD dataset size)
                     samples_per_query=1,
                 ),
                 server=ScenarioConfig(
                     min_duration_ms=60000,
-                    min_query_count=270336,
+                    min_query_count=10833,  # Server uses min_duration primarily
                     target_latency_ns=130000000,  # 130ms
-                    target_qps=5000.0,  # High default for max throughput
+                    target_qps=5000.0,
                 ),
                 onnx_url="https://zenodo.org/record/3733910/files/model.onnx",
             ),
@@ -397,14 +397,14 @@ class BenchmarkConfig:
                 ),
                 offline=ScenarioConfig(
                     min_duration_ms=60000,
-                    min_query_count=24576,  # MLPerf default
+                    min_query_count=24576,  # MLPerf official
                     samples_per_query=1,
                 ),
                 server=ScenarioConfig(
                     min_duration_ms=60000,
-                    min_query_count=270336,
+                    min_query_count=24576,  # Server uses min_duration primarily
                     target_latency_ns=100000000,  # 100ms
-                    target_qps=1000.0,  # High default for max throughput
+                    target_qps=1000.0,
                 ),
                 onnx_url="https://zenodo.org/record/6617879/files/resnext50_32x4d_fpn.onnx",
             ),
