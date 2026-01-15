@@ -375,14 +375,71 @@ class OpenImagesDataset(BaseDataset):
 
         if failed_images:
             logger.warning(f"Failed to preprocess {failed_count} images (corrupted downloads)")
-            # Save list of failed images for re-download
-            failed_file = self._preprocessed_dir / "failed_images.txt"
-            with open(failed_file, 'w') as f:
-                f.write('\n'.join(failed_images))
-            logger.warning(f"List saved to: {failed_file}")
-            logger.warning("Delete corrupted images and re-run dataset download to fix")
+            # Auto-fix: re-download and preprocess corrupted images
+            fixed = self._auto_fix_corrupted_images(failed_images)
+            failed_count -= fixed
 
         logger.info(f"Disk cache created: {completed - failed_count}/{total} files")
+
+    def _auto_fix_corrupted_images(self, failed_list: List[str]) -> int:
+        """Automatically re-download and preprocess corrupted images."""
+        # Extract image IDs from error messages
+        image_ids = []
+        for msg in failed_list:
+            # Format: "image_id (corrupted...)" or "image_id: error"
+            image_id = msg.split()[0].split(':')[0].split('(')[0].strip()
+            if image_id:
+                image_ids.append(image_id)
+
+        if not image_ids:
+            return 0
+
+        print(f"\nAuto-fixing {len(image_ids)} corrupted images...")
+
+        # Find images directory
+        images_dir = self.data_path / "validation" / "data"
+        if not images_dir.exists():
+            images_dir = self.data_path / "images"
+        if not images_dir.exists():
+            logger.warning("Cannot find images directory for auto-fix")
+            return 0
+
+        # Delete corrupted files
+        for image_id in image_ids:
+            img_path = images_dir / f"{image_id}.jpg"
+            if img_path.exists():
+                try:
+                    img_path.unlink()
+                except:
+                    pass
+
+        # Re-download from S3
+        try:
+            from ..utils.dataset_downloader import _download_openimages_from_s3
+            print(f"Re-downloading {len(image_ids)} images from S3...")
+            _download_openimages_from_s3(image_ids, images_dir, num_workers=4)
+
+            # Re-preprocess the fixed images
+            print("Re-preprocessing fixed images...")
+            fixed_count = 0
+            for image_id in image_ids:
+                img_path = images_dir / f"{image_id}.jpg"
+                cache_path = self._preprocessed_dir / f"{image_id}.npy"
+
+                if img_path.exists():
+                    try:
+                        img_array, _ = self._preprocess_image(img_path)
+                        np.save(cache_path, img_array.astype(np.float32))
+                        fixed_count += 1
+                    except Exception as e:
+                        logger.warning(f"Still failed: {image_id}")
+
+            print(f"Auto-fixed {fixed_count}/{len(image_ids)} images")
+            return fixed_count
+
+        except Exception as e:
+            logger.warning(f"Auto-fix failed: {e}")
+            return 0
 
     def _load_annotations(self, annotations_path: Path) -> None:
         """Load annotations from CSV file."""

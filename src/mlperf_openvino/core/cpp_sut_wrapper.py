@@ -805,8 +805,10 @@ class RetinaNetCppSUTWrapper:
         """Start progress monitoring thread."""
         self._start_time = time.time()
         self._progress_stop_event.clear()
+        self._loading_samples = True  # Track if we're still loading
 
         def progress_thread():
+            wait_count = 0
             while not self._progress_stop_event.is_set():
                 self._progress_stop_event.wait(timeout=1.0)
                 if self._progress_stop_event.is_set():
@@ -816,13 +818,27 @@ class RetinaNetCppSUTWrapper:
                 issued = self._cpp_sut.get_issued_count()
                 throughput = completed / elapsed if elapsed > 0 else 0
                 pending = issued - completed
-                print(f"\rRetinaNet C++ SUT: issued={issued}, done={completed}, pending={pending}, {throughput:.1f} samples/sec", end="", flush=True)
+
+                if issued == 0:
+                    wait_count += 1
+                    # Show what's happening while waiting
+                    if self._loading_samples:
+                        print(f"\rRetinaNet: Loading samples... ({wait_count}s)", end="", flush=True)
+                    else:
+                        print(f"\rRetinaNet: Waiting for queries... ({wait_count}s)", end="", flush=True)
+                else:
+                    print(f"\rRetinaNet C++ SUT: issued={issued}, done={completed}, pending={pending}, {throughput:.1f} samples/sec", end="", flush=True)
 
         self._progress_thread = threading.Thread(target=progress_thread, daemon=True)
         self._progress_thread.start()
 
     def issue_queries(self, query_samples: List[Any]) -> None:
         """Process incoming queries using RetinaNet C++ SUT."""
+        self._loading_samples = False  # Samples loaded, now processing queries
+
+        if len(query_samples) > 0:
+            logger.info(f"RetinaNet: Received {len(query_samples)} queries")
+
         for qs in query_samples:
             sample_idx = qs.index
             query_id = qs.id
