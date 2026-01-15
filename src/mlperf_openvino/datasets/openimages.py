@@ -536,6 +536,40 @@ class OpenImagesDataset(BaseDataset):
 
         return img_array, preprocess_info
 
+    def _fix_and_preprocess(self, sample: Dict[str, Any]) -> Tuple[np.ndarray, Dict]:
+        """Re-download corrupted image and preprocess it."""
+        image_id = sample['image_id']
+        image_path = Path(sample['image_path'])
+
+        # Find images directory
+        images_dir = image_path.parent
+
+        # Delete corrupted file
+        if image_path.exists():
+            try:
+                image_path.unlink()
+            except:
+                pass
+
+        # Re-download from S3
+        try:
+            from ..utils.dataset_downloader import _download_openimages_from_s3
+            _download_openimages_from_s3([image_id], images_dir, num_workers=1)
+        except Exception as e:
+            logger.error(f"Failed to re-download {image_id}: {e}")
+            # Return dummy image as fallback
+            dummy = np.zeros((1, 3, self.input_size, self.input_size), dtype=np.float32)
+            return dummy, {}
+
+        # Try preprocessing again
+        try:
+            return self._preprocess_image(image_path)
+        except Exception as e:
+            logger.error(f"Still failed after re-download {image_id}: {e}")
+            # Return dummy image
+            dummy = np.zeros((1, 3, self.input_size, self.input_size), dtype=np.float32)
+            return dummy, {}
+
     def __len__(self) -> int:
         return len(self._samples)
 
@@ -552,6 +586,7 @@ class OpenImagesDataset(BaseDataset):
         Get preprocessed sample (thread-safe).
 
         Uses disk cache (numpy files) if available for fast loading.
+        Auto-fixes truncated/corrupted images by re-downloading.
 
         Args:
             index: Sample index
@@ -578,15 +613,24 @@ class OpenImagesDataset(BaseDataset):
         if self.use_disk_cache and self._preprocessed_dir:
             cache_path = self._preprocessed_dir / f"{sample['image_id']}.npy"
             if cache_path.exists():
-                img_array = np.load(cache_path)
-                # Store in memory cache
-                with self._cache_lock:
-                    if self.cache_preprocessed:
-                        self._cache[index] = img_array
-                return img_array, sample
+                try:
+                    img_array = np.load(cache_path)
+                    # Store in memory cache
+                    with self._cache_lock:
+                        if self.cache_preprocessed:
+                            self._cache[index] = img_array
+                    return img_array, sample
+                except Exception:
+                    # Corrupted cache file, remove it
+                    cache_path.unlink()
 
-        # Fallback: preprocess from original image
-        img_array, preprocess_info = self._preprocess_image(sample['image_path'])
+        # Fallback: preprocess from original image (with auto-fix for corrupted)
+        try:
+            img_array, preprocess_info = self._preprocess_image(sample['image_path'])
+        except (OSError, IOError) as e:
+            # Image is truncated/corrupted - try to re-download
+            logger.warning(f"Corrupted image {sample['image_id']}, attempting auto-fix...")
+            img_array, preprocess_info = self._fix_and_preprocess(sample)
 
         # Store in caches
         with self._cache_lock:
