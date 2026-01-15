@@ -547,19 +547,42 @@ class OpenImagesDataset(BaseDataset):
         # Delete corrupted file
         if image_path.exists():
             try:
+                old_size = image_path.stat().st_size
+                logger.info(f"Deleting corrupted {image_id} ({old_size} bytes)")
                 image_path.unlink()
             except:
                 pass
 
-        # Re-download from S3
-        try:
-            from ..utils.dataset_downloader import _download_openimages_from_s3
-            _download_openimages_from_s3([image_id], images_dir, num_workers=1)
-        except Exception as e:
-            logger.error(f"Failed to re-download {image_id}: {e}")
-            # Return dummy image as fallback
-            dummy = np.zeros((1, 3, self.input_size, self.input_size), dtype=np.float32)
-            return dummy, {}
+        # Re-download from S3 with retries
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                from ..utils.dataset_downloader import _download_openimages_from_s3
+                _download_openimages_from_s3([image_id], images_dir, num_workers=1)
+
+                # Verify download
+                if image_path.exists():
+                    file_size = image_path.stat().st_size
+                    if file_size > 1000:  # Valid image should be > 1KB
+                        # Try to open with PIL to verify
+                        try:
+                            with Image.open(image_path) as img:
+                                img.verify()
+                            logger.info(f"Successfully re-downloaded {image_id} ({file_size} bytes)")
+                            break
+                        except Exception:
+                            logger.warning(f"Downloaded file still corrupted, retry {attempt+1}/{max_retries}")
+                            image_path.unlink()
+                    else:
+                        logger.warning(f"Downloaded file too small ({file_size} bytes), retry {attempt+1}/{max_retries}")
+                        image_path.unlink()
+            except Exception as e:
+                logger.warning(f"Download attempt {attempt+1} failed: {e}")
+
+            if attempt == max_retries - 1:
+                logger.error(f"Failed to download valid {image_id} after {max_retries} attempts")
+                dummy = np.zeros((1, 3, self.input_size, self.input_size), dtype=np.float32)
+                return dummy, {}
 
         # Try preprocessing again
         try:

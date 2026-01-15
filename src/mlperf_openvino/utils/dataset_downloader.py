@@ -880,10 +880,16 @@ def _download_openimages_from_s3(
     except ImportError:
         pass
 
-    def download_one(image_id: str) -> Optional[str]:
+    def download_one(image_id: str, force_redownload: bool = False) -> Optional[str]:
         dest = images_dir / f"{image_id}.jpg"
-        if dest.exists():
-            return image_id
+
+        # Check if file exists and is valid (> 1KB)
+        if dest.exists() and not force_redownload:
+            if dest.stat().st_size > 1000:
+                return image_id
+            else:
+                # File is corrupted, delete and re-download
+                dest.unlink()
 
         url = f"https://s3.amazonaws.com/open-images-dataset/validation/{image_id}.jpg"
 
@@ -892,16 +898,33 @@ def _download_openimages_from_s3(
                 if requests_session is not None:
                     response = requests_session.get(url, timeout=60)
                     response.raise_for_status()
-                    with open(dest, 'wb') as f:
-                        f.write(response.content)
+                    content = response.content
                 else:
                     # Fallback with SSL disabled
                     req = urllib.request.Request(url)
                     with urllib.request.urlopen(req, context=ssl_context, timeout=60) as resp:
-                        with open(dest, 'wb') as f:
-                            f.write(resp.read())
+                        content = resp.read()
 
-                return image_id
+                # Verify content size before writing
+                if len(content) < 1000:
+                    if attempt < 2:
+                        time.sleep(2 ** attempt)
+                        continue
+                    else:
+                        return None
+
+                with open(dest, 'wb') as f:
+                    f.write(content)
+
+                # Verify written file
+                if dest.stat().st_size > 1000:
+                    return image_id
+                else:
+                    dest.unlink()
+                    if attempt < 2:
+                        time.sleep(2 ** attempt)
+                        continue
+                    return None
 
             except Exception as e:
                 if attempt < 2:
