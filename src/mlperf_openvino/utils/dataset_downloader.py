@@ -723,9 +723,16 @@ def download_openimages(
 
     logger.info(f"Found {len(image_ids)} unique images in annotations")
 
-    if max_images and max_images < len(image_ids):
-        image_ids = image_ids[:max_images]
-        logger.info(f"Limiting to {max_images} images")
+    # MLPerf uses 24781 images - limit to this subset
+    MLPERF_IMAGE_COUNT = 24781
+    if max_images:
+        target_count = min(max_images, len(image_ids))
+    else:
+        target_count = min(MLPERF_IMAGE_COUNT, len(image_ids))
+
+    if target_count < len(image_ids):
+        image_ids = image_ids[:target_count]
+        logger.info(f"Using {target_count} images (MLPerf subset)")
 
     # Step 3: Download images from S3
     existing = set(p.stem for p in images_dir.glob("*.jpg"))
@@ -759,69 +766,68 @@ def download_openimages(
 def _download_openimages_from_s3(
     image_ids: List[str],
     images_dir: Path,
-    num_workers: int = 8  # Reduced to avoid rate limiting
+    num_workers: int = 8
 ) -> None:
-    """Download images from AWS S3 open-images-dataset bucket with retry logic."""
+    """Download images from AWS S3 open-images-dataset bucket."""
     import time
+    import ssl
+    import urllib.request
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    # Try to use requests for better SSL handling
+    # Disable SSL verification globally for this download
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
+
+    # Try to use requests for better handling
+    requests_session = None
     try:
         import requests
-        use_requests = True
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+
+        requests_session = requests.Session()
+        requests_session.verify = False  # Disable SSL verification
+
+        # Suppress SSL warnings
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+        # Configure retries
+        retry = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+        adapter = HTTPAdapter(max_retries=retry)
+        requests_session.mount('https://', adapter)
+        requests_session.mount('http://', adapter)
     except ImportError:
-        use_requests = False
+        pass
 
-    # Try boto3
-    s3_client = None
-    try:
-        import boto3
-        from botocore import UNSIGNED
-        from botocore.config import Config
-
-        s3_client = boto3.client(
-            's3',
-            config=Config(
-                signature_version=UNSIGNED,
-                retries={'max_attempts': 3, 'mode': 'adaptive'}
-            )
-        )
-    except ImportError:
-        logger.info("boto3 not installed, using HTTP fallback")
-
-    def download_one_with_retry(image_id: str, max_retries: int = 3) -> Optional[str]:
+    def download_one(image_id: str) -> Optional[str]:
         dest = images_dir / f"{image_id}.jpg"
         if dest.exists():
             return image_id
 
         url = f"https://s3.amazonaws.com/open-images-dataset/validation/{image_id}.jpg"
 
-        for attempt in range(max_retries):
+        for attempt in range(3):
             try:
-                if s3_client is not None:
-                    s3_client.download_file(
-                        'open-images-dataset',
-                        f'validation/{image_id}.jpg',
-                        str(dest)
-                    )
-                elif use_requests:
-                    response = requests.get(url, timeout=30)
+                if requests_session is not None:
+                    response = requests_session.get(url, timeout=60)
                     response.raise_for_status()
                     with open(dest, 'wb') as f:
                         f.write(response.content)
                 else:
-                    urllib.request.urlretrieve(url, str(dest))
+                    # Fallback with SSL disabled
+                    req = urllib.request.Request(url)
+                    with urllib.request.urlopen(req, context=ssl_context, timeout=60) as resp:
+                        with open(dest, 'wb') as f:
+                            f.write(resp.read())
 
                 return image_id
 
             except Exception as e:
-                if attempt < max_retries - 1:
-                    # Exponential backoff: 1s, 2s, 4s
-                    sleep_time = 2 ** attempt
-                    time.sleep(sleep_time)
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
                 else:
-                    logger.debug(f"Failed to download {image_id} after {max_retries} attempts: {e}")
-                    # Clean up partial download
                     if dest.exists():
                         dest.unlink()
                     return None
@@ -831,9 +837,8 @@ def _download_openimages_from_s3(
     downloaded = 0
     failed = 0
 
-    # Use smaller batches to avoid overwhelming the connection
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        futures = {executor.submit(download_one_with_retry, img_id): img_id for img_id in image_ids}
+        futures = {executor.submit(download_one, img_id): img_id for img_id in image_ids}
 
         for future in as_completed(futures):
             result = future.result()
