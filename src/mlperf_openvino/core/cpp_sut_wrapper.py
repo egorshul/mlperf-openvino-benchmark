@@ -25,13 +25,18 @@ from ..core.config import BenchmarkConfig, Scenario
 
 # Try to import C++ extension
 try:
-    from ..cpp import CppSUT, CppOfflineSUT, BertCppSUT, CPP_AVAILABLE, BERT_CPP_AVAILABLE
+    from ..cpp import (
+        CppSUT, CppOfflineSUT, BertCppSUT, RetinaNetCppSUT,
+        CPP_AVAILABLE, BERT_CPP_AVAILABLE, RETINANET_CPP_AVAILABLE
+    )
 except ImportError:
     CPP_AVAILABLE = False
     BERT_CPP_AVAILABLE = False
+    RETINANET_CPP_AVAILABLE = False
     CppSUT = None
     CppOfflineSUT = None
     BertCppSUT = None
+    RetinaNetCppSUT = None
 
 logger = logging.getLogger(__name__)
 
@@ -708,3 +713,240 @@ def create_bert_sut(
 
     backend = OpenVINOBackend(model_path, config.openvino)
     return BertSUT(config, backend, qsl, scenario)
+
+
+class RetinaNetCppSUTWrapper:
+    """
+    Wrapper for RetinaNet C++ SUT with object detection outputs.
+
+    Optimized for RetinaNet Object Detection:
+    - 1 input: float32 image
+    - 3 outputs: boxes, scores, labels
+    """
+
+    def __init__(
+        self,
+        config: BenchmarkConfig,
+        model_path: str,
+        qsl: "QuerySampleLibrary",
+        scenario: Scenario = Scenario.OFFLINE,
+    ):
+        if not LOADGEN_AVAILABLE:
+            raise ImportError("MLPerf LoadGen is not installed")
+
+        if not RETINANET_CPP_AVAILABLE or RetinaNetCppSUT is None:
+            raise ImportError(
+                "RetinaNet C++ SUT extension not available. "
+                "Build it with: ./build_cpp.sh"
+            )
+
+        self.config = config
+        self.qsl = qsl
+        self.scenario = scenario
+
+        # Create RetinaNet C++ SUT
+        device = config.openvino.device
+        num_streams = 0
+        if config.openvino.num_streams != "AUTO":
+            try:
+                num_streams = int(config.openvino.num_streams)
+            except ValueError:
+                pass
+
+        performance_hint = config.openvino.performance_hint
+
+        logger.info(f"Creating RetinaNet C++ SUT: device={device}, hint={performance_hint}")
+        self._cpp_sut = RetinaNetCppSUT(model_path, device, num_streams, performance_hint)
+
+        # Load model
+        logger.info("Loading model in RetinaNet C++ SUT...")
+        self._cpp_sut.load()
+
+        # Get info
+        self.input_name = self._cpp_sut.get_input_name()
+        self.boxes_name = self._cpp_sut.get_boxes_name()
+        self.scores_name = self._cpp_sut.get_scores_name()
+        self.labels_name = self._cpp_sut.get_labels_name()
+
+        logger.info(f"RetinaNet input: {self.input_name}")
+        logger.info(f"RetinaNet outputs: boxes={self.boxes_name}, scores={self.scores_name}, labels={self.labels_name}")
+
+        # Statistics
+        self._start_time = 0.0
+        self._progress_stop_event = threading.Event()
+
+        # Enable storing predictions for accuracy mode
+        self._cpp_sut.set_store_predictions(True)
+
+        # Set up response callback
+        self._setup_response_callback()
+
+        # Start progress monitoring
+        self._start_progress_monitor()
+
+        logger.info(f"RetinaNet C++ SUT initialized with {self._cpp_sut.get_optimal_nireq()} optimal requests")
+
+    def _setup_response_callback(self):
+        """Set up the callback that C++ uses to notify LoadGen."""
+        import array
+
+        # Use minimal response for performance mode
+        dummy_data = array.array('B', [0] * 8)
+        dummy_bi = dummy_data.buffer_info()
+
+        def response_callback(query_id: int, boxes, scores, labels):
+            # Use minimal response - predictions are stored in C++ for accuracy mode
+            response = lg.QuerySampleResponse(query_id, dummy_bi[0], dummy_bi[1])
+            lg.QuerySamplesComplete([response])
+
+        self._cpp_sut.set_response_callback(response_callback)
+
+    def _start_progress_monitor(self):
+        """Start progress monitoring thread."""
+        self._start_time = time.time()
+        self._progress_stop_event.clear()
+
+        def progress_thread():
+            while not self._progress_stop_event.is_set():
+                self._progress_stop_event.wait(timeout=1.0)
+                if self._progress_stop_event.is_set():
+                    break
+                elapsed = time.time() - self._start_time
+                completed = self._cpp_sut.get_completed_count()
+                issued = self._cpp_sut.get_issued_count()
+                throughput = completed / elapsed if elapsed > 0 else 0
+                pending = issued - completed
+                print(f"\rRetinaNet C++ SUT: issued={issued}, done={completed}, pending={pending}, {throughput:.1f} samples/sec", end="", flush=True)
+
+        self._progress_thread = threading.Thread(target=progress_thread, daemon=True)
+        self._progress_thread.start()
+
+    def issue_queries(self, query_samples: List[Any]) -> None:
+        """Process incoming queries using RetinaNet C++ SUT."""
+        for qs in query_samples:
+            sample_idx = qs.index
+            query_id = qs.id
+
+            # Get pre-optimized features from QSL
+            features = self.qsl.get_features(sample_idx)
+            input_data = features.get('input', features.get(self.input_name))
+
+            # Flatten and ensure float32 contiguous
+            input_data = np.ascontiguousarray(input_data.flatten(), dtype=np.float32)
+
+            # Start async inference in C++
+            self._cpp_sut.start_async(input_data, query_id, sample_idx)
+
+    def flush_queries(self) -> None:
+        """Flush any pending queries."""
+        self._cpp_sut.wait_all()
+
+        # Stop progress monitor
+        self._progress_stop_event.set()
+
+        # Print final stats
+        elapsed = time.time() - self._start_time
+        completed = self._cpp_sut.get_completed_count()
+        throughput = completed / elapsed if elapsed > 0 else 0
+        print(f"\nRetinaNet C++ SUT completed: {completed} samples in {elapsed:.1f}s ({throughput:.1f} samples/sec)")
+
+    def get_sut(self) -> "lg.ConstructSUT":
+        """Get the LoadGen SUT object."""
+        return lg.ConstructSUT(self.issue_queries, self.flush_queries)
+
+    def get_qsl(self) -> "lg.ConstructQSL":
+        """Get the LoadGen QSL object."""
+        return lg.ConstructQSL(
+            self.qsl.total_sample_count,
+            self.qsl.performance_sample_count,
+            self.qsl.load_query_samples,
+            self.qsl.unload_query_samples,
+        )
+
+    @property
+    def name(self) -> str:
+        return f"OpenVINO-RetinaNetCpp-{self.config.model.name}"
+
+    @property
+    def _sample_count(self) -> int:
+        return self._cpp_sut.get_completed_count()
+
+    @property
+    def _query_count(self) -> int:
+        return self._cpp_sut.get_issued_count()
+
+    def get_predictions(self) -> Dict[int, Dict[str, np.ndarray]]:
+        """Get all predictions as dict of {sample_idx: {boxes, scores, labels}}."""
+        raw_preds = self._cpp_sut.get_predictions()
+        result = {}
+        for idx, pred in raw_preds.items():
+            boxes = np.array(pred['boxes'], dtype=np.float32)
+            scores = np.array(pred['scores'], dtype=np.float32)
+            labels = np.array(pred['labels'], dtype=np.float32) if pred['labels'].size > 0 else np.array([])
+
+            # Reshape boxes to [N, 4]
+            if len(boxes) > 0 and len(boxes) % 4 == 0:
+                boxes = boxes.reshape(-1, 4)
+
+            result[idx] = {
+                'boxes': boxes,
+                'scores': scores,
+                'labels': labels.astype(np.int64) if len(labels) > 0 else np.array([], dtype=np.int64),
+            }
+        return result
+
+    def reset(self) -> None:
+        """Reset SUT state."""
+        self._cpp_sut.reset_counters()
+
+    def compute_accuracy(self) -> Dict[str, float]:
+        """Compute mAP accuracy."""
+        predictions = self.get_predictions()
+
+        if not predictions:
+            return {'mAP': 0.0, 'num_samples': 0}
+
+        pred_list = []
+        gt_list = []
+        indices = sorted(predictions.keys())
+
+        for idx in indices:
+            pred_list.append(predictions[idx])
+            gt_list.append(self.qsl.get_label(idx))
+
+        return self.qsl.dataset.compute_accuracy(pred_list, indices)
+
+
+def create_retinanet_sut(
+    config: BenchmarkConfig,
+    model_path: str,
+    qsl: "QuerySampleLibrary",
+    scenario: Scenario = Scenario.OFFLINE,
+    force_python: bool = False,
+):
+    """
+    Factory function to create RetinaNet SUT.
+
+    Uses C++ SUT if available for maximum performance.
+
+    Args:
+        config: Benchmark configuration
+        model_path: Path to RetinaNet model file
+        qsl: Query Sample Library (OpenImagesQSL)
+        scenario: Test scenario
+        force_python: Force Python SUT even if C++ is available
+
+    Returns:
+        RetinaNet SUT instance
+    """
+    if RETINANET_CPP_AVAILABLE and not force_python:
+        logger.info(f"Using RetinaNet C++ SUT for {scenario.value} mode")
+        return RetinaNetCppSUTWrapper(config, model_path, qsl, scenario)
+
+    # Fall back to Python RetinaNetSUT
+    logger.info(f"Using Python RetinaNet SUT for {scenario.value} mode")
+    from .retinanet_sut import RetinaNetSUT
+    from ..backends.openvino_backend import OpenVINOBackend
+
+    backend = OpenVINOBackend(model_path, config.openvino)
+    return RetinaNetSUT(config, backend, qsl, scenario)

@@ -149,7 +149,7 @@ class BenchmarkRunner:
     def _setup_retinanet(self) -> None:
         """Set up RetinaNet benchmark."""
         from ..datasets.openimages import OpenImagesQSL
-        from .retinanet_sut import RetinaNetSUT
+        from .cpp_sut_wrapper import create_retinanet_sut
 
         logger.info(f"Loading OpenImages dataset from {self.config.dataset.path}")
         self.qsl = OpenImagesQSL(
@@ -161,9 +161,10 @@ class BenchmarkRunner:
         self.qsl.load()
 
         logger.info(f"Creating RetinaNet SUT for scenario: {self.config.scenario}")
-        self.sut = RetinaNetSUT(
+        # Use create_retinanet_sut to automatically select C++ or Python SUT
+        self.sut = create_retinanet_sut(
             config=self.config,
-            backend=self.backend,
+            model_path=self.config.model.model_path,
             qsl=self.qsl,
             scenario=self.config.scenario,
         )

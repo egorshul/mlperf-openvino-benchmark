@@ -8,6 +8,7 @@
  * - CppSUT: async inference for ResNet50 (single float32 input)
  * - CppOfflineSUT: sync batch inference for Offline scenario
  * - BertCppSUT: async inference for BERT (3x int64 inputs, 2x float32 outputs)
+ * - RetinaNetCppSUT: async inference for RetinaNet (1x float32 input, 3x outputs)
  */
 
 #include <pybind11/pybind11.h>
@@ -20,6 +21,7 @@
 #include "sut_cpp.hpp"
 #include "offline_sut.hpp"
 #include "bert_sut_cpp.hpp"
+#include "retinanet_sut_cpp.hpp"
 
 namespace py = pybind11;
 
@@ -310,6 +312,136 @@ PYBIND11_MODULE(_cpp_sut, m) {
              py::arg("callback"),
              "Set response callback (receives query_id, start_logits, end_logits)");
 
+    // RetinaNetCppSUT - optimized for RetinaNet Object Detection
+    py::class_<mlperf_ov::RetinaNetCppSUT>(m, "RetinaNetCppSUT")
+        .def(py::init<const std::string&, const std::string&, int, const std::string&>(),
+             py::arg("model_path"),
+             py::arg("device") = "CPU",
+             py::arg("num_streams") = 0,
+             py::arg("performance_hint") = "THROUGHPUT",
+             "Create RetinaNet C++ SUT instance")
+
+        .def("load", &mlperf_ov::RetinaNetCppSUT::load,
+             py::call_guard<py::gil_scoped_release>(),
+             "Load and compile the model")
+
+        .def("is_loaded", &mlperf_ov::RetinaNetCppSUT::is_loaded,
+             "Check if model is loaded")
+
+        .def("get_optimal_nireq", &mlperf_ov::RetinaNetCppSUT::get_optimal_nireq,
+             "Get optimal number of inference requests")
+
+        .def("get_input_name", &mlperf_ov::RetinaNetCppSUT::get_input_name,
+             "Get input tensor name")
+
+        .def("get_boxes_name", &mlperf_ov::RetinaNetCppSUT::get_boxes_name,
+             "Get boxes output name")
+
+        .def("get_scores_name", &mlperf_ov::RetinaNetCppSUT::get_scores_name,
+             "Get scores output name")
+
+        .def("get_labels_name", &mlperf_ov::RetinaNetCppSUT::get_labels_name,
+             "Get labels output name")
+
+        .def("get_input_shape", &mlperf_ov::RetinaNetCppSUT::get_input_shape,
+             "Get input shape")
+
+        .def("start_async",
+             [](mlperf_ov::RetinaNetCppSUT& self,
+                py::array_t<float, py::array::c_style | py::array::forcecast> input,
+                uint64_t query_id,
+                int sample_idx) {
+                 py::buffer_info buf = input.request();
+                 const float* data = static_cast<const float*>(buf.ptr);
+                 size_t size = buf.size;
+
+                 py::gil_scoped_release release;
+                 self.start_async(data, size, query_id, sample_idx);
+             },
+             py::arg("input"),
+             py::arg("query_id"),
+             py::arg("sample_idx"),
+             "Start async RetinaNet inference (GIL released)")
+
+        .def("wait_all", &mlperf_ov::RetinaNetCppSUT::wait_all,
+             py::call_guard<py::gil_scoped_release>(),
+             "Wait for all pending inferences")
+
+        .def("get_completed_count", &mlperf_ov::RetinaNetCppSUT::get_completed_count,
+             "Get number of completed samples")
+
+        .def("get_issued_count", &mlperf_ov::RetinaNetCppSUT::get_issued_count,
+             "Get number of issued samples")
+
+        .def("reset_counters", &mlperf_ov::RetinaNetCppSUT::reset_counters,
+             "Reset counters")
+
+        .def("set_store_predictions", &mlperf_ov::RetinaNetCppSUT::set_store_predictions,
+             py::arg("store"),
+             "Enable/disable storing predictions")
+
+        .def("get_predictions",
+             [](mlperf_ov::RetinaNetCppSUT& self) {
+                 auto cpp_preds = self.get_predictions();
+                 py::dict py_preds;
+
+                 for (const auto& [idx, pred] : cpp_preds) {
+                     py::dict entry;
+
+                     py::array_t<float> boxes_arr(pred.boxes.size());
+                     py::array_t<float> scores_arr(pred.scores.size());
+                     py::array_t<float> labels_arr(pred.labels.size());
+
+                     std::memcpy(boxes_arr.mutable_data(), pred.boxes.data(),
+                                pred.boxes.size() * sizeof(float));
+                     std::memcpy(scores_arr.mutable_data(), pred.scores.data(),
+                                pred.scores.size() * sizeof(float));
+                     if (!pred.labels.empty()) {
+                         std::memcpy(labels_arr.mutable_data(), pred.labels.data(),
+                                    pred.labels.size() * sizeof(float));
+                     }
+
+                     entry["boxes"] = boxes_arr;
+                     entry["scores"] = scores_arr;
+                     entry["labels"] = labels_arr;
+                     entry["num_detections"] = pred.num_detections;
+                     py_preds[py::int_(idx)] = entry;
+                 }
+                 return py_preds;
+             },
+             "Get stored predictions")
+
+        .def("set_response_callback",
+             [](mlperf_ov::RetinaNetCppSUT& self, py::function callback) {
+                 self.set_response_callback(
+                     [callback](uint64_t query_id,
+                               const float* boxes_data, size_t boxes_size,
+                               const float* scores_data, size_t scores_size,
+                               const float* labels_data, size_t labels_size) {
+                         py::gil_scoped_acquire acquire;
+
+                         if (boxes_data && scores_data && boxes_size > 0) {
+                             py::array_t<float> boxes_arr(boxes_size);
+                             py::array_t<float> scores_arr(scores_size);
+
+                             std::memcpy(boxes_arr.mutable_data(), boxes_data, boxes_size * sizeof(float));
+                             std::memcpy(scores_arr.mutable_data(), scores_data, scores_size * sizeof(float));
+
+                             if (labels_data && labels_size > 0) {
+                                 py::array_t<float> labels_arr(labels_size);
+                                 std::memcpy(labels_arr.mutable_data(), labels_data, labels_size * sizeof(float));
+                                 callback(query_id, boxes_arr, scores_arr, labels_arr);
+                             } else {
+                                 callback(query_id, boxes_arr, scores_arr, py::none());
+                             }
+                         } else {
+                             callback(query_id, py::none(), py::none(), py::none());
+                         }
+                     });
+             },
+             py::arg("callback"),
+             "Set response callback (receives query_id, boxes, scores, labels)");
+
     // Version info
-    m.attr("__version__") = "1.1.0";
+    m.attr("__version__") = "1.2.0";
 }

@@ -615,23 +615,57 @@ def download_squad(
     }
 
 
+def _download_openimages_image(args) -> Optional[str]:
+    """Download a single OpenImages image from S3."""
+    image_id, images_dir = args
+
+    try:
+        import boto3
+        from botocore import UNSIGNED
+        from botocore.config import Config
+    except ImportError:
+        # Fallback to HTTP download
+        url = f"https://s3.amazonaws.com/open-images-dataset/validation/{image_id}.jpg"
+        dest = images_dir / f"{image_id}.jpg"
+        try:
+            urllib.request.urlretrieve(url, str(dest))
+            return image_id
+        except Exception:
+            return None
+
+    try:
+        s3 = boto3.client('s3', config=Config(signature_version=UNSIGNED))
+        dest = images_dir / f"{image_id}.jpg"
+        s3.download_file('open-images-dataset', f'validation/{image_id}.jpg', str(dest))
+        return image_id
+    except Exception:
+        return None
+
+
 def download_openimages(
     output_dir: str,
-    force: bool = False
+    force: bool = False,
+    max_images: Optional[int] = None,
+    num_workers: int = 8
 ) -> Dict[str, str]:
     """
-    Download OpenImages annotations for RetinaNet Object Detection.
+    Download OpenImages validation set for RetinaNet Object Detection.
 
-    Note: This only downloads annotations. Images need to be downloaded
-    separately from the OpenImages website or via fiftyone.
+    Downloads both annotations and images from the official sources:
+    - Annotations from Google Storage
+    - Images from AWS S3 (open-images-dataset bucket)
 
     Args:
         output_dir: Directory to save dataset
         force: Force re-download
+        max_images: Maximum number of images to download (None = all ~24k)
+        num_workers: Number of parallel download workers
 
     Returns:
         Dictionary with dataset paths
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -645,37 +679,108 @@ def download_openimages(
     dataset_info = DATASET_REGISTRY["openimages"]
 
     # Download annotations
-    if "annotations" in dataset_info:
-        ann_info = dataset_info["annotations"]
-        ann_file = annotations_dir / ann_info["filename"]
-
-        if not ann_file.exists() or force:
-            logger.info("Downloading OpenImages annotations...")
-            _download_file(
-                ann_info["url"],
-                str(ann_file),
-                expected_size_mb=ann_info.get("size_mb")
-            )
+    ann_file = annotations_dir / "validation-annotations-bbox.csv"
+    if not ann_file.exists() or force:
+        logger.info("Downloading OpenImages annotations...")
+        _download_file(
+            dataset_info["annotations"]["url"],
+            str(ann_file),
+            expected_size_mb=dataset_info["annotations"].get("size_mb")
+        )
 
     # Download class descriptions
-    if "class_descriptions" in dataset_info:
-        class_info = dataset_info["class_descriptions"]
-        class_file = annotations_dir / class_info["filename"]
+    class_file = annotations_dir / "class-descriptions.csv"
+    if not class_file.exists() or force:
+        logger.info("Downloading class descriptions...")
+        _download_file(
+            dataset_info["class_descriptions"]["url"],
+            str(class_file)
+        )
 
-        if not class_file.exists() or force:
-            logger.info("Downloading class descriptions...")
-            _download_file(class_info["url"], str(class_file))
+    # Download MLPerf image list (official subset)
+    mlperf_list_url = "https://raw.githubusercontent.com/mlcommons/inference/master/vision/classification_and_detection/tools/openimages_mlperf.txt"
+    mlperf_list_file = annotations_dir / "openimages_mlperf.txt"
 
-    logger.info(f"OpenImages annotations ready at {data_dir}")
-    logger.info("Note: Images need to be downloaded separately from OpenImages website")
-    logger.info("You can use: pip install fiftyone && fiftyone zoo download open-images-v6 --split validation")
+    try:
+        if not mlperf_list_file.exists() or force:
+            logger.info("Downloading MLPerf image list...")
+            _download_file(mlperf_list_url, str(mlperf_list_file), show_progress=False)
+    except Exception as e:
+        logger.warning(f"Could not download MLPerf image list: {e}")
+        mlperf_list_file = None
+
+    # Get list of images to download
+    image_ids = set()
+
+    # Use MLPerf list if available
+    if mlperf_list_file and mlperf_list_file.exists():
+        with open(mlperf_list_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    # Remove .jpg extension if present
+                    image_id = line.replace('.jpg', '')
+                    image_ids.add(image_id)
+        logger.info(f"Found {len(image_ids)} images in MLPerf list")
+    else:
+        # Parse annotations to get image IDs
+        logger.info("Parsing annotations for image IDs...")
+        with open(ann_file, 'r') as f:
+            import csv
+            reader = csv.DictReader(f)
+            for row in reader:
+                image_id = row.get('ImageID', '')
+                if image_id:
+                    image_ids.add(image_id)
+        logger.info(f"Found {len(image_ids)} unique images in annotations")
+
+    # Limit number of images if specified
+    if max_images and max_images < len(image_ids):
+        image_ids = set(list(image_ids)[:max_images])
+        logger.info(f"Limiting to {max_images} images")
+
+    # Check existing images
+    existing = set(p.stem for p in images_dir.glob("*.jpg"))
+    to_download = image_ids - existing
+
+    if not to_download:
+        logger.info(f"All {len(image_ids)} images already downloaded")
+    else:
+        logger.info(f"Downloading {len(to_download)} images ({len(existing)} already exist)...")
+
+        # Download images in parallel
+        downloaded = 0
+        failed = 0
+
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            args_list = [(img_id, images_dir) for img_id in to_download]
+            futures = {executor.submit(_download_openimages_image, args): args[0]
+                      for args in args_list}
+
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    downloaded += 1
+                else:
+                    failed += 1
+
+                total = downloaded + failed
+                if total % 100 == 0 or total == len(to_download):
+                    print(f"\rDownloaded: {downloaded}/{len(to_download)}, failed: {failed}",
+                          end="", flush=True)
+
+        print()  # newline
+        logger.info(f"Downloaded {downloaded} images, {failed} failed")
+
+    # Count final images
+    final_count = len(list(images_dir.glob("*.jpg")))
+    logger.info(f"OpenImages dataset ready: {final_count} images at {data_dir}")
 
     return {
         "data_path": str(data_dir),
-        "annotations_file": str(annotations_dir / "validation-annotations-bbox.csv"),
+        "annotations_file": str(ann_file),
         "images_dir": str(images_dir),
-        "num_samples": dataset_info.get("num_samples", 24576),
-        "note": "Images need to be downloaded separately",
+        "num_samples": final_count,
     }
 
 
