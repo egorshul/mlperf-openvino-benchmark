@@ -434,7 +434,6 @@ class RetinaNetSUT:
         Args:
             query_samples: List of query samples from LoadGen
         """
-        logger.info(f"[DEBUG] Python RetinaNetSUT issue_queries: {len(query_samples)} samples, scenario={self.scenario}")
         if self.scenario == Scenario.OFFLINE:
             self._issue_query_offline(query_samples)
         elif self.scenario == Scenario.SERVER:
@@ -487,15 +486,8 @@ class RetinaNetSUT:
         Returns:
             Dictionary with mAP and other metrics
         """
-        logger.info(f"[DEBUG] Python RetinaNetSUT compute_accuracy: {len(self._predictions)} predictions")
-        if self._predictions:
-            first_idx = next(iter(self._predictions.keys()))
-            first_pred = self._predictions[first_idx]
-            logger.info(f"[DEBUG] First prediction (idx={first_idx}): "
-                       f"boxes={first_pred['boxes'].shape if hasattr(first_pred['boxes'], 'shape') else len(first_pred.get('boxes', []))}")
-
         if not self._predictions:
-            logger.error("[DEBUG] No predictions! sample_count={self._sample_count}, query_count={self._query_count}")
+            logger.warning(f"No predictions (sample_count={self._sample_count}, query_count={self._query_count})")
             return {'mAP': 0.0, 'num_samples': 0}
 
         # Try to use pycocotools for accurate mAP calculation (same as C++ wrapper)
