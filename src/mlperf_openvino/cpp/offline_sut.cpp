@@ -32,8 +32,6 @@ void CppOfflineSUT::load() {
         return;
     }
 
-    std::cout << "[CppOfflineSUT] Loading model: " << model_path_ << std::endl;
-    std::cout << "[CppOfflineSUT] Batch size: " << batch_size_ << std::endl;
 
     // Read model
     model_ = core_.read_model(model_path_);
@@ -66,12 +64,6 @@ void CppOfflineSUT::load() {
         input_shape_[0] = batch_size_;
     }
 
-    std::cout << "[CppOfflineSUT] Input: " << input_name_
-              << ", single sample shape: " << single_sample_shape_
-              << ", batch shape: " << input_shape_ << std::endl;
-    std::cout << "[CppOfflineSUT] Output[" << output_idx_ << "]: " << output_name_ << std::endl;
-    std::cout << "[CppOfflineSUT] Sample size: " << sample_size_ << " elements" << std::endl;
-
     // Build compile properties - optimize for THROUGHPUT
     ov::AnyMap properties;
     properties[ov::hint::performance_mode.name()] = ov::hint::PerformanceMode::THROUGHPUT;
@@ -86,7 +78,6 @@ void CppOfflineSUT::load() {
     }
 
     // Compile model
-    std::cout << "[CppOfflineSUT] Compiling model for device: " << device_ << std::endl;
     compiled_model_ = core_.compile_model(model_, device_, properties);
 
     // Create single inference request
@@ -97,7 +88,6 @@ void CppOfflineSUT::load() {
     infer_request_.set_input_tensor(input_tensor_);
 
     loaded_ = true;
-    std::cout << "[CppOfflineSUT] Model loaded successfully" << std::endl;
 }
 
 std::string CppOfflineSUT::get_input_name() const {

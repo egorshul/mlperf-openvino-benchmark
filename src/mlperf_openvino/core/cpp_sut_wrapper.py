@@ -98,17 +98,17 @@ class CppSUTWrapper:
 
         performance_hint = config.openvino.performance_hint
 
-        logger.info(f"Creating C++ SUT: device={device}, num_streams={num_streams}, hint={performance_hint}")
+        logger.debug(f"Creating C++ SUT: device={device}, num_streams={num_streams}, hint={performance_hint}")
         self._cpp_sut = CppSUT(model_path, device, num_streams, performance_hint)
 
         # Load model
-        logger.info("Loading model in C++ SUT...")
+        logger.debug("Loading model in C++ SUT...")
         self._cpp_sut.load()
 
         # Get input/output names
         self.input_name = self._cpp_sut.get_input_name()
         self.output_name = self._cpp_sut.get_output_name()
-        logger.info(f"Input: {self.input_name}, Output: {self.output_name}")
+        logger.debug(f"Input: {self.input_name}, Output: {self.output_name}")
 
         # Statistics
         self._start_time = 0.0
@@ -123,7 +123,7 @@ class CppSUTWrapper:
         # Start progress monitoring
         self._start_progress_monitor()
 
-        logger.info(f"C++ SUT initialized with {self._cpp_sut.get_optimal_nireq()} optimal requests")
+        logger.debug(f"C++ SUT initialized with {self._cpp_sut.get_optimal_nireq()} optimal requests")
 
     def _setup_response_callback(self):
         """Set up the callback that C++ uses to notify LoadGen."""
@@ -306,11 +306,11 @@ class CppOfflineSUTWrapper:
             except ValueError:
                 pass
 
-        logger.info(f"Creating C++ Offline SUT: device={device}, batch_size={batch_size}")
+        logger.debug(f"Creating C++ Offline SUT: device={device}, batch_size={batch_size}")
         self._cpp_sut = CppOfflineSUT(model_path, device, batch_size, num_streams)
 
         # Load model
-        logger.info("Loading model in C++ Offline SUT...")
+        logger.debug("Loading model in C++ Offline SUT...")
         self._cpp_sut.load()
 
         # Get input info
@@ -318,7 +318,7 @@ class CppOfflineSUTWrapper:
         self.output_name = self._cpp_sut.get_output_name()
         self.sample_size = self._cpp_sut.get_sample_size()
 
-        logger.info(f"C++ Offline SUT initialized: batch={batch_size}, sample_size={self.sample_size}")
+        logger.debug(f"C++ Offline SUT initialized: batch={batch_size}, sample_size={self.sample_size}")
 
         # Statistics
         self._start_time = 0.0
@@ -473,11 +473,11 @@ class BertCppSUTWrapper:
 
         performance_hint = config.openvino.performance_hint
 
-        logger.info(f"Creating BERT C++ SUT: device={device}, num_streams={num_streams}, hint={performance_hint}")
+        logger.debug(f"Creating BERT C++ SUT: device={device}, num_streams={num_streams}, hint={performance_hint}")
         self._cpp_sut = BertCppSUT(model_path, device, num_streams, performance_hint)
 
         # Load model
-        logger.info("Loading model in BERT C++ SUT...")
+        logger.debug("Loading model in BERT C++ SUT...")
         self._cpp_sut.load()
 
         # Get input/output names
@@ -488,9 +488,9 @@ class BertCppSUTWrapper:
         self.end_logits_name = self._cpp_sut.get_end_logits_name()
         self.seq_length = self._cpp_sut.get_seq_length()
 
-        logger.info(f"BERT inputs: {self.input_ids_name}, {self.attention_mask_name}, {self.token_type_ids_name}")
-        logger.info(f"BERT outputs: {self.start_logits_name}, {self.end_logits_name}")
-        logger.info(f"Sequence length: {self.seq_length}")
+        logger.debug(f"BERT inputs: {self.input_ids_name}, {self.attention_mask_name}, {self.token_type_ids_name}")
+        logger.debug(f"BERT outputs: {self.start_logits_name}, {self.end_logits_name}")
+        logger.debug(f"Sequence length: {self.seq_length}")
 
         # Statistics
         self._start_time = 0.0
@@ -505,7 +505,7 @@ class BertCppSUTWrapper:
         # Start progress monitoring
         self._start_progress_monitor()
 
-        logger.info(f"BERT C++ SUT initialized with {self._cpp_sut.get_optimal_nireq()} optimal requests")
+        logger.debug(f"BERT C++ SUT initialized with {self._cpp_sut.get_optimal_nireq()} optimal requests")
 
     def _setup_response_callback(self):
         """Set up the callback that C++ uses to notify LoadGen."""
@@ -756,11 +756,11 @@ class RetinaNetCppSUTWrapper:
 
         performance_hint = config.openvino.performance_hint
 
-        logger.info(f"Creating RetinaNet C++ SUT: device={device}, hint={performance_hint}")
+        logger.debug(f"Creating RetinaNet C++ SUT: device={device}, hint={performance_hint}")
         self._cpp_sut = RetinaNetCppSUT(model_path, device, num_streams, performance_hint)
 
         # Load model
-        logger.info("Loading model in RetinaNet C++ SUT...")
+        logger.debug("Loading model in RetinaNet C++ SUT...")
         self._cpp_sut.load()
 
         # Get info
@@ -769,8 +769,8 @@ class RetinaNetCppSUTWrapper:
         self.scores_name = self._cpp_sut.get_scores_name()
         self.labels_name = self._cpp_sut.get_labels_name()
 
-        logger.info(f"RetinaNet input: {self.input_name}")
-        logger.info(f"RetinaNet outputs: boxes={self.boxes_name}, scores={self.scores_name}, labels={self.labels_name}")
+        logger.debug(f"RetinaNet input: {self.input_name}")
+        logger.debug(f"RetinaNet outputs: boxes={self.boxes_name}, scores={self.scores_name}, labels={self.labels_name}")
 
         # Statistics
         self._start_time = 0.0
@@ -785,7 +785,7 @@ class RetinaNetCppSUTWrapper:
         # Start progress monitoring
         self._start_progress_monitor()
 
-        logger.info(f"RetinaNet C++ SUT initialized with {self._cpp_sut.get_optimal_nireq()} optimal requests")
+        logger.debug(f"RetinaNet C++ SUT initialized with {self._cpp_sut.get_optimal_nireq()} optimal requests")
 
     def _setup_response_callback(self):
         """Set up the callback that C++ uses to notify LoadGen."""
@@ -953,14 +953,14 @@ class RetinaNetCppSUTWrapper:
                         break
 
                 if coco_file:
-                    logger.info(f"Using pycocotools with {coco_file}")
+                    logger.debug(f"Using pycocotools with {coco_file}")
 
                     # Get sample_idx to filename mapping for correct COCO image_id lookup
                     # This is CRITICAL - dataset order may differ from COCO annotation order!
                     sample_to_filename = None
                     if hasattr(self.qsl, 'get_sample_to_filename_mapping'):
                         sample_to_filename = self.qsl.get_sample_to_filename_mapping()
-                        logger.info(f"Got filename mapping for {len(sample_to_filename)} samples")
+                        logger.debug(f"Got filename mapping for {len(sample_to_filename)} samples")
 
                     return evaluate_openimages_accuracy(
                         predictions=predictions,

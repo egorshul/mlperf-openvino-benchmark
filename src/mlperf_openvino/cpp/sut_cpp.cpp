@@ -51,7 +51,6 @@ void CppSUT::load() {
         return;
     }
 
-    std::cout << "[CppSUT] Loading model: " << model_path_ << std::endl;
 
     // Read model
     model_ = core_.read_model(model_path_);
@@ -73,8 +72,6 @@ void CppSUT::load() {
     output_idx_ = outputs.size() > 1 ? 1 : 0;
     output_name_ = outputs[output_idx_].get_any_name();
 
-    std::cout << "[CppSUT] Input: " << input_name_ << ", shape: " << input_shape_ << std::endl;
-    std::cout << "[CppSUT] Output[" << output_idx_ << "]: " << output_name_ << std::endl;
 
     // Build compile properties
     ov::AnyMap properties;
@@ -97,7 +94,6 @@ void CppSUT::load() {
     }
 
     // Compile model
-    std::cout << "[CppSUT] Compiling model for device: " << device_ << std::endl;
     compiled_model_ = core_.compile_model(model_, device_, properties);
 
     // Get optimal number of inference requests
@@ -107,7 +103,6 @@ void CppSUT::load() {
         optimal_nireq_ = 4;
     }
 
-    std::cout << "[CppSUT] Optimal number of inference requests: " << optimal_nireq_ << std::endl;
 
     // Create InferRequest pool with 2x optimal requests for better pipelining
     int num_requests = std::max(optimal_nireq_ * 2, 16);
@@ -139,10 +134,8 @@ void CppSUT::load() {
         available_ids_.push(static_cast<size_t>(i));
     }
 
-    std::cout << "[CppSUT] Created " << num_requests << " inference requests" << std::endl;
 
     loaded_ = true;
-    std::cout << "[CppSUT] Model loaded successfully" << std::endl;
 }
 
 std::string CppSUT::get_input_name() const {

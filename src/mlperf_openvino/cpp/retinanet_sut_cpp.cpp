@@ -77,18 +77,12 @@ void RetinaNetCppSUT::map_output_names() {
         labels_idx_ = 2;
     }
 
-    std::cout << "[RetinaNetCppSUT] Output mapping:" << std::endl;
-    std::cout << "  boxes[" << boxes_idx_ << "]: " << boxes_name_ << std::endl;
-    std::cout << "  scores[" << scores_idx_ << "]: " << scores_name_ << std::endl;
-    std::cout << "  labels[" << labels_idx_ << "]: " << labels_name_ << std::endl;
 }
 
 void RetinaNetCppSUT::load() {
     if (loaded_) {
         return;
     }
-
-    std::cout << "[RetinaNetCppSUT] Loading model: " << model_path_ << std::endl;
 
     model_ = core_.read_model(model_path_);
 
@@ -105,8 +99,6 @@ void RetinaNetCppSUT::load() {
     if (input_shape_.size() > 0 && input_shape_[0] == 0) {
         input_shape_[0] = 1;
     }
-
-    std::cout << "[RetinaNetCppSUT] Input: " << input_name_ << ", shape: " << input_shape_ << std::endl;
 
     // Map output names
     map_output_names();
@@ -128,7 +120,6 @@ void RetinaNetCppSUT::load() {
         properties[ov::hint::enable_cpu_pinning.name()] = true;
     }
 
-    std::cout << "[RetinaNetCppSUT] Compiling model for device: " << device_ << std::endl;
     compiled_model_ = core_.compile_model(model_, device_, properties);
 
     try {
@@ -136,8 +127,6 @@ void RetinaNetCppSUT::load() {
     } catch (...) {
         optimal_nireq_ = 4;
     }
-
-    std::cout << "[RetinaNetCppSUT] Optimal requests: " << optimal_nireq_ << std::endl;
 
     // Create InferRequest pool
     int num_requests = std::max(optimal_nireq_ * 2, 16);
@@ -162,10 +151,7 @@ void RetinaNetCppSUT::load() {
         available_ids_.push(static_cast<size_t>(i));
     }
 
-    std::cout << "[RetinaNetCppSUT] Created " << num_requests << " inference requests" << std::endl;
-
     loaded_ = true;
-    std::cout << "[RetinaNetCppSUT] Model loaded successfully" << std::endl;
 }
 
 std::vector<size_t> RetinaNetCppSUT::get_input_shape() const {
