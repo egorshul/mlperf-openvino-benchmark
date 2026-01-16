@@ -130,8 +130,8 @@ def main():
 
     for i in range(min(args.count, dataset.total_count)):
         try:
-            features = dataset.get_item(i)
-            img = features['input']
+            img, info = dataset.get_sample(i)
+            # img already has the preprocessed image from get_sample
 
             # Run inference
             result = compiled(img)
