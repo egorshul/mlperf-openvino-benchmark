@@ -18,13 +18,20 @@ def main():
     print("RetinaNet Diagnostic")
     print("=" * 60)
 
+    # Download model if needed
+    from mlperf_openvino.utils.model_downloader import download_model
+    model_path = download_model("retinanet", "models")
+    print(f"\nModel path: {model_path}")
+
     # Create config
     config = BenchmarkConfig.default_retinanet()
+    config.model.model_path = model_path
     config.dataset.path = "./data/openimages"
     config.dataset.num_samples = 10  # Small test
     config.test_mode = TestMode.ACCURACY_ONLY
 
     print(f"\nConfig:")
+    print(f"  Model path: {config.model.model_path}")
     print(f"  Data path: {config.dataset.path}")
     print(f"  Num samples: {config.dataset.num_samples}")
 
