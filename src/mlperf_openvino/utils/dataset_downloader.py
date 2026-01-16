@@ -358,44 +358,70 @@ def download_librispeech(
 ) -> Dict[str, str]:
     """
     Download LibriSpeech dataset for Whisper benchmark.
-    
+
     For MLPerf submissions, use subset="mlperf" which downloads
     both dev-clean and dev-other.
-    
+
     Args:
         output_dir: Directory to save dataset
         subset: "mlperf" (dev-clean + dev-other), "dev-clean", "dev-other", etc.
         force: Force re-download
-        
+
     Returns:
         Dictionary with dataset paths
     """
+    import json
+
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    
+
     # Handle MLPerf subset (dev-clean + dev-other)
     if subset == "mlperf":
         logger.info("Downloading MLPerf LibriSpeech (dev-clean + dev-other)...")
-        
+
         results = {"subsets": []}
         total_samples = 0
-        
+        all_manifest_entries = []
+
         for sub in DATASET_REGISTRY["librispeech"]["mlperf_subsets"]:
             sub_result = _download_librispeech_subset(output_path, sub, force)
             results["subsets"].append(sub_result)
             total_samples += sub_result.get("num_samples", 0)
-        
-        # Create combined directory with symlinks
+
+            # Load manifest entries from subset
+            manifest_path = sub_result.get("manifest_path")
+            if manifest_path and Path(manifest_path).exists():
+                with open(manifest_path, 'r') as f:
+                    entries = json.load(f)
+                    all_manifest_entries.extend(entries)
+
+        # Create combined directory
         mlperf_dir = output_path / "librispeech" / "mlperf"
         mlperf_dir.mkdir(parents=True, exist_ok=True)
-        
-        results["data_path"] = str(output_path / "librispeech")
+
+        # Create combined manifest
+        combined_manifest = mlperf_dir / "manifest.json"
+        with open(combined_manifest, 'w') as f:
+            json.dump(all_manifest_entries, f, indent=2)
+        logger.info(f"Created combined manifest with {len(all_manifest_entries)} entries")
+
+        # Create combined transcripts file
+        combined_transcripts = mlperf_dir / "transcripts.txt"
+        with open(combined_transcripts, 'w', encoding='utf-8') as f:
+            for entry in all_manifest_entries:
+                utterance_id = entry.get("utterance_id", "")
+                text = entry.get("text", "")
+                f.write(f"{utterance_id} {text}\n")
+
+        results["data_path"] = str(mlperf_dir)
+        results["manifest_path"] = str(combined_manifest)
+        results["transcript_path"] = str(combined_transcripts)
         results["num_samples"] = total_samples
         results["note"] = "MLPerf Whisper uses dev-clean + dev-other combined"
-        
-        logger.info(f"LibriSpeech MLPerf ready: {total_samples} samples")
+
+        logger.info(f"LibriSpeech MLPerf ready: {total_samples} samples at {mlperf_dir}")
         return results
-    
+
     # Single subset
     return _download_librispeech_subset(output_path, subset, force)
 
@@ -408,27 +434,31 @@ def _download_librispeech_subset(
     """Download a single LibriSpeech subset."""
     dataset_info = DATASET_REGISTRY["librispeech"].get(subset)
     if not dataset_info or not isinstance(dataset_info, dict):
-        available = [k for k, v in DATASET_REGISTRY["librispeech"].items() 
+        available = [k for k, v in DATASET_REGISTRY["librispeech"].items()
                      if isinstance(v, dict) and "url" in v]
         raise ValueError(f"Unknown subset: {subset}. Available: {available}")
-    
+
     data_dir = output_path / "librispeech" / subset
     audio_dir = data_dir / "audio"
     transcript_file = data_dir / "transcripts.txt"
-    
+    manifest_file = data_dir / "manifest.json"
+
     # Check if already exists
     if data_dir.exists() and transcript_file.exists() and not force:
         logger.info(f"LibriSpeech {subset} already exists at {data_dir}")
+        # Count actual audio files
+        actual_count = len(list(audio_dir.glob("*.flac"))) if audio_dir.exists() else 0
         return {
             "data_path": str(data_dir),
             "audio_dir": str(audio_dir),
             "transcript_path": str(transcript_file),
-            "num_samples": dataset_info["num_samples"],
+            "manifest_path": str(manifest_file) if manifest_file.exists() else None,
+            "num_samples": actual_count or dataset_info["num_samples"],
         }
-    
+
     # Download
     archive_path = output_path / dataset_info["filename"]
-    
+
     if not archive_path.exists() or force:
         logger.info(f"Downloading LibriSpeech {subset} (~{dataset_info['size_mb']} MB)...")
         _download_file(
@@ -436,64 +466,79 @@ def _download_librispeech_subset(
             str(archive_path),
             expected_size_mb=dataset_info["size_mb"]
         )
-        
+
         # Verify checksum
         if dataset_info.get("md5"):
             if not _verify_md5(str(archive_path), dataset_info["md5"]):
                 archive_path.unlink()
                 raise RuntimeError("Checksum verification failed")
-    
+
     # Extract
     _extract_archive(str(archive_path), str(output_path))
-    
+
     # Organize: move from LibriSpeech/dev-clean to librispeech/dev-clean
     extracted_dir = output_path / dataset_info["extracted_dir"]
-    
+
     data_dir.mkdir(parents=True, exist_ok=True)
     audio_dir.mkdir(exist_ok=True)
-    
-    # Process and create transcripts
-    _process_librispeech(extracted_dir, audio_dir, transcript_file)
-    
+
+    # Process and create transcripts + manifest
+    actual_count = _process_librispeech(extracted_dir, audio_dir, transcript_file, manifest_file)
+
     logger.info(f"LibriSpeech {subset} ready at {data_dir}")
-    
+
     return {
         "data_path": str(data_dir),
         "audio_dir": str(audio_dir),
         "transcript_path": str(transcript_file),
-        "num_samples": dataset_info["num_samples"],
+        "manifest_path": str(manifest_file),
+        "num_samples": actual_count,
     }
 
 
 def _process_librispeech(
     source_dir: Path,
     audio_dir: Path,
-    transcript_file: Path
-) -> None:
+    transcript_file: Path,
+    manifest_file: Optional[Path] = None
+) -> int:
     """
     Process LibriSpeech directory structure.
-    
+
     LibriSpeech format:
         speaker_id/chapter_id/speaker_id-chapter_id-utterance_id.flac
         speaker_id/chapter_id/speaker_id-chapter_id.trans.txt
-    
+
     Creates:
         audio/speaker_id-chapter_id-utterance_id.flac (copies or symlinks)
         transcripts.txt
+        manifest.json (MLPerf format, optional)
+
+    Returns:
+        Number of processed audio files
     """
+    import json
+
+    try:
+        import soundfile as sf
+        has_soundfile = True
+    except ImportError:
+        has_soundfile = False
+
     logger.info("Processing LibriSpeech files...")
-    
+
     transcripts = []
+    manifest_entries = []
     audio_count = 0
-    
+
     for speaker_dir in sorted(source_dir.iterdir()):
         if not speaker_dir.is_dir():
             continue
-        
+
         for chapter_dir in sorted(speaker_dir.iterdir()):
             if not chapter_dir.is_dir():
                 continue
-            
+
             # Read transcripts
             chapter_transcripts = {}
             for trans_file in chapter_dir.glob("*.trans.txt"):
@@ -504,26 +549,51 @@ def _process_librispeech(
                             parts = line.split(' ', 1)
                             if len(parts) == 2:
                                 chapter_transcripts[parts[0]] = parts[1]
-            
+
             # Process audio files
             for audio_file in sorted(chapter_dir.glob("*.flac")):
                 utterance_id = audio_file.stem
-                
+
                 # Copy audio file
                 dest_audio = audio_dir / audio_file.name
                 if not dest_audio.exists():
                     shutil.copy2(audio_file, dest_audio)
-                
+
                 transcript = chapter_transcripts.get(utterance_id, "")
                 transcripts.append((utterance_id, transcript))
+
+                # Get audio duration for manifest
+                duration = 0.0
+                if has_soundfile and dest_audio.exists():
+                    try:
+                        info = sf.info(str(dest_audio))
+                        duration = info.duration
+                    except Exception:
+                        pass
+
+                # Create manifest entry (MLPerf format)
+                manifest_entries.append({
+                    "audio_filepath": str(dest_audio),
+                    "text": transcript,
+                    "duration": duration,
+                    "utterance_id": utterance_id,
+                })
+
                 audio_count += 1
-    
-    # Write transcripts
+
+    # Write transcripts (simple format)
     with open(transcript_file, 'w', encoding='utf-8') as f:
         for audio_id, transcript in transcripts:
             f.write(f"{audio_id} {transcript}\n")
-    
+
+    # Write JSON manifest (MLPerf format)
+    if manifest_file:
+        with open(manifest_file, 'w', encoding='utf-8') as f:
+            json.dump(manifest_entries, f, indent=2)
+        logger.info(f"Created manifest with {len(manifest_entries)} entries")
+
     logger.info(f"Processed {audio_count} audio files")
+    return audio_count
 
 
 def download_whisper_mlperf(output_dir: str) -> Dict[str, str]:

@@ -221,35 +221,80 @@ class LibriSpeechDataset(BaseDataset):
         """Load dataset metadata."""
         if self._is_loaded:
             return
-        
+
         logger.info(f"Loading LibriSpeech dataset from {self.data_path}")
-        
-        # Find transcript file
-        if self.transcript_path:
-            transcript_file = Path(self.transcript_path)
+
+        # Try JSON manifest first (MLPerf format)
+        manifest_file = None
+        for name in ["manifest.json", "dev-all.json"]:
+            candidate = self.data_path / name
+            if candidate.exists():
+                manifest_file = candidate
+                break
+
+        if manifest_file:
+            self._load_from_manifest(manifest_file)
         else:
-            # Try common names
-            for name in ["transcripts.txt", "dev-clean.txt", "test-clean.txt"]:
-                transcript_file = self.data_path / name
-                if transcript_file.exists():
-                    break
+            # Fall back to transcript file
+            if self.transcript_path:
+                transcript_file = Path(self.transcript_path)
             else:
-                # Scan for audio files without transcripts
-                logger.warning("No transcript file found, scanning for audio files")
+                # Try common names
                 transcript_file = None
-        
-        # Load samples
-        if transcript_file and transcript_file.exists():
-            self._load_from_transcript(transcript_file)
-        else:
-            self._scan_audio_files()
-        
+                for name in ["transcripts.txt", "dev-clean.txt", "test-clean.txt"]:
+                    candidate = self.data_path / name
+                    if candidate.exists():
+                        transcript_file = candidate
+                        break
+
+                if not transcript_file:
+                    # Scan for audio files without transcripts
+                    logger.warning("No transcript file found, scanning for audio files")
+
+            # Load samples
+            if transcript_file and transcript_file.exists():
+                self._load_from_transcript(transcript_file)
+            else:
+                self._scan_audio_files()
+
         # Limit count if specified
         if self.count and self.count < len(self._samples):
             self._samples = self._samples[:self.count]
-        
+
         logger.info(f"Loaded {len(self._samples)} audio samples")
         self._is_loaded = True
+
+    def _load_from_manifest(self, manifest_file: Path) -> None:
+        """Load samples from JSON manifest file (MLPerf format)."""
+        import json
+
+        logger.info(f"Loading from manifest: {manifest_file}")
+
+        with open(manifest_file, 'r', encoding='utf-8') as f:
+            entries = json.load(f)
+
+        for entry in entries:
+            audio_path = entry.get("audio_filepath", "")
+
+            # Handle relative paths
+            if not Path(audio_path).is_absolute():
+                audio_path = str(self.data_path / audio_path)
+
+            # Check if file exists
+            if not Path(audio_path).exists():
+                # Try in audio subdirectory
+                audio_name = Path(audio_path).name
+                alt_path = self.data_path / "audio" / audio_name
+                if alt_path.exists():
+                    audio_path = str(alt_path)
+
+            if Path(audio_path).exists():
+                self._samples.append({
+                    "id": entry.get("utterance_id", Path(audio_path).stem),
+                    "audio_path": audio_path,
+                    "transcript": entry.get("text", ""),
+                    "duration": entry.get("duration", 0.0),
+                })
     
     def _load_from_transcript(self, transcript_file: Path) -> None:
         """Load samples from transcript file."""
