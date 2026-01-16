@@ -64,28 +64,28 @@ def main():
 
         print("\n4. Analyzing outputs:")
         for i, out in enumerate(model.outputs):
-            data = result[out]
-            print(f"\n   Output '{out.any_name}':")
+            data = result[i]  # Use index instead of output object
+            name = out.any_name
+            print(f"\n   Output [{i}] '{name}':")
             print(f"     Shape: {data.shape}")
             print(f"     Dtype: {data.dtype}")
             print(f"     Range: [{data.min():.4f}, {data.max():.4f}]")
 
             # Analyze based on shape
-            if len(data.shape) >= 2:
-                flat = data.flatten()
-                print(f"     First 10 values: {flat[:10]}")
+            flat = data.flatten()
+            print(f"     First 10 values: {flat[:10]}")
 
-                # If looks like boxes (values in reasonable range)
-                if data.max() <= 1.0 and data.min() >= 0:
-                    print(f"     Looks like NORMALIZED coordinates")
-                elif data.max() > 100:
-                    print(f"     Looks like PIXEL coordinates")
+            # If looks like boxes (values in reasonable range)
+            if data.max() <= 1.0 and data.min() >= 0:
+                print(f"     Looks like NORMALIZED coordinates")
+            elif data.max() > 100:
+                print(f"     Looks like PIXEL coordinates (max={data.max():.1f})")
 
-                # If looks like labels (integers)
-                unique = np.unique(data.flatten()[:1000])
-                if len(unique) < 500 and data.min() >= 0:
-                    print(f"     Unique values (first 20): {unique[:20]}")
-                    print(f"     Min label: {data.min()}, Max label: {data.max()}")
+            # If looks like labels (integers or small range)
+            if 'label' in name.lower() or 'class' in name.lower():
+                unique = np.unique(flat[:1000].astype(int))
+                print(f"     Unique label values: {unique[:20]}")
+                print(f"     Label range: {int(data.min())} to {int(data.max())}")
 
     except Exception as e:
         print(f"   Error: {e}")
