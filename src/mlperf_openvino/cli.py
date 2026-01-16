@@ -405,8 +405,10 @@ def info():
               default='./data', help='Output directory')
 @click.option('--subset', '-s', type=str, default=None,
               help='Dataset subset (e.g., "dev-clean" for librispeech)')
+@click.option('--count', '-c', type=int, default=None,
+              help='Max images to download (OpenImages only, default=all)')
 @click.option('--force', is_flag=True, help='Force re-download')
-def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str], force: bool):
+def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str], count: Optional[int], force: bool):
     """
     Download dataset files.
 
@@ -437,11 +439,18 @@ def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str], f
 
     if subset:
         click.echo(f"Subset: {subset}")
+    if count and dataset == 'openimages':
+        click.echo(f"Max images: {count}")
 
     click.echo("")
 
     try:
-        paths = download_dataset(dataset, output_dir, subset, force)
+        # Special handling for OpenImages with count limit
+        if dataset == 'openimages':
+            from .utils.dataset_downloader import download_openimages
+            paths = download_openimages(output_dir, force=force, max_images=count)
+        else:
+            paths = download_dataset(dataset, output_dir, subset, force)
 
         click.echo("\nDataset downloaded successfully!")
         click.echo(f"  Path: {paths.get('data_path', 'N/A')}")
