@@ -966,7 +966,7 @@ class RetinaNetCppSUTWrapper:
                         predictions=predictions,
                         coco_annotations_file=coco_file,
                         input_size=800,
-                        model_labels_zero_indexed=True,  # Model outputs 0-indexed labels (0-364), add +1 for category_ids (1-365)
+                        model_labels_zero_indexed=True,  # Model outputs 0-indexed labels (0-263), add +1 for category_ids (1-264)
                         boxes_in_pixels=True,  # Model outputs boxes in pixel coords [0,800]
                         sample_to_filename=sample_to_filename,
                     )

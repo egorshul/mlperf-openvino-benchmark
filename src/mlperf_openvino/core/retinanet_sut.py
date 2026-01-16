@@ -33,8 +33,8 @@ from ..datasets.openimages import OpenImagesQSL
 
 logger = logging.getLogger(__name__)
 
-# RetinaNet constants for OpenImages (MLPerf uses 365 classes, not COCO's 80)
-NUM_CLASSES = 365  # MLPerf OpenImages classes
+# RetinaNet constants for OpenImages (MLPerf uses 264 classes, not COCO's 80)
+NUM_CLASSES = 264  # MLPerf OpenImages classes
 SCORE_THRESHOLD = 0.05
 NMS_THRESHOLD = 0.5
 MAX_DETECTIONS = 100
@@ -523,7 +523,7 @@ class RetinaNetSUT:
                         predictions=self._predictions,
                         coco_annotations_file=coco_file,
                         input_size=800,
-                        model_labels_zero_indexed=True,  # Model outputs 0-indexed labels (0-364), add +1 for category_ids (1-365)
+                        model_labels_zero_indexed=True,  # Model outputs 0-indexed labels (0-263), add +1 for category_ids (1-264)
                         boxes_in_pixels=True,  # Model outputs boxes in pixel coords [0,800]
                         sample_to_filename=sample_to_filename,
                     )

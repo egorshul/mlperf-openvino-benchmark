@@ -42,7 +42,7 @@ def evaluate_openimages_accuracy(
         image_sizes: Dict of {sample_idx: (width, height)} - used if boxes need scaling
         input_size: Model input size (default 800 for RetinaNet)
         model_labels_zero_indexed: If True, add +1 to labels. MLPerf ONNX model outputs
-                                   0-indexed labels (0-364), COCO uses 1-indexed category_ids (1-365).
+                                   0-indexed labels (0-263), COCO uses 1-indexed category_ids (1-264).
         boxes_in_pixels: If True, boxes are already in pixel coordinates [0, input_size].
                         MLPerf ONNX RetinaNet outputs pixels, so this should be True.
         sample_to_filename: Dict of {sample_idx: filename} for proper mapping to COCO image_ids.
@@ -93,14 +93,14 @@ def evaluate_openimages_accuracy(
     cat_ids = sorted(coco_gt.cats.keys())
     logger.debug(f"Category IDs: {cat_ids[:10]}... (total {len(cat_ids)})")
 
-    # Check if annotations have correct category_id range (1-365 for MLPerf)
-    # If we see category_ids > 365, the annotations file needs regeneration
+    # Check if annotations have correct category_id range (1-264 for MLPerf)
+    # If we see category_ids > 264, the annotations file needs regeneration
     max_cat_id = max(cat_ids) if cat_ids else 0
     min_cat_id = min(cat_ids) if cat_ids else 0
-    if max_cat_id > 400:  # Old format used all ~600 OpenImages classes
+    if max_cat_id > 300:  # Old format used all ~600 OpenImages classes
         logger.warning(f"COCO annotations have category_ids up to {max_cat_id}")
         logger.warning("This suggests the annotations file was created with OLD format.")
-        logger.warning("Please delete openimages-mlperf.json and re-run to regenerate with correct category_ids (1-365).")
+        logger.warning("Please delete openimages-mlperf.json and re-run to regenerate with correct category_ids (1-264).")
 
     # Auto-detect label format by analyzing first predictions
     # Check what label values the model outputs

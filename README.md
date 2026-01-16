@@ -538,6 +538,9 @@ Contributions are welcome! Please read our contributing guidelines before submit
 - Added proper int64 to float conversion for RetinaNet labels
 - Fixed critical sample_idx to COCO image_id mapping for correct mAP evaluation
 - Integrated pycocotools for official mAP calculation
+- Fixed OpenImages class count: 264 classes (matching MLCommons reference), not 365
+- Added failed image download logging to `failed_downloads.txt` for debugging
+- Added fallback URL for OpenImages S3 downloads
 - Removed debug scripts, cleaned up codebase for release
 
 ### v0.1.0
