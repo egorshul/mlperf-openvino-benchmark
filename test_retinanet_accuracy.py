@@ -37,8 +37,7 @@ def main():
     print("\n1. Downloading RetinaNet model...")
     from mlperf_openvino.utils.model_downloader import download_model
 
-    model_result = download_model("retinanet", args.model_dir)
-    model_path = model_result.get("onnx_path") or model_result.get("model_path")
+    model_path = download_model("retinanet", args.model_dir)
     print(f"   Model: {model_path}")
 
     # Step 2: Download dataset subset
