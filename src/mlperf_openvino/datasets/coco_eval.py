@@ -30,22 +30,20 @@ def evaluate_openimages_accuracy(
     image_sizes: Optional[Dict[int, Tuple[int, int]]] = None,
     input_size: int = 800,
     model_labels_zero_indexed: bool = True,
-    boxes_yxyx_format: bool = False,
+    boxes_in_pixels: bool = True,
 ) -> Dict[str, float]:
     """
     Evaluate RetinaNet predictions using COCO API (official MLPerf method).
 
     Args:
         predictions: Dict of {sample_idx: {'boxes': [N,4], 'scores': [N], 'labels': [N]}}
-                    boxes in normalized [0,1] format
         coco_annotations_file: Path to COCO format annotations JSON
-        image_sizes: Dict of {sample_idx: (width, height)} for denormalization
-                    If None, assumes input_size x input_size
+        image_sizes: Dict of {sample_idx: (width, height)} - used if boxes need scaling
         input_size: Model input size (default 800 for RetinaNet)
-        model_labels_zero_indexed: If True, model outputs 0-indexed labels (0-364)
-                                   which need +1 to match COCO category_ids (1-365)
-        boxes_yxyx_format: If True, model outputs boxes in [ymin, xmin, ymax, xmax] format.
-                          If False, assumes [xmin, ymin, xmax, ymax] format (MLPerf RetinaNet standard).
+        model_labels_zero_indexed: If True, add +1 to labels. MLPerf ONNX model outputs
+                                   0-indexed labels (0-364), COCO uses 1-indexed category_ids (1-365).
+        boxes_in_pixels: If True, boxes are already in pixel coordinates [0, input_size].
+                        MLPerf ONNX RetinaNet outputs pixels, so this should be True.
 
     Returns:
         Dictionary with mAP metrics
@@ -141,32 +139,28 @@ def evaluate_openimages_accuracy(
             img_width = img_height = input_size
 
         for box, score, label in zip(boxes, scores, labels):
-            # Handle box coordinate format
-            # MLPerf RetinaNet outputs [xmin, ymin, xmax, ymax] (normalized after our preprocessing)
-            # We need to convert to COCO format: [x, y, width, height] in pixels
-            if boxes_yxyx_format:
-                # Some models use [ymin, xmin, ymax, xmax] format
-                ymin, xmin, ymax, xmax = box
-                x1, y1, x2, y2 = xmin, ymin, xmax, ymax
+            # MLPerf RetinaNet ONNX model outputs boxes in [x1, y1, x2, y2] format
+            x1, y1, x2, y2 = box
+
+            if boxes_in_pixels:
+                # Boxes already in pixel coordinates [0, input_size]
+                # Just use directly
+                x1_px, y1_px, x2_px, y2_px = x1, y1, x2, y2
             else:
-                # MLPerf RetinaNet format: [xmin, ymin, xmax, ymax]
-                x1, y1, x2, y2 = box
+                # Boxes are normalized [0, 1] - scale to image dimensions
+                x1_px = x1 * img_width
+                y1_px = y1 * img_height
+                x2_px = x2 * img_width
+                y2_px = y2 * img_height
 
-            # Denormalize to pixels
-            x1_px = x1 * img_width
-            y1_px = y1 * img_height
-            x2_px = x2 * img_width
-            y2_px = y2 * img_height
-
-            # Convert to [x, y, w, h]
+            # Convert to COCO format [x, y, w, h]
             bbox_width = x2_px - x1_px
             bbox_height = y2_px - y1_px
 
-            # Category ID - convert from model output to COCO format
-            # Model outputs 0-indexed labels (0-364), COCO uses 1-indexed (1-365)
+            # Category ID - model outputs ORIGINAL OpenImages category IDs
             category_id = int(label)
             if model_labels_zero_indexed:
-                category_id = category_id + 1  # Convert 0-indexed to 1-indexed
+                category_id = category_id + 1
 
             # Skip invalid categories
             if category_id not in valid_cat_ids:

@@ -893,12 +893,15 @@ class RetinaNetCppSUTWrapper:
         return self._cpp_sut.get_issued_count()
 
     def get_predictions(self) -> Dict[int, Dict[str, np.ndarray]]:
-        """Get all predictions as dict of {sample_idx: {boxes, scores, labels}}."""
+        """Get all predictions as dict of {sample_idx: {boxes, scores, labels}}.
+
+        Note: MLPerf RetinaNet ONNX model outputs:
+        - boxes: [N, 4] in PIXEL coordinates [0, 800], format [x1, y1, x2, y2]
+        - scores: [N] confidence scores
+        - labels: [N] ORIGINAL OpenImages category IDs (not 0-indexed!)
+        """
         raw_preds = self._cpp_sut.get_predictions()
         result = {}
-
-        # Input size for normalization (RetinaNet uses 800x800)
-        input_size = 800.0
 
         for idx, pred in raw_preds.items():
             boxes = np.array(pred['boxes'], dtype=np.float32)
@@ -908,9 +911,8 @@ class RetinaNetCppSUTWrapper:
             # Reshape boxes to [N, 4]
             if len(boxes) > 0 and len(boxes) % 4 == 0:
                 boxes = boxes.reshape(-1, 4)
-                # Normalize boxes from pixel coords [0, 800] to [0, 1]
-                # to match ground truth format
-                boxes = boxes / input_size
+                # Model outputs boxes in PIXEL coordinates [0, 800]
+                # Keep as-is, coco_eval expects pixel coordinates
 
             result[idx] = {
                 'boxes': boxes,
@@ -954,8 +956,8 @@ class RetinaNetCppSUTWrapper:
                         predictions=predictions,
                         coco_annotations_file=coco_file,
                         input_size=800,
-                        model_labels_zero_indexed=True,  # Model outputs 0-364, COCO uses 1-365
-                        boxes_yxyx_format=False,  # MLPerf RetinaNet outputs [xmin,ymin,xmax,ymax]
+                        model_labels_zero_indexed=True,  # Model outputs 0-indexed labels (0-364), add +1 for category_ids (1-365)
+                        boxes_in_pixels=True,  # Model outputs boxes in pixel coords [0,800]
                     )
                 else:
                     logger.warning("COCO annotations file not found, using fallback mAP calculation")
