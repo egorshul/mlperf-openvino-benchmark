@@ -837,8 +837,10 @@ class RetinaNetCppSUTWrapper:
         """Process incoming queries using RetinaNet C++ SUT."""
         self._loading_samples = False  # Samples loaded, now processing queries
 
+        logger.info(f"[DEBUG] RetinaNet issue_queries called with {len(query_samples)} samples")
         if len(query_samples) > 0:
             logger.info(f"RetinaNet: Received {len(query_samples)} queries")
+            logger.info(f"[DEBUG] First sample: index={query_samples[0].index}, id={query_samples[0].id}")
 
         for qs in query_samples:
             sample_idx = qs.index
@@ -856,6 +858,7 @@ class RetinaNetCppSUTWrapper:
 
     def flush_queries(self) -> None:
         """Flush any pending queries."""
+        logger.info("[DEBUG] flush_queries called, waiting for all inferences...")
         self._cpp_sut.wait_all()
 
         # Stop progress monitor
@@ -864,8 +867,10 @@ class RetinaNetCppSUTWrapper:
         # Print final stats
         elapsed = time.time() - self._start_time
         completed = self._cpp_sut.get_completed_count()
+        issued = self._cpp_sut.get_issued_count()
         throughput = completed / elapsed if elapsed > 0 else 0
         print(f"\nRetinaNet C++ SUT completed: {completed} samples in {elapsed:.1f}s ({throughput:.1f} samples/sec)")
+        logger.info(f"[DEBUG] flush_queries done: issued={issued}, completed={completed}")
 
     def get_sut(self) -> "lg.ConstructSUT":
         """Get the LoadGen SUT object."""
@@ -929,7 +934,19 @@ class RetinaNetCppSUTWrapper:
         """Compute mAP accuracy using pycocotools (official MLPerf method)."""
         predictions = self.get_predictions()
 
+        logger.info(f"[DEBUG] compute_accuracy: got {len(predictions)} predictions")
+        if predictions:
+            # Log first prediction for debugging
+            first_idx = next(iter(predictions.keys()))
+            first_pred = predictions[first_idx]
+            logger.info(f"[DEBUG] First prediction (idx={first_idx}): "
+                       f"boxes={first_pred['boxes'].shape if hasattr(first_pred['boxes'], 'shape') else len(first_pred['boxes'])}, "
+                       f"scores={first_pred['scores'].shape if hasattr(first_pred['scores'], 'shape') else len(first_pred['scores'])}, "
+                       f"labels={first_pred['labels'].shape if hasattr(first_pred['labels'], 'shape') else len(first_pred['labels'])}")
+
         if not predictions:
+            logger.error("[DEBUG] No predictions collected! Check if inference ran correctly.")
+            logger.error(f"[DEBUG] C++ SUT stats: issued={self._cpp_sut.get_issued_count()}, completed={self._cpp_sut.get_completed_count()}")
             return {'mAP': 0.0, 'num_samples': 0}
 
         # Try to use pycocotools for accurate mAP calculation
