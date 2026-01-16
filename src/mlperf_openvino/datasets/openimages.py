@@ -311,7 +311,9 @@ class OpenImagesDataset(BaseDataset):
 
         # Set up preprocessed cache directory
         if self.use_disk_cache:
-            self._preprocessed_dir = self.data_path / "preprocessed_cache"
+            # Use versioned cache directory to invalidate on preprocessing changes
+            # v2: MLPerf standard preprocessing (no ImageNet normalization)
+            self._preprocessed_dir = self.data_path / "preprocessed_cache_v2"
             self._preprocessed_dir.mkdir(exist_ok=True)
             self._check_or_create_disk_cache()
 
@@ -556,6 +558,11 @@ class OpenImagesDataset(BaseDataset):
         """
         Preprocess image for RetinaNet.
 
+        MLPerf reference preprocessing:
+        1. Resize to [800, 800] (simple resize, no aspect ratio preservation)
+        2. Normalize: divide by 255.0 ONLY (NO ImageNet mean/std!)
+        3. Convert to NCHW format
+
         Args:
             image_path: Path to image file
 
@@ -565,27 +572,12 @@ class OpenImagesDataset(BaseDataset):
         img = Image.open(image_path).convert('RGB')
         orig_width, orig_height = img.size
 
-        # Calculate scale to resize shortest side to input_size
-        scale = self.input_size / min(orig_width, orig_height)
+        # MLPerf reference: simple resize to target size (no aspect ratio preservation)
+        img = img.resize((self.input_size, self.input_size), Image.Resampling.BILINEAR)
 
-        # Resize
-        new_width = int(orig_width * scale)
-        new_height = int(orig_height * scale)
-        img = img.resize((new_width, new_height), Image.Resampling.BILINEAR)
-
-        # Pad to square
-        padded = Image.new('RGB', (self.input_size, self.input_size), (128, 128, 128))
-        paste_x = (self.input_size - new_width) // 2
-        paste_y = (self.input_size - new_height) // 2
-        padded.paste(img, (paste_x, paste_y))
-
-        # Convert to numpy and normalize
-        img_array = np.array(padded, dtype=np.float32) / 255.0
-
-        # Normalize with ImageNet mean/std
-        mean = np.array(NORMALIZE_MEAN, dtype=np.float32)
-        std = np.array(NORMALIZE_STD, dtype=np.float32)
-        img_array = (img_array - mean) / std
+        # Convert to numpy and normalize - ONLY divide by 255!
+        # MLPerf RetinaNet does NOT use ImageNet mean/std normalization
+        img_array = np.array(img, dtype=np.float32) / 255.0
 
         # Convert to NCHW format
         img_array = np.transpose(img_array, (2, 0, 1))
@@ -594,9 +586,8 @@ class OpenImagesDataset(BaseDataset):
         preprocess_info = {
             'orig_width': orig_width,
             'orig_height': orig_height,
-            'scale': scale,
-            'pad_x': paste_x,
-            'pad_y': paste_y,
+            'scale_x': self.input_size / orig_width,
+            'scale_y': self.input_size / orig_height,
         }
 
         return img_array, preprocess_info
