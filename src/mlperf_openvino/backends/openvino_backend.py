@@ -3,6 +3,8 @@ OpenVINO backend implementation for MLPerf Benchmark.
 """
 
 import logging
+import queue
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -10,13 +12,14 @@ import numpy as np
 
 try:
     import openvino as ov
-    from openvino.runtime import Core, CompiledModel, InferRequest
+    from openvino import Core, CompiledModel, InferRequest, AsyncInferQueue
     OPENVINO_AVAILABLE = True
 except ImportError:
     OPENVINO_AVAILABLE = False
     Core = None
     CompiledModel = None
     InferRequest = None
+    AsyncInferQueue = None
 
 from .base import BaseBackend
 from ..core.config import OpenVINOConfig
@@ -27,14 +30,14 @@ logger = logging.getLogger(__name__)
 class OpenVINOBackend(BaseBackend):
     """
     OpenVINO backend for inference.
-    
+
     This backend supports:
     - ONNX models (converted on-the-fly)
     - OpenVINO IR models (.xml/.bin)
     - Various precision modes (FP32, FP16, INT8)
     - Automatic batching and streaming
     """
-    
+
     def __init__(
         self,
         model_path: str,
@@ -43,7 +46,7 @@ class OpenVINOBackend(BaseBackend):
     ):
         """
         Initialize OpenVINO backend.
-        
+
         Args:
             model_path: Path to ONNX or OpenVINO IR model
             config: OpenVINO configuration
@@ -54,45 +57,48 @@ class OpenVINOBackend(BaseBackend):
                 "OpenVINO is not installed. Please install it with: "
                 "pip install openvino"
             )
-        
+
         super().__init__(model_path, **kwargs)
-        
+
         self.config = config or OpenVINOConfig()
         self._core: Optional[Core] = None
         self._model: Optional[ov.Model] = None
         self._compiled_model: Optional[CompiledModel] = None
         self._infer_request: Optional[InferRequest] = None
-        
+
         # For async inference
         self._infer_requests: List[InferRequest] = []
-        self._num_streams: int = 1
-        
+        self._optimal_nireq: int = 1  # Optimal number of inference requests
+
+        # For thread-safe inference - queue of available requests
+        self._request_queue: Optional[queue.Queue] = None
+
         # Cache input/output info
         self._input_names: List[str] = []
         self._output_names: List[str] = []
         self._input_shapes: Dict[str, Tuple[int, ...]] = {}
         self._output_shapes: Dict[str, Tuple[int, ...]] = {}
-    
+
     def load(self) -> None:
         """Load and compile the model."""
         if self._loaded:
             logger.warning("Model already loaded, skipping...")
             return
-        
+
         logger.info(f"Loading model from {self.model_path}")
-        
+
         # Initialize OpenVINO Core
         self._core = Core()
-        
+
         # Create cache directory if specified
         if self.config.cache_dir:
             cache_path = Path(self.config.cache_dir)
             cache_path.mkdir(parents=True, exist_ok=True)
             self._core.set_property({"CACHE_DIR": str(cache_path)})
-        
+
         # Load the model
         model_path = Path(self.model_path)
-        
+
         if model_path.suffix.lower() == ".onnx":
             logger.info("Loading ONNX model and converting to OpenVINO IR...")
             self._model = self._core.read_model(str(model_path))
@@ -101,32 +107,35 @@ class OpenVINOBackend(BaseBackend):
             self._model = self._core.read_model(str(model_path))
         else:
             raise ValueError(f"Unsupported model format: {model_path.suffix}")
-        
+
         # Get model info before compilation
         self._extract_model_info()
-        
+
         # Compile the model with optimizations
         logger.info(f"Compiling model for device: {self.config.device}")
-        
+
         # Build properties
         properties = self._build_compile_properties()
-        
+
         self._compiled_model = self._core.compile_model(
-            self._model, 
+            self._model,
             self.config.device,
             properties
         )
-        
-        # Get number of streams
+
+        # Get optimal number of inference requests - KEY for performance!
         try:
-            self._num_streams = self._compiled_model.get_property("NUM_STREAMS")
-            logger.info(f"Using {self._num_streams} inference streams")
+            self._optimal_nireq = self._compiled_model.get_property(
+                ov.properties.optimal_number_of_infer_requests()
+            )
+            logger.info(f"Optimal number of inference requests: {self._optimal_nireq}")
         except Exception:
-            self._num_streams = 1
-        
+            self._optimal_nireq = 4  # Fallback
+            logger.warning(f"Could not get optimal nireq, using {self._optimal_nireq}")
+
         # Create inference requests
         self._create_infer_requests()
-        
+
         self._loaded = True
         logger.info("Model loaded and compiled successfully")
     
@@ -168,74 +177,160 @@ class OpenVINOBackend(BaseBackend):
         # Get input info
         self._input_names = []
         self._input_shapes = {}
-        
+        self._input_dtypes = {}
+
         for input_node in self._model.inputs:
             name = input_node.any_name
             self._input_names.append(name)
-            
+
             shape = tuple(input_node.partial_shape.get_min_shape())
             if any(d == 0 for d in shape):
                 # Dynamic shape, use default
                 shape = tuple(d if d > 0 else 1 for d in shape)
-            
+
             self._input_shapes[name] = shape
-        
+
+            # Get element type
+            element_type = input_node.element_type
+            self._input_dtypes[name] = element_type
+
         # Get output info
         self._output_names = []
         self._output_shapes = {}
-        
+
         for output_node in self._model.outputs:
             name = output_node.any_name
             self._output_names.append(name)
-            
+
             shape = tuple(output_node.partial_shape.get_min_shape())
             if any(d == 0 for d in shape):
                 shape = tuple(d if d > 0 else 1 for d in shape)
-            
+
             self._output_shapes[name] = shape
-        
+
         logger.info(f"Model inputs: {self._input_names}")
+        logger.info(f"Model input dtypes: {self._input_dtypes}")
         logger.info(f"Model outputs: {self._output_names}")
     
     def _create_infer_requests(self) -> None:
         """Create inference requests for async execution."""
         self._infer_requests = []
-        
-        # Create one request per stream
-        for _ in range(max(1, self._num_streams)):
+
+        # Create optimal number of requests for maximum throughput
+        nireq = max(1, self._optimal_nireq)
+        for _ in range(nireq):
             request = self._compiled_model.create_infer_request()
             self._infer_requests.append(request)
-        
-        # Set default request
+
+        # Set default request for sync inference
         self._infer_request = self._infer_requests[0]
+
+        # Create queue for thread-safe inference
+        self._request_queue = queue.Queue()
+        for req in self._infer_requests:
+            self._request_queue.put(req)
+
+        logger.info(f"Created {nireq} inference requests")
+
+    def add_infer_requests(self, count: int) -> None:
+        """Add more inference requests for higher parallelism (e.g., Server mode)."""
+        if not self._loaded:
+            self.load()
+
+        for _ in range(count):
+            request = self._compiled_model.create_infer_request()
+            self._infer_requests.append(request)
+            self._request_queue.put(request)
+
+        logger.info(f"Added {count} inference requests, total: {len(self._infer_requests)}")
     
+    def _convert_to_model_dtype(self, name: str, data: np.ndarray) -> np.ndarray:
+        """Convert input data to the dtype expected by the model."""
+        if name not in self._input_dtypes:
+            return data
+
+        element_type = self._input_dtypes[name]
+        element_type_str = str(element_type)
+
+        # Map OpenVINO element types to numpy dtypes
+        if 'i64' in element_type_str or 'int64' in element_type_str.lower():
+            return data.astype(np.int64)
+        elif 'i32' in element_type_str or 'int32' in element_type_str.lower():
+            return data.astype(np.int32)
+        elif 'f32' in element_type_str or 'float32' in element_type_str.lower():
+            return data.astype(np.float32)
+        elif 'f16' in element_type_str or 'float16' in element_type_str.lower():
+            return data.astype(np.float16)
+
+        return data
+
     def predict(self, inputs: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
         """
-        Run synchronous inference.
-        
+        Run synchronous inference (NOT thread-safe, use predict_threadsafe for multi-threaded).
+
         Args:
             inputs: Dictionary mapping input names to numpy arrays
-            
+
         Returns:
             Dictionary mapping output names to numpy arrays
         """
         if not self._loaded:
             self.load()
-        
-        # Set input tensors
+
+        # Set input tensors with automatic dtype conversion
         for name, data in inputs.items():
-            self._infer_request.set_tensor(name, ov.Tensor(data))
-        
+            converted_data = self._convert_to_model_dtype(name, data)
+            self._infer_request.set_tensor(name, ov.Tensor(converted_data))
+
         # Run inference
         self._infer_request.infer()
-        
+
         # Get output tensors
         outputs = {}
         for name in self._output_names:
             output_tensor = self._infer_request.get_tensor(name)
             outputs[name] = output_tensor.data.copy()
-        
+
         return outputs
+
+    def predict_threadsafe(self, inputs: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+        """
+        Run synchronous inference in a thread-safe manner.
+
+        Uses a queue of inference requests - each thread gets exclusive
+        access to a request while running inference.
+
+        Args:
+            inputs: Dictionary mapping input names to numpy arrays
+
+        Returns:
+            Dictionary mapping output names to numpy arrays
+        """
+        if not self._loaded:
+            self.load()
+
+        # Get an available request from queue (blocks if none available)
+        request = self._request_queue.get()
+
+        try:
+            # Set input tensors with automatic dtype conversion
+            for name, data in inputs.items():
+                converted_data = self._convert_to_model_dtype(name, data)
+                request.set_tensor(name, ov.Tensor(converted_data))
+
+            # Run inference (this blocks until complete)
+            request.infer()
+
+            # Get output tensors
+            outputs = {}
+            for name in self._output_names:
+                output_tensor = request.get_tensor(name)
+                outputs[name] = output_tensor.data.copy()
+
+            return outputs
+        finally:
+            # Return request to queue for reuse
+            self._request_queue.put(request)
     
     def predict_batch(
         self, 
@@ -265,10 +360,11 @@ class OpenVINOBackend(BaseBackend):
             # Start all inferences
             for j, inputs in enumerate(chunk):
                 request = self._infer_requests[j]
-                
+
                 for name, data in inputs.items():
-                    request.set_tensor(name, ov.Tensor(data))
-                
+                    converted_data = self._convert_to_model_dtype(name, data)
+                    request.set_tensor(name, ov.Tensor(converted_data))
+
                 request.start_async()
             
             # Wait for all to complete
@@ -304,10 +400,11 @@ class OpenVINOBackend(BaseBackend):
             self.load()
         
         request = self._infer_requests[request_id % len(self._infer_requests)]
-        
+
         for name, data in inputs.items():
-            request.set_tensor(name, ov.Tensor(data))
-        
+            converted_data = self._convert_to_model_dtype(name, data)
+            request.set_tensor(name, ov.Tensor(converted_data))
+
         request.start_async()
         return request
     
@@ -329,7 +426,61 @@ class OpenVINOBackend(BaseBackend):
             outputs[name] = output_tensor.data.copy()
         
         return outputs
-    
+
+    def create_async_queue(
+        self,
+        num_jobs: Optional[int] = None,
+        callback: Optional[callable] = None
+    ) -> "AsyncInferQueue":
+        """
+        Create an AsyncInferQueue for high-throughput async inference.
+
+        Args:
+            num_jobs: Number of parallel jobs (default: optimal_nireq)
+            callback: Callback function called when inference completes.
+                      Signature: callback(infer_request, userdata)
+
+        Returns:
+            AsyncInferQueue instance
+        """
+        if not self._loaded:
+            self.load()
+
+        if num_jobs is None:
+            num_jobs = self._optimal_nireq
+
+        # Ensure we have enough parallel jobs for high throughput
+        num_jobs = max(num_jobs, self._optimal_nireq)
+
+        async_queue = AsyncInferQueue(self._compiled_model, num_jobs)
+
+        if callback:
+            async_queue.set_callback(callback)
+
+        logger.info(f"Created AsyncInferQueue with {num_jobs} parallel jobs (optimal_nireq={self._optimal_nireq})")
+        return async_queue
+
+    def start_async_queue(
+        self,
+        async_queue: "AsyncInferQueue",
+        inputs: Dict[str, np.ndarray],
+        userdata: Any = None
+    ) -> None:
+        """
+        Start async inference on the queue.
+
+        Args:
+            async_queue: The AsyncInferQueue
+            inputs: Input tensors
+            userdata: User data passed to callback
+        """
+        # Convert inputs to proper dtypes
+        converted = {}
+        for name, data in inputs.items():
+            converted[name] = self._convert_to_model_dtype(name, data)
+
+        async_queue.start_async(converted, userdata)
+
     @property
     def input_names(self) -> List[str]:
         """Get list of input tensor names."""
@@ -352,8 +503,8 @@ class OpenVINOBackend(BaseBackend):
     
     @property
     def num_streams(self) -> int:
-        """Get number of inference streams."""
-        return self._num_streams
+        """Get optimal number of inference requests."""
+        return self._optimal_nireq
     
     def get_info(self) -> Dict[str, Any]:
         """Get backend information."""
@@ -365,7 +516,7 @@ class OpenVINOBackend(BaseBackend):
         if self._loaded:
             info.update({
                 "device": self.config.device,
-                "num_streams": self._num_streams,
+                "optimal_nireq": self._optimal_nireq,
                 "performance_hint": self.config.performance_hint,
                 "inference_precision": self.config.inference_precision,
             })

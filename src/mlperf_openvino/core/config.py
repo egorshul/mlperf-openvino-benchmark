@@ -52,6 +52,7 @@ class OpenVINOConfig:
     device: str = "CPU"
     num_streams: str = "AUTO"
     num_threads: int = 0  # 0 = auto-detect
+    batch_size: int = 1  # Inference batch size
     enable_profiling: bool = False
     cache_dir: str = "./cache"
     performance_hint: str = "THROUGHPUT"  # THROUGHPUT or LATENCY
@@ -87,6 +88,10 @@ class ScenarioConfig:
     samples_per_query: int = 1
     target_latency_ns: int = 0
     target_qps: float = 0.0
+    # MLPerf seeds for reproducibility
+    qsl_rng_seed: int = 13281865557512327830
+    sample_index_rng_seed: int = 198141574272810017
+    schedule_rng_seed: int = 7575108116881280410
 
 
 @dataclass
@@ -192,8 +197,13 @@ class BenchmarkConfig:
         server_data = model_data.get("server", {})
         server = ScenarioConfig(
             min_duration_ms=server_data.get("min_duration_ms", 60000),
-            min_query_count=server_data.get("min_query_count", 270336),
+            min_query_count=server_data.get("min_query_count", 24576),
             target_latency_ns=server_data.get("target_latency_ns", 15000000),
+            target_qps=server_data.get("target_qps", 10000.0),  # High default for max throughput
+            # MLPerf seeds for reproducibility
+            qsl_rng_seed=server_data.get("qsl_rng_seed", 13281865557512327830),
+            sample_index_rng_seed=server_data.get("sample_index_rng_seed", 198141574272810017),
+            schedule_rng_seed=server_data.get("schedule_rng_seed", 7575108116881280410),
         )
         
         sources = model_data.get("sources", {})
@@ -223,6 +233,7 @@ class BenchmarkConfig:
             device=ov_data.get("device", "CPU"),
             num_streams=str(ov_data.get("num_streams", "AUTO")),
             num_threads=ov_data.get("num_threads", 0),
+            batch_size=ov_data.get("batch_size", 1),
             enable_profiling=ov_data.get("enable_profiling", False),
             cache_dir=ov_data.get("cache_dir", "./cache"),
             performance_hint=ov_data.get("performance_hint", "THROUGHPUT"),
@@ -274,13 +285,24 @@ class BenchmarkConfig:
                 accuracy_target=0.7646,
                 accuracy_threshold=0.99,
                 onnx_url="https://zenodo.org/record/4735647/files/resnet50_v1.onnx",
+                offline=ScenarioConfig(
+                    min_duration_ms=60000,
+                    min_query_count=24576,  # MLPerf official
+                    samples_per_query=1,
+                ),
+                server=ScenarioConfig(
+                    min_duration_ms=60000,
+                    min_query_count=24576,  # Server uses min_duration primarily
+                    target_latency_ns=15000000,  # 15ms
+                    target_qps=10000.0,
+                ),
             ),
             dataset=DatasetConfig(
                 name="imagenet2012",
                 path="./data/imagenet",
             ),
         )
-    
+
     @classmethod
     def default_whisper(cls) -> "BenchmarkConfig":
         """Create default Whisper configuration."""
@@ -294,24 +316,101 @@ class BenchmarkConfig:
                 output_name="sequences",
                 data_format="NCT",  # batch, channels (mels), time
                 dtype="FP32",
-                accuracy_target=0.0,  # WER target TBD
+                accuracy_target=0.979329,  # Word Accuracy (official MLPerf v5.1)
                 accuracy_threshold=0.99,
                 preprocessing=PreprocessingConfig(),  # Not used for audio
                 offline=ScenarioConfig(
                     min_duration_ms=60000,
-                    min_query_count=2513,  # MLPerf default
+                    min_query_count=2513,  # MLPerf official (LibriSpeech)
                     samples_per_query=1,
                 ),
                 server=ScenarioConfig(
                     min_duration_ms=60000,
-                    min_query_count=2513,
+                    min_query_count=2513,  # Server uses min_duration primarily
                     target_latency_ns=1000000000,  # 1 second for ASR
+                    target_qps=500.0,
                 ),
                 onnx_url="https://huggingface.co/openai/whisper-large-v3/resolve/main/model.onnx",
             ),
             dataset=DatasetConfig(
                 name="librispeech",
                 path="./data/librispeech",
+            ),
+        )
+
+    @classmethod
+    def default_bert(cls) -> "BenchmarkConfig":
+        """Create default BERT-Large configuration for SQuAD."""
+        return cls(
+            model=ModelConfig(
+                name="BERT-Large",
+                task="question_answering",
+                model_type=ModelType.BERT,
+                input_shape=[1, 384],  # (batch, seq_length)
+                input_name="input_ids",
+                output_name="output",
+                data_format="NC",
+                dtype="FP32",
+                accuracy_target=0.90874,  # F1 score (official MLPerf v5.1)
+                accuracy_threshold=0.99,
+                preprocessing=PreprocessingConfig(),  # Not used for text
+                offline=ScenarioConfig(
+                    min_duration_ms=60000,
+                    min_query_count=10833,  # MLPerf official (SQuAD dataset size)
+                    samples_per_query=1,
+                ),
+                server=ScenarioConfig(
+                    min_duration_ms=60000,
+                    min_query_count=10833,  # Server uses min_duration primarily
+                    target_latency_ns=130000000,  # 130ms
+                    target_qps=5000.0,
+                ),
+                onnx_url="https://zenodo.org/record/3733910/files/model.onnx",
+            ),
+            dataset=DatasetConfig(
+                name="squad",
+                path="./data/squad",
+            ),
+        )
+
+    @classmethod
+    def default_retinanet(cls) -> "BenchmarkConfig":
+        """Create default RetinaNet configuration for OpenImages."""
+        return cls(
+            model=ModelConfig(
+                name="RetinaNet",
+                task="object_detection",
+                model_type=ModelType.RETINANET,
+                input_shape=[1, 3, 800, 800],  # (batch, channels, height, width)
+                input_name="input",
+                output_name="output",
+                data_format="NCHW",
+                dtype="FP32",
+                accuracy_target=0.3757,  # mAP (official MLPerf v5.1)
+                accuracy_threshold=0.99,
+                preprocessing=PreprocessingConfig(
+                    resize=(800, 800),
+                    center_crop=(800, 800),
+                    mean=(0.485 * 255, 0.456 * 255, 0.406 * 255),
+                    std=(0.229 * 255, 0.224 * 255, 0.225 * 255),
+                    channel_order="RGB",
+                ),
+                offline=ScenarioConfig(
+                    min_duration_ms=60000,
+                    min_query_count=24576,  # MLPerf official
+                    samples_per_query=1,
+                ),
+                server=ScenarioConfig(
+                    min_duration_ms=60000,
+                    min_query_count=24576,  # Server uses min_duration primarily
+                    target_latency_ns=100000000,  # 100ms
+                    target_qps=1000.0,
+                ),
+                onnx_url="https://zenodo.org/record/6617879/files/resnext50_32x4d_fpn.onnx",
+            ),
+            dataset=DatasetConfig(
+                name="openimages",
+                path="./data/openimages",
             ),
         )
     

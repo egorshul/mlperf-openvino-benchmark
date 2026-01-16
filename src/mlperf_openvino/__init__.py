@@ -7,17 +7,16 @@ compatible with MLPerf Inference v5.1 specifications.
 
 Supported Models:
 - ResNet50 (Image Classification)
-- BERT-Large (Question Answering) [Planned]
-- RetinaNet (Object Detection) [Planned]
-- Whisper (Speech to Text) [Planned]
-- Stable Diffusion XL (Text to Image) [Planned]
+- BERT-Large (Question Answering)
+- RetinaNet (Object Detection)
+- Whisper Large v3 (Speech Recognition)
 
 Supported Scenarios:
 - Offline: Maximum throughput
 - Server: Latency-constrained throughput
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __mlperf_version__ = "5.1"
 
 from .core.benchmark_runner import BenchmarkRunner

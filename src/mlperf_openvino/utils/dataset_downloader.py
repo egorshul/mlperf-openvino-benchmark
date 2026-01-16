@@ -32,6 +32,42 @@ DATASET_REGISTRY: Dict[str, Dict] = {
         "num_samples": 50000,
         "val_map_url": "https://raw.githubusercontent.com/mlcommons/inference/master/vision/classification_and_detection/tools/val_map.txt",
     },
+    "squad": {
+        "description": "SQuAD v1.1 dataset for BERT Question Answering",
+        "dev": {
+            "url": "https://rajpurkar.github.io/SQuAD-explorer/dataset/dev-v1.1.json",
+            "filename": "dev-v1.1.json",
+            "size_mb": 4.9,
+            "num_samples": 10833,
+        },
+        "train": {
+            "url": "https://rajpurkar.github.io/SQuAD-explorer/dataset/train-v1.1.json",
+            "filename": "train-v1.1.json",
+            "size_mb": 30,
+            "num_samples": 87599,
+        },
+        "vocab": {
+            "url": "https://zenodo.org/record/3733868/files/vocab.txt",
+            "filename": "vocab.txt",
+            "size_mb": 0.2,
+        },
+    },
+    "openimages": {
+        "description": "OpenImages validation set for RetinaNet Object Detection",
+        "annotations": {
+            # V5 validation annotations work for V6 as well
+            "url": "https://storage.googleapis.com/openimages/v5/validation-annotations-bbox.csv",
+            "filename": "validation-annotations-bbox.csv",
+            "size_mb": 24,
+        },
+        "class_descriptions": {
+            "url": "https://storage.googleapis.com/openimages/v5/class-descriptions-boxable.csv",
+            "filename": "class-descriptions-boxable.csv",
+            "size_mb": 0.02,
+        },
+        "num_samples": 24781,  # Official MLPerf count from 365 class filtering
+        "note": "Images downloaded from AWS S3 open-images-dataset bucket",
+    },
     "librispeech": {
         "description": "LibriSpeech ASR corpus for Whisper (dev-clean + dev-other)",
         "dev-clean": {
@@ -524,6 +560,581 @@ def download_whisper_mlperf(output_dir: str) -> Dict[str, str]:
         return download_librispeech(output_dir, subset="mlperf")
 
 
+def download_squad(
+    output_dir: str,
+    subset: str = "dev",
+    force: bool = False
+) -> Dict[str, str]:
+    """
+    Download SQuAD v1.1 dataset for BERT Question Answering.
+
+    Args:
+        output_dir: Directory to save dataset
+        subset: "dev" or "train"
+        force: Force re-download
+
+    Returns:
+        Dictionary with dataset paths
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    data_dir = output_path / "squad"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    dataset_info = DATASET_REGISTRY["squad"]
+
+    # Download dev set by default
+    if subset in dataset_info:
+        subset_info = dataset_info[subset]
+        data_file = data_dir / subset_info["filename"]
+
+        if not data_file.exists() or force:
+            logger.info(f"Downloading SQuAD {subset} set...")
+            _download_file(
+                subset_info["url"],
+                str(data_file),
+                expected_size_mb=subset_info.get("size_mb")
+            )
+
+    # Also download vocab file
+    if "vocab" in dataset_info:
+        vocab_info = dataset_info["vocab"]
+        vocab_file = data_dir / vocab_info["filename"]
+
+        if not vocab_file.exists() or force:
+            logger.info("Downloading BERT vocab file...")
+            _download_file(vocab_info["url"], str(vocab_file))
+
+    logger.info(f"SQuAD dataset ready at {data_dir}")
+
+    return {
+        "data_path": str(data_dir),
+        "dev_file": str(data_dir / "dev-v1.1.json"),
+        "vocab_file": str(data_dir / "vocab.txt"),
+        "num_samples": dataset_info["dev"]["num_samples"],
+    }
+
+
+def _download_openimages_image(args) -> Optional[str]:
+    """Download a single OpenImages image from S3."""
+    image_id, images_dir = args
+
+    try:
+        import boto3
+        from botocore import UNSIGNED
+        from botocore.config import Config
+    except ImportError:
+        # Fallback to HTTP download
+        url = f"https://s3.amazonaws.com/open-images-dataset/validation/{image_id}.jpg"
+        dest = images_dir / f"{image_id}.jpg"
+        try:
+            urllib.request.urlretrieve(url, str(dest))
+            return image_id
+        except Exception:
+            return None
+
+    try:
+        s3 = boto3.client('s3', config=Config(signature_version=UNSIGNED))
+        dest = images_dir / f"{image_id}.jpg"
+        s3.download_file('open-images-dataset', f'validation/{image_id}.jpg', str(dest))
+        return image_id
+    except Exception:
+        return None
+
+
+def download_openimages(
+    output_dir: str,
+    force: bool = False,
+    max_images: Optional[int] = None,
+    num_workers: int = 8
+) -> Dict[str, str]:
+    """
+    Download OpenImages validation set for RetinaNet Object Detection.
+
+    Uses official MLCommons approach:
+    1. Download annotations from Google Cloud Storage
+    2. Extract image IDs from annotations
+    3. Download images from AWS S3 open-images-dataset bucket
+    4. Convert annotations to COCO format
+
+    Based on: https://github.com/mlcommons/inference/tree/master/vision/classification_and_detection
+
+    Args:
+        output_dir: Directory to save dataset
+        force: Force re-download
+        max_images: Maximum number of images to download (None = all validation images)
+        num_workers: Number of parallel download workers
+
+    Returns:
+        Dictionary with dataset paths
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    data_dir = output_path / "openimages"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    images_dir = data_dir / "validation" / "data"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    annotations_dir = data_dir / "annotations"
+    annotations_dir.mkdir(parents=True, exist_ok=True)
+
+    # Check if already downloaded
+    existing_images = list(images_dir.glob("*.jpg"))
+    coco_annotations = annotations_dir / "openimages-mlperf.json"
+    # Only use quick check if max_images is explicitly specified
+    # Otherwise, we need to filter by MLPerf classes to determine actual count
+    if max_images and len(existing_images) >= max_images and coco_annotations.exists() and not force:
+        logger.info(f"OpenImages already downloaded: {len(existing_images)} images")
+        return {
+            "data_path": str(data_dir),
+            "annotations_file": str(coco_annotations),
+            "images_dir": str(images_dir),
+            "num_samples": len(existing_images),
+        }
+
+    # URLs for OpenImages v5 annotations (compatible with MLPerf)
+    ANNOTATIONS_URL = "https://storage.googleapis.com/openimages/v5/validation-annotations-bbox.csv"
+    CLASS_NAMES_URL = "https://storage.googleapis.com/openimages/v5/class-descriptions-boxable.csv"
+
+    # Step 1: Download annotations
+    annotations_file = annotations_dir / "validation-annotations-bbox.csv"
+    if not annotations_file.exists() or force:
+        logger.info("Downloading annotations...")
+        _download_file(ANNOTATIONS_URL, str(annotations_file))
+
+    class_names_file = annotations_dir / "class-descriptions-boxable.csv"
+    if not class_names_file.exists() or force:
+        logger.info("Downloading class descriptions...")
+        _download_file(CLASS_NAMES_URL, str(class_names_file))
+
+    # Step 2: Get MLPerf classes and filter annotations
+    # Official MLPerf uses these 365 classes from openimages_mlperf.sh
+    MLPERF_CLASSES = [
+        "Airplane", "Antelope", "Apple", "Backpack", "Balloon", "Banana",
+        "Barrel", "Baseball bat", "Baseball glove", "Bee", "Beer", "Bench",
+        "Bicycle", "Bicycle helmet", "Bicycle wheel", "Billboard", "Book",
+        "Bookcase", "Boot", "Bottle", "Bowl", "Bowling equipment", "Box",
+        "Boy", "Brassiere", "Bread", "Broccoli", "Bronze sculpture",
+        "Bull", "Bus", "Bust", "Butterfly", "Cabinetry", "Cake",
+        "Camel", "Camera", "Candle", "Candy", "Cannon", "Canoe",
+        "Carrot", "Cart", "Castle", "Cat", "Cattle", "Cello", "Chair",
+        "Cheese", "Chest of drawers", "Chicken", "Christmas tree", "Coat",
+        "Cocktail", "Coffee", "Coffee cup", "Coffee table", "Coin",
+        "Common sunflower", "Computer keyboard", "Computer monitor",
+        "Convenience store", "Cookie", "Countertop", "Cowboy hat", "Crab",
+        "Crocodile", "Cucumber", "Cupboard", "Curtain", "Deer", "Desk",
+        "Dinosaur", "Dog", "Doll", "Dolphin", "Door", "Dragonfly",
+        "Drawer", "Dress", "Drum", "Duck", "Eagle", "Earrings",
+        "Egg (Food)", "Elephant", "Falcon", "Fedora", "Flag", "Flowerpot",
+        "Football", "Football helmet", "Fork", "Fountain", "French fries",
+        "French horn", "Frog", "Giraffe", "Girl", "Glasses", "Goat",
+        "Goggles", "Goldfish", "Gondola", "Goose", "Grape", "Grapefruit",
+        "Guitar", "Hamburger", "Handbag", "Harbor seal", "Headphones",
+        "Helicopter", "High heels", "Hiking equipment", "Horse", "House",
+        "Houseplant", "Human arm", "Human beard", "Human body", "Human ear",
+        "Human eye", "Human face", "Human foot", "Human hair", "Human hand",
+        "Human head", "Human leg", "Human mouth", "Human nose", "Ice cream",
+        "Jacket", "Jeans", "Jellyfish", "Juice", "Kitchen & dining room table",
+        "Kite", "Lamp", "Lantern", "Laptop", "Lavender (Plant)", "Lemon",
+        "Light bulb", "Lighthouse", "Lily", "Lion", "Lipstick", "Lizard",
+        "Man", "Maple", "Microphone", "Mirror", "Mixing bowl", "Mobile phone",
+        "Monkey", "Motorcycle", "Muffin", "Mug", "Mule", "Mushroom",
+        "Musical keyboard", "Necklace", "Nightstand", "Office building",
+        "Orange", "Owl", "Oyster", "Paddle", "Palm tree", "Parachute",
+        "Parrot", "Pen", "Penguin", "Personal flotation device", "Piano",
+        "Picture frame", "Pig", "Pillow", "Pizza", "Plate", "Platter",
+        "Porch", "Poster", "Pumpkin", "Rabbit", "Rifle", "Roller skates",
+        "Rose", "Salad", "Sandal", "Saucer", "Saxophone", "Scarf",
+        "Sea lion", "Sea turtle", "Sheep", "Shelf", "Shirt", "Shorts",
+        "Shrimp", "Sink", "Skateboard", "Ski", "Skull", "Skyscraper",
+        "Snake", "Sock", "Sofa bed", "Sparrow", "Spider", "Spoon",
+        "Sports uniform", "Squirrel", "Stairs", "Stool", "Strawberry",
+        "Street light", "Studio couch", "Suit", "Sun hat", "Sunglasses",
+        "Surfboard", "Sushi", "Swan", "Swimming pool", "Swimwear", "Tank",
+        "Tap", "Taxi", "Tea", "Teddy bear", "Television", "Tent", "Tie",
+        "Tiger", "Tin can", "Tire", "Toilet", "Tomato", "Tortoise",
+        "Tower", "Traffic light", "Train", "Tripod", "Truck", "Trumpet",
+        "Umbrella", "Van", "Vase", "Vehicle registration plate", "Violin",
+        "Wall clock", "Waste container", "Watch", "Whale", "Wheel",
+        "Wheelchair", "Whiteboard", "Window", "Wine", "Wine glass",
+        "Woman", "Zebra", "Zucchini",
+    ]
+
+    import csv
+
+    # Load class name to LabelName mapping
+    logger.info("Loading class descriptions...")
+    class_name_to_label = {}
+    with open(class_names_file, 'r') as f:
+        reader = csv.reader(f)
+        for row in reader:
+            if len(row) >= 2:
+                label_name, display_name = row[0], row[1]
+                class_name_to_label[display_name] = label_name
+
+    # Get LabelNames for MLPerf classes
+    mlperf_labels = set()
+    for class_name in MLPERF_CLASSES:
+        if class_name in class_name_to_label:
+            mlperf_labels.add(class_name_to_label[class_name])
+
+    logger.info(f"Found {len(mlperf_labels)} MLPerf class labels")
+
+    # Extract image IDs that have MLPerf class annotations
+    logger.info("Extracting image IDs with MLPerf classes...")
+    image_ids = []
+    seen_ids = set()
+
+    with open(annotations_file, 'r') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            label_name = row['LabelName']
+            if label_name in mlperf_labels:
+                image_id = row['ImageID']
+                if image_id not in seen_ids:
+                    seen_ids.add(image_id)
+                    image_ids.append(image_id)
+
+    logger.info(f"Found {len(image_ids)} images with MLPerf classes")
+
+    # Apply max_images limit only if explicitly specified
+    if max_images and max_images < len(image_ids):
+        image_ids = image_ids[:max_images]
+        logger.info(f"Limited to {max_images} images (user specified)")
+
+    # Check if already complete (all filtered images downloaded)
+    existing = set(p.stem for p in images_dir.glob("*.jpg"))
+    if len(existing) >= len(image_ids) and coco_annotations.exists() and not force:
+        logger.info(f"OpenImages already complete: {len(existing)} images (MLPerf filtered: {len(image_ids)})")
+        return {
+            "data_path": str(data_dir),
+            "annotations_file": str(coco_annotations),
+            "images_dir": str(images_dir),
+            "num_samples": len(existing),
+        }
+
+    # Step 3: Download images from S3
+    to_download = [img_id for img_id in image_ids if img_id not in existing]
+
+    if to_download:
+        logger.info(f"Downloading {len(to_download)} images ({len(existing)} already exist)...")
+        _download_openimages_from_s3(to_download, images_dir, num_workers)
+
+    # Step 4: Convert to COCO format
+    logger.info("Converting annotations to COCO format...")
+    _convert_openimages_to_coco(
+        annotations_file=annotations_file,
+        class_names_file=class_names_file,
+        image_ids=image_ids,
+        images_dir=images_dir,
+        output_file=coco_annotations,
+    )
+
+    final_count = len(list(images_dir.glob("*.jpg")))
+    logger.info(f"OpenImages ready: {final_count} images")
+
+    return {
+        "data_path": str(data_dir),
+        "annotations_file": str(coco_annotations),
+        "images_dir": str(images_dir),
+        "num_samples": final_count,
+    }
+
+
+def _download_openimages_from_s3(
+    image_ids: List[str],
+    images_dir: Path,
+    num_workers: int = 8
+) -> None:
+    """Download images from AWS S3 open-images-dataset bucket."""
+    import time
+    import ssl
+    import urllib.request
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    # Disable SSL verification globally for this download
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
+
+    # Try to use requests for better handling
+    requests_session = None
+    try:
+        import requests
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+
+        requests_session = requests.Session()
+        requests_session.verify = False  # Disable SSL verification
+
+        # Suppress SSL warnings
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+        # Configure retries
+        retry = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+        adapter = HTTPAdapter(max_retries=retry)
+        requests_session.mount('https://', adapter)
+        requests_session.mount('http://', adapter)
+    except ImportError:
+        pass
+
+    def download_one(image_id: str, force_redownload: bool = False) -> Optional[str]:
+        dest = images_dir / f"{image_id}.jpg"
+
+        # Check if file exists and is valid (> 1KB)
+        if dest.exists() and not force_redownload:
+            if dest.stat().st_size > 1000:
+                return image_id
+            else:
+                # File is corrupted, delete and re-download
+                dest.unlink()
+
+        url = f"https://s3.amazonaws.com/open-images-dataset/validation/{image_id}.jpg"
+
+        for attempt in range(3):
+            try:
+                if requests_session is not None:
+                    response = requests_session.get(url, timeout=60)
+                    response.raise_for_status()
+                    content = response.content
+                else:
+                    # Fallback with SSL disabled
+                    req = urllib.request.Request(url)
+                    with urllib.request.urlopen(req, context=ssl_context, timeout=60) as resp:
+                        content = resp.read()
+
+                # Verify content size before writing
+                if len(content) < 1000:
+                    if attempt < 2:
+                        time.sleep(2 ** attempt)
+                        continue
+                    else:
+                        return None
+
+                with open(dest, 'wb') as f:
+                    f.write(content)
+
+                # Verify written file
+                if dest.stat().st_size > 1000:
+                    return image_id
+                else:
+                    dest.unlink()
+                    if attempt < 2:
+                        time.sleep(2 ** attempt)
+                        continue
+                    return None
+
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+                else:
+                    if dest.exists():
+                        dest.unlink()
+                    return None
+
+        return None
+
+    downloaded = 0
+    failed = 0
+
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = {executor.submit(download_one, img_id): img_id for img_id in image_ids}
+
+        for future in as_completed(futures):
+            result = future.result()
+            if result:
+                downloaded += 1
+            else:
+                failed += 1
+
+            total = downloaded + failed
+            if total % 100 == 0 or total == len(image_ids):
+                print(f"\rDownloaded: {downloaded}/{len(image_ids)}, failed: {failed}", end="", flush=True)
+
+    print()
+    logger.info(f"Downloaded {downloaded} images, {failed} failed")
+
+
+def _convert_openimages_to_coco(
+    annotations_file: Path,
+    class_names_file: Path,
+    image_ids: List[str],
+    images_dir: Path,
+    output_file: Path,
+) -> None:
+    """Convert OpenImages annotations to COCO format.
+
+    IMPORTANT: Uses only the 365 MLPerf classes with sequential category_ids (1-365).
+    This matches the MLPerf RetinaNet model output format where class indices
+    correspond to the alphabetically sorted MLPerf class list.
+    """
+    import csv
+    import json
+
+    # MLPerf uses these 365 classes (alphabetically sorted - this is the model's class order!)
+    MLPERF_CLASSES = [
+        "Airplane", "Antelope", "Apple", "Backpack", "Balloon", "Banana",
+        "Barrel", "Baseball bat", "Baseball glove", "Bee", "Beer", "Bench",
+        "Bicycle", "Bicycle helmet", "Bicycle wheel", "Billboard", "Book",
+        "Bookcase", "Boot", "Bottle", "Bowl", "Bowling equipment", "Box",
+        "Boy", "Brassiere", "Bread", "Broccoli", "Bronze sculpture",
+        "Bull", "Bus", "Bust", "Butterfly", "Cabinetry", "Cake",
+        "Camel", "Camera", "Candle", "Candy", "Cannon", "Canoe",
+        "Carrot", "Cart", "Castle", "Cat", "Cattle", "Cello", "Chair",
+        "Cheese", "Chest of drawers", "Chicken", "Christmas tree", "Coat",
+        "Cocktail", "Coffee", "Coffee cup", "Coffee table", "Coin",
+        "Common sunflower", "Computer keyboard", "Computer monitor",
+        "Convenience store", "Cookie", "Countertop", "Cowboy hat", "Crab",
+        "Crocodile", "Cucumber", "Cupboard", "Curtain", "Deer", "Desk",
+        "Dinosaur", "Dog", "Doll", "Dolphin", "Door", "Dragonfly",
+        "Drawer", "Dress", "Drum", "Duck", "Eagle", "Earrings",
+        "Egg (Food)", "Elephant", "Falcon", "Fedora", "Flag", "Flowerpot",
+        "Football", "Football helmet", "Fork", "Fountain", "French fries",
+        "French horn", "Frog", "Giraffe", "Girl", "Glasses", "Goat",
+        "Goggles", "Goldfish", "Gondola", "Goose", "Grape", "Grapefruit",
+        "Guitar", "Hamburger", "Handbag", "Harbor seal", "Headphones",
+        "Helicopter", "High heels", "Hiking equipment", "Horse", "House",
+        "Houseplant", "Human arm", "Human beard", "Human body", "Human ear",
+        "Human eye", "Human face", "Human foot", "Human hair", "Human hand",
+        "Human head", "Human leg", "Human mouth", "Human nose", "Ice cream",
+        "Jacket", "Jeans", "Jellyfish", "Juice", "Kitchen & dining room table",
+        "Kite", "Lamp", "Lantern", "Laptop", "Lavender (Plant)", "Lemon",
+        "Light bulb", "Lighthouse", "Lily", "Lion", "Lipstick", "Lizard",
+        "Man", "Maple", "Microphone", "Mirror", "Mixing bowl", "Mobile phone",
+        "Monkey", "Motorcycle", "Muffin", "Mug", "Mule", "Mushroom",
+        "Musical keyboard", "Necklace", "Nightstand", "Office building",
+        "Orange", "Owl", "Oyster", "Paddle", "Palm tree", "Parachute",
+        "Parrot", "Pen", "Penguin", "Personal flotation device", "Piano",
+        "Picture frame", "Pig", "Pillow", "Pizza", "Plate", "Platter",
+        "Porch", "Poster", "Pumpkin", "Rabbit", "Rifle", "Roller skates",
+        "Rose", "Salad", "Sandal", "Saucer", "Saxophone", "Scarf",
+        "Sea lion", "Sea turtle", "Sheep", "Shelf", "Shirt", "Shorts",
+        "Shrimp", "Sink", "Skateboard", "Ski", "Skull", "Skyscraper",
+        "Snake", "Sock", "Sofa bed", "Sparrow", "Spider", "Spoon",
+        "Sports uniform", "Squirrel", "Stairs", "Stool", "Strawberry",
+        "Street light", "Studio couch", "Suit", "Sun hat", "Sunglasses",
+        "Surfboard", "Sushi", "Swan", "Swimming pool", "Swimwear", "Tank",
+        "Tap", "Taxi", "Tea", "Teddy bear", "Television", "Tent", "Tie",
+        "Tiger", "Tin can", "Tire", "Toilet", "Tomato", "Tortoise",
+        "Tower", "Traffic light", "Train", "Tripod", "Truck", "Trumpet",
+        "Umbrella", "Van", "Vase", "Vehicle registration plate", "Violin",
+        "Wall clock", "Waste container", "Watch", "Whale", "Wheel",
+        "Wheelchair", "Whiteboard", "Window", "Wine", "Wine glass",
+        "Woman", "Zebra", "Zucchini",
+    ]
+
+    # Load display name -> LabelName mapping from class descriptions
+    display_to_label = {}
+    with open(class_names_file, 'r') as f:
+        reader = csv.reader(f)
+        for row in reader:
+            if len(row) >= 2:
+                label_name, display_name = row[0], row[1]
+                display_to_label[display_name] = label_name
+
+    # Build class_map with SEQUENTIAL category_ids (1-365) for MLPerf classes ONLY
+    # This matches the model's output class indices (0-364) when we add 1
+    class_map = {}  # LabelName -> class_id (1-indexed, sequential)
+    class_names = {}  # class_id -> display_name
+
+    for idx, display_name in enumerate(MLPERF_CLASSES):
+        if display_name in display_to_label:
+            label_name = display_to_label[display_name]
+            class_id = idx + 1  # 1-indexed: class 0 -> category_id 1
+            class_map[label_name] = class_id
+            class_names[class_id] = display_name
+
+    logger.info(f"Built class mapping for {len(class_map)} MLPerf classes (category_ids 1-{len(class_map)})")
+
+    # Load annotations
+    image_id_set = set(image_ids)
+    annotations_by_image = {}
+
+    with open(annotations_file, 'r') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            image_id = row['ImageID']
+            if image_id not in image_id_set:
+                continue
+
+            if image_id not in annotations_by_image:
+                annotations_by_image[image_id] = []
+
+            annotations_by_image[image_id].append({
+                'LabelName': row['LabelName'],
+                'XMin': float(row['XMin']),
+                'YMin': float(row['YMin']),
+                'XMax': float(row['XMax']),
+                'YMax': float(row['YMax']),
+                'IsOccluded': int(row.get('IsOccluded', 0)),
+                'IsTruncated': int(row.get('IsTruncated', 0)),
+                'IsGroupOf': int(row.get('IsGroupOf', 0)),
+            })
+
+    # Build COCO format
+    coco = {
+        'images': [],
+        'annotations': [],
+        'categories': [{'id': cid, 'name': name} for cid, name in class_names.items()],
+    }
+
+    annotation_id = 1
+
+    for img_idx, image_id in enumerate(image_ids):
+        img_path = images_dir / f"{image_id}.jpg"
+        if not img_path.exists():
+            continue
+
+        # Get image dimensions
+        try:
+            from PIL import Image
+            with Image.open(img_path) as img:
+                width, height = img.size
+        except Exception:
+            # Default dimensions if can't read
+            width, height = 800, 600
+
+        coco['images'].append({
+            'id': img_idx + 1,
+            'file_name': f"{image_id}.jpg",
+            'width': width,
+            'height': height,
+        })
+
+        # Add annotations for this image
+        for ann in annotations_by_image.get(image_id, []):
+            label_name = ann['LabelName']
+            if label_name not in class_map:
+                continue
+
+            # Convert normalized coords to pixels
+            x_min = ann['XMin'] * width
+            y_min = ann['YMin'] * height
+            x_max = ann['XMax'] * width
+            y_max = ann['YMax'] * height
+
+            bbox_width = x_max - x_min
+            bbox_height = y_max - y_min
+
+            coco['annotations'].append({
+                'id': annotation_id,
+                'image_id': img_idx + 1,
+                'category_id': class_map[label_name],
+                'bbox': [x_min, y_min, bbox_width, bbox_height],
+                'area': bbox_width * bbox_height,
+                'iscrowd': ann['IsGroupOf'],
+            })
+            annotation_id += 1
+
+    # Write COCO JSON
+    with open(output_file, 'w') as f:
+        json.dump(coco, f)
+
+    logger.info(f"COCO annotations: {len(coco['images'])} images, {len(coco['annotations'])} annotations")
+
+
 def download_dataset(
     dataset_name: str,
     output_dir: str,
@@ -532,18 +1143,22 @@ def download_dataset(
 ) -> Dict[str, str]:
     """
     Download a dataset by name.
-    
+
     Args:
-        dataset_name: "imagenet" or "librispeech"
+        dataset_name: "imagenet", "squad", "openimages", or "librispeech"
         output_dir: Directory to save dataset
         subset: Optional subset name
         force: Force re-download
-        
+
     Returns:
         Dictionary with dataset paths
     """
     if dataset_name == "imagenet":
         return download_imagenet(output_dir, force)
+    elif dataset_name == "squad":
+        return download_squad(output_dir, subset or "dev", force)
+    elif dataset_name == "openimages":
+        return download_openimages(output_dir, force)
     elif dataset_name == "librispeech":
         return download_librispeech(output_dir, subset or "mlperf", force)
     elif dataset_name == "whisper-mlperf":
@@ -556,6 +1171,8 @@ def list_available_datasets() -> Dict[str, str]:
     """List available datasets."""
     return {
         "imagenet": DATASET_REGISTRY["imagenet"]["description"],
+        "squad": DATASET_REGISTRY["squad"]["description"],
+        "openimages": DATASET_REGISTRY["openimages"]["description"],
         "librispeech": DATASET_REGISTRY["librispeech"]["description"],
     }
 
@@ -565,3 +1182,71 @@ def get_dataset_info(dataset_name: str) -> Dict:
     if dataset_name not in DATASET_REGISTRY:
         raise ValueError(f"Unknown dataset: {dataset_name}")
     return DATASET_REGISTRY[dataset_name]
+
+
+def redownload_corrupted_openimages(data_path: str, num_workers: int = 8) -> int:
+    """
+    Re-download corrupted OpenImages files.
+
+    Checks for corrupted images (< 1KB or unreadable) and re-downloads them.
+
+    Args:
+        data_path: Path to OpenImages dataset directory
+        num_workers: Number of parallel download workers
+
+    Returns:
+        Number of files re-downloaded
+    """
+    from PIL import Image
+
+    data_dir = Path(data_path)
+    images_dir = data_dir / "validation" / "data"
+    if not images_dir.exists():
+        images_dir = data_dir / "images"
+
+    if not images_dir.exists():
+        logger.error(f"Images directory not found in {data_path}")
+        return 0
+
+    # Find corrupted images
+    corrupted = []
+    logger.info("Checking for corrupted images...")
+
+    for img_path in images_dir.glob("*.jpg"):
+        try:
+            # Check file size
+            if img_path.stat().st_size < 1000:
+                corrupted.append(img_path.stem)
+                continue
+
+            # Try to open image
+            with Image.open(img_path) as img:
+                img.verify()
+        except Exception:
+            corrupted.append(img_path.stem)
+
+    if not corrupted:
+        logger.info("No corrupted images found")
+        return 0
+
+    logger.info(f"Found {len(corrupted)} corrupted images, re-downloading...")
+
+    # Delete corrupted files
+    for image_id in corrupted:
+        img_path = images_dir / f"{image_id}.jpg"
+        if img_path.exists():
+            img_path.unlink()
+
+    # Re-download
+    _download_openimages_from_s3(corrupted, images_dir, num_workers)
+
+    # Also clear preprocessed cache for these images
+    cache_dir = data_dir / "preprocessed_cache"
+    if cache_dir.exists():
+        for image_id in corrupted:
+            cache_file = cache_dir / f"{image_id}.npy"
+            if cache_file.exists():
+                cache_file.unlink()
+        logger.info(f"Cleared {len(corrupted)} cached preprocessed files")
+
+    return len(corrupted)

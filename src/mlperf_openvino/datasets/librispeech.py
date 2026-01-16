@@ -399,56 +399,66 @@ class LibriSpeechDataset(BaseDataset):
         ground_truth: List[str]
     ) -> Dict[str, float]:
         """
-        Compute Word Error Rate (WER).
-        
+        Compute Word Accuracy (MLPerf v5.1 official metric for Whisper).
+
+        Word Accuracy = 1 - WER (Word Error Rate)
+
         Args:
             predictions: Predicted transcriptions
             ground_truth: Ground truth transcriptions
-            
+
         Returns:
-            Dictionary with WER and other metrics
+            Dictionary with Word Accuracy and other metrics
         """
         try:
             from jiwer import wer, cer
-            
+
             # Normalize texts
             predictions = [p.upper().strip() for p in predictions]
             ground_truth = [g.upper().strip() for g in ground_truth]
-            
+
             # Filter out empty references
             valid_pairs = [
                 (p, g) for p, g in zip(predictions, ground_truth) if g
             ]
-            
+
             if not valid_pairs:
                 return {
+                    "word_accuracy": 0.0,
                     "wer": 0.0,
                     "cer": 0.0,
                     "num_samples": 0,
                 }
-            
+
             preds, refs = zip(*valid_pairs)
-            
+
             word_error_rate = wer(list(refs), list(preds))
             char_error_rate = cer(list(refs), list(preds))
-            
+
+            # MLPerf v5.1 uses Word Accuracy = 1 - WER
+            word_accuracy = 1.0 - word_error_rate
+
             return {
+                "word_accuracy": word_accuracy,  # Primary MLPerf metric
                 "wer": word_error_rate,
                 "cer": char_error_rate,
                 "num_samples": len(valid_pairs),
             }
-            
+
         except ImportError:
             logger.warning("jiwer not installed, computing simple accuracy")
-            
+
             # Simple exact match accuracy
             correct = sum(
                 1 for p, g in zip(predictions, ground_truth)
                 if p.upper().strip() == g.upper().strip()
             )
-            
+
+            exact_match = correct / len(predictions) if predictions else 0.0
+
             return {
-                "exact_match": correct / len(predictions) if predictions else 0.0,
+                "word_accuracy": exact_match,  # Approximation when jiwer unavailable
+                "exact_match": exact_match,
                 "num_samples": len(predictions),
             }
 
@@ -493,6 +503,8 @@ class LibriSpeechQSL(QuerySampleLibrary):
     
     @property
     def total_sample_count(self) -> int:
+        if not self.dataset._is_loaded:
+            self.dataset.load()
         return self.dataset.total_count
     
     @property
