@@ -31,6 +31,7 @@ def evaluate_openimages_accuracy(
     input_size: int = 800,
     model_labels_zero_indexed: bool = True,
     boxes_in_pixels: bool = True,
+    sample_to_filename: Optional[Dict[int, str]] = None,
 ) -> Dict[str, float]:
     """
     Evaluate RetinaNet predictions using COCO API (official MLPerf method).
@@ -44,6 +45,8 @@ def evaluate_openimages_accuracy(
                                    0-indexed labels (0-364), COCO uses 1-indexed category_ids (1-365).
         boxes_in_pixels: If True, boxes are already in pixel coordinates [0, input_size].
                         MLPerf ONNX RetinaNet outputs pixels, so this should be True.
+        sample_to_filename: Dict of {sample_idx: filename} for proper mapping to COCO image_ids.
+                           CRITICAL for correct evaluation - dataset and COCO may have different orderings!
 
     Returns:
         Dictionary with mAP metrics
@@ -56,16 +59,33 @@ def evaluate_openimages_accuracy(
     logger.info(f"Loading COCO annotations from {coco_annotations_file}")
     coco_gt = COCO(coco_annotations_file)
 
-    # Build image_id to sample_idx mapping
-    # COCO image IDs are typically 1-indexed
-    image_id_to_sample = {}
+    # Build filename to image_id mapping from COCO
+    filename_to_image_id = {}
+    for img_id, img_info in coco_gt.imgs.items():
+        filename = img_info.get('file_name', '')
+        # Normalize filename (remove extension for comparison)
+        base_name = filename.replace('.jpg', '').replace('.jpeg', '').replace('.png', '')
+        filename_to_image_id[base_name] = img_id
+        filename_to_image_id[filename] = img_id  # Also store with extension
+
+    # Build sample_idx to image_id mapping
     sample_to_image_id = {}
 
-    # Get sorted image IDs to create proper mapping
-    sorted_img_ids = sorted(coco_gt.imgs.keys())
-    for sample_idx, img_id in enumerate(sorted_img_ids):
-        image_id_to_sample[img_id] = sample_idx
-        sample_to_image_id[sample_idx] = img_id
+    if sample_to_filename:
+        # Use provided filename mapping (correct way)
+        for sample_idx, filename in sample_to_filename.items():
+            base_name = filename.replace('.jpg', '').replace('.jpeg', '').replace('.png', '')
+            if base_name in filename_to_image_id:
+                sample_to_image_id[sample_idx] = filename_to_image_id[base_name]
+            elif filename in filename_to_image_id:
+                sample_to_image_id[sample_idx] = filename_to_image_id[filename]
+        logger.info(f"Using filename-based mapping: {len(sample_to_image_id)} samples mapped to COCO image_ids")
+    else:
+        # Fallback: assume sample_idx order matches COCO image_id order (may be incorrect!)
+        logger.warning("No filename mapping provided - assuming sample order matches COCO order (may be incorrect!)")
+        sorted_img_ids = sorted(coco_gt.imgs.keys())
+        for sample_idx, img_id in enumerate(sorted_img_ids):
+            sample_to_image_id[sample_idx] = img_id
 
     logger.info(f"COCO has {len(coco_gt.imgs)} images, {len(coco_gt.cats)} categories")
 
@@ -122,11 +142,11 @@ def evaluate_openimages_accuracy(
         if len(boxes) == 0:
             continue
 
-        # Get image_id for this sample
-        if sample_idx in sample_to_image_id:
-            image_id = sample_to_image_id[sample_idx]
-        else:
-            image_id = sample_idx + 1  # Fallback: assume 1-indexed
+        # Get image_id for this sample - MUST use correct mapping!
+        if sample_idx not in sample_to_image_id:
+            logger.warning(f"Sample {sample_idx} not found in mapping, skipping")
+            continue
+        image_id = sample_to_image_id[sample_idx]
 
         # Get image dimensions for denormalization
         if image_id in coco_gt.imgs:
