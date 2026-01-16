@@ -534,10 +534,11 @@ Contributions are welcome! Please read our contributing guidelines before submit
 ### v0.2.0
 
 - Added C++ SUT for BERT and RetinaNet models
-- Fixed RetinaNet output order handling (boxes, scores, labels)
+- Fixed RetinaNet C++ SUT output order: `[0]=boxes, [1]=scores, [2]=labels`
 - Added proper int64 to float conversion for RetinaNet labels
-- Integrated pycocotools for official mAP evaluation
-- Improved documentation and code cleanup
+- Fixed critical sample_idx to COCO image_id mapping for correct mAP evaluation
+- Integrated pycocotools for official mAP calculation
+- Removed debug scripts, cleaned up codebase for release
 
 ### v0.1.0
 
