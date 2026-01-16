@@ -103,21 +103,59 @@ def main():
             print(f"  Expected range for COCO: 1-365 (after +1 offset)")
             print(f"  Model outputs 0-indexed: 0-364")
 
-        # Manually test evaluation
+        # Show all predictions labels
+        print("\nAll predictions labels:")
+        all_labels = []
+        for idx, p in predictions.items():
+            if len(p['labels']) > 0:
+                all_labels.extend(p['labels'].tolist())
+        if all_labels:
+            import numpy as np
+            all_labels = np.array(all_labels)
+            print(f"  Total detections: {len(all_labels)}")
+            print(f"  Unique labels: {np.unique(all_labels)[:20]}...")
+            print(f"  Label range: {all_labels.min()} to {all_labels.max()}")
+        else:
+            print("  NO LABELS IN ANY PREDICTION!")
+
+        # Check annotations category_ids
+        print("\nAnnotations category_ids:")
+        import json
+        with open(ann_file) as f:
+            coco = json.load(f)
+        ann_cats = set()
+        for ann in coco.get('annotations', []):
+            ann_cats.add(ann['category_id'])
+        ann_cats = sorted(ann_cats)
+        print(f"  Unique category_ids in annotations: {ann_cats[:20]}...")
+        print(f"  Category_id range: {min(ann_cats)} to {max(ann_cats)}")
+
+        # Test with both settings
         print("\n" + "=" * 60)
-        print("Manual evaluation test:")
+        print("Testing evaluate_openimages_accuracy:")
         print("=" * 60)
 
         from mlperf_openvino.datasets.coco_eval import evaluate_openimages_accuracy
 
-        result = evaluate_openimages_accuracy(
+        print("\n1. model_labels_zero_indexed=True (adds +1):")
+        result1 = evaluate_openimages_accuracy(
             predictions=predictions,
             coco_annotations_file=str(ann_file),
             input_size=800,
             model_labels_zero_indexed=True,
             boxes_in_pixels=True,
         )
-        print(f"\nManual evaluate_openimages_accuracy result: {result}")
+        print(f"   Result: {result1}")
+
+        print("\n2. model_labels_zero_indexed=False (no offset):")
+        result2 = evaluate_openimages_accuracy(
+            predictions=predictions,
+            coco_annotations_file=str(ann_file),
+            input_size=800,
+            model_labels_zero_indexed=False,
+            boxes_in_pixels=True,
+        )
+        print(f"   Result: {result2}")
     else:
         print("\nNO PREDICTIONS!")
 
