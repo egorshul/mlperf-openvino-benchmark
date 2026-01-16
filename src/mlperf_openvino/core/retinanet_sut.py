@@ -481,7 +481,7 @@ class RetinaNetSUT:
 
     def compute_accuracy(self) -> Dict[str, float]:
         """
-        Compute mAP accuracy.
+        Compute mAP accuracy using pycocotools (official MLPerf method).
 
         Returns:
             Dictionary with mAP and other metrics
@@ -489,13 +489,45 @@ class RetinaNetSUT:
         if not self._predictions:
             return {'mAP': 0.0, 'num_samples': 0}
 
+        # Try to use pycocotools for accurate mAP calculation (same as C++ wrapper)
+        try:
+            from ..datasets.coco_eval import evaluate_openimages_accuracy, PYCOCOTOOLS_AVAILABLE
+            from pathlib import Path
+
+            if PYCOCOTOOLS_AVAILABLE:
+                # Find COCO annotations file
+                coco_file = None
+                data_path = Path(self.qsl.dataset.data_path)
+
+                for name in [
+                    "annotations/openimages-mlperf.json",
+                    "openimages-mlperf.json",
+                ]:
+                    path = data_path / name
+                    if path.exists():
+                        coco_file = str(path)
+                        break
+
+                if coco_file:
+                    logger.info(f"Using pycocotools with {coco_file}")
+                    return evaluate_openimages_accuracy(
+                        predictions=self._predictions,
+                        coco_annotations_file=coco_file,
+                        input_size=800,
+                        model_labels_zero_indexed=True,  # Model outputs 0-indexed labels (0-364), add +1 for category_ids (1-365)
+                        boxes_in_pixels=True,  # Model outputs boxes in pixel coords [0,800]
+                    )
+                else:
+                    logger.warning("COCO annotations file not found, using fallback mAP calculation")
+        except Exception as e:
+            logger.warning(f"pycocotools evaluation failed: {e}, using fallback")
+
+        # Fallback to basic mAP calculation
         predictions = []
-        ground_truths = []
         indices = []
 
         for sample_idx in sorted(self._predictions.keys()):
             predictions.append(self._predictions[sample_idx])
-            ground_truths.append(self.qsl.get_label(sample_idx))
             indices.append(sample_idx)
 
         return self.qsl.dataset.compute_accuracy(predictions, indices)
