@@ -191,13 +191,40 @@ class BenchmarkRunner:
         # Check if we have encoder-decoder or encoder-only model
         model_path = Path(self.config.model.model_path)
 
-        # Check for separate encoder/decoder models
+        # Check for separate encoder/decoder models (try different naming conventions)
         if model_path.is_dir():
-            encoder_path = model_path / "encoder_model.xml"
-            decoder_path = model_path / "decoder_model.xml"
+            # Try different naming conventions from optimum-cli
+            encoder_candidates = [
+                model_path / "encoder_model.xml",
+                model_path / "openvino_encoder_model.xml",
+            ]
+            decoder_candidates = [
+                model_path / "decoder_model.xml",
+                model_path / "openvino_decoder_model.xml",
+                model_path / "decoder_model_merged.xml",
+                model_path / "openvino_decoder_model_merged.xml",
+                model_path / "decoder_with_past_model.xml",
+                model_path / "openvino_decoder_with_past_model.xml",
+            ]
 
-            if encoder_path.exists() and decoder_path.exists():
-                logger.info("Setting up Whisper with separate encoder/decoder")
+            encoder_path = None
+            decoder_path = None
+
+            for ep in encoder_candidates:
+                if ep.exists():
+                    encoder_path = ep
+                    break
+
+            for dp in decoder_candidates:
+                if dp.exists():
+                    decoder_path = dp
+                    break
+
+            if encoder_path and decoder_path:
+                logger.info(f"Setting up Whisper with separate encoder/decoder")
+                logger.info(f"  Encoder: {encoder_path}")
+                logger.info(f"  Decoder: {decoder_path}")
+
                 encoder_backend = OpenVINOBackend(
                     model_path=str(encoder_path),
                     config=self.config.openvino,
@@ -218,8 +245,20 @@ class BenchmarkRunner:
                     scenario=self.config.scenario,
                 )
                 return
+            else:
+                # List available files in directory
+                xml_files = list(model_path.glob("*.xml"))
+                logger.error(f"Could not find encoder/decoder models in {model_path}")
+                logger.error(f"Available .xml files: {[f.name for f in xml_files]}")
+                raise ValueError(
+                    f"Whisper model directory {model_path} does not contain "
+                    f"expected encoder/decoder files. Found: {[f.name for f in xml_files]}"
+                )
 
-        # Single model - use encoder-only SUT
+        # Single model file - use encoder-only SUT
+        if self.backend is None:
+            raise ValueError(f"Cannot load Whisper model from {model_path}")
+
         logger.info(f"Creating Whisper encoder-only SUT for scenario: {self.config.scenario}")
         self.sut = WhisperEncoderOnlySUT(
             config=self.config,
