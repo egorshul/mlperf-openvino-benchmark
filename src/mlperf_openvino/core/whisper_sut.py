@@ -103,8 +103,8 @@ class WhisperOptimumSUT:
         self._load_model()
 
     def _load_model(self) -> None:
-        """Load Whisper model using Optimum-Intel."""
-        from transformers import AutoProcessor
+        """Load Whisper model using Optimum-Intel pipeline."""
+        from transformers import AutoProcessor, pipeline
 
         logger.info(f"Loading Whisper model from {self.model_path}")
 
@@ -122,6 +122,16 @@ class WhisperOptimumSUT:
             self.model_path,
             ov_config=ov_config,
             compile=True,
+        )
+
+        # Create pipeline for easier inference
+        self.pipe = pipeline(
+            "automatic-speech-recognition",
+            model=self.model,
+            tokenizer=self.processor.tokenizer,
+            feature_extractor=self.processor.feature_extractor,
+            chunk_length_s=30,
+            return_timestamps=False,
         )
 
         logger.info("Whisper model loaded successfully")
@@ -178,40 +188,20 @@ class WhisperOptimumSUT:
         Returns:
             Transcribed text
         """
-        import torch
+        # Get audio file path from QSL dataset
+        audio_path = self.qsl.dataset.get_audio_path(sample_idx)
 
-        # Get audio features from QSL
-        features = self.qsl.get_features(sample_idx)
-        input_features = features["input_features"]
-
-        # Convert to tensor
-        if isinstance(input_features, np.ndarray):
-            input_features = torch.from_numpy(input_features)
-
-        # Ensure correct shape (batch, n_mels, time)
-        if input_features.dim() == 2:
-            input_features = input_features.unsqueeze(0)
-
-        # Create attention mask (all ones since we have valid input)
-        attention_mask = torch.ones(input_features.shape[:2], dtype=torch.long)
-
-        # Generate transcription with explicit parameters to avoid compatibility issues
-        # use_cache=False to avoid past_key_values issues with some model exports
-        generated_ids = self.model.generate(
-            input_features,
-            attention_mask=attention_mask,
-            max_new_tokens=self.max_new_tokens,
-            return_timestamps=False,
-            use_cache=False,
+        # Use pipeline for inference (handles all preprocessing internally)
+        result = self.pipe(
+            audio_path,
+            generate_kwargs={"max_new_tokens": self.max_new_tokens},
         )
 
-        # Decode tokens to text
-        text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        text = result["text"]
 
         # Debug: log first few samples
         if self._sample_count < 3:
-            logger.info(f"Sample {sample_idx}: generated {len(generated_ids[0])} tokens")
-            logger.info(f"  Text: '{text[:100]}...'")
+            logger.info(f"Sample {sample_idx}: '{text[:100]}...'")
 
         return text
 
