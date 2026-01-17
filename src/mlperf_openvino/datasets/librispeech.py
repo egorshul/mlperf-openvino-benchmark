@@ -24,6 +24,31 @@ N_MELS = 80
 CHUNK_LENGTH = 30  # seconds
 N_SAMPLES = CHUNK_LENGTH * SAMPLE_RATE  # 480000 samples for 30 seconds
 
+# Global feature extractor (lazy loaded)
+_feature_extractor = None
+
+
+def get_whisper_feature_extractor():
+    """Get or create WhisperFeatureExtractor for audio preprocessing."""
+    global _feature_extractor
+    if _feature_extractor is None:
+        try:
+            from transformers import WhisperFeatureExtractor
+            _feature_extractor = WhisperFeatureExtractor.from_pretrained(
+                "openai/whisper-large-v3"
+            )
+            logger.info("Using WhisperFeatureExtractor for audio preprocessing")
+        except ImportError:
+            logger.warning(
+                "transformers not available, falling back to manual mel spectrogram. "
+                "Install with: pip install transformers"
+            )
+            _feature_extractor = False  # Mark as unavailable
+        except Exception as e:
+            logger.warning(f"Failed to load WhisperFeatureExtractor: {e}")
+            _feature_extractor = False
+    return _feature_extractor if _feature_extractor else None
+
 
 def load_audio(file_path: str, sr: int = SAMPLE_RATE) -> np.ndarray:
     """
@@ -360,32 +385,44 @@ class LibriSpeechDataset(BaseDataset):
     def get_sample(self, index: int) -> Tuple[np.ndarray, str]:
         """
         Get preprocessed audio sample.
-        
+
         Args:
             index: Sample index
-            
+
         Returns:
-            Tuple of (mel_spectrogram, transcript)
-            mel_spectrogram shape: (1, n_mels, time_frames)
+            Tuple of (input_features, transcript)
+            input_features shape: (1, n_mels, time_frames) - typically (1, 128, 3000) for Whisper
         """
         if index in self._cache:
-            mel = self._cache[index]
+            features = self._cache[index]
         else:
             sample = self._samples[index]
             audio = load_audio(sample["audio_path"])
-            
-            # Pad or trim to chunk length
-            audio = pad_or_trim(audio, N_SAMPLES)
-            
-            # Compute mel spectrogram
-            mel = log_mel_spectrogram(audio)
-            
-            self._cache[index] = mel
-        
-        # Add batch dimension
-        mel = mel[np.newaxis, ...]  # (1, n_mels, time_frames)
-        
-        return mel, self._samples[index]["transcript"]
+
+            # Try to use WhisperFeatureExtractor for correct preprocessing
+            feature_extractor = get_whisper_feature_extractor()
+
+            if feature_extractor is not None:
+                # Use HuggingFace feature extractor (produces correct shape for OpenVINO model)
+                inputs = feature_extractor(
+                    audio,
+                    sampling_rate=SAMPLE_RATE,
+                    return_tensors="np",
+                )
+                features = inputs["input_features"]  # Shape: (1, 128, 3000) or (1, 80, 3000)
+            else:
+                # Fallback to manual mel spectrogram
+                audio = pad_or_trim(audio, N_SAMPLES)
+                mel = log_mel_spectrogram(audio)
+                features = mel[np.newaxis, ...]  # (1, n_mels, time_frames)
+
+            self._cache[index] = features
+
+        # Ensure we have batch dimension
+        if features.ndim == 2:
+            features = features[np.newaxis, ...]
+
+        return features, self._samples[index]["transcript"]
     
     def get_samples(self, indices: List[int]) -> Tuple[np.ndarray, List[str]]:
         """
