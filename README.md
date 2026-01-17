@@ -521,6 +521,44 @@ pip install openvino>=2024.0.0
 pip install mlcommons-loadgen>=4.0
 ```
 
+**Whisper model download hangs:**
+
+If `mlperf-ov download --model whisper --format openvino` hangs during download of large files (3+ GB), use wget with resume support:
+
+```bash
+# 1. Create directory and download files with wget (supports resume with -c)
+mkdir -p ./models/whisper-large-v3-hf
+cd ./models/whisper-large-v3-hf
+
+wget -c "https://huggingface.co/openai/whisper-large-v3/resolve/main/model.safetensors"
+wget -c "https://huggingface.co/openai/whisper-large-v3/resolve/main/config.json"
+wget -c "https://huggingface.co/openai/whisper-large-v3/resolve/main/tokenizer.json"
+wget -c "https://huggingface.co/openai/whisper-large-v3/resolve/main/preprocessor_config.json"
+wget -c "https://huggingface.co/openai/whisper-large-v3/resolve/main/generation_config.json"
+wget -c "https://huggingface.co/openai/whisper-large-v3/resolve/main/merges.txt"
+wget -c "https://huggingface.co/openai/whisper-large-v3/resolve/main/vocab.json"
+wget -c "https://huggingface.co/openai/whisper-large-v3/resolve/main/added_tokens.json"
+wget -c "https://huggingface.co/openai/whisper-large-v3/resolve/main/special_tokens_map.json"
+wget -c "https://huggingface.co/openai/whisper-large-v3/resolve/main/tokenizer_config.json"
+
+cd -
+
+# 2. Convert to OpenVINO format
+optimum-cli export openvino \
+  --model ./models/whisper-large-v3-hf \
+  --task automatic-speech-recognition \
+  ./models/whisper-large-v3-openvino
+```
+
+Then run the benchmark with:
+```bash
+mlperf-ov run \
+  --model whisper \
+  --model-path ./models/whisper-large-v3-openvino \
+  --data-path ./data/librispeech \
+  --mode accuracy
+```
+
 ## License
 
 Apache License 2.0
