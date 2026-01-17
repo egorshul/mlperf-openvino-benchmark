@@ -138,8 +138,6 @@ class OpenVINOSUT:
         # Double the requests for better pipelining
         num_requests = max(num_requests * 2, 16)
 
-        logger.info(f"Server mode: AsyncInferQueue with {num_requests} inference requests")
-
         # Pre-cache input dtype for fast conversion
         compiled_model = self.backend._compiled_model
         input_element_type = str(compiled_model.input(0).element_type)
@@ -153,8 +151,6 @@ class OpenVINOSUT:
             self._input_dtype = np.int32
         else:
             self._input_dtype = np.float32  # Default
-
-        logger.info(f"Server mode: input dtype = {self._input_dtype}")
 
         # Create AsyncInferQueue with callback
         self._async_queue = AsyncInferQueue(compiled_model, num_requests)
@@ -187,8 +183,6 @@ class OpenVINOSUT:
             self._sample_count += 1
 
         self._async_queue.set_callback(inference_callback)
-
-        logger.info(f"AsyncInferQueue configured with callback")
 
         # Start progress monitoring thread
         self._progress_thread_stop = False
@@ -304,8 +298,6 @@ class OpenVINOSUT:
         In Offline mode, all samples are sent at once and processed
         as fast as possible for maximum throughput.
         """
-        logger.info(f"Offline: received {len(query_samples)} samples in issue_queries")
-
         responses = []
         response_arrays = []  # Keep arrays alive until QuerySamplesComplete!
 

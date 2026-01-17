@@ -209,8 +209,6 @@ class RetinaNetSUT:
         if not self.input_name and model_inputs:
             self.input_name = model_inputs[0]
 
-        logger.info(f"RetinaNet input: {self.input_name}")
-
         # Output mapping
         model_outputs = self.backend.output_names
 
@@ -234,9 +232,6 @@ class RetinaNetSUT:
             self.scores_name = model_outputs[1]
         if not self.labels_name and len(model_outputs) >= 3:
             self.labels_name = model_outputs[2]
-
-        logger.info(f"RetinaNet outputs: boxes={self.boxes_name}, "
-                   f"scores={self.scores_name}, labels={self.labels_name}")
 
     def _postprocess_detections(
         self,

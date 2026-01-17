@@ -27,13 +27,12 @@ from ..core.config import BenchmarkConfig, Scenario
 # Try to import C++ extension
 try:
     from ..cpp import (
-        ResNetCppSUT, CppOfflineSUT, BertCppSUT, RetinaNetCppSUT, WhisperCppSUT,
+        ResNetCppSUT, BertCppSUT, RetinaNetCppSUT, WhisperCppSUT,
         CPP_AVAILABLE,
     )
 except ImportError:
     CPP_AVAILABLE = False
     ResNetCppSUT = None
-    CppOfflineSUT = None
     BertCppSUT = None
     RetinaNetCppSUT = None
     WhisperCppSUT = None
@@ -237,145 +236,6 @@ class ResNetCppSUTWrapper:
         self._cpp_sut.reset_counters()
 
 
-class CppOfflineSUTWrapper:
-    """
-    Wrapper for C++ Offline SUT with batch inference.
-
-    Optimized for Offline scenario:
-    - Sync batch inference (multiple samples per call)
-    - No per-sample callback overhead
-    - Maximum throughput with large batches
-    """
-
-    def __init__(
-        self,
-        config: BenchmarkConfig,
-        model_path: str,
-        qsl: QuerySampleLibrary,
-        batch_size: int = 32,
-    ):
-        if not LOADGEN_AVAILABLE:
-            raise ImportError("MLPerf LoadGen is not installed")
-
-        if not CPP_AVAILABLE or CppOfflineSUT is None:
-            raise ImportError("C++ Offline SUT extension not available")
-
-        self.config = config
-        self.qsl = qsl
-        self.batch_size = batch_size
-        self.scenario = Scenario.OFFLINE
-
-        # Create C++ Offline SUT
-        device = config.openvino.device
-        num_streams = 0
-        if config.openvino.num_streams != "AUTO":
-            try:
-                num_streams = int(config.openvino.num_streams)
-            except ValueError:
-                pass
-
-        self._cpp_sut = CppOfflineSUT(model_path, device, batch_size, num_streams)
-        self._cpp_sut.load()
-
-        # Get input info
-        self.input_name = self._cpp_sut.get_input_name()
-        self.output_name = self._cpp_sut.get_output_name()
-        self.sample_size = self._cpp_sut.get_sample_size()
-
-        # Statistics
-        self._start_time = 0.0
-        self._issued_count = 0
-
-        # Predictions storage for accuracy mode
-        self._predictions: Dict[int, Any] = {}
-
-    def issue_queries(self, query_samples: List["lg.QuerySample"]) -> None:
-        """Process queries using batch inference."""
-        self._start_time = time.time()
-        total_samples = len(query_samples)
-        self._issued_count = total_samples
-
-        # Process in batches
-        for batch_start in range(0, total_samples, self.batch_size):
-            batch_end = min(batch_start + self.batch_size, total_samples)
-            batch_samples = query_samples[batch_start:batch_end]
-            num_in_batch = len(batch_samples)
-
-            # Prepare batch input
-            batch_input = np.zeros((self.batch_size, self.sample_size), dtype=np.float32)
-
-            query_ids = []
-            for i, qs in enumerate(batch_samples):
-                sample_idx = qs.index
-                query_ids.append(qs.id)
-
-                # Get input data from QSL
-                if hasattr(self.qsl, '_loaded_samples') and sample_idx in self.qsl._loaded_samples:
-                    input_data = self.qsl._loaded_samples[sample_idx]
-                else:
-                    features = self.qsl.get_features(sample_idx)
-                    input_data = features.get("input", features.get(self.input_name))
-
-                # Flatten and copy to batch
-                batch_input[i] = input_data.flatten().astype(np.float32)
-
-            # Run batch inference
-            results = self._cpp_sut.infer_batch(batch_input.flatten(), num_in_batch)
-
-            # Send responses to LoadGen and store predictions
-            responses = []
-            for i, (query_id, result) in enumerate(zip(query_ids, results)):
-                sample_idx = batch_samples[i].index
-                self._predictions[sample_idx] = result.copy()
-
-                response = lg.QuerySampleResponse(
-                    query_id,
-                    result.ctypes.data,
-                    result.nbytes
-                )
-                responses.append(response)
-
-            lg.QuerySamplesComplete(responses)
-
-    def flush_queries(self) -> None:
-        """Flush completed - all done in issue_queries for Offline."""
-        pass
-
-    def get_sut(self) -> "lg.ConstructSUT":
-        """Get the LoadGen SUT object."""
-        return lg.ConstructSUT(self.issue_queries, self.flush_queries)
-
-    def get_qsl(self) -> "lg.ConstructQSL":
-        """Get the LoadGen QSL object."""
-        return lg.ConstructQSL(
-            self.qsl.total_sample_count,
-            self.qsl.performance_sample_count,
-            self.qsl.load_query_samples,
-            self.qsl.unload_query_samples,
-        )
-
-    @property
-    def name(self) -> str:
-        return f"OpenVINO-CppOffline-{self.config.model.name}"
-
-    @property
-    def _sample_count(self) -> int:
-        return self._cpp_sut.get_completed_count()
-
-    @property
-    def _query_count(self) -> int:
-        return self._issued_count
-
-    def get_predictions(self) -> Dict[int, Any]:
-        """Get stored predictions for accuracy computation."""
-        return self._predictions
-
-    def reset(self) -> None:
-        self._cpp_sut.reset_counters()
-        self._issued_count = 0
-        self._predictions = {}
-
-
 class BertCppSUTWrapper:
     """
     Wrapper for BERT C++ SUT with 3 int64 inputs and 2 float32 outputs.
@@ -557,8 +417,7 @@ def create_sut(
     """
     Factory function to create the best available SUT.
 
-    - Server: CppSUT with async inference (batch=1)
-    - Offline: CppOfflineSUT with sync batch inference
+    Uses async C++ SUT with InferRequest pool for maximum throughput.
 
     Args:
         config: Benchmark configuration
@@ -571,8 +430,6 @@ def create_sut(
         SUT instance
     """
     if CPP_AVAILABLE and not force_python:
-        # Use async C++ SUT for both modes - it has parallelism via InferRequest pool
-        # CppOfflineSUT (sync batch) is slower because it uses single InferRequest
         logger.info(f"Using ResNet C++ SUT for {scenario.value} mode")
         return ResNetCppSUTWrapper(config, model_path, qsl, scenario)
 

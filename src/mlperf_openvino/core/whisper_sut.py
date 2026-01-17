@@ -203,11 +203,6 @@ class WhisperOptimumSUT:
         # Decode tokens to text
         text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
 
-        # Debug: log first few samples
-        if self._sample_count < 3:
-            logger.info(f"Sample {sample_idx}: generated {len(generated_ids[0])} tokens")
-            logger.info(f"  Text: '{text[:100]}...'")
-
         return text
 
     def issue_queries(self, query_samples: List[Any]) -> None:
@@ -351,7 +346,6 @@ class WhisperSUT:
 
         # Discover decoder input names
         self._decoder_input_names = self._discover_decoder_inputs()
-        logger.info(f"Decoder inputs: {self._decoder_input_names}")
 
         # Results storage
         self._predictions: Dict[int, str] = {}
@@ -426,8 +420,6 @@ class WhisperSUT:
             - 'attention_mask': name for attention mask (optional)
         """
         input_names = self.decoder.input_names
-        logger.info(f"Decoder model inputs: {input_names}")
-
         result = {}
 
         # Find input_ids (decoder_input_ids or input_ids)
@@ -557,7 +549,6 @@ class WhisperSUT:
         self,
         mel_features: np.ndarray,
         temperature: float = 0.0,
-        debug: bool = False,
     ) -> Tuple[List[int], str]:
         """
         Generate transcript from mel spectrogram.
@@ -565,16 +556,12 @@ class WhisperSUT:
         Args:
             mel_features: Mel spectrogram
             temperature: Sampling temperature (0 = greedy)
-            debug: Enable debug logging
-            
+
         Returns:
             Tuple of (token_ids, decoded_text)
         """
         # Encode audio
         encoder_hidden_states = self._encode(mel_features)
-
-        if debug:
-            logger.info(f"Encoder output shape: {encoder_hidden_states.shape}")
 
         # Initialize decoder input with special tokens
         # [SOT, language, task, no_timestamps]
@@ -594,10 +581,6 @@ class WhisperSUT:
             # Get logits
             logits = self._decode_step(encoder_hidden_states, decoder_input_ids)
 
-            if debug and step == 0:
-                logger.info(f"Decoder output shape: {logits.shape}")
-                logger.info(f"Decoder output dtype: {logits.dtype}")
-
             # Get next token (greedy or sampling)
             # Logits shape should be (batch, seq_len, vocab_size)
             if logits.ndim == 3:
@@ -606,13 +589,7 @@ class WhisperSUT:
                 # Shape might be (batch, vocab_size) for last token only
                 next_token_logits = logits[0, :]
             else:
-                logger.error(f"Unexpected logits shape: {logits.shape}")
                 break
-
-            if debug and step == 0:
-                top5_indices = np.argsort(next_token_logits)[-5:][::-1]
-                top5_values = next_token_logits[top5_indices]
-                logger.info(f"Top 5 tokens: {list(zip(top5_indices.tolist(), top5_values.tolist()))}")
 
             if temperature == 0.0:
                 next_token = int(np.argmax(next_token_logits))
@@ -622,21 +599,16 @@ class WhisperSUT:
                 probs = probs / probs.sum()
                 next_token = int(np.random.choice(len(probs), p=probs))
 
-            if debug and step == 0:
-                logger.info(f"First generated token: {next_token} (EOT={self.EOT_TOKEN})")
-
             # Check for end of transcript
             if next_token == self.EOT_TOKEN:
-                if debug:
-                    logger.info(f"EOT at step {step}")
                 break
 
             generated_tokens.append(next_token)
             decoder_input.append(next_token)
-        
+
         # Decode tokens to text
         text = self._decode_tokens(generated_tokens)
-        
+
         return generated_tokens, text
     
     def _process_sample(self, sample_idx: int) -> str:
@@ -651,21 +623,7 @@ class WhisperSUT:
         """
         features = self.qsl.get_features(sample_idx)
         mel_features = features["input_features"]
-
-        # Enable debug for first sample
-        debug = (self._sample_count == 0)
-
-        if debug:
-            logger.info(f"Input features shape: {mel_features.shape}")
-
-        tokens, text = self._generate(mel_features, debug=debug)
-
-        # Debug: log first few samples
-        if self._sample_count < 3:
-            logger.info(f"Sample {sample_idx}: generated {len(tokens)} tokens")
-            logger.info(f"  First 20 tokens: {tokens[:20]}")
-            logger.info(f"  Decoded text: '{text[:100]}...'")
-
+        tokens, text = self._generate(mel_features)
         return text
     
     def issue_queries(self, query_samples: List[Any]) -> None:
