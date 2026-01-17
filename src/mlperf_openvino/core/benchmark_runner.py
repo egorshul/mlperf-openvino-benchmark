@@ -189,30 +189,10 @@ class BenchmarkRunner:
 
         model_path = Path(self.config.model.model_path)
 
-        # Try to use Optimum-Intel WhisperOptimumSUT first (recommended)
-        try:
-            from .whisper_sut import WhisperOptimumSUT, OPTIMUM_AVAILABLE
-
-            if OPTIMUM_AVAILABLE and model_path.is_dir():
-                # Check if this looks like an optimum-exported model
-                config_file = model_path / "config.json"
-                if config_file.exists():
-                    logger.info("Using Optimum-Intel for Whisper inference (recommended)")
-                    self.sut = WhisperOptimumSUT(
-                        config=self.config,
-                        model_path=model_path,
-                        qsl=self.qsl,
-                        scenario=self.config.scenario,
-                    )
-                    return
-        except Exception as e:
-            logger.warning(f"Could not use Optimum-Intel: {e}")
-            logger.info("Falling back to manual encoder-decoder inference")
-
-        # Fallback: Manual encoder-decoder inference
-        from .whisper_sut import WhisperSUT, WhisperEncoderOnlySUT
-
         # Check for separate encoder/decoder models (try different naming conventions)
+        encoder_path = None
+        decoder_path = None
+
         if model_path.is_dir():
             # Try different naming conventions from optimum-cli
             encoder_candidates = [
@@ -228,9 +208,6 @@ class BenchmarkRunner:
                 model_path / "openvino_decoder_with_past_model.xml",
             ]
 
-            encoder_path = None
-            decoder_path = None
-
             for ep in encoder_candidates:
                 if ep.exists():
                     encoder_path = ep
@@ -241,40 +218,82 @@ class BenchmarkRunner:
                     decoder_path = dp
                     break
 
-            if encoder_path and decoder_path:
-                logger.info(f"Setting up Whisper with separate encoder/decoder")
-                logger.info(f"  Encoder: {encoder_path}")
-                logger.info(f"  Decoder: {decoder_path}")
+        # Try C++ Whisper SUT first (maximum performance)
+        if encoder_path and decoder_path:
+            try:
+                from .cpp_sut_wrapper import create_whisper_sut
 
-                encoder_backend = OpenVINOBackend(
-                    model_path=str(encoder_path),
-                    config=self.config.openvino,
-                )
-                encoder_backend.load()
-
-                decoder_backend = OpenVINOBackend(
-                    model_path=str(decoder_path),
-                    config=self.config.openvino,
-                )
-                decoder_backend.load()
-
-                self.sut = WhisperSUT(
+                self.sut = create_whisper_sut(
                     config=self.config,
-                    encoder_backend=encoder_backend,
-                    decoder_backend=decoder_backend,
+                    encoder_path=str(encoder_path),
+                    decoder_path=str(decoder_path),
                     qsl=self.qsl,
                     scenario=self.config.scenario,
                 )
                 return
-            else:
-                # List available files in directory
-                xml_files = list(model_path.glob("*.xml"))
-                logger.error(f"Could not find encoder/decoder models in {model_path}")
-                logger.error(f"Available .xml files: {[f.name for f in xml_files]}")
-                raise ValueError(
-                    f"Whisper model directory {model_path} does not contain "
-                    f"expected encoder/decoder files. Found: {[f.name for f in xml_files]}"
-                )
+            except ImportError as e:
+                logger.info(f"C++ Whisper SUT not available: {e}")
+            except Exception as e:
+                logger.warning(f"C++ Whisper SUT failed: {e}, trying Python fallback")
+
+        # Try to use Optimum-Intel WhisperOptimumSUT (Python fallback)
+        try:
+            from .whisper_sut import WhisperOptimumSUT, OPTIMUM_AVAILABLE
+
+            if OPTIMUM_AVAILABLE and model_path.is_dir():
+                # Check if this looks like an optimum-exported model
+                config_file = model_path / "config.json"
+                if config_file.exists():
+                    logger.info("Using Optimum-Intel for Whisper inference")
+                    self.sut = WhisperOptimumSUT(
+                        config=self.config,
+                        model_path=model_path,
+                        qsl=self.qsl,
+                        scenario=self.config.scenario,
+                    )
+                    return
+        except Exception as e:
+            logger.warning(f"Could not use Optimum-Intel: {e}")
+            logger.info("Falling back to manual encoder-decoder inference")
+
+        # Fallback: Manual encoder-decoder inference
+        from .whisper_sut import WhisperSUT, WhisperEncoderOnlySUT
+
+        if encoder_path and decoder_path:
+            logger.info(f"Setting up Whisper with separate encoder/decoder (Python)")
+            logger.info(f"  Encoder: {encoder_path}")
+            logger.info(f"  Decoder: {decoder_path}")
+
+            encoder_backend = OpenVINOBackend(
+                model_path=str(encoder_path),
+                config=self.config.openvino,
+            )
+            encoder_backend.load()
+
+            decoder_backend = OpenVINOBackend(
+                model_path=str(decoder_path),
+                config=self.config.openvino,
+            )
+            decoder_backend.load()
+
+            self.sut = WhisperSUT(
+                config=self.config,
+                encoder_backend=encoder_backend,
+                decoder_backend=decoder_backend,
+                qsl=self.qsl,
+                scenario=self.config.scenario,
+            )
+            return
+
+        if model_path.is_dir():
+            # List available files in directory
+            xml_files = list(model_path.glob("*.xml"))
+            logger.error(f"Could not find encoder/decoder models in {model_path}")
+            logger.error(f"Available .xml files: {[f.name for f in xml_files]}")
+            raise ValueError(
+                f"Whisper model directory {model_path} does not contain "
+                f"expected encoder/decoder files. Found: {[f.name for f in xml_files]}"
+            )
 
         # Single model file - use encoder-only SUT
         if self.backend is None:

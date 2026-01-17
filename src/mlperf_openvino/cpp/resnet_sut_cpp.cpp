@@ -8,7 +8,7 @@
  * 4. Minimal allocations in hot path
  */
 
-#include "sut_cpp.hpp"
+#include "resnet_sut_cpp.hpp"
 
 #include <cstring>
 #include <iostream>
