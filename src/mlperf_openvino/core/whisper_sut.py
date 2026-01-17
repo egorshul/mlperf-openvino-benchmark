@@ -196,12 +196,13 @@ class WhisperOptimumSUT:
         attention_mask = torch.ones(input_features.shape[:2], dtype=torch.long)
 
         # Generate transcription with explicit parameters to avoid compatibility issues
+        # use_cache=False to avoid past_key_values issues with some model exports
         generated_ids = self.model.generate(
             input_features,
             attention_mask=attention_mask,
             max_new_tokens=self.max_new_tokens,
             return_timestamps=False,
-            use_cache=True,
+            use_cache=False,
         )
 
         # Decode tokens to text
