@@ -192,6 +192,7 @@ class BenchmarkRunner:
         # Check for separate encoder/decoder models (try different naming conventions)
         encoder_path = None
         decoder_path = None
+        decoder_no_past_path = None  # For C++ SUT (KV-cache not working yet)
 
         if model_path.is_dir():
             # Try different naming conventions from optimum-cli
@@ -199,14 +200,17 @@ class BenchmarkRunner:
                 model_path / "encoder_model.xml",
                 model_path / "openvino_encoder_model.xml",
             ]
-            # Decoder candidates (prefer with KV-cache for better performance)
-            decoder_candidates = [
+            # Decoders WITHOUT KV-cache (for C++ SUT - KV-cache implementation has issues)
+            decoder_no_past_candidates = [
+                model_path / "decoder_model.xml",
+                model_path / "openvino_decoder_model.xml",
+            ]
+            # Decoders WITH KV-cache (for Python SUT via Optimum - better performance)
+            decoder_with_past_candidates = [
                 model_path / "decoder_with_past_model.xml",
                 model_path / "openvino_decoder_with_past_model.xml",
                 model_path / "decoder_model_merged.xml",
                 model_path / "openvino_decoder_model_merged.xml",
-                model_path / "decoder_model.xml",
-                model_path / "openvino_decoder_model.xml",
             ]
 
             for ep in encoder_candidates:
@@ -214,20 +218,30 @@ class BenchmarkRunner:
                     encoder_path = ep
                     break
 
-            for dp in decoder_candidates:
+            # Find decoder without KV-cache (for C++ SUT)
+            for dp in decoder_no_past_candidates:
+                if dp.exists():
+                    decoder_no_past_path = dp
+                    break
+
+            # Find any decoder (prefer with KV-cache for Python fallback)
+            for dp in decoder_with_past_candidates + decoder_no_past_candidates:
                 if dp.exists():
                     decoder_path = dp
                     break
 
-        # Try C++ Whisper SUT first (supports KV-cache)
-        if encoder_path and decoder_path:
+        # Try C++ Whisper SUT first (uses decoder WITHOUT KV-cache)
+        if encoder_path and decoder_no_past_path:
             try:
                 from .cpp_sut_wrapper import create_whisper_sut
 
+                logger.info(f"Using C++ Whisper SUT with decoder without KV-cache")
+                logger.info(f"  Encoder: {encoder_path}")
+                logger.info(f"  Decoder: {decoder_no_past_path}")
                 self.sut = create_whisper_sut(
                     config=self.config,
                     encoder_path=str(encoder_path),
-                    decoder_path=str(decoder_path),
+                    decoder_path=str(decoder_no_past_path),  # Use decoder without KV-cache
                     qsl=self.qsl,
                     scenario=self.config.scenario,
                 )
