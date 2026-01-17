@@ -7,7 +7,9 @@
 #include "whisper_sut_cpp.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
+#include <iostream>
 #include <regex>
 #include <stdexcept>
 
@@ -338,7 +340,18 @@ std::vector<int64_t> WhisperCppSUT::greedy_decode(const ov::Tensor& encoder_hidd
 
     std::vector<int64_t> generated_tokens;
 
+    // Debug: track decoding progress
+    auto start_time = std::chrono::steady_clock::now();
+    const int timeout_seconds = 30;  // Timeout per sample
+
     for (int step = 0; step < max_new_tokens_; ++step) {
+        // Check timeout
+        auto elapsed = std::chrono::steady_clock::now() - start_time;
+        if (std::chrono::duration_cast<std::chrono::seconds>(elapsed).count() > timeout_seconds) {
+            std::cerr << "\n[Whisper] TIMEOUT at step " << step << ", forcing EOT" << std::endl;
+            break;
+        }
+
         bool is_first_step = (step == 0);
 
         // For KV-cache, only pass the last token after the first step
