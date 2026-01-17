@@ -27,17 +27,19 @@ from ..core.config import BenchmarkConfig, Scenario
 # Try to import C++ extension
 try:
     from ..cpp import (
-        CppSUT, CppOfflineSUT, BertCppSUT, RetinaNetCppSUT,
-        CPP_AVAILABLE, BERT_CPP_AVAILABLE, RETINANET_CPP_AVAILABLE
+        CppSUT, CppOfflineSUT, BertCppSUT, RetinaNetCppSUT, WhisperCppSUT,
+        CPP_AVAILABLE, BERT_CPP_AVAILABLE, RETINANET_CPP_AVAILABLE, WHISPER_CPP_AVAILABLE
     )
 except ImportError:
     CPP_AVAILABLE = False
     BERT_CPP_AVAILABLE = False
     RETINANET_CPP_AVAILABLE = False
+    WHISPER_CPP_AVAILABLE = False
     CppSUT = None
     CppOfflineSUT = None
     BertCppSUT = None
     RetinaNetCppSUT = None
+    WhisperCppSUT = None
 
 logger = logging.getLogger(__name__)
 
@@ -1020,3 +1022,241 @@ def create_retinanet_sut(
 
     backend = OpenVINOBackend(model_path, config.openvino)
     return RetinaNetSUT(config, backend, qsl, scenario)
+
+
+class WhisperCppSUTWrapper:
+    """
+    Wrapper for Whisper C++ SUT with encoder-decoder architecture.
+
+    Optimized for Whisper Large v3:
+    - Encoder: mel spectrogram [1, 128, 3000] -> hidden states [1, 1500, 1280]
+    - Decoder: autoregressive token generation with greedy decoding in C++
+    """
+
+    def __init__(
+        self,
+        config: BenchmarkConfig,
+        encoder_path: str,
+        decoder_path: str,
+        qsl: "QuerySampleLibrary",
+        scenario: Scenario = Scenario.OFFLINE,
+        max_new_tokens: int = 440,
+    ):
+        if not LOADGEN_AVAILABLE:
+            raise ImportError("MLPerf LoadGen is not installed")
+
+        if not WHISPER_CPP_AVAILABLE or WhisperCppSUT is None:
+            raise ImportError(
+                "Whisper C++ SUT extension not available. "
+                "Build it with: ./build_cpp.sh"
+            )
+
+        self.config = config
+        self.qsl = qsl
+        self.scenario = scenario
+        self.max_new_tokens = max_new_tokens
+
+        # Create Whisper C++ SUT
+        device = config.openvino.device
+        num_streams = 0
+        if config.openvino.num_streams != "AUTO":
+            try:
+                num_streams = int(config.openvino.num_streams)
+            except ValueError:
+                pass
+
+        logger.debug(f"Creating Whisper C++ SUT: device={device}, max_new_tokens={max_new_tokens}")
+        self._cpp_sut = WhisperCppSUT(encoder_path, decoder_path, device, num_streams, max_new_tokens)
+
+        # Load model
+        logger.debug("Loading models in Whisper C++ SUT...")
+        self._cpp_sut.load()
+
+        # Get mel dimensions
+        self.n_mels = self._cpp_sut.get_n_mels()
+        self.n_frames = self._cpp_sut.get_n_frames()
+
+        logger.debug(f"Whisper mel dimensions: {self.n_mels} x {self.n_frames}")
+
+        # Statistics
+        self._start_time = 0.0
+        self._progress_stop_event = threading.Event()
+
+        # Enable storing predictions for accuracy mode
+        self._cpp_sut.set_store_predictions(True)
+
+        # Set up response callback
+        self._setup_response_callback()
+
+        # Start progress monitoring
+        self._start_progress_monitor()
+
+        logger.debug(f"Whisper C++ SUT initialized with {self._cpp_sut.get_optimal_nireq()} optimal requests")
+
+    def _setup_response_callback(self):
+        """Set up the callback that C++ uses to notify LoadGen."""
+        import array
+
+        # Use minimal response for performance mode
+        dummy_data = array.array('B', [0] * 8)
+        dummy_bi = dummy_data.buffer_info()
+
+        def response_callback(query_id: int, tokens_ptr, num_tokens):
+            # Use minimal response - predictions are stored in C++ for accuracy mode
+            response = lg.QuerySampleResponse(query_id, dummy_bi[0], dummy_bi[1])
+            lg.QuerySamplesComplete([response])
+
+        self._cpp_sut.set_response_callback(response_callback)
+
+    def _start_progress_monitor(self):
+        """Start progress monitoring thread."""
+        self._start_time = time.time()
+        self._progress_stop_event.clear()
+
+        def progress_thread():
+            while not self._progress_stop_event.is_set():
+                self._progress_stop_event.wait(timeout=1.0)
+                if self._progress_stop_event.is_set():
+                    break
+                elapsed = time.time() - self._start_time
+                completed = self._cpp_sut.get_completed_count()
+                issued = self._cpp_sut.get_issued_count()
+                throughput = completed / elapsed if elapsed > 0 else 0
+                pending = issued - completed
+                print(f"\rWhisper C++ SUT: issued={issued}, done={completed}, pending={pending}, {throughput:.1f} samples/sec", end="", flush=True)
+
+        self._progress_thread = threading.Thread(target=progress_thread, daemon=True)
+        self._progress_thread.start()
+
+    def issue_queries(self, query_samples: List[Any]) -> None:
+        """Process incoming queries using Whisper C++ SUT."""
+        for qs in query_samples:
+            sample_idx = qs.index
+            query_id = qs.id
+
+            # Get mel features from QSL
+            features = self.qsl.get_features(sample_idx)
+            mel_features = features.get('input_features', features.get('mel'))
+
+            # Ensure float32 contiguous
+            mel_features = np.ascontiguousarray(mel_features.flatten(), dtype=np.float32)
+
+            # Start async inference in C++
+            self._cpp_sut.start_async(mel_features, query_id, sample_idx)
+
+    def flush_queries(self) -> None:
+        """Flush any pending queries."""
+        self._cpp_sut.wait_all()
+
+        # Stop progress monitor
+        self._progress_stop_event.set()
+
+        # Print final stats
+        elapsed = time.time() - self._start_time
+        completed = self._cpp_sut.get_completed_count()
+        throughput = completed / elapsed if elapsed > 0 else 0
+        print(f"\nWhisper C++ SUT completed: {completed} samples in {elapsed:.1f}s ({throughput:.1f} samples/sec)")
+
+    def get_sut(self) -> "lg.ConstructSUT":
+        """Get the LoadGen SUT object."""
+        return lg.ConstructSUT(self.issue_queries, self.flush_queries)
+
+    def get_qsl(self) -> "lg.ConstructQSL":
+        """Get the LoadGen QSL object."""
+        return lg.ConstructQSL(
+            self.qsl.total_sample_count,
+            self.qsl.performance_sample_count,
+            self.qsl.load_query_samples,
+            self.qsl.unload_query_samples,
+        )
+
+    @property
+    def name(self) -> str:
+        return f"OpenVINO-WhisperCpp-{self.config.model.name}"
+
+    @property
+    def _sample_count(self) -> int:
+        return self._cpp_sut.get_completed_count()
+
+    @property
+    def _query_count(self) -> int:
+        return self._cpp_sut.get_issued_count()
+
+    def get_predictions(self) -> Dict[int, Dict[str, Any]]:
+        """Get all predictions as dict of {sample_idx: {tokens}}."""
+        raw_preds = self._cpp_sut.get_predictions()
+        result = {}
+
+        for idx, tokens_arr in raw_preds.items():
+            # C++ binding returns tokens directly as numpy array
+            tokens = list(tokens_arr) if hasattr(tokens_arr, '__iter__') else []
+            result[idx] = {
+                'tokens': tokens,
+            }
+        return result
+
+    def reset(self) -> None:
+        """Reset SUT state."""
+        self._cpp_sut.reset_counters()
+
+    def compute_accuracy(self) -> Dict[str, float]:
+        """Compute WER accuracy for Whisper transcriptions."""
+        predictions = self.get_predictions()
+
+        if not predictions:
+            logger.warning(f"No predictions collected (issued={self._cpp_sut.get_issued_count()}, "
+                          f"completed={self._cpp_sut.get_completed_count()})")
+            return {'wer': 1.0, 'num_samples': 0}
+
+        # Get tokens and convert to text using tokenizer
+        indices = sorted(predictions.keys())
+
+        # Use dataset's postprocess to decode tokens to text
+        pred_texts = []
+        for idx in indices:
+            tokens = predictions[idx]['tokens']
+            # Decode tokens using dataset's tokenizer if available
+            if hasattr(self.qsl.dataset, 'decode_tokens'):
+                text = self.qsl.dataset.decode_tokens(tokens)
+            else:
+                text = str(tokens)  # Fallback
+            pred_texts.append(text)
+
+        return self.qsl.dataset.compute_accuracy(pred_texts, indices)
+
+
+def create_whisper_sut(
+    config: BenchmarkConfig,
+    encoder_path: str,
+    decoder_path: str,
+    qsl: "QuerySampleLibrary",
+    scenario: Scenario = Scenario.OFFLINE,
+    force_python: bool = False,
+    max_new_tokens: int = 440,
+):
+    """
+    Factory function to create Whisper SUT.
+
+    Uses C++ SUT if available for maximum performance.
+
+    Args:
+        config: Benchmark configuration
+        encoder_path: Path to Whisper encoder model
+        decoder_path: Path to Whisper decoder model
+        qsl: Query Sample Library (LibriSpeechQSL)
+        scenario: Test scenario
+        force_python: Force Python SUT even if C++ is available
+        max_new_tokens: Maximum tokens to generate
+
+    Returns:
+        Whisper SUT instance
+    """
+    if WHISPER_CPP_AVAILABLE and not force_python:
+        logger.info(f"Using Whisper C++ SUT for {scenario.value} mode")
+        return WhisperCppSUTWrapper(config, encoder_path, decoder_path, qsl, scenario, max_new_tokens)
+
+    # Fall back to Python WhisperSUT
+    logger.info(f"Using Python Whisper SUT for {scenario.value} mode")
+    from .whisper_sut import WhisperOptimumSUT
+
+    return WhisperOptimumSUT(config, encoder_path.replace("_encoder.xml", ""), qsl, scenario)

@@ -33,6 +33,7 @@ pybind11_add_module(_cpp_sut
     offline_sut.cpp
     bert_sut_cpp.cpp
     retinanet_sut_cpp.cpp
+    whisper_sut_cpp.cpp
     bindings.cpp
 )
 

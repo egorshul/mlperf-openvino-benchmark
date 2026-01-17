@@ -22,6 +22,7 @@
 #include "offline_sut.hpp"
 #include "bert_sut_cpp.hpp"
 #include "retinanet_sut_cpp.hpp"
+#include "whisper_sut_cpp.hpp"
 
 namespace py = pybind11;
 
@@ -442,6 +443,130 @@ PYBIND11_MODULE(_cpp_sut, m) {
              py::arg("callback"),
              "Set response callback (receives query_id, boxes, scores, labels)");
 
+    // WhisperCppSUT - optimized for Whisper encoder-decoder
+    py::class_<mlperf_ov::WhisperCppSUT>(m, "WhisperCppSUT")
+        .def(py::init<const std::string&, const std::string&, const std::string&, int, int>(),
+             py::arg("encoder_path"),
+             py::arg("decoder_path"),
+             py::arg("device") = "CPU",
+             py::arg("num_streams") = 0,
+             py::arg("max_new_tokens") = 440,
+             "Create Whisper C++ SUT instance")
+
+        .def("load", &mlperf_ov::WhisperCppSUT::load,
+             py::call_guard<py::gil_scoped_release>(),
+             "Load and compile the models")
+
+        .def("is_loaded", &mlperf_ov::WhisperCppSUT::is_loaded,
+             "Check if models are loaded")
+
+        .def("get_optimal_nireq", &mlperf_ov::WhisperCppSUT::get_optimal_nireq,
+             "Get optimal number of inference requests")
+
+        .def("get_encoder_input_name", &mlperf_ov::WhisperCppSUT::get_encoder_input_name,
+             "Get encoder input tensor name")
+
+        .def("get_n_mels", &mlperf_ov::WhisperCppSUT::get_n_mels,
+             "Get number of mel bins")
+
+        .def("get_n_frames", &mlperf_ov::WhisperCppSUT::get_n_frames,
+             "Get number of frames")
+
+        .def("process_sample",
+             [](mlperf_ov::WhisperCppSUT& self,
+                py::array_t<float, py::array::c_style | py::array::forcecast> mel_features,
+                uint64_t query_id,
+                int sample_idx) {
+                 py::buffer_info buf = mel_features.request();
+                 const float* data = static_cast<const float*>(buf.ptr);
+                 size_t size = buf.size;
+
+                 std::vector<int64_t> tokens;
+                 {
+                     py::gil_scoped_release release;
+                     tokens = self.process_sample(data, size, query_id, sample_idx);
+                 }
+
+                 // Convert to numpy array
+                 py::array_t<int64_t> result(tokens.size());
+                 std::memcpy(result.mutable_data(), tokens.data(), tokens.size() * sizeof(int64_t));
+                 return result;
+             },
+             py::arg("mel_features"),
+             py::arg("query_id"),
+             py::arg("sample_idx"),
+             "Process a single sample and return generated tokens")
+
+        .def("start_async",
+             [](mlperf_ov::WhisperCppSUT& self,
+                py::array_t<float, py::array::c_style | py::array::forcecast> mel_features,
+                uint64_t query_id,
+                int sample_idx) {
+                 py::buffer_info buf = mel_features.request();
+                 const float* data = static_cast<const float*>(buf.ptr);
+                 size_t size = buf.size;
+
+                 py::gil_scoped_release release;
+                 self.start_async(data, size, query_id, sample_idx);
+             },
+             py::arg("mel_features"),
+             py::arg("query_id"),
+             py::arg("sample_idx"),
+             "Start async Whisper inference (GIL released)")
+
+        .def("wait_all", &mlperf_ov::WhisperCppSUT::wait_all,
+             py::call_guard<py::gil_scoped_release>(),
+             "Wait for all pending inferences")
+
+        .def("get_completed_count", &mlperf_ov::WhisperCppSUT::get_completed_count,
+             "Get number of completed samples")
+
+        .def("get_issued_count", &mlperf_ov::WhisperCppSUT::get_issued_count,
+             "Get number of issued samples")
+
+        .def("reset_counters", &mlperf_ov::WhisperCppSUT::reset_counters,
+             "Reset counters")
+
+        .def("set_store_predictions", &mlperf_ov::WhisperCppSUT::set_store_predictions,
+             py::arg("store"),
+             "Enable/disable storing predictions")
+
+        .def("get_predictions",
+             [](mlperf_ov::WhisperCppSUT& self) {
+                 auto cpp_preds = self.get_predictions();
+                 py::dict py_preds;
+
+                 for (const auto& [idx, pred] : cpp_preds) {
+                     py::array_t<int64_t> tokens_arr(pred.tokens.size());
+                     std::memcpy(tokens_arr.mutable_data(), pred.tokens.data(),
+                                pred.tokens.size() * sizeof(int64_t));
+                     py_preds[py::int_(idx)] = tokens_arr;
+                 }
+                 return py_preds;
+             },
+             "Get stored predictions as dict of {sample_idx: tokens}")
+
+        .def("set_response_callback",
+             [](mlperf_ov::WhisperCppSUT& self, py::function callback) {
+                 self.set_response_callback(
+                     [callback](uint64_t query_id,
+                               const int64_t* tokens,
+                               size_t num_tokens) {
+                         py::gil_scoped_acquire acquire;
+
+                         if (tokens != nullptr && num_tokens > 0) {
+                             py::array_t<int64_t> tokens_arr(num_tokens);
+                             std::memcpy(tokens_arr.mutable_data(), tokens,
+                                        num_tokens * sizeof(int64_t));
+                             callback(query_id, tokens_arr);
+                         } else {
+                             callback(query_id, py::none());
+                         }
+                     });
+             },
+             py::arg("callback"),
+             "Set response callback (receives query_id, tokens)");
+
     // Version info
-    m.attr("__version__") = "1.2.0";
+    m.attr("__version__") = "1.3.0";
 }

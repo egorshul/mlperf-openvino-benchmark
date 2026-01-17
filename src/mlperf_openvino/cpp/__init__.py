@@ -9,9 +9,10 @@ SUT types:
 - CppOfflineSUT: sync batch inference for Offline scenario
 - BertCppSUT: async inference for BERT (3x int64 inputs, 2x float32 outputs)
 - RetinaNetCppSUT: async inference for RetinaNet (1x float32 input, 3 outputs)
+- WhisperCppSUT: encoder-decoder inference for Whisper (mel spectrogram input, token output)
 
 Usage:
-    from mlperf_openvino.cpp import CppSUT, BertCppSUT, RetinaNetCppSUT, CPP_AVAILABLE
+    from mlperf_openvino.cpp import CppSUT, BertCppSUT, RetinaNetCppSUT, WhisperCppSUT, CPP_AVAILABLE
 
     if CPP_AVAILABLE:
         # For ResNet50
@@ -25,6 +26,10 @@ Usage:
         # For RetinaNet
         retinanet_sut = RetinaNetCppSUT(model_path, device="CPU")
         retinanet_sut.load()
+
+        # For Whisper
+        whisper_sut = WhisperCppSUT(encoder_path, decoder_path, device="CPU")
+        whisper_sut.load()
 """
 
 CPP_AVAILABLE = False
@@ -32,14 +37,17 @@ CppSUT = None
 CppOfflineSUT = None
 BertCppSUT = None
 RetinaNetCppSUT = None
+WhisperCppSUT = None
 BERT_CPP_AVAILABLE = False
 RETINANET_CPP_AVAILABLE = False
+WHISPER_CPP_AVAILABLE = False
 
 try:
-    from ._cpp_sut import CppSUT, CppOfflineSUT, BertCppSUT, RetinaNetCppSUT
+    from ._cpp_sut import CppSUT, CppOfflineSUT, BertCppSUT, RetinaNetCppSUT, WhisperCppSUT
     CPP_AVAILABLE = True
     BERT_CPP_AVAILABLE = True
     RETINANET_CPP_AVAILABLE = True
+    WHISPER_CPP_AVAILABLE = True
 except ImportError as e:
     import warnings
     warnings.warn(
@@ -49,6 +57,6 @@ except ImportError as e:
     )
 
 __all__ = [
-    "CppSUT", "CppOfflineSUT", "BertCppSUT", "RetinaNetCppSUT",
-    "CPP_AVAILABLE", "BERT_CPP_AVAILABLE", "RETINANET_CPP_AVAILABLE"
+    "CppSUT", "CppOfflineSUT", "BertCppSUT", "RetinaNetCppSUT", "WhisperCppSUT",
+    "CPP_AVAILABLE", "BERT_CPP_AVAILABLE", "RETINANET_CPP_AVAILABLE", "WHISPER_CPP_AVAILABLE"
 ]
