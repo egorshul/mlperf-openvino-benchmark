@@ -799,7 +799,7 @@ class WhisperCppSUTWrapper:
         dummy_data = array.array('B', [0] * 8)
         dummy_bi = dummy_data.buffer_info()
 
-        def response_callback(query_id: int, tokens_ptr, num_tokens):
+        def response_callback(query_id: int, tokens):
             # Use minimal response - predictions are stored in C++ for accuracy mode
             response = lg.QuerySampleResponse(query_id, dummy_bi[0], dummy_bi[1])
             lg.QuerySamplesComplete([response])
