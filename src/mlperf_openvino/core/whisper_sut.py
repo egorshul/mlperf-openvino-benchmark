@@ -81,7 +81,11 @@ class WhisperSUT:
         self.qsl = qsl
         self.scenario = scenario
         self.max_new_tokens = max_new_tokens
-        
+
+        # Discover decoder input names
+        self._decoder_input_names = self._discover_decoder_inputs()
+        logger.info(f"Decoder inputs: {self._decoder_input_names}")
+
         # Results storage
         self._predictions: Dict[int, str] = {}
         self._query_count = 0
@@ -144,11 +148,55 @@ class WhisperSUT:
         if self._progress_bar is not None:
             self._close_progress()
 
+    def _discover_decoder_inputs(self) -> Dict[str, str]:
+        """
+        Discover decoder input names from the model.
+
+        Returns:
+            Dictionary mapping semantic names to actual input names:
+            - 'input_ids': name for decoder input IDs
+            - 'encoder_hidden_states': name for encoder output
+            - 'attention_mask': name for attention mask (optional)
+        """
+        input_names = self.decoder.input_names
+        logger.info(f"Decoder model inputs: {input_names}")
+
+        result = {}
+
+        # Find input_ids (decoder_input_ids or input_ids)
+        for name in input_names:
+            name_lower = name.lower()
+            if 'input_id' in name_lower or 'decoder_input' in name_lower:
+                result['input_ids'] = name
+            elif 'encoder_hidden' in name_lower or 'encoder_output' in name_lower:
+                result['encoder_hidden_states'] = name
+            elif 'attention_mask' in name_lower and 'encoder' not in name_lower:
+                result['attention_mask'] = name
+            elif 'encoder_attention_mask' in name_lower:
+                result['encoder_attention_mask'] = name
+
+        # Fallback if not found
+        if 'input_ids' not in result:
+            # Try first input that looks like IDs
+            for name in input_names:
+                if 'id' in name.lower():
+                    result['input_ids'] = name
+                    break
+
+        if 'encoder_hidden_states' not in result:
+            # Try to find encoder output
+            for name in input_names:
+                if 'encoder' in name.lower() and 'mask' not in name.lower():
+                    result['encoder_hidden_states'] = name
+                    break
+
+        return result
+
     def _load_tokenizer(self):
         """Load Whisper tokenizer."""
         if self._tokenizer is not None:
             return
-        
+
         try:
             from transformers import WhisperTokenizer
             self._tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-large-v3")
@@ -201,18 +249,40 @@ class WhisperSUT:
     ) -> np.ndarray:
         """
         Run one decoder step.
-        
+
         Args:
             encoder_hidden_states: Encoder output
             decoder_input_ids: Current token sequence
-            
+
         Returns:
             Logits for next token
         """
-        inputs = {
-            "encoder_hidden_states": encoder_hidden_states,
-            "decoder_input_ids": decoder_input_ids,
-        }
+        inputs = {}
+
+        # Use discovered input names
+        if 'input_ids' in self._decoder_input_names:
+            inputs[self._decoder_input_names['input_ids']] = decoder_input_ids
+        else:
+            inputs['decoder_input_ids'] = decoder_input_ids
+
+        if 'encoder_hidden_states' in self._decoder_input_names:
+            inputs[self._decoder_input_names['encoder_hidden_states']] = encoder_hidden_states
+        else:
+            inputs['encoder_hidden_states'] = encoder_hidden_states
+
+        # Add attention masks if required by model
+        if 'attention_mask' in self._decoder_input_names:
+            # Create attention mask (all ones for valid tokens)
+            attn_mask = np.ones(decoder_input_ids.shape, dtype=np.int64)
+            inputs[self._decoder_input_names['attention_mask']] = attn_mask
+
+        if 'encoder_attention_mask' in self._decoder_input_names:
+            # Create encoder attention mask
+            batch_size = encoder_hidden_states.shape[0]
+            seq_len = encoder_hidden_states.shape[1]
+            enc_attn_mask = np.ones((batch_size, seq_len), dtype=np.int64)
+            inputs[self._decoder_input_names['encoder_attention_mask']] = enc_attn_mask
+
         outputs = self.decoder.predict(inputs)
         return list(outputs.values())[0]
     
