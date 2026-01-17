@@ -191,9 +191,12 @@ class WhisperOptimumSUT:
         # Get audio file path from QSL dataset
         audio_path = self.qsl.dataset.get_audio_path(sample_idx)
 
-        # Use pipeline for inference (handles all preprocessing internally)
+        # Load audio using librosa or soundfile (no ffmpeg dependency)
+        audio_array = self._load_audio(audio_path)
+
+        # Use pipeline for inference with raw audio array
         result = self.pipe(
-            audio_path,
+            {"raw": audio_array, "sampling_rate": 16000},
             generate_kwargs={"max_new_tokens": self.max_new_tokens},
         )
 
@@ -204,6 +207,32 @@ class WhisperOptimumSUT:
             logger.info(f"Sample {sample_idx}: '{text[:100]}...'")
 
         return text
+
+    def _load_audio(self, audio_path: str, target_sr: int = 16000) -> np.ndarray:
+        """Load audio file and resample to target sample rate."""
+        try:
+            import librosa
+            audio, sr = librosa.load(audio_path, sr=target_sr)
+            return audio
+        except ImportError:
+            pass
+
+        try:
+            import soundfile as sf
+            audio, sr = sf.read(audio_path)
+            if sr != target_sr:
+                # Simple resampling using scipy
+                import scipy.signal
+                num_samples = int(len(audio) * target_sr / sr)
+                audio = scipy.signal.resample(audio, num_samples)
+            return audio.astype(np.float32)
+        except ImportError:
+            pass
+
+        raise ImportError(
+            "Either librosa or soundfile is required to load audio. "
+            "Install with: pip install librosa or pip install soundfile"
+        )
 
     def issue_queries(self, query_samples: List[Any]) -> None:
         """Process queries from LoadGen."""
