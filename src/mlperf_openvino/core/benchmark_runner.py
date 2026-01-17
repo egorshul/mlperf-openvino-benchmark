@@ -448,6 +448,7 @@ class BenchmarkRunner:
         predictions = self.sut.get_predictions()
 
         if not predictions:
+            logger.error("No predictions found!")
             self._accuracy_results = {'word_accuracy': 0.0, 'wer': 0.0, 'num_samples': 0}
             return
 
@@ -463,6 +464,15 @@ class BenchmarkRunner:
                 pred_texts.append("")
 
             ground_truth.append(self.qsl.get_label(sample_idx))
+
+        # Debug: show first few predictions vs ground truth
+        logger.info(f"Total predictions: {len(pred_texts)}")
+        for i in range(min(5, len(pred_texts))):
+            pred_preview = pred_texts[i][:100] if pred_texts[i] else "(empty)"
+            gt_preview = ground_truth[i][:100] if ground_truth[i] else "(empty)"
+            logger.info(f"Sample {i}:")
+            logger.info(f"  Predicted: '{pred_preview}' (len={len(pred_texts[i])})")
+            logger.info(f"  Ground truth: '{gt_preview}' (len={len(ground_truth[i])})")
 
         self._accuracy_results = self.qsl.dataset.compute_accuracy(pred_texts, ground_truth)
 

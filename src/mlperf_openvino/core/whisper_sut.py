@@ -348,18 +348,24 @@ class WhisperSUT:
     def _process_sample(self, sample_idx: int) -> str:
         """
         Process a single audio sample.
-        
+
         Args:
             sample_idx: Sample index
-            
+
         Returns:
             Transcribed text
         """
         features = self.qsl.get_features(sample_idx)
         mel_features = features["input_features"]
-        
-        _, text = self._generate(mel_features)
-        
+
+        tokens, text = self._generate(mel_features)
+
+        # Debug: log first few samples
+        if self._sample_count < 3:
+            logger.info(f"Sample {sample_idx}: generated {len(tokens)} tokens")
+            logger.info(f"  First 20 tokens: {tokens[:20]}")
+            logger.info(f"  Decoded text: '{text[:100]}...'")
+
         return text
     
     def issue_queries(self, query_samples: List[Any]) -> None:
