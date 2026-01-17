@@ -272,6 +272,11 @@ def download(model: str, output_dir: str, format: str):
 
         mlperf-ov download --model whisper --format openvino
     """
+    import warnings
+    # Suppress known third-party warnings during model download
+    warnings.filterwarnings("ignore", message=".*networkx backend.*", category=RuntimeWarning)
+    warnings.filterwarnings("ignore", message=".*openvino.runtime.*", category=DeprecationWarning)
+
     click.echo(f"Downloading {model} model...")
 
     output_path = Path(output_dir)
@@ -495,6 +500,11 @@ def setup_cmd(model: str, output_dir: str, format: str):
         # Set up Whisper benchmark with OpenVINO format
         mlperf-ov setup --model whisper --format openvino
     """
+    import warnings
+    # Suppress known third-party warnings during model download
+    warnings.filterwarnings("ignore", message=".*networkx backend.*", category=RuntimeWarning)
+    warnings.filterwarnings("ignore", message=".*openvino.runtime.*", category=DeprecationWarning)
+
     from .utils.model_downloader import download_model, download_whisper_model
     from .utils.dataset_downloader import download_dataset
 

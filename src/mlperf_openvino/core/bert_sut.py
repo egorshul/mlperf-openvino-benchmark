@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from openvino.runtime import AsyncInferQueue
+from openvino import AsyncInferQueue
 
 try:
     from tqdm import tqdm
