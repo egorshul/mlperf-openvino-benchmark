@@ -103,8 +103,8 @@ class WhisperOptimumSUT:
         self._load_model()
 
     def _load_model(self) -> None:
-        """Load Whisper model using Optimum-Intel pipeline."""
-        from transformers import AutoProcessor, pipeline
+        """Load Whisper model using Optimum-Intel."""
+        from transformers import AutoProcessor
 
         logger.info(f"Loading Whisper model from {self.model_path}")
 
@@ -116,22 +116,12 @@ class WhisperOptimumSUT:
             logger.info("Falling back to openai/whisper-large-v3 processor")
             self.processor = AutoProcessor.from_pretrained("openai/whisper-large-v3")
 
-        # Load OpenVINO model
+        # Load OpenVINO model (exported with --task automatic-speech-recognition-with-past)
         ov_config = {"CACHE_DIR": ""}
         self.model = OVModelForSpeechSeq2Seq.from_pretrained(
             self.model_path,
             ov_config=ov_config,
             compile=True,
-        )
-
-        # Create pipeline for easier inference
-        self.pipe = pipeline(
-            "automatic-speech-recognition",
-            model=self.model,
-            tokenizer=self.processor.tokenizer,
-            feature_extractor=self.processor.feature_extractor,
-            chunk_length_s=30,
-            return_timestamps=False,
         )
 
         logger.info("Whisper model loaded successfully")
@@ -188,51 +178,37 @@ class WhisperOptimumSUT:
         Returns:
             Transcribed text
         """
-        # Get audio file path from QSL dataset
-        audio_path = self.qsl.dataset.get_audio_path(sample_idx)
+        import torch
 
-        # Load audio using librosa or soundfile (no ffmpeg dependency)
-        audio_array = self._load_audio(audio_path)
+        # Get preprocessed mel features from QSL
+        features = self.qsl.get_features(sample_idx)
+        input_features = features["input_features"]
 
-        # Use pipeline for inference with raw audio array
-        result = self.pipe(
-            {"raw": audio_array, "sampling_rate": 16000},
-            generate_kwargs={"max_new_tokens": self.max_new_tokens},
+        # Convert to tensor
+        if isinstance(input_features, np.ndarray):
+            input_features = torch.from_numpy(input_features)
+
+        # Ensure correct shape (batch, n_mels, time)
+        if input_features.dim() == 2:
+            input_features = input_features.unsqueeze(0)
+
+        # Generate transcription using model with KV-cache support
+        generated_ids = self.model.generate(
+            input_features,
+            max_new_tokens=self.max_new_tokens,
+            language="en",
+            task="transcribe",
         )
 
-        text = result["text"]
+        # Decode tokens to text
+        text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
 
         # Debug: log first few samples
         if self._sample_count < 3:
-            logger.info(f"Sample {sample_idx}: '{text[:100]}...'")
+            logger.info(f"Sample {sample_idx}: generated {len(generated_ids[0])} tokens")
+            logger.info(f"  Text: '{text[:100]}...'")
 
         return text
-
-    def _load_audio(self, audio_path: str, target_sr: int = 16000) -> np.ndarray:
-        """Load audio file and resample to target sample rate."""
-        try:
-            import librosa
-            audio, sr = librosa.load(audio_path, sr=target_sr)
-            return audio
-        except ImportError:
-            pass
-
-        try:
-            import soundfile as sf
-            audio, sr = sf.read(audio_path)
-            if sr != target_sr:
-                # Simple resampling using scipy
-                import scipy.signal
-                num_samples = int(len(audio) * target_sr / sr)
-                audio = scipy.signal.resample(audio, num_samples)
-            return audio.astype(np.float32)
-        except ImportError:
-            pass
-
-        raise ImportError(
-            "Either librosa or soundfile is required to load audio. "
-            "Install with: pip install librosa or pip install soundfile"
-        )
 
     def issue_queries(self, query_samples: List[Any]) -> None:
         """Process queries from LoadGen."""
