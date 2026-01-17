@@ -192,12 +192,16 @@ class WhisperOptimumSUT:
         if input_features.dim() == 2:
             input_features = input_features.unsqueeze(0)
 
-        # Generate transcription
+        # Create attention mask (all ones since we have valid input)
+        attention_mask = torch.ones(input_features.shape[:2], dtype=torch.long)
+
+        # Generate transcription with explicit parameters to avoid compatibility issues
         generated_ids = self.model.generate(
             input_features,
+            attention_mask=attention_mask,
             max_new_tokens=self.max_new_tokens,
-            language="en",
-            task="transcribe",
+            return_timestamps=False,
+            use_cache=True,
         )
 
         # Decode tokens to text
