@@ -75,16 +75,21 @@ class BenchmarkRunner:
         Path(self.config.results_dir).mkdir(parents=True, exist_ok=True)
         Path(self.config.logs_dir).mkdir(parents=True, exist_ok=True)
 
-        # Initialize backend
-        logger.info(f"Loading model from {self.config.model.model_path}")
-        self.backend = OpenVINOBackend(
-            model_path=self.config.model.model_path,
-            config=self.config.openvino,
-        )
-        self.backend.load()
-
         # Initialize model-specific components
         model_type = self.config.model.model_type
+
+        # Initialize backend (skip for Whisper with directory path - it handles its own loading)
+        model_path = Path(self.config.model.model_path)
+        if model_type == ModelType.WHISPER and model_path.is_dir():
+            logger.info(f"Whisper model directory: {self.config.model.model_path}")
+            self.backend = None  # Will be set up in _setup_whisper
+        else:
+            logger.info(f"Loading model from {self.config.model.model_path}")
+            self.backend = OpenVINOBackend(
+                model_path=self.config.model.model_path,
+                config=self.config.openvino,
+            )
+            self.backend.load()
 
         if model_type == ModelType.RESNET50:
             self._setup_resnet50()
