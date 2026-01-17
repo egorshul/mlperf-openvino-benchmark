@@ -307,8 +307,8 @@ ov::Tensor WhisperCppSUT::run_decoder_step(const ov::Tensor& encoder_hidden,
     // Set beam_idx for KV-cache reordering (greedy = single beam at index 0)
     if (has_beam_idx_) {
         ov::Shape beam_shape = {1};
-        ov::Tensor beam_tensor(ov::element::i64, beam_shape);
-        beam_tensor.data<int64_t>()[0] = 0;  // Greedy: always use beam 0
+        ov::Tensor beam_tensor(ov::element::i32, beam_shape);
+        beam_tensor.data<int32_t>()[0] = 0;  // Greedy: always use beam 0
         decoder_request_.set_tensor(decoder_beam_idx_name_, beam_tensor);
     }
 
