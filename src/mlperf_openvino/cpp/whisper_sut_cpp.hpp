@@ -7,7 +7,7 @@
  *
  * Key optimizations:
  * - Encoder runs once per sample
- * - Decoder uses stateful inference with KV-cache
+ * - Decoder uses KV-cache for efficient autoregressive decoding
  * - Greedy decoding in C++ (no Python overhead)
  */
 
@@ -33,32 +33,23 @@ namespace mlperf_ov {
 class WhisperCppSUT;
 
 /**
- * Context for Whisper inference.
- */
-struct WhisperInferContext {
-    ov::InferRequest encoder_request;
-    ov::InferRequest decoder_request;
-
-    // Encoder input tensor
-    ov::Tensor mel_tensor;
-
-    // Decoder input tensors
-    ov::Tensor decoder_input_ids_tensor;
-    ov::Tensor encoder_hidden_states_tensor;
-
-    // Query info
-    uint64_t query_id = 0;
-    int sample_idx = 0;
-    size_t pool_id = 0;
-    WhisperCppSUT* sut = nullptr;
-};
-
-/**
  * Whisper prediction result (generated tokens + text).
  */
 struct WhisperPrediction {
     std::vector<int64_t> tokens;
     std::string text;  // Decoded text (if tokenizer available)
+};
+
+/**
+ * KV-cache entry: maps layer index to input/output names and shape info.
+ */
+struct KVCacheEntry {
+    std::string key_input_name;
+    std::string value_input_name;
+    std::string key_output_name;
+    std::string value_output_name;
+    ov::Shape key_shape;
+    ov::Shape value_shape;
 };
 
 /**
@@ -115,6 +106,11 @@ public:
      */
     int get_n_mels() const { return n_mels_; }
     int get_n_frames() const { return n_frames_; }
+
+    /**
+     * Check if decoder uses KV-cache.
+     */
+    bool has_kv_cache() const { return has_kv_cache_; }
 
     /**
      * Process a single audio sample (blocking).
@@ -192,7 +188,7 @@ private:
     ov::CompiledModel compiled_encoder_;
     ov::CompiledModel compiled_decoder_;
 
-    // Inference requests (for sync inference, we use a single set)
+    // Inference requests
     ov::InferRequest encoder_request_;
     ov::InferRequest decoder_request_;
 
@@ -202,10 +198,17 @@ private:
     int n_mels_ = 128;
     int n_frames_ = 3000;
 
-    // Model info - decoder
+    // Model info - decoder (basic inputs)
     std::string decoder_input_ids_name_;
     std::string decoder_encoder_hidden_name_;
     std::string decoder_output_name_;
+
+    // KV-cache support
+    bool has_kv_cache_ = false;
+    std::vector<KVCacheEntry> kv_cache_entries_;  // Per-layer KV cache info
+    size_t num_layers_ = 0;
+    size_t num_heads_ = 0;
+    size_t head_dim_ = 0;
 
     // Shape info
     int optimal_nireq_ = 1;
@@ -237,9 +240,16 @@ private:
     // Run encoder
     ov::Tensor run_encoder(const float* mel_features, size_t mel_size);
 
-    // Run decoder step (returns logits)
+    // Run decoder step (with KV-cache support)
     ov::Tensor run_decoder_step(const ov::Tensor& encoder_hidden,
-                                 const std::vector<int64_t>& input_ids);
+                                 const std::vector<int64_t>& input_ids,
+                                 bool is_first_step);
+
+    // Initialize KV-cache tensors
+    void init_kv_cache();
+
+    // Copy present to past KV-cache
+    void update_kv_cache();
 
     // Greedy decode
     std::vector<int64_t> greedy_decode(const ov::Tensor& encoder_hidden);

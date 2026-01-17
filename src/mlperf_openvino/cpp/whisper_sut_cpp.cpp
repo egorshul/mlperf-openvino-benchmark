@@ -1,14 +1,14 @@
 /**
  * Whisper C++ SUT implementation for maximum throughput.
  *
- * Encoder-decoder architecture with greedy decoding in C++.
+ * Encoder-decoder architecture with KV-cache for efficient decoding.
  */
 
 #include "whisper_sut_cpp.hpp"
 
 #include <algorithm>
 #include <cstring>
-#include <iostream>
+#include <regex>
 #include <stdexcept>
 
 namespace mlperf_ov {
@@ -74,6 +74,9 @@ void WhisperCppSUT::map_decoder_names() {
     const auto& inputs = decoder_model_->inputs();
     const auto& outputs = decoder_model_->outputs();
 
+    // Maps to track KV-cache inputs/outputs by layer
+    std::map<int, KVCacheEntry> kv_map;
+
     // Find decoder inputs by name patterns
     for (const auto& input : inputs) {
         std::string name = input.get_any_name();
@@ -86,10 +89,68 @@ void WhisperCppSUT::map_decoder_names() {
         } else if (name_lower.find("encoder_hidden") != std::string::npos ||
                    name_lower.find("encoder_output") != std::string::npos) {
             decoder_encoder_hidden_name_ = name;
+        } else if (name_lower.find("past_key_value") != std::string::npos ||
+                   name_lower.find("past_key_values") != std::string::npos ||
+                   name_lower.find("pkv") != std::string::npos) {
+            // KV-cache input - parse layer index
+            has_kv_cache_ = true;
+
+            // Try to extract layer number: past_key_values.0.key, pkv_0_key, etc.
+            std::regex layer_regex(R"((\d+))");
+            std::smatch match;
+            int layer = -1;
+            if (std::regex_search(name, match, layer_regex)) {
+                layer = std::stoi(match[1]);
+            }
+
+            if (layer >= 0) {
+                if (kv_map.find(layer) == kv_map.end()) {
+                    kv_map[layer] = KVCacheEntry{};
+                }
+
+                if (name_lower.find("key") != std::string::npos) {
+                    kv_map[layer].key_input_name = name;
+                    kv_map[layer].key_shape = input.get_partial_shape().get_max_shape();
+                } else if (name_lower.find("value") != std::string::npos) {
+                    kv_map[layer].value_input_name = name;
+                    kv_map[layer].value_shape = input.get_partial_shape().get_max_shape();
+                }
+            }
         }
     }
 
-    // Fallback: positional mapping
+    // Find KV-cache outputs (present_key_values)
+    for (const auto& output : outputs) {
+        std::string name = output.get_any_name();
+        std::string name_lower = name;
+        std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+
+        if (name_lower.find("logits") != std::string::npos ||
+            name_lower.find("output") != std::string::npos) {
+            if (decoder_output_name_.empty()) {
+                decoder_output_name_ = name;
+            }
+        } else if (name_lower.find("present") != std::string::npos ||
+                   name_lower.find("key_values") != std::string::npos) {
+            // KV-cache output
+            std::regex layer_regex(R"((\d+))");
+            std::smatch match;
+            int layer = -1;
+            if (std::regex_search(name, match, layer_regex)) {
+                layer = std::stoi(match[1]);
+            }
+
+            if (layer >= 0 && kv_map.find(layer) != kv_map.end()) {
+                if (name_lower.find("key") != std::string::npos) {
+                    kv_map[layer].key_output_name = name;
+                } else if (name_lower.find("value") != std::string::npos) {
+                    kv_map[layer].value_output_name = name;
+                }
+            }
+        }
+    }
+
+    // Fallback: positional mapping for basic inputs
     if (decoder_input_ids_name_.empty() && inputs.size() >= 1) {
         decoder_input_ids_name_ = inputs[0].get_any_name();
     }
@@ -98,8 +159,68 @@ void WhisperCppSUT::map_decoder_names() {
     }
 
     // Decoder output (logits)
-    if (!outputs.empty()) {
+    if (decoder_output_name_.empty() && !outputs.empty()) {
         decoder_output_name_ = outputs[0].get_any_name();
+    }
+
+    // Build ordered KV-cache entries
+    if (has_kv_cache_) {
+        num_layers_ = kv_map.size();
+        kv_cache_entries_.reserve(num_layers_);
+
+        for (int i = 0; i < static_cast<int>(num_layers_); ++i) {
+            if (kv_map.find(i) != kv_map.end()) {
+                kv_cache_entries_.push_back(kv_map[i]);
+
+                // Extract num_heads and head_dim from shape
+                // Shape is typically [batch, num_heads, seq_len, head_dim]
+                if (!kv_map[i].key_shape.empty() && kv_map[i].key_shape.size() >= 4) {
+                    num_heads_ = kv_map[i].key_shape[1];
+                    head_dim_ = kv_map[i].key_shape[3];
+                }
+            }
+        }
+    }
+}
+
+void WhisperCppSUT::init_kv_cache() {
+    if (!has_kv_cache_) return;
+
+    // Initialize all KV-cache inputs with zeros (seq_len = 0 for first step)
+    for (const auto& entry : kv_cache_entries_) {
+        // Create zero tensors with seq_len = 0
+        // Shape: [batch=1, num_heads, seq_len=0, head_dim]
+        ov::Shape key_shape = {1, num_heads_, 0, head_dim_};
+        ov::Shape value_shape = {1, num_heads_, 0, head_dim_};
+
+        ov::Tensor key_tensor(ov::element::f32, key_shape);
+        ov::Tensor value_tensor(ov::element::f32, value_shape);
+
+        decoder_request_.set_tensor(entry.key_input_name, key_tensor);
+        decoder_request_.set_tensor(entry.value_input_name, value_tensor);
+    }
+}
+
+void WhisperCppSUT::update_kv_cache() {
+    if (!has_kv_cache_) return;
+
+    // Copy present KV-cache outputs to past KV-cache inputs
+    for (const auto& entry : kv_cache_entries_) {
+        if (!entry.key_output_name.empty() && !entry.key_input_name.empty()) {
+            ov::Tensor present_key = decoder_request_.get_tensor(entry.key_output_name);
+            // Create a copy
+            ov::Tensor past_key(present_key.get_element_type(), present_key.get_shape());
+            std::memcpy(past_key.data(), present_key.data(), present_key.get_byte_size());
+            decoder_request_.set_tensor(entry.key_input_name, past_key);
+        }
+
+        if (!entry.value_output_name.empty() && !entry.value_input_name.empty()) {
+            ov::Tensor present_value = decoder_request_.get_tensor(entry.value_output_name);
+            // Create a copy
+            ov::Tensor past_value(present_value.get_element_type(), present_value.get_shape());
+            std::memcpy(past_value.data(), present_value.data(), present_value.get_byte_size());
+            decoder_request_.set_tensor(entry.value_input_name, past_value);
+        }
     }
 }
 
@@ -168,7 +289,8 @@ ov::Tensor WhisperCppSUT::run_encoder(const float* mel_features, size_t mel_size
 }
 
 ov::Tensor WhisperCppSUT::run_decoder_step(const ov::Tensor& encoder_hidden,
-                                            const std::vector<int64_t>& input_ids) {
+                                            const std::vector<int64_t>& input_ids,
+                                            bool is_first_step) {
     // Create decoder input_ids tensor
     ov::Shape ids_shape = {1, input_ids.size()};
     ov::Tensor ids_tensor(ov::element::i64, ids_shape);
@@ -177,6 +299,14 @@ ov::Tensor WhisperCppSUT::run_decoder_step(const ov::Tensor& encoder_hidden,
     // Set inputs
     decoder_request_.set_tensor(decoder_input_ids_name_, ids_tensor);
     decoder_request_.set_tensor(decoder_encoder_hidden_name_, encoder_hidden);
+
+    // Initialize or update KV-cache
+    if (has_kv_cache_) {
+        if (is_first_step) {
+            init_kv_cache();
+        }
+        // Note: KV-cache is updated after inference in greedy_decode
+    }
 
     // Run decoder
     decoder_request_.infer();
@@ -197,8 +327,25 @@ std::vector<int64_t> WhisperCppSUT::greedy_decode(const ov::Tensor& encoder_hidd
     std::vector<int64_t> generated_tokens;
 
     for (int step = 0; step < max_new_tokens_; ++step) {
+        bool is_first_step = (step == 0);
+
+        // For KV-cache, only pass the last token after the first step
+        std::vector<int64_t> step_input;
+        if (has_kv_cache_ && !is_first_step) {
+            // Only the newly generated token
+            step_input = {decoder_input.back()};
+        } else {
+            // Full sequence for first step or non-KV-cache models
+            step_input = decoder_input;
+        }
+
         // Run decoder step
-        ov::Tensor logits = run_decoder_step(encoder_hidden, decoder_input);
+        ov::Tensor logits = run_decoder_step(encoder_hidden, step_input, is_first_step);
+
+        // Update KV-cache for next step
+        if (has_kv_cache_) {
+            update_kv_cache();
+        }
 
         // Get shape info
         auto shape = logits.get_shape();  // [batch, seq_len, vocab_size]
@@ -279,7 +426,6 @@ void WhisperCppSUT::start_async(const float* mel_features,
                                 uint64_t query_id,
                                 int sample_idx) {
     // For now, just call sync version
-    // TODO: implement true async with thread pool
     process_sample(mel_features, mel_size, query_id, sample_idx);
 }
 
