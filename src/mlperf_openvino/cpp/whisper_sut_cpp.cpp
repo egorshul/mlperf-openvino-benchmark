@@ -89,6 +89,10 @@ void WhisperCppSUT::map_decoder_names() {
         } else if (name_lower.find("encoder_hidden") != std::string::npos ||
                    name_lower.find("encoder_output") != std::string::npos) {
             decoder_encoder_hidden_name_ = name;
+        } else if (name_lower.find("beam_idx") != std::string::npos) {
+            // beam_idx input for KV-cache reordering in beam search
+            decoder_beam_idx_name_ = name;
+            has_beam_idx_ = true;
         } else if (name_lower.find("past_key_value") != std::string::npos ||
                    name_lower.find("past_key_values") != std::string::npos ||
                    name_lower.find("pkv") != std::string::npos) {
@@ -299,6 +303,14 @@ ov::Tensor WhisperCppSUT::run_decoder_step(const ov::Tensor& encoder_hidden,
     // Set inputs
     decoder_request_.set_tensor(decoder_input_ids_name_, ids_tensor);
     decoder_request_.set_tensor(decoder_encoder_hidden_name_, encoder_hidden);
+
+    // Set beam_idx for KV-cache reordering (greedy = single beam at index 0)
+    if (has_beam_idx_) {
+        ov::Shape beam_shape = {1};
+        ov::Tensor beam_tensor(ov::element::i64, beam_shape);
+        beam_tensor.data<int64_t>()[0] = 0;  // Greedy: always use beam 0
+        decoder_request_.set_tensor(decoder_beam_idx_name_, beam_tensor);
+    }
 
     // Initialize or update KV-cache
     if (has_kv_cache_) {

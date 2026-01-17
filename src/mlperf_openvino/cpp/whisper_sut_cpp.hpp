@@ -202,9 +202,11 @@ private:
     std::string decoder_input_ids_name_;
     std::string decoder_encoder_hidden_name_;
     std::string decoder_output_name_;
+    std::string decoder_beam_idx_name_;  // For KV-cache reordering
 
     // KV-cache support
     bool has_kv_cache_ = false;
+    bool has_beam_idx_ = false;
     std::vector<KVCacheEntry> kv_cache_entries_;  // Per-layer KV cache info
     size_t num_layers_ = 0;
     size_t num_heads_ = 0;
