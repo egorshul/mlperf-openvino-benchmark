@@ -1,6 +1,6 @@
 # MLPerf v5.1 OpenVINO Benchmark
 
-![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)
+![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)
 ![MLPerf](https://img.shields.io/badge/MLPerf-v5.1-green.svg)
 ![OpenVINO](https://img.shields.io/badge/OpenVINO-2024.0+-orange.svg)
 ![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)
@@ -11,7 +11,8 @@ A high-performance benchmark tool for measuring CPU inference performance using 
 
 - **MLPerf v5.1 Compatible**: Follows official MLPerf Inference benchmark specifications
 - **OpenVINO Backend**: Optimized for Intel CPUs using OpenVINO runtime
-- **C++ Accelerated SUT**: High-performance C++ implementation for all models (ResNet50, BERT, RetinaNet) bypassing Python GIL
+- **C++ Accelerated SUT**: High-performance C++ implementation for ResNet50, BERT, RetinaNet bypassing Python GIL
+- **Optimum-Intel Integration**: Whisper uses Optimum-Intel for optimal encoder-decoder performance with KV-cache
 - **Multiple Scenarios**: Supports Offline and Server scenarios
 - **Four Models**: ResNet50-v1.5, BERT-Large, RetinaNet, Whisper Large v3
 - **Automated Setup**: Built-in model and dataset downloaders
@@ -319,11 +320,10 @@ mlperf-openvino-benchmark/
 │   │   ├── whisper_sut.py       # Whisper System Under Test
 │   │   └── benchmark_runner.py  # Main benchmark orchestrator
 │   ├── cpp/                     # C++ accelerated components
-│   │   ├── sut_cpp.cpp/hpp      # C++ SUT for ResNet50
-│   │   ├── bert_sut_cpp.cpp/hpp # C++ SUT for BERT
+│   │   ├── resnet_sut_cpp.cpp/hpp    # C++ SUT for ResNet50
+│   │   ├── bert_sut_cpp.cpp/hpp      # C++ SUT for BERT
 │   │   ├── retinanet_sut_cpp.cpp/hpp # C++ SUT for RetinaNet
-│   │   ├── offline_sut.cpp/hpp  # C++ Offline SUT (batch)
-│   │   └── bindings.cpp         # pybind11 bindings
+│   │   └── bindings.cpp              # pybind11 bindings
 │   ├── backends/                # Inference backends
 │   │   └── openvino_backend.py  # OpenVINO inference
 │   ├── datasets/                # Dataset handlers
@@ -568,6 +568,14 @@ Apache License 2.0
 Contributions are welcome! Please read our contributing guidelines before submitting PRs.
 
 ## Changelog
+
+### v0.3.0
+
+- Removed C++ Whisper SUT - Whisper now uses Optimum-Intel Python SUT exclusively for proper KV-cache handling
+- Removed dead code: CppOfflineSUT, WhisperCppSUTWrapper
+- Added real-time progress monitoring for all C++ SUT wrappers (ResNet, BERT, RetinaNet)
+- Cleaned up debug prints across all SUTs
+- Renamed sut_cpp to resnet_sut_cpp for clarity
 
 ### v0.2.0
 
