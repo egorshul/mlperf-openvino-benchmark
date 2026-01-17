@@ -205,7 +205,10 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
     if warmup > 0:
         click.echo(f"Warming up ({warmup} iterations)...")
         runner.setup()
-        runner.backend.warmup(warmup)
+        if runner.backend is not None:
+            runner.backend.warmup(warmup)
+        else:
+            click.echo("Skipping warmup (Whisper uses separate encoder/decoder)")
 
     # Run benchmark
     if mode == 'accuracy':
