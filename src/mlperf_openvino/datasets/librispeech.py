@@ -249,12 +249,29 @@ class LibriSpeechDataset(BaseDataset):
 
         logger.info(f"Loading LibriSpeech dataset from {self.data_path}")
 
-        # Try JSON manifest first (MLPerf format)
+        # Try JSON manifest first (MLPerf/MLCommons format)
         manifest_file = None
-        for name in ["manifest.json", "dev-all.json"]:
-            candidate = self.data_path / name
-            if candidate.exists():
-                manifest_file = candidate
+        manifest_names = [
+            "dev-all-repack.json",  # MLCommons repackaged format
+            "dev-all.json",         # MLCommons merged format
+            "manifest.json",        # Generic manifest
+            "dev-clean.json",       # Dev-clean split
+            "dev-other.json",       # Dev-other split
+        ]
+
+        # Search in current directory and parent directory
+        search_paths = [self.data_path]
+        if self.data_path.parent != self.data_path:
+            search_paths.append(self.data_path.parent)
+
+        for search_path in search_paths:
+            for name in manifest_names:
+                candidate = search_path / name
+                if candidate.exists():
+                    manifest_file = candidate
+                    logger.info(f"Found manifest: {manifest_file}")
+                    break
+            if manifest_file:
                 break
 
         if manifest_file:
@@ -266,7 +283,13 @@ class LibriSpeechDataset(BaseDataset):
             else:
                 # Try common names
                 transcript_file = None
-                for name in ["transcripts.txt", "dev-clean.txt", "test-clean.txt"]:
+                transcript_names = [
+                    "transcripts.txt",
+                    "dev-clean.txt",
+                    "dev-other.txt",
+                    "test-clean.txt",
+                ]
+                for name in transcript_names:
                     candidate = self.data_path / name
                     if candidate.exists():
                         transcript_file = candidate
@@ -282,6 +305,15 @@ class LibriSpeechDataset(BaseDataset):
             else:
                 self._scan_audio_files()
 
+        if not self._samples:
+            logger.warning(f"No samples found in {self.data_path}")
+            logger.info("For LibriSpeech dataset, expected structure:")
+            logger.info("  data_path/")
+            logger.info("  ├── dev-all-repack.json (MLCommons manifest)")
+            logger.info("  └── *.wav or *.flac files")
+            logger.info("")
+            logger.info("Or use mlperf-ov download --model whisper to get the dataset")
+
         # Limit count if specified
         if self.count and self.count < len(self._samples):
             self._samples = self._samples[:self.count]
@@ -290,36 +322,117 @@ class LibriSpeechDataset(BaseDataset):
         self._is_loaded = True
 
     def _load_from_manifest(self, manifest_file: Path) -> None:
-        """Load samples from JSON manifest file (MLPerf format)."""
+        """Load samples from JSON manifest file (MLPerf/MLCommons format).
+
+        Supports multiple manifest formats:
+        1. MLCommons format: {"files": [{"fname": "audio.wav"}], "transcript": "text"}
+        2. NeMo format: {"audio_filepath": "audio.wav", "text": "text"}
+        3. Simple format: {"audio_filepath": "audio.wav", "transcript": "text"}
+        """
         import json
 
         logger.info(f"Loading from manifest: {manifest_file}")
 
         with open(manifest_file, 'r', encoding='utf-8') as f:
-            entries = json.load(f)
+            content = f.read().strip()
+
+        # Try to parse as JSON array or JSONL (newline-delimited JSON)
+        entries = []
+        if content.startswith('['):
+            # Standard JSON array
+            entries = json.loads(content)
+        else:
+            # JSONL format (one JSON object per line)
+            for line in content.split('\n'):
+                line = line.strip()
+                if line:
+                    try:
+                        entries.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+
+        logger.info(f"Found {len(entries)} entries in manifest")
 
         for entry in entries:
-            audio_path = entry.get("audio_filepath", "")
+            # Extract audio path from various formats
+            audio_path = None
 
-            # Handle relative paths
+            # MLCommons format: files[0].fname
+            if "files" in entry and isinstance(entry["files"], list) and entry["files"]:
+                fname = entry["files"][0].get("fname", "")
+                if fname:
+                    audio_path = fname
+
+            # Standard format: audio_filepath
+            if not audio_path:
+                audio_path = entry.get("audio_filepath", "")
+
+            # Alternative: audio_path directly
+            if not audio_path:
+                audio_path = entry.get("audio_path", "")
+
+            if not audio_path:
+                logger.debug(f"No audio path found in entry: {entry}")
+                continue
+
+            # Handle relative paths - resolve against manifest directory
             if not Path(audio_path).is_absolute():
-                audio_path = str(self.data_path / audio_path)
+                # First try relative to manifest file directory
+                manifest_dir = manifest_file.parent
+                candidate = manifest_dir / audio_path
+                if candidate.exists():
+                    audio_path = str(candidate)
+                else:
+                    # Try relative to data_path
+                    candidate = self.data_path / audio_path
+                    if candidate.exists():
+                        audio_path = str(candidate)
+                    else:
+                        # Try in audio subdirectory
+                        audio_name = Path(audio_path).name
+                        for subdir in ["audio", "wav", "flac", ""]:
+                            if subdir:
+                                candidate = self.data_path / subdir / audio_name
+                            else:
+                                candidate = self.data_path / audio_name
+                            if candidate.exists():
+                                audio_path = str(candidate)
+                                break
 
-            # Check if file exists
+            # Skip if file doesn't exist
             if not Path(audio_path).exists():
-                # Try in audio subdirectory
-                audio_name = Path(audio_path).name
-                alt_path = self.data_path / "audio" / audio_name
-                if alt_path.exists():
-                    audio_path = str(alt_path)
+                logger.debug(f"Audio file not found: {audio_path}")
+                continue
 
-            if Path(audio_path).exists():
-                self._samples.append({
-                    "id": entry.get("utterance_id", Path(audio_path).stem),
-                    "audio_path": audio_path,
-                    "transcript": entry.get("text", ""),
-                    "duration": entry.get("duration", 0.0),
-                })
+            # Extract transcript from various fields
+            transcript = entry.get("transcript", "")
+            if not transcript:
+                transcript = entry.get("text", "")
+            if not transcript and "text_filepath" in entry:
+                text_path = Path(entry["text_filepath"])
+                if not text_path.is_absolute():
+                    text_path = manifest_file.parent / text_path
+                if text_path.exists():
+                    transcript = text_path.read_text().strip()
+
+            # Extract ID
+            sample_id = entry.get("utterance_id", "")
+            if not sample_id:
+                sample_id = entry.get("id", Path(audio_path).stem)
+
+            # Extract duration
+            duration = entry.get("duration", 0.0)
+            if not duration and "original_duration" in entry:
+                duration = entry.get("original_duration", 0.0)
+
+            self._samples.append({
+                "id": sample_id,
+                "audio_path": audio_path,
+                "transcript": transcript,
+                "duration": duration,
+            })
+
+        logger.info(f"Loaded {len(self._samples)} valid samples from manifest")
     
     def _load_from_transcript(self, transcript_file: Path) -> None:
         """Load samples from transcript file."""

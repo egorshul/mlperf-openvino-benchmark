@@ -177,7 +177,6 @@ class BenchmarkRunner:
     def _setup_whisper(self) -> None:
         """Set up Whisper benchmark."""
         from ..datasets.librispeech import LibriSpeechQSL
-        from .whisper_sut import WhisperSUT, WhisperEncoderOnlySUT
 
         logger.info(f"Loading LibriSpeech dataset from {self.config.dataset.path}")
         self.qsl = LibriSpeechQSL(
@@ -188,8 +187,30 @@ class BenchmarkRunner:
         )
         self.qsl.load()
 
-        # Check if we have encoder-decoder or encoder-only model
         model_path = Path(self.config.model.model_path)
+
+        # Try to use Optimum-Intel WhisperOptimumSUT first (recommended)
+        try:
+            from .whisper_sut import WhisperOptimumSUT, OPTIMUM_AVAILABLE
+
+            if OPTIMUM_AVAILABLE and model_path.is_dir():
+                # Check if this looks like an optimum-exported model
+                config_file = model_path / "config.json"
+                if config_file.exists():
+                    logger.info("Using Optimum-Intel for Whisper inference (recommended)")
+                    self.sut = WhisperOptimumSUT(
+                        config=self.config,
+                        model_path=model_path,
+                        qsl=self.qsl,
+                        scenario=self.config.scenario,
+                    )
+                    return
+        except Exception as e:
+            logger.warning(f"Could not use Optimum-Intel: {e}")
+            logger.info("Falling back to manual encoder-decoder inference")
+
+        # Fallback: Manual encoder-decoder inference
+        from .whisper_sut import WhisperSUT, WhisperEncoderOnlySUT
 
         # Check for separate encoder/decoder models (try different naming conventions)
         if model_path.is_dir():
