@@ -598,6 +598,9 @@ class LibriSpeechDataset(BaseDataset):
 
         Word Accuracy = 1 - WER (Word Error Rate)
 
+        Uses EnglishTextNormalizer from transformers for proper text normalization
+        as required by MLCommons Whisper benchmark specification.
+
         Args:
             predictions: Predicted transcriptions
             ground_truth: Ground truth transcriptions
@@ -607,55 +610,76 @@ class LibriSpeechDataset(BaseDataset):
         """
         try:
             from jiwer import wer, cer
-
-            # Normalize texts
-            predictions = [p.upper().strip() for p in predictions]
-            ground_truth = [g.upper().strip() for g in ground_truth]
-
-            # Filter out empty references
-            valid_pairs = [
-                (p, g) for p, g in zip(predictions, ground_truth) if g
-            ]
-
-            if not valid_pairs:
-                return {
-                    "word_accuracy": 0.0,
-                    "wer": 0.0,
-                    "cer": 0.0,
-                    "num_samples": 0,
-                }
-
-            preds, refs = zip(*valid_pairs)
-
-            word_error_rate = wer(list(refs), list(preds))
-            char_error_rate = cer(list(refs), list(preds))
-
-            # MLPerf v5.1 uses Word Accuracy = 1 - WER
-            word_accuracy = 1.0 - word_error_rate
-
-            return {
-                "word_accuracy": word_accuracy,  # Primary MLPerf metric
-                "wer": word_error_rate,
-                "cer": char_error_rate,
-                "num_samples": len(valid_pairs),
-            }
-
         except ImportError:
             logger.warning("jiwer not installed, computing simple accuracy")
-
             # Simple exact match accuracy
             correct = sum(
                 1 for p, g in zip(predictions, ground_truth)
                 if p.upper().strip() == g.upper().strip()
             )
-
             exact_match = correct / len(predictions) if predictions else 0.0
-
             return {
-                "word_accuracy": exact_match,  # Approximation when jiwer unavailable
+                "word_accuracy": exact_match,
                 "exact_match": exact_match,
                 "num_samples": len(predictions),
             }
+
+        # Try to use Whisper's EnglishTextNormalizer (MLCommons standard)
+        normalizer = None
+        try:
+            from transformers.models.whisper.english_normalizer import EnglishTextNormalizer
+            normalizer = EnglishTextNormalizer()
+            logger.info("Using EnglishTextNormalizer for WER calculation (MLCommons standard)")
+        except ImportError:
+            try:
+                # Alternative import path
+                from transformers.models.whisper import english_normalizer
+                normalizer = english_normalizer.EnglishTextNormalizer()
+                logger.info("Using EnglishTextNormalizer for WER calculation (MLCommons standard)")
+            except ImportError:
+                logger.warning(
+                    "EnglishTextNormalizer not available, using basic normalization. "
+                    "This may result in LOWER accuracy scores! "
+                    "Install/upgrade transformers: pip install transformers>=4.30"
+                )
+
+        # Normalize texts
+        if normalizer is not None:
+            # Use Whisper's English normalizer (handles numbers, contractions, etc.)
+            predictions_norm = [normalizer(p) for p in predictions]
+            ground_truth_norm = [normalizer(g) for g in ground_truth]
+        else:
+            # Fallback: basic normalization (lowercase, strip whitespace)
+            predictions_norm = [p.lower().strip() for p in predictions]
+            ground_truth_norm = [g.lower().strip() for g in ground_truth]
+
+        # Filter out empty references
+        valid_pairs = [
+            (p, g) for p, g in zip(predictions_norm, ground_truth_norm) if g
+        ]
+
+        if not valid_pairs:
+            return {
+                "word_accuracy": 0.0,
+                "wer": 0.0,
+                "cer": 0.0,
+                "num_samples": 0,
+            }
+
+        preds, refs = zip(*valid_pairs)
+
+        word_error_rate = wer(list(refs), list(preds))
+        char_error_rate = cer(list(refs), list(preds))
+
+        # MLPerf v5.1 uses Word Accuracy = 1 - WER
+        word_accuracy = 1.0 - word_error_rate
+
+        return {
+            "word_accuracy": word_accuracy,  # Primary MLPerf metric
+            "wer": word_error_rate,
+            "cer": char_error_rate,
+            "num_samples": len(valid_pairs),
+        }
 
 
 class LibriSpeechQSL(QuerySampleLibrary):
