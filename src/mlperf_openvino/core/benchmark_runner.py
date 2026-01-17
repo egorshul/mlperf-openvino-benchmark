@@ -192,6 +192,7 @@ class BenchmarkRunner:
         # Check for separate encoder/decoder models (try different naming conventions)
         encoder_path = None
         decoder_path = None
+        decoder_no_past_path = None  # For C++ SUT (doesn't support KV-cache)
 
         if model_path.is_dir():
             # Try different naming conventions from optimum-cli
@@ -199,9 +200,13 @@ class BenchmarkRunner:
                 model_path / "encoder_model.xml",
                 model_path / "openvino_encoder_model.xml",
             ]
-            decoder_candidates = [
+            # Decoders WITHOUT KV-cache (for C++ SUT)
+            decoder_no_past_candidates = [
                 model_path / "decoder_model.xml",
                 model_path / "openvino_decoder_model.xml",
+            ]
+            # Decoders WITH KV-cache (for Python SUT - better performance)
+            decoder_with_past_candidates = [
                 model_path / "decoder_model_merged.xml",
                 model_path / "openvino_decoder_model_merged.xml",
                 model_path / "decoder_with_past_model.xml",
@@ -213,20 +218,27 @@ class BenchmarkRunner:
                     encoder_path = ep
                     break
 
-            for dp in decoder_candidates:
+            # Find decoder without past (for C++ SUT)
+            for dp in decoder_no_past_candidates:
+                if dp.exists():
+                    decoder_no_past_path = dp
+                    break
+
+            # Find any decoder (prefer with past for Python)
+            for dp in decoder_with_past_candidates + decoder_no_past_candidates:
                 if dp.exists():
                     decoder_path = dp
                     break
 
-        # Try C++ Whisper SUT first (maximum performance)
-        if encoder_path and decoder_path:
+        # Try C++ Whisper SUT first (only with decoder without KV-cache)
+        if encoder_path and decoder_no_past_path:
             try:
                 from .cpp_sut_wrapper import create_whisper_sut
 
                 self.sut = create_whisper_sut(
                     config=self.config,
                     encoder_path=str(encoder_path),
-                    decoder_path=str(decoder_path),
+                    decoder_path=str(decoder_no_past_path),
                     qsl=self.qsl,
                     scenario=self.config.scenario,
                 )
