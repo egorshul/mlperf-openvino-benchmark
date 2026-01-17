@@ -16,7 +16,7 @@
 
 namespace mlperf_ov {
 
-CppSUT::CppSUT(const std::string& model_path,
+ResNetCppSUT::ResNetCppSUT(const std::string& model_path,
                const std::string& device,
                int num_streams,
                const std::string& performance_hint)
@@ -35,7 +35,7 @@ CppSUT::CppSUT(const std::string& model_path,
       response_callback_(nullptr) {
 }
 
-CppSUT::~CppSUT() {
+ResNetCppSUT::~ResNetCppSUT() {
     // Wait for all pending operations to complete
     wait_all();
 
@@ -46,7 +46,7 @@ CppSUT::~CppSUT() {
     }
 }
 
-void CppSUT::load() {
+void ResNetCppSUT::load() {
     if (loaded_) {
         return;
     }
@@ -138,15 +138,15 @@ void CppSUT::load() {
     loaded_ = true;
 }
 
-std::string CppSUT::get_input_name() const {
+std::string ResNetCppSUT::get_input_name() const {
     return input_name_;
 }
 
-std::string CppSUT::get_output_name() const {
+std::string ResNetCppSUT::get_output_name() const {
     return output_name_;
 }
 
-size_t CppSUT::get_idle_request() {
+size_t ResNetCppSUT::get_idle_request() {
     std::unique_lock<std::mutex> lock(pool_mutex_);
 
     // Wait for an available request
@@ -157,7 +157,7 @@ size_t CppSUT::get_idle_request() {
     return id;
 }
 
-void CppSUT::return_request(size_t id) {
+void ResNetCppSUT::return_request(size_t id) {
     {
         std::lock_guard<std::mutex> lock(pool_mutex_);
         available_ids_.push(id);
@@ -165,7 +165,7 @@ void CppSUT::return_request(size_t id) {
     pool_cv_.notify_one();
 }
 
-void CppSUT::start_async(const float* input_data,
+void ResNetCppSUT::start_async(const float* input_data,
                          size_t input_size,
                          uint64_t query_id,
                          int sample_idx) {
@@ -193,7 +193,7 @@ void CppSUT::start_async(const float* input_data,
     issued_count_++;
 }
 
-void CppSUT::on_inference_complete(InferContext* ctx) {
+void ResNetCppSUT::on_inference_complete(InferContext* ctx) {
     // This runs in OpenVINO's internal thread - NO GIL!
     // Track that this callback is running (for proper shutdown)
     callbacks_running_++;
@@ -229,7 +229,7 @@ void CppSUT::on_inference_complete(InferContext* ctx) {
         }
 
     } catch (const std::exception& e) {
-        std::cerr << "[CppSUT] Callback error: " << e.what() << std::endl;
+        std::cerr << "[ResNetCppSUT] Callback error: " << e.what() << std::endl;
         // Still call response callback with null to avoid LoadGen hang
         {
             std::lock_guard<std::mutex> lock(callback_mutex_);
@@ -249,7 +249,7 @@ void CppSUT::on_inference_complete(InferContext* ctx) {
     callbacks_running_--;
 }
 
-void CppSUT::wait_all() {
+void ResNetCppSUT::wait_all() {
     // Wait for all pending requests AND all callbacks to complete
     // This is critical: callbacks_running_ tracks callbacks that are still
     // executing (including return_request calls), so we must wait for both
@@ -258,7 +258,7 @@ void CppSUT::wait_all() {
     }
 }
 
-void CppSUT::reset_counters() {
+void ResNetCppSUT::reset_counters() {
     // Wait for any pending operations before resetting
     wait_all();
 
@@ -271,12 +271,12 @@ void CppSUT::reset_counters() {
     }
 }
 
-std::unordered_map<int, std::vector<float>> CppSUT::get_predictions() const {
+std::unordered_map<int, std::vector<float>> ResNetCppSUT::get_predictions() const {
     std::lock_guard<std::mutex> lock(predictions_mutex_);
     return predictions_;
 }
 
-void CppSUT::set_response_callback(ResponseCallback callback) {
+void ResNetCppSUT::set_response_callback(ResponseCallback callback) {
     std::lock_guard<std::mutex> lock(callback_mutex_);
     response_callback_ = callback;
 }

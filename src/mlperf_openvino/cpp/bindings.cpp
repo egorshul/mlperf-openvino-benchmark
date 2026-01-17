@@ -29,7 +29,7 @@ namespace py = pybind11;
 PYBIND11_MODULE(_cpp_sut, m) {
     m.doc() = "C++ SUT for maximum throughput (bypasses Python GIL)";
 
-    py::class_<mlperf_ov::CppSUT>(m, "CppSUT")
+    py::class_<mlperf_ov::ResNetCppSUT>(m, "ResNetCppSUT")
         .def(py::init<const std::string&, const std::string&, int, const std::string&>(),
              py::arg("model_path"),
              py::arg("device") = "CPU",
@@ -37,24 +37,24 @@ PYBIND11_MODULE(_cpp_sut, m) {
              py::arg("performance_hint") = "THROUGHPUT",
              "Create C++ SUT instance")
 
-        .def("load", &mlperf_ov::CppSUT::load,
+        .def("load", &mlperf_ov::ResNetCppSUT::load,
              py::call_guard<py::gil_scoped_release>(),  // Release GIL during load
              "Load and compile the model")
 
-        .def("is_loaded", &mlperf_ov::CppSUT::is_loaded,
+        .def("is_loaded", &mlperf_ov::ResNetCppSUT::is_loaded,
              "Check if model is loaded")
 
-        .def("get_optimal_nireq", &mlperf_ov::CppSUT::get_optimal_nireq,
+        .def("get_optimal_nireq", &mlperf_ov::ResNetCppSUT::get_optimal_nireq,
              "Get optimal number of inference requests")
 
-        .def("get_input_name", &mlperf_ov::CppSUT::get_input_name,
+        .def("get_input_name", &mlperf_ov::ResNetCppSUT::get_input_name,
              "Get input tensor name")
 
-        .def("get_output_name", &mlperf_ov::CppSUT::get_output_name,
+        .def("get_output_name", &mlperf_ov::ResNetCppSUT::get_output_name,
              "Get output tensor name")
 
         .def("start_async",
-             [](mlperf_ov::CppSUT& self,
+             [](mlperf_ov::ResNetCppSUT& self,
                 py::array_t<float, py::array::c_style | py::array::forcecast> input,
                 uint64_t query_id,
                 int sample_idx) {
@@ -73,28 +73,28 @@ PYBIND11_MODULE(_cpp_sut, m) {
              py::arg("sample_idx"),
              "Start async inference (GIL released)")
 
-        .def("wait_all", &mlperf_ov::CppSUT::wait_all,
+        .def("wait_all", &mlperf_ov::ResNetCppSUT::wait_all,
              py::call_guard<py::gil_scoped_release>(),  // Release GIL during wait
              "Wait for all pending inferences")
 
-        .def("get_completed_count", &mlperf_ov::CppSUT::get_completed_count,
+        .def("get_completed_count", &mlperf_ov::ResNetCppSUT::get_completed_count,
              "Get number of completed samples")
 
-        .def("get_issued_count", &mlperf_ov::CppSUT::get_issued_count,
+        .def("get_issued_count", &mlperf_ov::ResNetCppSUT::get_issued_count,
              "Get number of issued samples")
 
-        .def("reset_counters", &mlperf_ov::CppSUT::reset_counters,
+        .def("reset_counters", &mlperf_ov::ResNetCppSUT::reset_counters,
              "Reset counters")
 
-        .def("set_store_predictions", &mlperf_ov::CppSUT::set_store_predictions,
+        .def("set_store_predictions", &mlperf_ov::ResNetCppSUT::set_store_predictions,
              py::arg("store"),
              "Enable/disable storing predictions")
 
-        .def("get_predictions", &mlperf_ov::CppSUT::get_predictions,
+        .def("get_predictions", &mlperf_ov::ResNetCppSUT::get_predictions,
              "Get stored predictions")
 
         .def("set_response_callback",
-             [](mlperf_ov::CppSUT& self, py::function callback) {
+             [](mlperf_ov::ResNetCppSUT& self, py::function callback) {
                  // Wrap Python callback to be called from C++
                  // Note: This callback will be called from C++ thread,
                  // so we need to acquire GIL
