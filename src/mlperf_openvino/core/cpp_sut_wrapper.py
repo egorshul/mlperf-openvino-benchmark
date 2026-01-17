@@ -7,10 +7,11 @@ The actual inference runs in C++ without GIL for maximum throughput.
 """
 
 import logging
+import sys
 import time
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 
@@ -38,6 +39,70 @@ except ImportError:
     WhisperCppSUT = None
 
 logger = logging.getLogger(__name__)
+
+
+class ProgressMonitor:
+    """Progress bar monitor for SUT inference."""
+
+    def __init__(
+        self,
+        total_samples: int,
+        get_completed: Callable[[], int],
+        name: str = "Progress",
+        update_interval: float = 0.5,
+    ):
+        self.total_samples = total_samples
+        self.get_completed = get_completed
+        self.name = name
+        self.update_interval = update_interval
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._start_time = 0.0
+
+    def start(self):
+        """Start progress monitoring thread."""
+        self._stop_event.clear()
+        self._start_time = time.time()
+        self._thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        """Stop progress monitoring and print final status."""
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=1.0)
+        self._print_progress(final=True)
+
+    def _monitor_loop(self):
+        """Background thread that updates progress bar."""
+        while not self._stop_event.is_set():
+            self._print_progress()
+            self._stop_event.wait(self.update_interval)
+
+    def _print_progress(self, final: bool = False):
+        """Print progress bar to stderr."""
+        completed = self.get_completed()
+        total = self.total_samples
+        elapsed = time.time() - self._start_time
+
+        if total > 0:
+            pct = min(100.0, completed / total * 100)
+            bar_width = 40
+            filled = int(bar_width * completed / total)
+            bar = "█" * filled + "░" * (bar_width - filled)
+
+            # Calculate throughput
+            throughput = completed / elapsed if elapsed > 0 else 0
+
+            status = f"\r{self.name}: [{bar}] {completed}/{total} ({pct:.1f}%) | {throughput:.1f} samples/s"
+
+            if final:
+                status += f" | Total: {elapsed:.1f}s\n"
+            else:
+                status += "   "  # Extra spaces to clear previous longer output
+
+            sys.stderr.write(status)
+            sys.stderr.flush()
 
 
 class ResNetCppSUTWrapper:
@@ -103,18 +168,14 @@ class ResNetCppSUTWrapper:
         self.input_name = self._cpp_sut.get_input_name()
         self.output_name = self._cpp_sut.get_output_name()
 
-        # Statistics
-        self._start_time = 0.0
-        self._progress_stop_event = threading.Event()
-
         # Enable storing predictions for accuracy mode
         self._cpp_sut.set_store_predictions(True)
 
         # Set up response callback
         self._setup_response_callback()
 
-        # Start progress monitoring
-        self._start_progress_monitor()
+        # Progress monitor (started when queries are issued)
+        self._progress_monitor: Optional[ProgressMonitor] = None
 
     def _setup_response_callback(self):
         """Set up the callback that C++ uses to notify LoadGen."""
@@ -147,11 +208,6 @@ class ResNetCppSUTWrapper:
 
         self._cpp_sut.set_response_callback(response_callback)
 
-    def _start_progress_monitor(self):
-        """Start progress monitoring."""
-        self._start_time = time.time()
-        self._progress_stop_event.clear()
-
     def issue_queries(self, query_samples: List["lg.QuerySample"]) -> None:
         """
         Process incoming queries using C++ SUT.
@@ -162,6 +218,15 @@ class ResNetCppSUTWrapper:
         Args:
             query_samples: List of query samples from LoadGen
         """
+        # Start progress monitor on first batch
+        if self._progress_monitor is None:
+            self._progress_monitor = ProgressMonitor(
+                total_samples=self.qsl.total_sample_count,
+                get_completed=self._cpp_sut.get_completed_count,
+                name="ResNet",
+            )
+            self._progress_monitor.start()
+
         qsl = self.qsl
         cpp_sut = self._cpp_sut
         input_name = self.input_name
@@ -195,7 +260,9 @@ class ResNetCppSUTWrapper:
         This is called by LoadGen when all queries have been issued.
         """
         self._cpp_sut.wait_all()
-        self._progress_stop_event.set()
+        if self._progress_monitor:
+            self._progress_monitor.stop()
+            self._progress_monitor = None
 
     def get_sut(self) -> "lg.ConstructSUT":
         """Get the LoadGen SUT object."""
@@ -287,43 +354,38 @@ class BertCppSUTWrapper:
         self.end_logits_name = self._cpp_sut.get_end_logits_name()
         self.seq_length = self._cpp_sut.get_seq_length()
 
-        # Statistics
-        self._start_time = 0.0
-        self._progress_stop_event = threading.Event()
-
         # Enable storing predictions for accuracy mode
         self._cpp_sut.set_store_predictions(True)
 
         # Set up response callback
         self._setup_response_callback()
 
-        # Start progress monitoring
-        self._start_progress_monitor()
+        # Progress monitor (started when queries are issued)
+        self._progress_monitor: Optional[ProgressMonitor] = None
 
     def _setup_response_callback(self):
         """Set up the callback that C++ uses to notify LoadGen."""
         import array
 
-        # Pre-allocate a single dummy response for performance mode
-        # LoadGen only cares that we called QuerySamplesComplete
-        # The actual data is only needed for accuracy mode (stored in C++ predictions)
-        dummy_data = array.array('B', [0] * 8)  # Minimal response
+        dummy_data = array.array('B', [0] * 8)
         dummy_bi = dummy_data.buffer_info()
 
         def response_callback(query_id: int, start_logits, end_logits):
-            # Use minimal response - predictions are stored in C++ for accuracy mode
             response = lg.QuerySampleResponse(query_id, dummy_bi[0], dummy_bi[1])
             lg.QuerySamplesComplete([response])
 
         self._cpp_sut.set_response_callback(response_callback)
 
-    def _start_progress_monitor(self):
-        """Start progress monitoring."""
-        self._start_time = time.time()
-        self._progress_stop_event.clear()
-
     def issue_queries(self, query_samples: List[Any]) -> None:
         """Process incoming queries using BERT C++ SUT."""
+        if self._progress_monitor is None:
+            self._progress_monitor = ProgressMonitor(
+                total_samples=self.qsl.total_sample_count,
+                get_completed=self._cpp_sut.get_completed_count,
+                name="BERT",
+            )
+            self._progress_monitor.start()
+
         for qs in query_samples:
             sample_idx = qs.index
             query_id = qs.id
@@ -340,7 +402,9 @@ class BertCppSUTWrapper:
     def flush_queries(self) -> None:
         """Flush any pending queries."""
         self._cpp_sut.wait_all()
-        self._progress_stop_event.set()
+        if self._progress_monitor:
+            self._progress_monitor.stop()
+            self._progress_monitor = None
 
     def get_sut(self) -> "lg.ConstructSUT":
         """Get the LoadGen SUT object."""
@@ -526,41 +590,38 @@ class RetinaNetCppSUTWrapper:
         self.scores_name = self._cpp_sut.get_scores_name()
         self.labels_name = self._cpp_sut.get_labels_name()
 
-        # Statistics
-        self._start_time = 0.0
-        self._progress_stop_event = threading.Event()
-
         # Enable storing predictions for accuracy mode
         self._cpp_sut.set_store_predictions(True)
 
         # Set up response callback
         self._setup_response_callback()
 
-        # Start progress monitoring
-        self._start_progress_monitor()
+        # Progress monitor (started when queries are issued)
+        self._progress_monitor: Optional[ProgressMonitor] = None
 
     def _setup_response_callback(self):
         """Set up the callback that C++ uses to notify LoadGen."""
         import array
 
-        # Use minimal response for performance mode
         dummy_data = array.array('B', [0] * 8)
         dummy_bi = dummy_data.buffer_info()
 
         def response_callback(query_id: int, boxes, scores, labels):
-            # Use minimal response - predictions are stored in C++ for accuracy mode
             response = lg.QuerySampleResponse(query_id, dummy_bi[0], dummy_bi[1])
             lg.QuerySamplesComplete([response])
 
         self._cpp_sut.set_response_callback(response_callback)
 
-    def _start_progress_monitor(self):
-        """Start progress monitoring."""
-        self._start_time = time.time()
-        self._progress_stop_event.clear()
-
     def issue_queries(self, query_samples: List[Any]) -> None:
         """Process incoming queries using RetinaNet C++ SUT."""
+        if self._progress_monitor is None:
+            self._progress_monitor = ProgressMonitor(
+                total_samples=self.qsl.total_sample_count,
+                get_completed=self._cpp_sut.get_completed_count,
+                name="RetinaNet",
+            )
+            self._progress_monitor.start()
+
         for qs in query_samples:
             sample_idx = qs.index
             query_id = qs.id
@@ -573,7 +634,9 @@ class RetinaNetCppSUTWrapper:
     def flush_queries(self) -> None:
         """Flush any pending queries."""
         self._cpp_sut.wait_all()
-        self._progress_stop_event.set()
+        if self._progress_monitor:
+            self._progress_monitor.stop()
+            self._progress_monitor = None
 
     def get_sut(self) -> "lg.ConstructSUT":
         """Get the LoadGen SUT object."""
@@ -778,41 +841,38 @@ class WhisperCppSUTWrapper:
         self.n_mels = self._cpp_sut.get_n_mels()
         self.n_frames = self._cpp_sut.get_n_frames()
 
-        # Statistics
-        self._start_time = 0.0
-        self._progress_stop_event = threading.Event()
-
         # Enable storing predictions for accuracy mode
         self._cpp_sut.set_store_predictions(True)
 
         # Set up response callback
         self._setup_response_callback()
 
-        # Start progress monitoring
-        self._start_progress_monitor()
+        # Progress monitor (started when queries are issued)
+        self._progress_monitor: Optional[ProgressMonitor] = None
 
     def _setup_response_callback(self):
         """Set up the callback that C++ uses to notify LoadGen."""
         import array
 
-        # Use minimal response for performance mode
         dummy_data = array.array('B', [0] * 8)
         dummy_bi = dummy_data.buffer_info()
 
         def response_callback(query_id: int, tokens):
-            # Use minimal response - predictions are stored in C++ for accuracy mode
             response = lg.QuerySampleResponse(query_id, dummy_bi[0], dummy_bi[1])
             lg.QuerySamplesComplete([response])
 
         self._cpp_sut.set_response_callback(response_callback)
 
-    def _start_progress_monitor(self):
-        """Start progress monitoring."""
-        self._start_time = time.time()
-        self._progress_stop_event.clear()
-
     def issue_queries(self, query_samples: List[Any]) -> None:
         """Process incoming queries using Whisper C++ SUT."""
+        if self._progress_monitor is None:
+            self._progress_monitor = ProgressMonitor(
+                total_samples=self.qsl.total_sample_count,
+                get_completed=self._cpp_sut.get_completed_count,
+                name="Whisper",
+            )
+            self._progress_monitor.start()
+
         for qs in query_samples:
             sample_idx = qs.index
             query_id = qs.id
@@ -825,7 +885,9 @@ class WhisperCppSUTWrapper:
     def flush_queries(self) -> None:
         """Flush any pending queries."""
         self._cpp_sut.wait_all()
-        self._progress_stop_event.set()
+        if self._progress_monitor:
+            self._progress_monitor.stop()
+            self._progress_monitor = None
 
     def get_sut(self) -> "lg.ConstructSUT":
         """Get the LoadGen SUT object."""
