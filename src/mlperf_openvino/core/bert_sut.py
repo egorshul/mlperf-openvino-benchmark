@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from openvino.runtime import AsyncInferQueue
+from openvino import AsyncInferQueue
 
 try:
     from tqdm import tqdm
@@ -107,8 +107,6 @@ class BertSUT:
         num_requests = self.backend.num_streams
         # Double for better pipelining
         num_requests = max(num_requests * 2, 16)
-
-        logger.info(f"BERT Server mode: AsyncInferQueue with {num_requests} requests")
 
         # Create AsyncInferQueue
         compiled_model = self.backend._compiled_model
@@ -226,10 +224,6 @@ class BertSUT:
                     f"Could not map BERT inputs. Model inputs: {self.backend.input_names}"
                 )
 
-        logger.info(f"BERT input mapping: input_ids={self.input_ids_name}, "
-                   f"attention_mask={self.attention_mask_name}, "
-                   f"token_type_ids={self.token_type_ids_name}")
-
         # Map output names
         self.start_logits_name = None
         self.end_logits_name = None
@@ -253,8 +247,6 @@ class BertSUT:
             # Single output - assume concatenated
             self.start_logits_name = model_outputs[0]
             self.end_logits_name = model_outputs[0]
-
-        logger.info(f"BERT output mapping: start={self.start_logits_name}, end={self.end_logits_name}")
 
     def _process_sample(self, sample_idx: int) -> Tuple[np.ndarray, np.ndarray]:
         """

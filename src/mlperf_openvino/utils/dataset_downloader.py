@@ -65,7 +65,7 @@ DATASET_REGISTRY: Dict[str, Dict] = {
             "filename": "class-descriptions-boxable.csv",
             "size_mb": 0.02,
         },
-        "num_samples": 24781,  # Official MLPerf count from 365 class filtering
+        "num_samples": 24781,  # Official MLPerf count from 264 class filtering
         "note": "Images downloaded from AWS S3 open-images-dataset bucket",
     },
     "librispeech": {
@@ -358,44 +358,70 @@ def download_librispeech(
 ) -> Dict[str, str]:
     """
     Download LibriSpeech dataset for Whisper benchmark.
-    
+
     For MLPerf submissions, use subset="mlperf" which downloads
     both dev-clean and dev-other.
-    
+
     Args:
         output_dir: Directory to save dataset
         subset: "mlperf" (dev-clean + dev-other), "dev-clean", "dev-other", etc.
         force: Force re-download
-        
+
     Returns:
         Dictionary with dataset paths
     """
+    import json
+
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    
+
     # Handle MLPerf subset (dev-clean + dev-other)
     if subset == "mlperf":
         logger.info("Downloading MLPerf LibriSpeech (dev-clean + dev-other)...")
-        
+
         results = {"subsets": []}
         total_samples = 0
-        
+        all_manifest_entries = []
+
         for sub in DATASET_REGISTRY["librispeech"]["mlperf_subsets"]:
             sub_result = _download_librispeech_subset(output_path, sub, force)
             results["subsets"].append(sub_result)
             total_samples += sub_result.get("num_samples", 0)
-        
-        # Create combined directory with symlinks
+
+            # Load manifest entries from subset
+            manifest_path = sub_result.get("manifest_path")
+            if manifest_path and Path(manifest_path).exists():
+                with open(manifest_path, 'r') as f:
+                    entries = json.load(f)
+                    all_manifest_entries.extend(entries)
+
+        # Create combined directory
         mlperf_dir = output_path / "librispeech" / "mlperf"
         mlperf_dir.mkdir(parents=True, exist_ok=True)
-        
-        results["data_path"] = str(output_path / "librispeech")
+
+        # Create combined manifest
+        combined_manifest = mlperf_dir / "manifest.json"
+        with open(combined_manifest, 'w') as f:
+            json.dump(all_manifest_entries, f, indent=2)
+        logger.info(f"Created combined manifest with {len(all_manifest_entries)} entries")
+
+        # Create combined transcripts file
+        combined_transcripts = mlperf_dir / "transcripts.txt"
+        with open(combined_transcripts, 'w', encoding='utf-8') as f:
+            for entry in all_manifest_entries:
+                utterance_id = entry.get("utterance_id", "")
+                text = entry.get("text", "")
+                f.write(f"{utterance_id} {text}\n")
+
+        results["data_path"] = str(mlperf_dir)
+        results["manifest_path"] = str(combined_manifest)
+        results["transcript_path"] = str(combined_transcripts)
         results["num_samples"] = total_samples
         results["note"] = "MLPerf Whisper uses dev-clean + dev-other combined"
-        
-        logger.info(f"LibriSpeech MLPerf ready: {total_samples} samples")
+
+        logger.info(f"LibriSpeech MLPerf ready: {total_samples} samples at {mlperf_dir}")
         return results
-    
+
     # Single subset
     return _download_librispeech_subset(output_path, subset, force)
 
@@ -408,27 +434,31 @@ def _download_librispeech_subset(
     """Download a single LibriSpeech subset."""
     dataset_info = DATASET_REGISTRY["librispeech"].get(subset)
     if not dataset_info or not isinstance(dataset_info, dict):
-        available = [k for k, v in DATASET_REGISTRY["librispeech"].items() 
+        available = [k for k, v in DATASET_REGISTRY["librispeech"].items()
                      if isinstance(v, dict) and "url" in v]
         raise ValueError(f"Unknown subset: {subset}. Available: {available}")
-    
+
     data_dir = output_path / "librispeech" / subset
     audio_dir = data_dir / "audio"
     transcript_file = data_dir / "transcripts.txt"
-    
+    manifest_file = data_dir / "manifest.json"
+
     # Check if already exists
     if data_dir.exists() and transcript_file.exists() and not force:
         logger.info(f"LibriSpeech {subset} already exists at {data_dir}")
+        # Count actual audio files
+        actual_count = len(list(audio_dir.glob("*.flac"))) if audio_dir.exists() else 0
         return {
             "data_path": str(data_dir),
             "audio_dir": str(audio_dir),
             "transcript_path": str(transcript_file),
-            "num_samples": dataset_info["num_samples"],
+            "manifest_path": str(manifest_file) if manifest_file.exists() else None,
+            "num_samples": actual_count or dataset_info["num_samples"],
         }
-    
+
     # Download
     archive_path = output_path / dataset_info["filename"]
-    
+
     if not archive_path.exists() or force:
         logger.info(f"Downloading LibriSpeech {subset} (~{dataset_info['size_mb']} MB)...")
         _download_file(
@@ -436,64 +466,79 @@ def _download_librispeech_subset(
             str(archive_path),
             expected_size_mb=dataset_info["size_mb"]
         )
-        
+
         # Verify checksum
         if dataset_info.get("md5"):
             if not _verify_md5(str(archive_path), dataset_info["md5"]):
                 archive_path.unlink()
                 raise RuntimeError("Checksum verification failed")
-    
+
     # Extract
     _extract_archive(str(archive_path), str(output_path))
-    
+
     # Organize: move from LibriSpeech/dev-clean to librispeech/dev-clean
     extracted_dir = output_path / dataset_info["extracted_dir"]
-    
+
     data_dir.mkdir(parents=True, exist_ok=True)
     audio_dir.mkdir(exist_ok=True)
-    
-    # Process and create transcripts
-    _process_librispeech(extracted_dir, audio_dir, transcript_file)
-    
+
+    # Process and create transcripts + manifest
+    actual_count = _process_librispeech(extracted_dir, audio_dir, transcript_file, manifest_file)
+
     logger.info(f"LibriSpeech {subset} ready at {data_dir}")
-    
+
     return {
         "data_path": str(data_dir),
         "audio_dir": str(audio_dir),
         "transcript_path": str(transcript_file),
-        "num_samples": dataset_info["num_samples"],
+        "manifest_path": str(manifest_file),
+        "num_samples": actual_count,
     }
 
 
 def _process_librispeech(
     source_dir: Path,
     audio_dir: Path,
-    transcript_file: Path
-) -> None:
+    transcript_file: Path,
+    manifest_file: Optional[Path] = None
+) -> int:
     """
     Process LibriSpeech directory structure.
-    
+
     LibriSpeech format:
         speaker_id/chapter_id/speaker_id-chapter_id-utterance_id.flac
         speaker_id/chapter_id/speaker_id-chapter_id.trans.txt
-    
+
     Creates:
         audio/speaker_id-chapter_id-utterance_id.flac (copies or symlinks)
         transcripts.txt
+        manifest.json (MLPerf format, optional)
+
+    Returns:
+        Number of processed audio files
     """
+    import json
+
+    try:
+        import soundfile as sf
+        has_soundfile = True
+    except ImportError:
+        has_soundfile = False
+
     logger.info("Processing LibriSpeech files...")
-    
+
     transcripts = []
+    manifest_entries = []
     audio_count = 0
-    
+
     for speaker_dir in sorted(source_dir.iterdir()):
         if not speaker_dir.is_dir():
             continue
-        
+
         for chapter_dir in sorted(speaker_dir.iterdir()):
             if not chapter_dir.is_dir():
                 continue
-            
+
             # Read transcripts
             chapter_transcripts = {}
             for trans_file in chapter_dir.glob("*.trans.txt"):
@@ -504,26 +549,51 @@ def _process_librispeech(
                             parts = line.split(' ', 1)
                             if len(parts) == 2:
                                 chapter_transcripts[parts[0]] = parts[1]
-            
+
             # Process audio files
             for audio_file in sorted(chapter_dir.glob("*.flac")):
                 utterance_id = audio_file.stem
-                
+
                 # Copy audio file
                 dest_audio = audio_dir / audio_file.name
                 if not dest_audio.exists():
                     shutil.copy2(audio_file, dest_audio)
-                
+
                 transcript = chapter_transcripts.get(utterance_id, "")
                 transcripts.append((utterance_id, transcript))
+
+                # Get audio duration for manifest
+                duration = 0.0
+                if has_soundfile and dest_audio.exists():
+                    try:
+                        info = sf.info(str(dest_audio))
+                        duration = info.duration
+                    except Exception:
+                        pass
+
+                # Create manifest entry (MLPerf format)
+                manifest_entries.append({
+                    "audio_filepath": str(dest_audio),
+                    "text": transcript,
+                    "duration": duration,
+                    "utterance_id": utterance_id,
+                })
+
                 audio_count += 1
-    
-    # Write transcripts
+
+    # Write transcripts (simple format)
     with open(transcript_file, 'w', encoding='utf-8') as f:
         for audio_id, transcript in transcripts:
             f.write(f"{audio_id} {transcript}\n")
-    
+
+    # Write JSON manifest (MLPerf format)
+    if manifest_file:
+        with open(manifest_file, 'w', encoding='utf-8') as f:
+            json.dump(manifest_entries, f, indent=2)
+        logger.info(f"Created manifest with {len(manifest_entries)} entries")
+
     logger.info(f"Processed {audio_count} audio files")
+    return audio_count
 
 
 def download_whisper_mlperf(output_dir: str) -> Dict[str, str]:
@@ -709,7 +779,8 @@ def download_openimages(
         _download_file(CLASS_NAMES_URL, str(class_names_file))
 
     # Step 2: Get MLPerf classes and filter annotations
-    # Official MLPerf uses these 365 classes from openimages_mlperf.sh
+    # Official MLPerf uses these 264 classes from openimages_mlperf.sh
+    # See: https://github.com/mlcommons/inference/blob/master/vision/classification_and_detection/tools/openimages_mlperf.sh
     MLPERF_CLASSES = [
         "Airplane", "Antelope", "Apple", "Backpack", "Balloon", "Banana",
         "Barrel", "Baseball bat", "Baseball glove", "Bee", "Beer", "Bench",
@@ -775,11 +846,18 @@ def download_openimages(
 
     # Get LabelNames for MLPerf classes
     mlperf_labels = set()
+    missing_classes = []
     for class_name in MLPERF_CLASSES:
         if class_name in class_name_to_label:
             mlperf_labels.add(class_name_to_label[class_name])
+        else:
+            missing_classes.append(class_name)
 
-    logger.info(f"Found {len(mlperf_labels)} MLPerf class labels")
+    logger.info(f"Found {len(mlperf_labels)} MLPerf class labels in OpenImages class descriptions")
+    if missing_classes:
+        logger.info(f"Note: {len(missing_classes)} MLPerf classes not found in OpenImages boxable classes.")
+        logger.info(f"  This is expected - not all model classes appear in the validation set.")
+        logger.debug(f"  Missing classes: {missing_classes[:20]}{'...' if len(missing_classes) > 20 else ''}")
 
     # Extract image IDs that have MLPerf class annotations
     logger.info("Extracting image IDs with MLPerf classes...")
@@ -846,8 +924,12 @@ def _download_openimages_from_s3(
     image_ids: List[str],
     images_dir: Path,
     num_workers: int = 8
-) -> None:
-    """Download images from AWS S3 open-images-dataset bucket."""
+) -> List[str]:
+    """Download images from AWS S3 open-images-dataset bucket.
+
+    Returns:
+        List of failed image IDs
+    """
     import time
     import ssl
     import urllib.request
@@ -880,6 +962,12 @@ def _download_openimages_from_s3(
     except ImportError:
         pass
 
+    # Alternative download URLs for fallback
+    DOWNLOAD_URLS = [
+        "https://s3.amazonaws.com/open-images-dataset/validation/{image_id}.jpg",
+        "https://open-images-dataset.s3.amazonaws.com/validation/{image_id}.jpg",
+    ]
+
     def download_one(image_id: str, force_redownload: bool = False) -> Optional[str]:
         dest = images_dir / f"{image_id}.jpg"
 
@@ -891,63 +979,72 @@ def _download_openimages_from_s3(
                 # File is corrupted, delete and re-download
                 dest.unlink()
 
-        url = f"https://s3.amazonaws.com/open-images-dataset/validation/{image_id}.jpg"
+        last_error = None
+        for url_template in DOWNLOAD_URLS:
+            url = url_template.format(image_id=image_id)
 
-        for attempt in range(3):
-            try:
-                if requests_session is not None:
-                    response = requests_session.get(url, timeout=60)
-                    response.raise_for_status()
-                    content = response.content
-                else:
-                    # Fallback with SSL disabled
-                    req = urllib.request.Request(url)
-                    with urllib.request.urlopen(req, context=ssl_context, timeout=60) as resp:
-                        content = resp.read()
-
-                # Verify content size before writing
-                if len(content) < 1000:
-                    if attempt < 2:
-                        time.sleep(2 ** attempt)
-                        continue
+            for attempt in range(3):
+                try:
+                    if requests_session is not None:
+                        response = requests_session.get(url, timeout=60)
+                        response.raise_for_status()
+                        content = response.content
                     else:
-                        return None
+                        # Fallback with SSL disabled
+                        req = urllib.request.Request(url)
+                        with urllib.request.urlopen(req, context=ssl_context, timeout=60) as resp:
+                            content = resp.read()
 
-                with open(dest, 'wb') as f:
-                    f.write(content)
+                    # Verify content size before writing
+                    if len(content) < 1000:
+                        last_error = f"Content too small ({len(content)} bytes)"
+                        if attempt < 2:
+                            time.sleep(2 ** attempt)
+                            continue
+                        else:
+                            break  # Try next URL
 
-                # Verify written file
-                if dest.stat().st_size > 1000:
-                    return image_id
-                else:
-                    dest.unlink()
+                    with open(dest, 'wb') as f:
+                        f.write(content)
+
+                    # Verify written file
+                    if dest.stat().st_size > 1000:
+                        return image_id
+                    else:
+                        dest.unlink()
+                        last_error = "Written file too small"
+                        if attempt < 2:
+                            time.sleep(2 ** attempt)
+                            continue
+                        break  # Try next URL
+
+                except Exception as e:
+                    last_error = str(e)
                     if attempt < 2:
                         time.sleep(2 ** attempt)
-                        continue
-                    return None
+                    else:
+                        break  # Try next URL
 
-            except Exception as e:
-                if attempt < 2:
-                    time.sleep(2 ** attempt)
-                else:
-                    if dest.exists():
-                        dest.unlink()
-                    return None
-
+        # All URLs failed
+        if dest.exists():
+            dest.unlink()
         return None
 
     downloaded = 0
     failed = 0
+    failed_ids = []
 
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
         futures = {executor.submit(download_one, img_id): img_id for img_id in image_ids}
 
         for future in as_completed(futures):
+            img_id = futures[future]
             result = future.result()
             if result:
                 downloaded += 1
             else:
                 failed += 1
+                failed_ids.append(img_id)
 
             total = downloaded + failed
             if total % 100 == 0 or total == len(image_ids):
@@ -955,6 +1052,17 @@ def _download_openimages_from_s3(
 
     print()
     logger.info(f"Downloaded {downloaded} images, {failed} failed")
+
+    # Log failed image IDs
+    if failed_ids:
+        failed_log = images_dir.parent.parent / "failed_downloads.txt"
+        with open(failed_log, 'w') as f:
+            for img_id in failed_ids:
+                f.write(f"{img_id}\n")
+        logger.warning(f"Failed image IDs saved to: {failed_log}")
+        logger.warning(f"Failed images: {failed_ids[:10]}{'...' if len(failed_ids) > 10 else ''}")
+
+    return failed_ids
 
 
 def _convert_openimages_to_coco(
@@ -966,14 +1074,14 @@ def _convert_openimages_to_coco(
 ) -> None:
     """Convert OpenImages annotations to COCO format.
 
-    IMPORTANT: Uses only the 365 MLPerf classes with sequential category_ids (1-365).
+    IMPORTANT: Uses only the 264 MLPerf classes with sequential category_ids (1-264).
     This matches the MLPerf RetinaNet model output format where class indices
     correspond to the alphabetically sorted MLPerf class list.
     """
     import csv
     import json
 
-    # MLPerf uses these 365 classes (alphabetically sorted - this is the model's class order!)
+    # MLPerf uses these 264 classes (alphabetically sorted - this is the model's class order!)
     MLPERF_CLASSES = [
         "Airplane", "Antelope", "Apple", "Backpack", "Balloon", "Banana",
         "Barrel", "Baseball bat", "Baseball glove", "Bee", "Beer", "Bench",
@@ -1034,8 +1142,8 @@ def _convert_openimages_to_coco(
                 label_name, display_name = row[0], row[1]
                 display_to_label[display_name] = label_name
 
-    # Build class_map with SEQUENTIAL category_ids (1-365) for MLPerf classes ONLY
-    # This matches the model's output class indices (0-364) when we add 1
+    # Build class_map with SEQUENTIAL category_ids (1-264) for MLPerf classes ONLY
+    # This matches the model's output class indices (0-263) when we add 1
     class_map = {}  # LabelName -> class_id (1-indexed, sequential)
     class_names = {}  # class_id -> display_name
 

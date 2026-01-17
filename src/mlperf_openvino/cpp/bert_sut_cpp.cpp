@@ -68,10 +68,6 @@ void BertCppSUT::map_input_names() {
         token_type_ids_name_ = inputs[2].get_any_name();
     }
 
-    std::cout << "[BertCppSUT] Input mapping:" << std::endl;
-    std::cout << "  input_ids: " << input_ids_name_ << std::endl;
-    std::cout << "  attention_mask: " << attention_mask_name_ << std::endl;
-    std::cout << "  token_type_ids: " << token_type_ids_name_ << std::endl;
 }
 
 void BertCppSUT::map_output_names() {
@@ -82,7 +78,6 @@ void BertCppSUT::map_output_names() {
         single_output_ = true;
         start_logits_name_ = outputs[0].get_any_name();
         end_logits_name_ = outputs[0].get_any_name();
-        std::cout << "[BertCppSUT] Single output mode: " << start_logits_name_ << std::endl;
     } else {
         // Multiple outputs - find start and end logits
         single_output_ = false;
@@ -107,9 +102,6 @@ void BertCppSUT::map_output_names() {
             end_logits_name_ = outputs[1].get_any_name();
         }
 
-        std::cout << "[BertCppSUT] Output mapping:" << std::endl;
-        std::cout << "  start_logits: " << start_logits_name_ << std::endl;
-        std::cout << "  end_logits: " << end_logits_name_ << std::endl;
     }
 }
 
@@ -118,7 +110,6 @@ void BertCppSUT::load() {
         return;
     }
 
-    std::cout << "[BertCppSUT] Loading model: " << model_path_ << std::endl;
 
     // Read model
     model_ = core_.read_model(model_path_);
@@ -138,7 +129,6 @@ void BertCppSUT::load() {
             break;
         }
     }
-    std::cout << "[BertCppSUT] Sequence length: " << seq_length_ << std::endl;
 
     // Build compile properties
     ov::AnyMap properties;
@@ -158,7 +148,6 @@ void BertCppSUT::load() {
     }
 
     // Compile model
-    std::cout << "[BertCppSUT] Compiling model for device: " << device_ << std::endl;
     compiled_model_ = core_.compile_model(model_, device_, properties);
 
     // Get optimal number of inference requests
@@ -168,7 +157,6 @@ void BertCppSUT::load() {
         optimal_nireq_ = 4;
     }
 
-    std::cout << "[BertCppSUT] Optimal requests: " << optimal_nireq_ << std::endl;
 
     // Create InferRequest pool (2x optimal for better pipelining)
     int num_requests = std::max(optimal_nireq_ * 2, 16);
@@ -201,10 +189,8 @@ void BertCppSUT::load() {
         available_ids_.push(static_cast<size_t>(i));
     }
 
-    std::cout << "[BertCppSUT] Created " << num_requests << " inference requests" << std::endl;
 
     loaded_ = true;
-    std::cout << "[BertCppSUT] Model loaded successfully" << std::endl;
 }
 
 size_t BertCppSUT::get_idle_request() {

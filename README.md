@@ -1,15 +1,22 @@
 # MLPerf v5.1 OpenVINO Benchmark
 
-A benchmark tool for measuring CPU inference performance using OpenVINO backend, compatible with MLPerf Inference v5.1 specifications.
+![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)
+![MLPerf](https://img.shields.io/badge/MLPerf-v5.1-green.svg)
+![OpenVINO](https://img.shields.io/badge/OpenVINO-2024.0+-orange.svg)
+![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)
+
+A high-performance benchmark tool for measuring CPU inference performance using OpenVINO backend, fully compatible with MLPerf Inference v5.1 specifications.
 
 ## Features
 
-- **MLPerf v5.1 Compatible**: Follows MLPerf Inference benchmark specifications
+- **MLPerf v5.1 Compatible**: Follows official MLPerf Inference benchmark specifications
 - **OpenVINO Backend**: Optimized for Intel CPUs using OpenVINO runtime
-- **C++ Accelerated SUT**: High-performance C++ implementation bypassing Python GIL
+- **C++ Accelerated SUT**: High-performance C++ implementation for ResNet50, BERT, RetinaNet bypassing Python GIL
+- **Optimum-Intel Integration**: Whisper uses Optimum-Intel for optimal encoder-decoder performance with KV-cache
 - **Multiple Scenarios**: Supports Offline and Server scenarios
-- **Multiple Models**: ResNet50, BERT-Large, RetinaNet, Whisper Large v3
+- **Four Models**: ResNet50-v1.5, BERT-Large, RetinaNet, Whisper Large v3
 - **Automated Setup**: Built-in model and dataset downloaders
+- **Official Accuracy Evaluation**: Uses pycocotools for RetinaNet mAP calculation
 
 ### Supported Models
 
@@ -313,9 +320,10 @@ mlperf-openvino-benchmark/
 │   │   ├── whisper_sut.py       # Whisper System Under Test
 │   │   └── benchmark_runner.py  # Main benchmark orchestrator
 │   ├── cpp/                     # C++ accelerated components
-│   │   ├── sut_cpp.cpp/hpp      # C++ SUT (async, GIL-free)
-│   │   ├── offline_sut.cpp/hpp  # C++ Offline SUT (batch)
-│   │   └── bindings.cpp         # pybind11 bindings
+│   │   ├── resnet_sut_cpp.cpp/hpp    # C++ SUT for ResNet50
+│   │   ├── bert_sut_cpp.cpp/hpp      # C++ SUT for BERT
+│   │   ├── retinanet_sut_cpp.cpp/hpp # C++ SUT for RetinaNet
+│   │   └── bindings.cpp              # pybind11 bindings
 │   ├── backends/                # Inference backends
 │   │   └── openvino_backend.py  # OpenVINO inference
 │   ├── datasets/                # Dataset handlers
@@ -513,6 +521,44 @@ pip install openvino>=2024.0.0
 pip install mlcommons-loadgen>=4.0
 ```
 
+**Whisper model download hangs:**
+
+If `mlperf-ov download --model whisper --format openvino` hangs during download of large files (3+ GB), use wget with resume support:
+
+```bash
+# 1. Create directory and download files with wget (supports resume with -c)
+mkdir -p ./models/whisper-large-v3-hf
+cd ./models/whisper-large-v3-hf
+
+wget -c "https://huggingface.co/openai/whisper-large-v3/resolve/main/model.safetensors"
+wget -c "https://huggingface.co/openai/whisper-large-v3/resolve/main/config.json"
+wget -c "https://huggingface.co/openai/whisper-large-v3/resolve/main/tokenizer.json"
+wget -c "https://huggingface.co/openai/whisper-large-v3/resolve/main/preprocessor_config.json"
+wget -c "https://huggingface.co/openai/whisper-large-v3/resolve/main/generation_config.json"
+wget -c "https://huggingface.co/openai/whisper-large-v3/resolve/main/merges.txt"
+wget -c "https://huggingface.co/openai/whisper-large-v3/resolve/main/vocab.json"
+wget -c "https://huggingface.co/openai/whisper-large-v3/resolve/main/added_tokens.json"
+wget -c "https://huggingface.co/openai/whisper-large-v3/resolve/main/special_tokens_map.json"
+wget -c "https://huggingface.co/openai/whisper-large-v3/resolve/main/tokenizer_config.json"
+
+cd -
+
+# 2. Convert to OpenVINO format
+optimum-cli export openvino \
+  --model ./models/whisper-large-v3-hf \
+  --task automatic-speech-recognition \
+  ./models/whisper-large-v3-openvino
+```
+
+Then run the benchmark with:
+```bash
+mlperf-ov run \
+  --model whisper \
+  --model-path ./models/whisper-large-v3-openvino \
+  --data-path ./data/librispeech \
+  --mode accuracy
+```
+
 ## License
 
 Apache License 2.0
@@ -520,6 +566,34 @@ Apache License 2.0
 ## Contributing
 
 Contributions are welcome! Please read our contributing guidelines before submitting PRs.
+
+## Changelog
+
+### v0.3.0
+
+- Removed C++ Whisper SUT - Whisper now uses Optimum-Intel Python SUT exclusively for proper KV-cache handling
+- Removed dead code: CppOfflineSUT, WhisperCppSUTWrapper
+- Added real-time progress monitoring for all C++ SUT wrappers (ResNet, BERT, RetinaNet)
+- Cleaned up debug prints across all SUTs
+- Renamed sut_cpp to resnet_sut_cpp for clarity
+
+### v0.2.0
+
+- Added C++ SUT for BERT and RetinaNet models
+- Fixed RetinaNet C++ SUT output order: `[0]=boxes, [1]=scores, [2]=labels`
+- Added proper int64 to float conversion for RetinaNet labels
+- Fixed critical sample_idx to COCO image_id mapping for correct mAP evaluation
+- Integrated pycocotools for official mAP calculation
+- Fixed OpenImages class count: 264 classes (matching MLCommons reference), not 365
+- Added failed image download logging to `failed_downloads.txt` for debugging
+- Added fallback URL for OpenImages S3 downloads
+- Removed debug scripts, cleaned up codebase for release
+
+### v0.1.0
+
+- Initial release with ResNet50, BERT, RetinaNet, Whisper support
+- Python and C++ SUT implementations
+- MLPerf v5.1 compatibility
 
 ## Acknowledgments
 

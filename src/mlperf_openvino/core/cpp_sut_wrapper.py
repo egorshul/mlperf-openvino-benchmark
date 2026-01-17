@@ -7,10 +7,11 @@ The actual inference runs in C++ without GIL for maximum throughput.
 """
 
 import logging
+import sys
 import time
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 
@@ -27,24 +28,85 @@ from ..core.config import BenchmarkConfig, Scenario
 # Try to import C++ extension
 try:
     from ..cpp import (
-        CppSUT, CppOfflineSUT, BertCppSUT, RetinaNetCppSUT,
-        CPP_AVAILABLE, BERT_CPP_AVAILABLE, RETINANET_CPP_AVAILABLE
+        ResNetCppSUT, BertCppSUT, RetinaNetCppSUT,
+        CPP_AVAILABLE,
     )
 except ImportError:
     CPP_AVAILABLE = False
-    BERT_CPP_AVAILABLE = False
-    RETINANET_CPP_AVAILABLE = False
-    CppSUT = None
-    CppOfflineSUT = None
+    ResNetCppSUT = None
     BertCppSUT = None
     RetinaNetCppSUT = None
 
 logger = logging.getLogger(__name__)
 
 
-class CppSUTWrapper:
+class ProgressMonitor:
+    """Progress bar monitor for SUT inference."""
+
+    def __init__(
+        self,
+        total_samples: int,
+        get_completed: Callable[[], int],
+        name: str = "Progress",
+        update_interval: float = 0.5,
+    ):
+        self.total_samples = total_samples
+        self.get_completed = get_completed
+        self.name = name
+        self.update_interval = update_interval
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._start_time = 0.0
+
+    def start(self):
+        """Start progress monitoring thread."""
+        self._stop_event.clear()
+        self._start_time = time.time()
+        self._thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        """Stop progress monitoring and print final status."""
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=1.0)
+        self._print_progress(final=True)
+
+    def _monitor_loop(self):
+        """Background thread that updates progress bar."""
+        while not self._stop_event.is_set():
+            self._print_progress()
+            self._stop_event.wait(self.update_interval)
+
+    def _print_progress(self, final: bool = False):
+        """Print progress bar to stderr."""
+        completed = self.get_completed()
+        total = self.total_samples
+        elapsed = time.time() - self._start_time
+
+        if total > 0:
+            pct = min(100.0, completed / total * 100)
+            bar_width = 40
+            filled = int(bar_width * completed / total)
+            bar = "█" * filled + "░" * (bar_width - filled)
+
+            # Calculate throughput
+            throughput = completed / elapsed if elapsed > 0 else 0
+
+            status = f"\r{self.name}: [{bar}] {completed}/{total} ({pct:.1f}%) | {throughput:.1f} samples/s"
+
+            if final:
+                status += f" | Total: {elapsed:.1f}s\n"
+            else:
+                status += "   "  # Extra spaces to clear previous longer output
+
+            sys.stderr.write(status)
+            sys.stderr.flush()
+
+
+class ResNetCppSUTWrapper:
     """
-    Wrapper for C++ SUT that provides MLPerf LoadGen interface.
+    Wrapper for ResNet C++ SUT that provides MLPerf LoadGen interface.
 
     This class handles:
     - LoadGen integration (issue_queries, flush_queries)
@@ -63,7 +125,7 @@ class CppSUTWrapper:
         scenario: Scenario = Scenario.OFFLINE,
     ):
         """
-        Initialize the C++ SUT wrapper.
+        Initialize the ResNet C++ SUT wrapper.
 
         Args:
             config: Benchmark configuration
@@ -98,21 +160,12 @@ class CppSUTWrapper:
 
         performance_hint = config.openvino.performance_hint
 
-        logger.info(f"Creating C++ SUT: device={device}, num_streams={num_streams}, hint={performance_hint}")
-        self._cpp_sut = CppSUT(model_path, device, num_streams, performance_hint)
-
-        # Load model
-        logger.info("Loading model in C++ SUT...")
+        self._cpp_sut = ResNetCppSUT(model_path, device, num_streams, performance_hint)
         self._cpp_sut.load()
 
         # Get input/output names
         self.input_name = self._cpp_sut.get_input_name()
         self.output_name = self._cpp_sut.get_output_name()
-        logger.info(f"Input: {self.input_name}, Output: {self.output_name}")
-
-        # Statistics
-        self._start_time = 0.0
-        self._progress_stop_event = threading.Event()
 
         # Enable storing predictions for accuracy mode
         self._cpp_sut.set_store_predictions(True)
@@ -120,10 +173,8 @@ class CppSUTWrapper:
         # Set up response callback
         self._setup_response_callback()
 
-        # Start progress monitoring
-        self._start_progress_monitor()
-
-        logger.info(f"C++ SUT initialized with {self._cpp_sut.get_optimal_nireq()} optimal requests")
+        # Progress monitor (started when queries are issued)
+        self._progress_monitor: Optional[ProgressMonitor] = None
 
     def _setup_response_callback(self):
         """Set up the callback that C++ uses to notify LoadGen."""
@@ -156,26 +207,6 @@ class CppSUTWrapper:
 
         self._cpp_sut.set_response_callback(response_callback)
 
-    def _start_progress_monitor(self):
-        """Start progress monitoring thread."""
-        self._start_time = time.time()
-        self._progress_stop_event.clear()
-
-        def progress_thread():
-            while not self._progress_stop_event.is_set():
-                self._progress_stop_event.wait(timeout=1.0)
-                if self._progress_stop_event.is_set():
-                    break
-                elapsed = time.time() - self._start_time
-                completed = self._cpp_sut.get_completed_count()
-                issued = self._cpp_sut.get_issued_count()
-                throughput = completed / elapsed if elapsed > 0 else 0
-                pending = issued - completed
-                print(f"\rC++ SUT: issued={issued}, done={completed}, pending={pending}, {throughput:.1f} samples/sec", end="", flush=True)
-
-        self._progress_thread = threading.Thread(target=progress_thread, daemon=True)
-        self._progress_thread.start()
-
     def issue_queries(self, query_samples: List["lg.QuerySample"]) -> None:
         """
         Process incoming queries using C++ SUT.
@@ -186,6 +217,15 @@ class CppSUTWrapper:
         Args:
             query_samples: List of query samples from LoadGen
         """
+        # Start progress monitor on first batch
+        if self._progress_monitor is None:
+            self._progress_monitor = ProgressMonitor(
+                total_samples=self.qsl.total_sample_count,
+                get_completed=self._cpp_sut.get_completed_count,
+                name="ResNet",
+            )
+            self._progress_monitor.start()
+
         qsl = self.qsl
         cpp_sut = self._cpp_sut
         input_name = self.input_name
@@ -218,17 +258,10 @@ class CppSUTWrapper:
 
         This is called by LoadGen when all queries have been issued.
         """
-        # Wait for all C++ inferences to complete
         self._cpp_sut.wait_all()
-
-        # Stop progress monitor
-        self._progress_stop_event.set()
-
-        # Print final stats
-        elapsed = time.time() - self._start_time
-        completed = self._cpp_sut.get_completed_count()
-        throughput = completed / elapsed if elapsed > 0 else 0
-        print(f"\nC++ SUT completed: {completed} samples in {elapsed:.1f}s ({throughput:.1f} samples/sec)")
+        if self._progress_monitor:
+            self._progress_monitor.stop()
+            self._progress_monitor = None
 
     def get_sut(self) -> "lg.ConstructSUT":
         """Get the LoadGen SUT object."""
@@ -269,170 +302,6 @@ class CppSUTWrapper:
         self._cpp_sut.reset_counters()
 
 
-class CppOfflineSUTWrapper:
-    """
-    Wrapper for C++ Offline SUT with batch inference.
-
-    Optimized for Offline scenario:
-    - Sync batch inference (multiple samples per call)
-    - No per-sample callback overhead
-    - Maximum throughput with large batches
-    """
-
-    def __init__(
-        self,
-        config: BenchmarkConfig,
-        model_path: str,
-        qsl: QuerySampleLibrary,
-        batch_size: int = 32,
-    ):
-        if not LOADGEN_AVAILABLE:
-            raise ImportError("MLPerf LoadGen is not installed")
-
-        if not CPP_AVAILABLE or CppOfflineSUT is None:
-            raise ImportError("C++ Offline SUT extension not available")
-
-        self.config = config
-        self.qsl = qsl
-        self.batch_size = batch_size
-        self.scenario = Scenario.OFFLINE
-
-        # Create C++ Offline SUT
-        device = config.openvino.device
-        num_streams = 0
-        if config.openvino.num_streams != "AUTO":
-            try:
-                num_streams = int(config.openvino.num_streams)
-            except ValueError:
-                pass
-
-        logger.info(f"Creating C++ Offline SUT: device={device}, batch_size={batch_size}")
-        self._cpp_sut = CppOfflineSUT(model_path, device, batch_size, num_streams)
-
-        # Load model
-        logger.info("Loading model in C++ Offline SUT...")
-        self._cpp_sut.load()
-
-        # Get input info
-        self.input_name = self._cpp_sut.get_input_name()
-        self.output_name = self._cpp_sut.get_output_name()
-        self.sample_size = self._cpp_sut.get_sample_size()
-
-        logger.info(f"C++ Offline SUT initialized: batch={batch_size}, sample_size={self.sample_size}")
-
-        # Statistics
-        self._start_time = 0.0
-        self._issued_count = 0
-
-        # Predictions storage for accuracy mode
-        self._predictions: Dict[int, Any] = {}
-
-    def issue_queries(self, query_samples: List["lg.QuerySample"]) -> None:
-        """
-        Process queries using batch inference.
-
-        For Offline mode, all samples come at once - process in batches.
-        """
-        self._start_time = time.time()
-        total_samples = len(query_samples)
-        self._issued_count = total_samples
-
-        logger.info(f"Offline: Processing {total_samples} samples in batches of {self.batch_size}")
-
-        # Process in batches
-        for batch_start in range(0, total_samples, self.batch_size):
-            batch_end = min(batch_start + self.batch_size, total_samples)
-            batch_samples = query_samples[batch_start:batch_end]
-            num_in_batch = len(batch_samples)
-
-            # Prepare batch input
-            batch_input = np.zeros((self.batch_size, self.sample_size), dtype=np.float32)
-
-            query_ids = []
-            for i, qs in enumerate(batch_samples):
-                sample_idx = qs.index
-                query_ids.append(qs.id)
-
-                # Get input data from QSL
-                if hasattr(self.qsl, '_loaded_samples') and sample_idx in self.qsl._loaded_samples:
-                    input_data = self.qsl._loaded_samples[sample_idx]
-                else:
-                    features = self.qsl.get_features(sample_idx)
-                    input_data = features.get("input", features.get(self.input_name))
-
-                # Flatten and copy to batch
-                batch_input[i] = input_data.flatten().astype(np.float32)
-
-            # Run batch inference
-            results = self._cpp_sut.infer_batch(batch_input.flatten(), num_in_batch)
-
-            # Send responses to LoadGen and store predictions
-            responses = []
-            for i, (query_id, result) in enumerate(zip(query_ids, results)):
-                sample_idx = batch_samples[i].index
-
-                # Store prediction for accuracy computation
-                self._predictions[sample_idx] = result.copy()
-
-                response = lg.QuerySampleResponse(
-                    query_id,
-                    result.ctypes.data,
-                    result.nbytes
-                )
-                responses.append(response)
-
-            lg.QuerySamplesComplete(responses)
-
-            # Progress
-            completed = batch_end
-            elapsed = time.time() - self._start_time
-            throughput = completed / elapsed if elapsed > 0 else 0
-            print(f"\rOffline: {completed}/{total_samples} samples, {throughput:.1f} samples/sec", end="", flush=True)
-
-        print()  # Newline after progress
-
-    def flush_queries(self) -> None:
-        """Flush completed - all done in issue_queries for Offline."""
-        elapsed = time.time() - self._start_time
-        completed = self._cpp_sut.get_completed_count()
-        throughput = completed / elapsed if elapsed > 0 else 0
-        logger.info(f"Offline completed: {completed} samples in {elapsed:.1f}s ({throughput:.1f} samples/sec)")
-
-    def get_sut(self) -> "lg.ConstructSUT":
-        """Get the LoadGen SUT object."""
-        return lg.ConstructSUT(self.issue_queries, self.flush_queries)
-
-    def get_qsl(self) -> "lg.ConstructQSL":
-        """Get the LoadGen QSL object."""
-        return lg.ConstructQSL(
-            self.qsl.total_sample_count,
-            self.qsl.performance_sample_count,
-            self.qsl.load_query_samples,
-            self.qsl.unload_query_samples,
-        )
-
-    @property
-    def name(self) -> str:
-        return f"OpenVINO-CppOffline-{self.config.model.name}"
-
-    @property
-    def _sample_count(self) -> int:
-        return self._cpp_sut.get_completed_count()
-
-    @property
-    def _query_count(self) -> int:
-        return self._issued_count
-
-    def get_predictions(self) -> Dict[int, Any]:
-        """Get stored predictions for accuracy computation."""
-        return self._predictions
-
-    def reset(self) -> None:
-        self._cpp_sut.reset_counters()
-        self._issued_count = 0
-        self._predictions = {}
-
-
 class BertCppSUTWrapper:
     """
     Wrapper for BERT C++ SUT with 3 int64 inputs and 2 float32 outputs.
@@ -452,7 +321,7 @@ class BertCppSUTWrapper:
         if not LOADGEN_AVAILABLE:
             raise ImportError("MLPerf LoadGen is not installed")
 
-        if not BERT_CPP_AVAILABLE or BertCppSUT is None:
+        if not CPP_AVAILABLE or BertCppSUT is None:
             raise ImportError(
                 "BERT C++ SUT extension not available. "
                 "Build it with: ./build_cpp.sh"
@@ -473,11 +342,7 @@ class BertCppSUTWrapper:
 
         performance_hint = config.openvino.performance_hint
 
-        logger.info(f"Creating BERT C++ SUT: device={device}, num_streams={num_streams}, hint={performance_hint}")
         self._cpp_sut = BertCppSUT(model_path, device, num_streams, performance_hint)
-
-        # Load model
-        logger.info("Loading model in BERT C++ SUT...")
         self._cpp_sut.load()
 
         # Get input/output names
@@ -488,73 +353,43 @@ class BertCppSUTWrapper:
         self.end_logits_name = self._cpp_sut.get_end_logits_name()
         self.seq_length = self._cpp_sut.get_seq_length()
 
-        logger.info(f"BERT inputs: {self.input_ids_name}, {self.attention_mask_name}, {self.token_type_ids_name}")
-        logger.info(f"BERT outputs: {self.start_logits_name}, {self.end_logits_name}")
-        logger.info(f"Sequence length: {self.seq_length}")
-
-        # Statistics
-        self._start_time = 0.0
-        self._progress_stop_event = threading.Event()
-
         # Enable storing predictions for accuracy mode
         self._cpp_sut.set_store_predictions(True)
 
         # Set up response callback
         self._setup_response_callback()
 
-        # Start progress monitoring
-        self._start_progress_monitor()
-
-        logger.info(f"BERT C++ SUT initialized with {self._cpp_sut.get_optimal_nireq()} optimal requests")
+        # Progress monitor (started when queries are issued)
+        self._progress_monitor: Optional[ProgressMonitor] = None
 
     def _setup_response_callback(self):
         """Set up the callback that C++ uses to notify LoadGen."""
         import array
 
-        # Pre-allocate a single dummy response for performance mode
-        # LoadGen only cares that we called QuerySamplesComplete
-        # The actual data is only needed for accuracy mode (stored in C++ predictions)
-        dummy_data = array.array('B', [0] * 8)  # Minimal response
+        dummy_data = array.array('B', [0] * 8)
         dummy_bi = dummy_data.buffer_info()
 
         def response_callback(query_id: int, start_logits, end_logits):
-            # Use minimal response - predictions are stored in C++ for accuracy mode
             response = lg.QuerySampleResponse(query_id, dummy_bi[0], dummy_bi[1])
             lg.QuerySamplesComplete([response])
 
         self._cpp_sut.set_response_callback(response_callback)
 
-    def _start_progress_monitor(self):
-        """Start progress monitoring thread."""
-        self._start_time = time.time()
-        self._progress_stop_event.clear()
-
-        def progress_thread():
-            while not self._progress_stop_event.is_set():
-                self._progress_stop_event.wait(timeout=1.0)
-                if self._progress_stop_event.is_set():
-                    break
-                elapsed = time.time() - self._start_time
-                completed = self._cpp_sut.get_completed_count()
-                issued = self._cpp_sut.get_issued_count()
-                throughput = completed / elapsed if elapsed > 0 else 0
-                pending = issued - completed
-                print(f"\rBERT C++ SUT: issued={issued}, done={completed}, pending={pending}, {throughput:.1f} samples/sec", end="", flush=True)
-
-        self._progress_thread = threading.Thread(target=progress_thread, daemon=True)
-        self._progress_thread.start()
-
     def issue_queries(self, query_samples: List[Any]) -> None:
         """Process incoming queries using BERT C++ SUT."""
+        if self._progress_monitor is None:
+            self._progress_monitor = ProgressMonitor(
+                total_samples=self.qsl.total_sample_count,
+                get_completed=self._cpp_sut.get_completed_count,
+                name="BERT",
+            )
+            self._progress_monitor.start()
+
         for qs in query_samples:
             sample_idx = qs.index
             query_id = qs.id
 
-            # Get pre-optimized features from QSL (already int64, contiguous, flattened)
             features = self.qsl.get_features(sample_idx)
-
-            # Features are pre-converted to int64 contiguous arrays in QSL
-            # Just pass them directly to C++ SUT
             self._cpp_sut.start_async(
                 features['input_ids'],
                 features['attention_mask'],
@@ -565,17 +400,10 @@ class BertCppSUTWrapper:
 
     def flush_queries(self) -> None:
         """Flush any pending queries."""
-        # Wait for all C++ inferences to complete
         self._cpp_sut.wait_all()
-
-        # Stop progress monitor
-        self._progress_stop_event.set()
-
-        # Print final stats
-        elapsed = time.time() - self._start_time
-        completed = self._cpp_sut.get_completed_count()
-        throughput = completed / elapsed if elapsed > 0 else 0
-        print(f"\nBERT C++ SUT completed: {completed} samples in {elapsed:.1f}s ({throughput:.1f} samples/sec)")
+        if self._progress_monitor:
+            self._progress_monitor.stop()
+            self._progress_monitor = None
 
     def get_sut(self) -> "lg.ConstructSUT":
         """Get the LoadGen SUT object."""
@@ -652,8 +480,7 @@ def create_sut(
     """
     Factory function to create the best available SUT.
 
-    - Server: CppSUT with async inference (batch=1)
-    - Offline: CppOfflineSUT with sync batch inference
+    Uses async C++ SUT with InferRequest pool for maximum throughput.
 
     Args:
         config: Benchmark configuration
@@ -666,11 +493,8 @@ def create_sut(
         SUT instance
     """
     if CPP_AVAILABLE and not force_python:
-        # Use async C++ SUT for both modes - it has parallelism via InferRequest pool
-        # CppOfflineSUT (sync batch) is slower because it uses single InferRequest
-        mode_desc = "async" if scenario == Scenario.SERVER else "async-parallel"
-        logger.info(f"Using C++ SUT for {scenario.value} mode ({mode_desc})")
-        return CppSUTWrapper(config, model_path, qsl, scenario)
+        logger.info(f"Using ResNet C++ SUT for {scenario.value} mode")
+        return ResNetCppSUTWrapper(config, model_path, qsl, scenario)
 
     # Fall back to Python SUT
     logger.info(f"Using Python SUT for {scenario.value} mode")
@@ -703,7 +527,7 @@ def create_bert_sut(
     Returns:
         BERT SUT instance
     """
-    if BERT_CPP_AVAILABLE and not force_python:
+    if CPP_AVAILABLE and BertCppSUT is not None and not force_python:
         logger.info(f"Using BERT C++ SUT for {scenario.value} mode")
         return BertCppSUTWrapper(config, model_path, qsl, scenario)
 
@@ -735,7 +559,7 @@ class RetinaNetCppSUTWrapper:
         if not LOADGEN_AVAILABLE:
             raise ImportError("MLPerf LoadGen is not installed")
 
-        if not RETINANET_CPP_AVAILABLE or RetinaNetCppSUT is None:
+        if not CPP_AVAILABLE or RetinaNetCppSUT is None:
             raise ImportError(
                 "RetinaNet C++ SUT extension not available. "
                 "Build it with: ./build_cpp.sh"
@@ -756,11 +580,7 @@ class RetinaNetCppSUTWrapper:
 
         performance_hint = config.openvino.performance_hint
 
-        logger.info(f"Creating RetinaNet C++ SUT: device={device}, hint={performance_hint}")
         self._cpp_sut = RetinaNetCppSUT(model_path, device, num_streams, performance_hint)
-
-        # Load model
-        logger.info("Loading model in RetinaNet C++ SUT...")
         self._cpp_sut.load()
 
         # Get info
@@ -769,103 +589,53 @@ class RetinaNetCppSUTWrapper:
         self.scores_name = self._cpp_sut.get_scores_name()
         self.labels_name = self._cpp_sut.get_labels_name()
 
-        logger.info(f"RetinaNet input: {self.input_name}")
-        logger.info(f"RetinaNet outputs: boxes={self.boxes_name}, scores={self.scores_name}, labels={self.labels_name}")
-
-        # Statistics
-        self._start_time = 0.0
-        self._progress_stop_event = threading.Event()
-
         # Enable storing predictions for accuracy mode
         self._cpp_sut.set_store_predictions(True)
 
         # Set up response callback
         self._setup_response_callback()
 
-        # Start progress monitoring
-        self._start_progress_monitor()
-
-        logger.info(f"RetinaNet C++ SUT initialized with {self._cpp_sut.get_optimal_nireq()} optimal requests")
+        # Progress monitor (started when queries are issued)
+        self._progress_monitor: Optional[ProgressMonitor] = None
 
     def _setup_response_callback(self):
         """Set up the callback that C++ uses to notify LoadGen."""
         import array
 
-        # Use minimal response for performance mode
         dummy_data = array.array('B', [0] * 8)
         dummy_bi = dummy_data.buffer_info()
 
         def response_callback(query_id: int, boxes, scores, labels):
-            # Use minimal response - predictions are stored in C++ for accuracy mode
             response = lg.QuerySampleResponse(query_id, dummy_bi[0], dummy_bi[1])
             lg.QuerySamplesComplete([response])
 
         self._cpp_sut.set_response_callback(response_callback)
 
-    def _start_progress_monitor(self):
-        """Start progress monitoring thread."""
-        self._start_time = time.time()
-        self._progress_stop_event.clear()
-        self._loading_samples = True  # Track if we're still loading
-
-        def progress_thread():
-            wait_count = 0
-            while not self._progress_stop_event.is_set():
-                self._progress_stop_event.wait(timeout=1.0)
-                if self._progress_stop_event.is_set():
-                    break
-                elapsed = time.time() - self._start_time
-                completed = self._cpp_sut.get_completed_count()
-                issued = self._cpp_sut.get_issued_count()
-                throughput = completed / elapsed if elapsed > 0 else 0
-                pending = issued - completed
-
-                if issued == 0:
-                    wait_count += 1
-                    # Show what's happening while waiting
-                    if self._loading_samples:
-                        print(f"\rRetinaNet: Loading samples... ({wait_count}s)", end="", flush=True)
-                    else:
-                        print(f"\rRetinaNet: Waiting for queries... ({wait_count}s)", end="", flush=True)
-                else:
-                    print(f"\rRetinaNet C++ SUT: issued={issued}, done={completed}, pending={pending}, {throughput:.1f} samples/sec", end="", flush=True)
-
-        self._progress_thread = threading.Thread(target=progress_thread, daemon=True)
-        self._progress_thread.start()
-
     def issue_queries(self, query_samples: List[Any]) -> None:
         """Process incoming queries using RetinaNet C++ SUT."""
-        self._loading_samples = False  # Samples loaded, now processing queries
-
-        if len(query_samples) > 0:
-            logger.info(f"RetinaNet: Received {len(query_samples)} queries")
+        if self._progress_monitor is None:
+            self._progress_monitor = ProgressMonitor(
+                total_samples=self.qsl.total_sample_count,
+                get_completed=self._cpp_sut.get_completed_count,
+                name="RetinaNet",
+            )
+            self._progress_monitor.start()
 
         for qs in query_samples:
             sample_idx = qs.index
             query_id = qs.id
 
-            # Get pre-optimized features from QSL
             features = self.qsl.get_features(sample_idx)
             input_data = features.get('input', features.get(self.input_name))
-
-            # Flatten and ensure float32 contiguous
             input_data = np.ascontiguousarray(input_data.flatten(), dtype=np.float32)
-
-            # Start async inference in C++
             self._cpp_sut.start_async(input_data, query_id, sample_idx)
 
     def flush_queries(self) -> None:
         """Flush any pending queries."""
         self._cpp_sut.wait_all()
-
-        # Stop progress monitor
-        self._progress_stop_event.set()
-
-        # Print final stats
-        elapsed = time.time() - self._start_time
-        completed = self._cpp_sut.get_completed_count()
-        throughput = completed / elapsed if elapsed > 0 else 0
-        print(f"\nRetinaNet C++ SUT completed: {completed} samples in {elapsed:.1f}s ({throughput:.1f} samples/sec)")
+        if self._progress_monitor:
+            self._progress_monitor.stop()
+            self._progress_monitor = None
 
     def get_sut(self) -> "lg.ConstructSUT":
         """Get the LoadGen SUT object."""
@@ -930,6 +700,8 @@ class RetinaNetCppSUTWrapper:
         predictions = self.get_predictions()
 
         if not predictions:
+            logger.warning(f"No predictions collected (issued={self._cpp_sut.get_issued_count()}, "
+                          f"completed={self._cpp_sut.get_completed_count()})")
             return {'mAP': 0.0, 'num_samples': 0}
 
         # Try to use pycocotools for accurate mAP calculation
@@ -951,18 +723,29 @@ class RetinaNetCppSUTWrapper:
                         break
 
                 if coco_file:
-                    logger.info(f"Using pycocotools with {coco_file}")
+                    logger.debug(f"Using pycocotools with {coco_file}")
+
+                    # Get sample_idx to filename mapping for correct COCO image_id lookup
+                    # This is CRITICAL - dataset order may differ from COCO annotation order!
+                    sample_to_filename = None
+                    if hasattr(self.qsl, 'get_sample_to_filename_mapping'):
+                        sample_to_filename = self.qsl.get_sample_to_filename_mapping()
+                        logger.debug(f"Got filename mapping for {len(sample_to_filename)} samples")
+
                     return evaluate_openimages_accuracy(
                         predictions=predictions,
                         coco_annotations_file=coco_file,
                         input_size=800,
-                        model_labels_zero_indexed=True,  # Model outputs 0-indexed labels (0-364), add +1 for category_ids (1-365)
+                        model_labels_zero_indexed=True,  # Model outputs 0-indexed labels (0-263), add +1 for category_ids (1-264)
                         boxes_in_pixels=True,  # Model outputs boxes in pixel coords [0,800]
+                        sample_to_filename=sample_to_filename,
                     )
                 else:
                     logger.warning("COCO annotations file not found, using fallback mAP calculation")
         except Exception as e:
             logger.warning(f"pycocotools evaluation failed: {e}, using fallback")
+            import traceback
+            traceback.print_exc()
 
         # Fallback to our mAP calculation
         pred_list = []
@@ -996,7 +779,7 @@ def create_retinanet_sut(
     Returns:
         RetinaNet SUT instance
     """
-    if RETINANET_CPP_AVAILABLE and not force_python:
+    if CPP_AVAILABLE and RetinaNetCppSUT is not None and not force_python:
         logger.info(f"Using RetinaNet C++ SUT for {scenario.value} mode")
         return RetinaNetCppSUTWrapper(config, model_path, qsl, scenario)
 

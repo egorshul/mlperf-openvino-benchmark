@@ -30,7 +30,7 @@
 namespace mlperf_ov {
 
 // Forward declaration
-class CppSUT;
+class ResNetCppSUT;
 
 /**
  * Context for each inference request.
@@ -41,7 +41,7 @@ struct InferContext {
     uint64_t query_id = 0;
     int sample_idx = 0;
     size_t pool_id = 0;
-    CppSUT* sut = nullptr;
+    ResNetCppSUT* sut = nullptr;
 };
 
 /**
@@ -49,7 +49,7 @@ struct InferContext {
  *
  * Bypasses Python GIL by handling inference callbacks entirely in C++.
  */
-class CppSUT {
+class ResNetCppSUT {
 public:
     /**
      * Constructor.
@@ -59,12 +59,12 @@ public:
      * @param num_streams Number of inference streams (0 = auto)
      * @param performance_hint Performance hint (THROUGHPUT or LATENCY)
      */
-    CppSUT(const std::string& model_path,
+    ResNetCppSUT(const std::string& model_path,
            const std::string& device = "CPU",
            int num_streams = 0,
            const std::string& performance_hint = "THROUGHPUT");
 
-    ~CppSUT();
+    ~ResNetCppSUT();
 
     /**
      * Load and compile the model.

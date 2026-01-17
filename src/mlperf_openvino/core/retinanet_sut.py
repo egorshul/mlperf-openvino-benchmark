@@ -33,8 +33,8 @@ from ..datasets.openimages import OpenImagesQSL
 
 logger = logging.getLogger(__name__)
 
-# RetinaNet constants for OpenImages (MLPerf uses 365 classes, not COCO's 80)
-NUM_CLASSES = 365  # MLPerf OpenImages classes
+# RetinaNet constants for OpenImages (MLPerf uses 264 classes, not COCO's 80)
+NUM_CLASSES = 264  # MLPerf OpenImages classes
 SCORE_THRESHOLD = 0.05
 NMS_THRESHOLD = 0.5
 MAX_DETECTIONS = 100
@@ -209,8 +209,6 @@ class RetinaNetSUT:
         if not self.input_name and model_inputs:
             self.input_name = model_inputs[0]
 
-        logger.info(f"RetinaNet input: {self.input_name}")
-
         # Output mapping
         model_outputs = self.backend.output_names
 
@@ -234,9 +232,6 @@ class RetinaNetSUT:
             self.scores_name = model_outputs[1]
         if not self.labels_name and len(model_outputs) >= 3:
             self.labels_name = model_outputs[2]
-
-        logger.info(f"RetinaNet outputs: boxes={self.boxes_name}, "
-                   f"scores={self.scores_name}, labels={self.labels_name}")
 
     def _postprocess_detections(
         self,
@@ -487,6 +482,7 @@ class RetinaNetSUT:
             Dictionary with mAP and other metrics
         """
         if not self._predictions:
+            logger.warning(f"No predictions (sample_count={self._sample_count}, query_count={self._query_count})")
             return {'mAP': 0.0, 'num_samples': 0}
 
         # Try to use pycocotools for accurate mAP calculation (same as C++ wrapper)
@@ -510,17 +506,28 @@ class RetinaNetSUT:
 
                 if coco_file:
                     logger.info(f"Using pycocotools with {coco_file}")
+
+                    # Get sample_idx to filename mapping for correct COCO image_id lookup
+                    # This is CRITICAL - dataset order may differ from COCO annotation order!
+                    sample_to_filename = None
+                    if hasattr(self.qsl, 'get_sample_to_filename_mapping'):
+                        sample_to_filename = self.qsl.get_sample_to_filename_mapping()
+                        logger.info(f"Got filename mapping for {len(sample_to_filename)} samples")
+
                     return evaluate_openimages_accuracy(
                         predictions=self._predictions,
                         coco_annotations_file=coco_file,
                         input_size=800,
-                        model_labels_zero_indexed=True,  # Model outputs 0-indexed labels (0-364), add +1 for category_ids (1-365)
+                        model_labels_zero_indexed=True,  # Model outputs 0-indexed labels (0-263), add +1 for category_ids (1-264)
                         boxes_in_pixels=True,  # Model outputs boxes in pixel coords [0,800]
+                        sample_to_filename=sample_to_filename,
                     )
                 else:
                     logger.warning("COCO annotations file not found, using fallback mAP calculation")
         except Exception as e:
             logger.warning(f"pycocotools evaluation failed: {e}, using fallback")
+            import traceback
+            traceback.print_exc()
 
         # Fallback to basic mAP calculation
         predictions = []

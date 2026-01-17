@@ -958,3 +958,17 @@ class OpenImagesQSL(QuerySampleLibrary):
     def get_label(self, sample_index: int) -> Dict[str, Any]:
         """Get ground truth for a sample."""
         return self.dataset.get_ground_truth(sample_index)
+
+    def get_sample_to_filename_mapping(self) -> Dict[int, str]:
+        """Get mapping from sample_idx to filename (image_id).
+
+        This is CRITICAL for correct mAP evaluation - the dataset may load
+        images in a different order than the COCO annotations file.
+        """
+        if not self.dataset._is_loaded:
+            self.dataset.load()
+
+        mapping = {}
+        for idx, sample in enumerate(self.dataset._samples):
+            mapping[idx] = sample['image_id']
+        return mapping
