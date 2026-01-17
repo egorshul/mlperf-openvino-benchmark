@@ -57,7 +57,7 @@ class WhisperOptimumSUT:
         model_path: Union[str, Path],
         qsl: LibriSpeechQSL,
         scenario: Scenario = Scenario.OFFLINE,
-        max_new_tokens: int = 448,
+        max_new_tokens: int = 440,  # Leave room for special tokens (448 - 8)
     ):
         """
         Initialize Whisper SUT using Optimum-Intel.
@@ -326,7 +326,7 @@ class WhisperSUT:
         decoder_backend: BaseBackend,
         qsl: LibriSpeechQSL,
         scenario: Scenario = Scenario.OFFLINE,
-        max_new_tokens: int = 448,
+        max_new_tokens: int = 440,  # Leave room for special tokens (448 - 8)
     ):
         """
         Initialize Whisper SUT.
