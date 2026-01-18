@@ -6,7 +6,6 @@ Supports multiple models: ResNet50, BERT, RetinaNet, Whisper.
 
 import json
 import logging
-import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -75,16 +74,21 @@ class BenchmarkRunner:
         Path(self.config.results_dir).mkdir(parents=True, exist_ok=True)
         Path(self.config.logs_dir).mkdir(parents=True, exist_ok=True)
 
-        # Initialize backend
-        logger.info(f"Loading model from {self.config.model.model_path}")
-        self.backend = OpenVINOBackend(
-            model_path=self.config.model.model_path,
-            config=self.config.openvino,
-        )
-        self.backend.load()
-
         # Initialize model-specific components
         model_type = self.config.model.model_type
+
+        # Initialize backend (skip for Whisper with directory path - it handles its own loading)
+        model_path = Path(self.config.model.model_path)
+        if model_type == ModelType.WHISPER and model_path.is_dir():
+            logger.info(f"Whisper model directory: {self.config.model.model_path}")
+            self.backend = None  # Will be set up in _setup_whisper
+        else:
+            logger.info(f"Loading model from {self.config.model.model_path}")
+            self.backend = OpenVINOBackend(
+                model_path=self.config.model.model_path,
+                config=self.config.openvino,
+            )
+            self.backend.load()
 
         if model_type == ModelType.RESNET50:
             self._setup_resnet50()
@@ -172,7 +176,6 @@ class BenchmarkRunner:
     def _setup_whisper(self) -> None:
         """Set up Whisper benchmark."""
         from ..datasets.librispeech import LibriSpeechQSL
-        from .whisper_sut import WhisperSUT, WhisperEncoderOnlySUT
 
         logger.info(f"Loading LibriSpeech dataset from {self.config.dataset.path}")
         self.qsl = LibriSpeechQSL(
@@ -183,38 +186,101 @@ class BenchmarkRunner:
         )
         self.qsl.load()
 
-        # Check if we have encoder-decoder or encoder-only model
         model_path = Path(self.config.model.model_path)
 
-        # Check for separate encoder/decoder models
+        # Check for separate encoder/decoder models (try different naming conventions)
+        encoder_path = None
+        decoder_path = None
+
         if model_path.is_dir():
-            encoder_path = model_path / "encoder_model.xml"
-            decoder_path = model_path / "decoder_model.xml"
+            # Try different naming conventions from optimum-cli
+            encoder_candidates = [
+                model_path / "encoder_model.xml",
+                model_path / "openvino_encoder_model.xml",
+            ]
+            # Decoder candidates (Optimum handles KV-cache automatically)
+            decoder_candidates = [
+                model_path / "decoder_with_past_model.xml",
+                model_path / "openvino_decoder_with_past_model.xml",
+                model_path / "decoder_model_merged.xml",
+                model_path / "openvino_decoder_model_merged.xml",
+                model_path / "decoder_model.xml",
+                model_path / "openvino_decoder_model.xml",
+            ]
 
-            if encoder_path.exists() and decoder_path.exists():
-                logger.info("Setting up Whisper with separate encoder/decoder")
-                encoder_backend = OpenVINOBackend(
-                    model_path=str(encoder_path),
-                    config=self.config.openvino,
-                )
-                encoder_backend.load()
+            for ep in encoder_candidates:
+                if ep.exists():
+                    encoder_path = ep
+                    break
 
-                decoder_backend = OpenVINOBackend(
-                    model_path=str(decoder_path),
-                    config=self.config.openvino,
-                )
-                decoder_backend.load()
+            for dp in decoder_candidates:
+                if dp.exists():
+                    decoder_path = dp
+                    break
 
-                self.sut = WhisperSUT(
-                    config=self.config,
-                    encoder_backend=encoder_backend,
-                    decoder_backend=decoder_backend,
-                    qsl=self.qsl,
-                    scenario=self.config.scenario,
-                )
-                return
+        # Use Optimum-Intel WhisperOptimumSUT (Python) - C++ SUT disabled due to KV-cache issues
+        try:
+            from .whisper_sut import WhisperOptimumSUT, OPTIMUM_AVAILABLE
 
-        # Single model - use encoder-only SUT
+            if OPTIMUM_AVAILABLE and model_path.is_dir():
+                # Check if this looks like an optimum-exported model
+                config_file = model_path / "config.json"
+                if config_file.exists():
+                    logger.info("Using Optimum-Intel for Whisper inference")
+                    self.sut = WhisperOptimumSUT(
+                        config=self.config,
+                        model_path=model_path,
+                        qsl=self.qsl,
+                        scenario=self.config.scenario,
+                    )
+                    return
+        except Exception as e:
+            logger.warning(f"Could not use Optimum-Intel: {e}")
+            logger.info("Falling back to manual encoder-decoder inference")
+
+        # Fallback: Manual encoder-decoder inference
+        from .whisper_sut import WhisperSUT, WhisperEncoderOnlySUT
+
+        if encoder_path and decoder_path:
+            logger.info(f"Setting up Whisper with separate encoder/decoder (Python)")
+            logger.info(f"  Encoder: {encoder_path}")
+            logger.info(f"  Decoder: {decoder_path}")
+
+            encoder_backend = OpenVINOBackend(
+                model_path=str(encoder_path),
+                config=self.config.openvino,
+            )
+            encoder_backend.load()
+
+            decoder_backend = OpenVINOBackend(
+                model_path=str(decoder_path),
+                config=self.config.openvino,
+            )
+            decoder_backend.load()
+
+            self.sut = WhisperSUT(
+                config=self.config,
+                encoder_backend=encoder_backend,
+                decoder_backend=decoder_backend,
+                qsl=self.qsl,
+                scenario=self.config.scenario,
+            )
+            return
+
+        if model_path.is_dir():
+            # List available files in directory
+            xml_files = list(model_path.glob("*.xml"))
+            logger.error(f"Could not find encoder/decoder models in {model_path}")
+            logger.error(f"Available .xml files: {[f.name for f in xml_files]}")
+            raise ValueError(
+                f"Whisper model directory {model_path} does not contain "
+                f"expected encoder/decoder files. Found: {[f.name for f in xml_files]}"
+            )
+
+        # Single model file - use encoder-only SUT
+        if self.backend is None:
+            raise ValueError(f"Cannot load Whisper model from {model_path}")
+
         logger.info(f"Creating Whisper encoder-only SUT for scenario: {self.config.scenario}")
         self.sut = WhisperEncoderOnlySUT(
             config=self.config,
@@ -342,11 +408,61 @@ class BenchmarkRunner:
         if self.config.test_mode == TestMode.ACCURACY_ONLY:
             self._compute_accuracy()
             self._results["accuracy"] = self._accuracy_results
+            self._save_mlperf_accuracy_log()
 
         lg.DestroySUT(sut_handle)
         lg.DestroyQSL(qsl_handle)
 
         return self._results
+
+    def _save_mlperf_accuracy_log(self) -> None:
+        """Save accuracy results in MLPerf-compatible format.
+
+        Writes mlperf_log_accuracy.json to the results directory.
+        This file is required for official MLPerf submission.
+        """
+        if not self._accuracy_results:
+            return
+
+        # Determine primary accuracy metric based on model type
+        model_type = self.config.model.model_type
+        if model_type == ModelType.RESNET50:
+            primary_metric = "top1_accuracy"
+            metric_value = self._accuracy_results.get("top1_accuracy", 0.0)
+        elif model_type == ModelType.BERT:
+            primary_metric = "f1"
+            metric_value = self._accuracy_results.get("f1", 0.0)
+        elif model_type == ModelType.RETINANET:
+            primary_metric = "mAP"
+            metric_value = self._accuracy_results.get("mAP", 0.0)
+        elif model_type == ModelType.WHISPER:
+            primary_metric = "word_accuracy"
+            metric_value = self._accuracy_results.get("word_accuracy", 0.0)
+        else:
+            primary_metric = "accuracy"
+            metric_value = 0.0
+
+        # MLPerf accuracy log format
+        accuracy_log = {
+            "accuracy_results": {
+                primary_metric: metric_value,
+                **self._accuracy_results,
+            },
+            "model": self.config.model.name,
+            "model_type": model_type.value if model_type else "unknown",
+            "scenario": self.config.scenario.value,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+        # Write to mlperf_log_accuracy.json in results directory
+        results_dir = Path(self.config.results_dir)
+        results_dir.mkdir(parents=True, exist_ok=True)
+        accuracy_log_path = results_dir / "mlperf_log_accuracy.json"
+
+        with open(accuracy_log_path, "w") as f:
+            json.dump(accuracy_log, f, indent=2, default=str)
+
+        logger.info(f"MLPerf accuracy log saved to {accuracy_log_path}")
 
     def _compute_accuracy(self) -> None:
         """Compute accuracy metrics based on model type."""
@@ -404,6 +520,7 @@ class BenchmarkRunner:
         predictions = self.sut.get_predictions()
 
         if not predictions:
+            logger.error("No predictions found!")
             self._accuracy_results = {'word_accuracy': 0.0, 'wer': 0.0, 'num_samples': 0}
             return
 

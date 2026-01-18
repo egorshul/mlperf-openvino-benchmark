@@ -24,6 +24,31 @@ N_MELS = 80
 CHUNK_LENGTH = 30  # seconds
 N_SAMPLES = CHUNK_LENGTH * SAMPLE_RATE  # 480000 samples for 30 seconds
 
+# Global feature extractor (lazy loaded)
+_feature_extractor = None
+
+
+def get_whisper_feature_extractor():
+    """Get or create WhisperFeatureExtractor for audio preprocessing."""
+    global _feature_extractor
+    if _feature_extractor is None:
+        try:
+            from transformers import WhisperFeatureExtractor
+            _feature_extractor = WhisperFeatureExtractor.from_pretrained(
+                "openai/whisper-large-v3"
+            )
+            logger.info("Using WhisperFeatureExtractor for audio preprocessing")
+        except ImportError:
+            logger.warning(
+                "transformers not available, falling back to manual mel spectrogram. "
+                "Install with: pip install transformers"
+            )
+            _feature_extractor = False  # Mark as unavailable
+        except Exception as e:
+            logger.warning(f"Failed to load WhisperFeatureExtractor: {e}")
+            _feature_extractor = False
+    return _feature_extractor if _feature_extractor else None
+
 
 def load_audio(file_path: str, sr: int = SAMPLE_RATE) -> np.ndarray:
     """
@@ -221,35 +246,193 @@ class LibriSpeechDataset(BaseDataset):
         """Load dataset metadata."""
         if self._is_loaded:
             return
-        
+
         logger.info(f"Loading LibriSpeech dataset from {self.data_path}")
-        
-        # Find transcript file
-        if self.transcript_path:
-            transcript_file = Path(self.transcript_path)
-        else:
-            # Try common names
-            for name in ["transcripts.txt", "dev-clean.txt", "test-clean.txt"]:
-                transcript_file = self.data_path / name
-                if transcript_file.exists():
+
+        # Try JSON manifest first (MLPerf/MLCommons format)
+        manifest_file = None
+        manifest_names = [
+            "dev-all-repack.json",  # MLCommons repackaged format
+            "dev-all.json",         # MLCommons merged format
+            "manifest.json",        # Generic manifest
+            "dev-clean.json",       # Dev-clean split
+            "dev-other.json",       # Dev-other split
+        ]
+
+        # Search in current directory and parent directory
+        search_paths = [self.data_path]
+        if self.data_path.parent != self.data_path:
+            search_paths.append(self.data_path.parent)
+
+        for search_path in search_paths:
+            for name in manifest_names:
+                candidate = search_path / name
+                if candidate.exists():
+                    manifest_file = candidate
+                    logger.info(f"Found manifest: {manifest_file}")
                     break
-            else:
-                # Scan for audio files without transcripts
-                logger.warning("No transcript file found, scanning for audio files")
-                transcript_file = None
-        
-        # Load samples
-        if transcript_file and transcript_file.exists():
-            self._load_from_transcript(transcript_file)
+            if manifest_file:
+                break
+
+        if manifest_file:
+            self._load_from_manifest(manifest_file)
         else:
-            self._scan_audio_files()
-        
+            # Fall back to transcript file
+            if self.transcript_path:
+                transcript_file = Path(self.transcript_path)
+            else:
+                # Try common names
+                transcript_file = None
+                transcript_names = [
+                    "transcripts.txt",
+                    "dev-clean.txt",
+                    "dev-other.txt",
+                    "test-clean.txt",
+                ]
+                for name in transcript_names:
+                    candidate = self.data_path / name
+                    if candidate.exists():
+                        transcript_file = candidate
+                        break
+
+                if not transcript_file:
+                    # Scan for audio files without transcripts
+                    logger.warning("No transcript file found, scanning for audio files")
+
+            # Load samples
+            if transcript_file and transcript_file.exists():
+                self._load_from_transcript(transcript_file)
+            else:
+                self._scan_audio_files()
+
+        if not self._samples:
+            logger.warning(f"No samples found in {self.data_path}")
+            logger.info("For LibriSpeech dataset, expected structure:")
+            logger.info("  data_path/")
+            logger.info("  ├── dev-all-repack.json (MLCommons manifest)")
+            logger.info("  └── *.wav or *.flac files")
+            logger.info("")
+            logger.info("Or use mlperf-ov download --model whisper to get the dataset")
+
         # Limit count if specified
         if self.count and self.count < len(self._samples):
             self._samples = self._samples[:self.count]
-        
+
         logger.info(f"Loaded {len(self._samples)} audio samples")
         self._is_loaded = True
+
+    def _load_from_manifest(self, manifest_file: Path) -> None:
+        """Load samples from JSON manifest file (MLPerf/MLCommons format).
+
+        Supports multiple manifest formats:
+        1. MLCommons format: {"files": [{"fname": "audio.wav"}], "transcript": "text"}
+        2. NeMo format: {"audio_filepath": "audio.wav", "text": "text"}
+        3. Simple format: {"audio_filepath": "audio.wav", "transcript": "text"}
+        """
+        import json
+
+        logger.info(f"Loading from manifest: {manifest_file}")
+
+        with open(manifest_file, 'r', encoding='utf-8') as f:
+            content = f.read().strip()
+
+        # Try to parse as JSON array or JSONL (newline-delimited JSON)
+        entries = []
+        if content.startswith('['):
+            # Standard JSON array
+            entries = json.loads(content)
+        else:
+            # JSONL format (one JSON object per line)
+            for line in content.split('\n'):
+                line = line.strip()
+                if line:
+                    try:
+                        entries.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+
+        logger.info(f"Found {len(entries)} entries in manifest")
+
+        for entry in entries:
+            # Extract audio path from various formats
+            audio_path = None
+
+            # MLCommons format: files[0].fname
+            if "files" in entry and isinstance(entry["files"], list) and entry["files"]:
+                fname = entry["files"][0].get("fname", "")
+                if fname:
+                    audio_path = fname
+
+            # Standard format: audio_filepath
+            if not audio_path:
+                audio_path = entry.get("audio_filepath", "")
+
+            # Alternative: audio_path directly
+            if not audio_path:
+                audio_path = entry.get("audio_path", "")
+
+            if not audio_path:
+                logger.debug(f"No audio path found in entry: {entry}")
+                continue
+
+            # Handle relative paths - resolve against manifest directory
+            if not Path(audio_path).is_absolute():
+                # First try relative to manifest file directory
+                manifest_dir = manifest_file.parent
+                candidate = manifest_dir / audio_path
+                if candidate.exists():
+                    audio_path = str(candidate)
+                else:
+                    # Try relative to data_path
+                    candidate = self.data_path / audio_path
+                    if candidate.exists():
+                        audio_path = str(candidate)
+                    else:
+                        # Try in audio subdirectory
+                        audio_name = Path(audio_path).name
+                        for subdir in ["audio", "wav", "flac", ""]:
+                            if subdir:
+                                candidate = self.data_path / subdir / audio_name
+                            else:
+                                candidate = self.data_path / audio_name
+                            if candidate.exists():
+                                audio_path = str(candidate)
+                                break
+
+            # Skip if file doesn't exist
+            if not Path(audio_path).exists():
+                logger.debug(f"Audio file not found: {audio_path}")
+                continue
+
+            # Extract transcript from various fields
+            transcript = entry.get("transcript", "")
+            if not transcript:
+                transcript = entry.get("text", "")
+            if not transcript and "text_filepath" in entry:
+                text_path = Path(entry["text_filepath"])
+                if not text_path.is_absolute():
+                    text_path = manifest_file.parent / text_path
+                if text_path.exists():
+                    transcript = text_path.read_text().strip()
+
+            # Extract ID
+            sample_id = entry.get("utterance_id", "")
+            if not sample_id:
+                sample_id = entry.get("id", Path(audio_path).stem)
+
+            # Extract duration
+            duration = entry.get("duration", 0.0)
+            if not duration and "original_duration" in entry:
+                duration = entry.get("original_duration", 0.0)
+
+            self._samples.append({
+                "id": sample_id,
+                "audio_path": audio_path,
+                "transcript": transcript,
+                "duration": duration,
+            })
+
+        logger.info(f"Loaded {len(self._samples)} valid samples from manifest")
     
     def _load_from_transcript(self, transcript_file: Path) -> None:
         """Load samples from transcript file."""
@@ -315,32 +498,44 @@ class LibriSpeechDataset(BaseDataset):
     def get_sample(self, index: int) -> Tuple[np.ndarray, str]:
         """
         Get preprocessed audio sample.
-        
+
         Args:
             index: Sample index
-            
+
         Returns:
-            Tuple of (mel_spectrogram, transcript)
-            mel_spectrogram shape: (1, n_mels, time_frames)
+            Tuple of (input_features, transcript)
+            input_features shape: (1, n_mels, time_frames) - typically (1, 128, 3000) for Whisper
         """
         if index in self._cache:
-            mel = self._cache[index]
+            features = self._cache[index]
         else:
             sample = self._samples[index]
             audio = load_audio(sample["audio_path"])
-            
-            # Pad or trim to chunk length
-            audio = pad_or_trim(audio, N_SAMPLES)
-            
-            # Compute mel spectrogram
-            mel = log_mel_spectrogram(audio)
-            
-            self._cache[index] = mel
-        
-        # Add batch dimension
-        mel = mel[np.newaxis, ...]  # (1, n_mels, time_frames)
-        
-        return mel, self._samples[index]["transcript"]
+
+            # Try to use WhisperFeatureExtractor for correct preprocessing
+            feature_extractor = get_whisper_feature_extractor()
+
+            if feature_extractor is not None:
+                # Use HuggingFace feature extractor (produces correct shape for OpenVINO model)
+                inputs = feature_extractor(
+                    audio,
+                    sampling_rate=SAMPLE_RATE,
+                    return_tensors="np",
+                )
+                features = inputs["input_features"]  # Shape: (1, 128, 3000) or (1, 80, 3000)
+            else:
+                # Fallback to manual mel spectrogram
+                audio = pad_or_trim(audio, N_SAMPLES)
+                mel = log_mel_spectrogram(audio)
+                features = mel[np.newaxis, ...]  # (1, n_mels, time_frames)
+
+            self._cache[index] = features
+
+        # Ensure we have batch dimension
+        if features.ndim == 2:
+            features = features[np.newaxis, ...]
+
+        return features, self._samples[index]["transcript"]
     
     def get_samples(self, indices: List[int]) -> Tuple[np.ndarray, List[str]]:
         """
@@ -403,6 +598,9 @@ class LibriSpeechDataset(BaseDataset):
 
         Word Accuracy = 1 - WER (Word Error Rate)
 
+        Uses EnglishTextNormalizer from transformers for proper text normalization
+        as required by MLCommons Whisper benchmark specification.
+
         Args:
             predictions: Predicted transcriptions
             ground_truth: Ground truth transcriptions
@@ -412,55 +610,79 @@ class LibriSpeechDataset(BaseDataset):
         """
         try:
             from jiwer import wer, cer
-
-            # Normalize texts
-            predictions = [p.upper().strip() for p in predictions]
-            ground_truth = [g.upper().strip() for g in ground_truth]
-
-            # Filter out empty references
-            valid_pairs = [
-                (p, g) for p, g in zip(predictions, ground_truth) if g
-            ]
-
-            if not valid_pairs:
-                return {
-                    "word_accuracy": 0.0,
-                    "wer": 0.0,
-                    "cer": 0.0,
-                    "num_samples": 0,
-                }
-
-            preds, refs = zip(*valid_pairs)
-
-            word_error_rate = wer(list(refs), list(preds))
-            char_error_rate = cer(list(refs), list(preds))
-
-            # MLPerf v5.1 uses Word Accuracy = 1 - WER
-            word_accuracy = 1.0 - word_error_rate
-
-            return {
-                "word_accuracy": word_accuracy,  # Primary MLPerf metric
-                "wer": word_error_rate,
-                "cer": char_error_rate,
-                "num_samples": len(valid_pairs),
-            }
-
         except ImportError:
             logger.warning("jiwer not installed, computing simple accuracy")
-
             # Simple exact match accuracy
             correct = sum(
                 1 for p, g in zip(predictions, ground_truth)
                 if p.upper().strip() == g.upper().strip()
             )
-
             exact_match = correct / len(predictions) if predictions else 0.0
-
             return {
-                "word_accuracy": exact_match,  # Approximation when jiwer unavailable
+                "word_accuracy": exact_match,
                 "exact_match": exact_match,
                 "num_samples": len(predictions),
             }
+
+        # Try to use Whisper's EnglishTextNormalizer (MLCommons standard)
+        normalizer = None
+        try:
+            # Method 1: Use WhisperTokenizer's normalize method (recommended)
+            from transformers import WhisperTokenizer
+            tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-large-v3")
+            # The tokenizer has a normalize() method that uses EnglishTextNormalizer internally
+            normalizer = tokenizer.normalize
+            logger.info("Using WhisperTokenizer.normalize for WER calculation (MLCommons standard)")
+        except Exception as e1:
+            try:
+                # Method 2: Try BasicTextNormalizer (doesn't need spelling mapping)
+                from transformers.models.whisper.english_normalizer import BasicTextNormalizer
+                normalizer = BasicTextNormalizer()
+                logger.info("Using BasicTextNormalizer for WER calculation")
+            except Exception as e2:
+                logger.warning(
+                    f"Text normalizer not available ({e1}), using basic normalization. "
+                    "This may result in LOWER accuracy scores! "
+                    "Install/upgrade transformers: pip install transformers>=4.30"
+                )
+
+        # Normalize texts
+        if normalizer is not None:
+            # Use Whisper's English normalizer (handles numbers, contractions, etc.)
+            predictions_norm = [normalizer(p) for p in predictions]
+            ground_truth_norm = [normalizer(g) for g in ground_truth]
+        else:
+            # Fallback: basic normalization (lowercase, strip whitespace)
+            predictions_norm = [p.lower().strip() for p in predictions]
+            ground_truth_norm = [g.lower().strip() for g in ground_truth]
+
+        # Filter out empty references
+        valid_pairs = [
+            (p, g) for p, g in zip(predictions_norm, ground_truth_norm) if g
+        ]
+
+        if not valid_pairs:
+            return {
+                "word_accuracy": 0.0,
+                "wer": 0.0,
+                "cer": 0.0,
+                "num_samples": 0,
+            }
+
+        preds, refs = zip(*valid_pairs)
+
+        word_error_rate = wer(list(refs), list(preds))
+        char_error_rate = cer(list(refs), list(preds))
+
+        # MLPerf v5.1 uses Word Accuracy = 1 - WER
+        word_accuracy = 1.0 - word_error_rate
+
+        return {
+            "word_accuracy": word_accuracy,  # Primary MLPerf metric
+            "wer": word_error_rate,
+            "cer": char_error_rate,
+            "num_samples": len(valid_pairs),
+        }
 
 
 class LibriSpeechQSL(QuerySampleLibrary):

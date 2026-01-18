@@ -301,16 +301,84 @@ def _download_whisper_from_hf(output_dir: str, model_id: str) -> Dict[str, str]:
     }
 
 
+def _configure_hf_download() -> None:
+    """
+    Configure HuggingFace Hub for reliable large file downloads.
+
+    Sets timeouts and enables resume for interrupted downloads.
+    """
+    try:
+        from huggingface_hub import constants
+        import os
+
+        # Enable resume downloads (default in newer versions)
+        os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
+
+        # Set longer timeout for large files (5 minutes connection, 30 minutes read)
+        os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "1800")
+
+    except ImportError:
+        pass
+
+
+def _download_with_retry(
+    download_func,
+    max_retries: int = 3,
+    initial_delay: float = 2.0,
+) -> any:
+    """
+    Execute download function with retry logic and exponential backoff.
+
+    Args:
+        download_func: Function to call for download
+        max_retries: Maximum number of retry attempts
+        initial_delay: Initial delay between retries in seconds
+
+    Returns:
+        Result from download_func
+    """
+    import time
+
+    last_error = None
+    delay = initial_delay
+
+    for attempt in range(max_retries + 1):
+        try:
+            return download_func()
+        except Exception as e:
+            last_error = e
+            error_str = str(e).lower()
+
+            # Check if it's a retryable error
+            retryable = any(x in error_str for x in [
+                "timeout", "connection", "network", "reset",
+                "incomplete", "aborted", "refused"
+            ])
+
+            if not retryable or attempt == max_retries:
+                break
+
+            logger.warning(
+                f"Download attempt {attempt + 1}/{max_retries + 1} failed: {e}. "
+                f"Retrying in {delay:.0f}s..."
+            )
+            time.sleep(delay)
+            delay *= 2  # Exponential backoff
+
+    raise RuntimeError(f"Download failed after {max_retries + 1} attempts: {last_error}")
+
+
 def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str]:
     """
     Export Whisper model to OpenVINO IR format.
-    
+
     This creates separate encoder and decoder models for optimal performance.
-    
+    Uses robust download with retry logic and timeout handling.
+
     Args:
         output_dir: Output directory
         model_id: HuggingFace model ID
-        
+
     Returns:
         Dictionary with paths to encoder and decoder IR models
     """
@@ -322,18 +390,21 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
             "optimum-intel is required for Whisper export to OpenVINO. "
             "Install with: pip install optimum[openvino]"
         )
-    
+
+    # Configure HuggingFace Hub for reliable downloads
+    _configure_hf_download()
+
     logger.info(f"Exporting Whisper model to OpenVINO: {model_id}")
-    
+
     output_path = Path(output_dir)
     model_name = model_id.split("/")[-1]
     ov_model_path = output_path / f"{model_name}-openvino"
-    
+
     # Check if already exported
     if ov_model_path.exists():
         encoder_path = ov_model_path / "encoder_model.xml"
         decoder_path = ov_model_path / "decoder_model.xml"
-        
+
         if encoder_path.exists() and decoder_path.exists():
             logger.info(f"OpenVINO model already exists at {ov_model_path}")
             return {
@@ -341,25 +412,34 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
                 "decoder_path": str(decoder_path),
                 "model_path": str(ov_model_path),
             }
-    
-    # Export model
-    logger.info("This may take several minutes...")
-    
-    model = OVModelForSpeechSeq2Seq.from_pretrained(
-        model_id,
-        export=True,
-        compile=False,
-    )
-    
+
+    # Export model with retry logic
+    logger.info("Downloading and exporting model (this may take several minutes)...")
+    logger.info("Large files (3+ GB) - download will resume if interrupted.")
+
+    def do_export():
+        return OVModelForSpeechSeq2Seq.from_pretrained(
+            model_id,
+            export=True,
+            compile=False,
+        )
+
+    model = _download_with_retry(do_export, max_retries=3)
+
     # Save model
     model.save_pretrained(str(ov_model_path))
-    
-    # Also save processor
-    processor = WhisperProcessor.from_pretrained(model_id)
+
+    # Also save processor with retry
+    logger.info("Downloading processor...")
+
+    def do_processor():
+        return WhisperProcessor.from_pretrained(model_id)
+
+    processor = _download_with_retry(do_processor, max_retries=3)
     processor.save_pretrained(str(ov_model_path))
-    
+
     logger.info(f"OpenVINO model saved to {ov_model_path}")
-    
+
     return {
         "encoder_path": str(ov_model_path / "encoder_model.xml"),
         "decoder_path": str(ov_model_path / "decoder_model.xml"),

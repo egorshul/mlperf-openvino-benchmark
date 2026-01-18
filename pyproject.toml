@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mlperf-openvino-benchmark"
-version = "0.2.0"
+version = "1.0.0"
 description = "MLPerf v5.1 compatible inference benchmark using OpenVINO backend for CPU performance testing"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -14,7 +14,7 @@ authors = [
 ]
 keywords = ["mlperf", "openvino", "benchmark", "inference", "cpu"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Apache Software License",

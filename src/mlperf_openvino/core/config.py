@@ -2,7 +2,6 @@
 Configuration management for MLPerf OpenVINO Benchmark.
 """
 
-import os
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -33,7 +32,6 @@ class ModelType(Enum):
     BERT = "bert"
     RETINANET = "retinanet"
     WHISPER = "whisper"
-    SDXL = "sdxl"
 
 
 @dataclass

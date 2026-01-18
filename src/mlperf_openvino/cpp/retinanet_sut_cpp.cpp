@@ -63,32 +63,26 @@ void RetinaNetCppSUT::map_output_names() {
     }
 
     // Fallback: use positional mapping
-    // MLPerf RetinaNet ONNX model outputs: [0]=boxes, [1]=labels, [2]=scores
+    // MLPerf RetinaNet ONNX model outputs: [0]=boxes, [1]=scores, [2]=labels
     if (boxes_name_.empty() && outputs.size() >= 1) {
         boxes_name_ = outputs[0].get_any_name();
         boxes_idx_ = 0;
     }
-    if (labels_name_.empty() && outputs.size() >= 2) {
-        labels_name_ = outputs[1].get_any_name();
-        labels_idx_ = 1;
+    if (scores_name_.empty() && outputs.size() >= 2) {
+        scores_name_ = outputs[1].get_any_name();
+        scores_idx_ = 1;
     }
-    if (scores_name_.empty() && outputs.size() >= 3) {
-        scores_name_ = outputs[2].get_any_name();
-        scores_idx_ = 2;
+    if (labels_name_.empty() && outputs.size() >= 3) {
+        labels_name_ = outputs[2].get_any_name();
+        labels_idx_ = 2;
     }
 
-    std::cout << "[RetinaNetCppSUT] Output mapping:" << std::endl;
-    std::cout << "  boxes[" << boxes_idx_ << "]: " << boxes_name_ << std::endl;
-    std::cout << "  scores[" << scores_idx_ << "]: " << scores_name_ << std::endl;
-    std::cout << "  labels[" << labels_idx_ << "]: " << labels_name_ << std::endl;
 }
 
 void RetinaNetCppSUT::load() {
     if (loaded_) {
         return;
     }
-
-    std::cout << "[RetinaNetCppSUT] Loading model: " << model_path_ << std::endl;
 
     model_ = core_.read_model(model_path_);
 
@@ -105,8 +99,6 @@ void RetinaNetCppSUT::load() {
     if (input_shape_.size() > 0 && input_shape_[0] == 0) {
         input_shape_[0] = 1;
     }
-
-    std::cout << "[RetinaNetCppSUT] Input: " << input_name_ << ", shape: " << input_shape_ << std::endl;
 
     // Map output names
     map_output_names();
@@ -128,7 +120,6 @@ void RetinaNetCppSUT::load() {
         properties[ov::hint::enable_cpu_pinning.name()] = true;
     }
 
-    std::cout << "[RetinaNetCppSUT] Compiling model for device: " << device_ << std::endl;
     compiled_model_ = core_.compile_model(model_, device_, properties);
 
     try {
@@ -136,8 +127,6 @@ void RetinaNetCppSUT::load() {
     } catch (...) {
         optimal_nireq_ = 4;
     }
-
-    std::cout << "[RetinaNetCppSUT] Optimal requests: " << optimal_nireq_ << std::endl;
 
     // Create InferRequest pool
     int num_requests = std::max(optimal_nireq_ * 2, 16);
@@ -162,10 +151,7 @@ void RetinaNetCppSUT::load() {
         available_ids_.push(static_cast<size_t>(i));
     }
 
-    std::cout << "[RetinaNetCppSUT] Created " << num_requests << " inference requests" << std::endl;
-
     loaded_ = true;
-    std::cout << "[RetinaNetCppSUT] Model loaded successfully" << std::endl;
 }
 
 std::vector<size_t> RetinaNetCppSUT::get_input_shape() const {
@@ -231,15 +217,38 @@ void RetinaNetCppSUT::on_inference_complete(RetinaNetInferContext* ctx) {
         size_t boxes_size = boxes_tensor.get_size();
         size_t scores_size = scores_tensor.get_size();
 
-        // Labels might not always be present
+        // Labels handling - model outputs int64_t, we convert to float for API compatibility
+        std::vector<float> labels_float;
         const float* labels_data = nullptr;
         size_t labels_size = 0;
 
         if (labels_idx_ < static_cast<int>(ctx->request.get_compiled_model().outputs().size())) {
             try {
                 ov::Tensor labels_tensor = ctx->request.get_output_tensor(labels_idx_);
-                labels_data = labels_tensor.data<float>();
                 labels_size = labels_tensor.get_size();
+
+                // Check element type and convert if needed
+                auto elem_type = labels_tensor.get_element_type();
+                if (elem_type == ov::element::i64) {
+                    // Model outputs int64_t labels - convert to float
+                    const int64_t* labels_int64 = labels_tensor.data<int64_t>();
+                    labels_float.resize(labels_size);
+                    for (size_t i = 0; i < labels_size; ++i) {
+                        labels_float[i] = static_cast<float>(labels_int64[i]);
+                    }
+                    labels_data = labels_float.data();
+                } else if (elem_type == ov::element::i32) {
+                    // Model outputs int32_t labels - convert to float
+                    const int32_t* labels_int32 = labels_tensor.data<int32_t>();
+                    labels_float.resize(labels_size);
+                    for (size_t i = 0; i < labels_size; ++i) {
+                        labels_float[i] = static_cast<float>(labels_int32[i]);
+                    }
+                    labels_data = labels_float.data();
+                } else {
+                    // Assume float32
+                    labels_data = labels_tensor.data<float>();
+                }
             } catch (...) {
                 // Labels output not available
             }

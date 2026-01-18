@@ -5,8 +5,7 @@
  * ensuring the critical inference callbacks run without GIL.
  *
  * SUT types:
- * - CppSUT: async inference for ResNet50 (single float32 input)
- * - CppOfflineSUT: sync batch inference for Offline scenario
+ * - ResNetCppSUT: async inference for ResNet50 (single float32 input)
  * - BertCppSUT: async inference for BERT (3x int64 inputs, 2x float32 outputs)
  * - RetinaNetCppSUT: async inference for RetinaNet (1x float32 input, 3x outputs)
  */
@@ -18,8 +17,7 @@
 
 #include <cstring>
 
-#include "sut_cpp.hpp"
-#include "offline_sut.hpp"
+#include "resnet_sut_cpp.hpp"
 #include "bert_sut_cpp.hpp"
 #include "retinanet_sut_cpp.hpp"
 
@@ -28,7 +26,7 @@ namespace py = pybind11;
 PYBIND11_MODULE(_cpp_sut, m) {
     m.doc() = "C++ SUT for maximum throughput (bypasses Python GIL)";
 
-    py::class_<mlperf_ov::CppSUT>(m, "CppSUT")
+    py::class_<mlperf_ov::ResNetCppSUT>(m, "ResNetCppSUT")
         .def(py::init<const std::string&, const std::string&, int, const std::string&>(),
              py::arg("model_path"),
              py::arg("device") = "CPU",
@@ -36,24 +34,24 @@ PYBIND11_MODULE(_cpp_sut, m) {
              py::arg("performance_hint") = "THROUGHPUT",
              "Create C++ SUT instance")
 
-        .def("load", &mlperf_ov::CppSUT::load,
+        .def("load", &mlperf_ov::ResNetCppSUT::load,
              py::call_guard<py::gil_scoped_release>(),  // Release GIL during load
              "Load and compile the model")
 
-        .def("is_loaded", &mlperf_ov::CppSUT::is_loaded,
+        .def("is_loaded", &mlperf_ov::ResNetCppSUT::is_loaded,
              "Check if model is loaded")
 
-        .def("get_optimal_nireq", &mlperf_ov::CppSUT::get_optimal_nireq,
+        .def("get_optimal_nireq", &mlperf_ov::ResNetCppSUT::get_optimal_nireq,
              "Get optimal number of inference requests")
 
-        .def("get_input_name", &mlperf_ov::CppSUT::get_input_name,
+        .def("get_input_name", &mlperf_ov::ResNetCppSUT::get_input_name,
              "Get input tensor name")
 
-        .def("get_output_name", &mlperf_ov::CppSUT::get_output_name,
+        .def("get_output_name", &mlperf_ov::ResNetCppSUT::get_output_name,
              "Get output tensor name")
 
         .def("start_async",
-             [](mlperf_ov::CppSUT& self,
+             [](mlperf_ov::ResNetCppSUT& self,
                 py::array_t<float, py::array::c_style | py::array::forcecast> input,
                 uint64_t query_id,
                 int sample_idx) {
@@ -72,28 +70,28 @@ PYBIND11_MODULE(_cpp_sut, m) {
              py::arg("sample_idx"),
              "Start async inference (GIL released)")
 
-        .def("wait_all", &mlperf_ov::CppSUT::wait_all,
+        .def("wait_all", &mlperf_ov::ResNetCppSUT::wait_all,
              py::call_guard<py::gil_scoped_release>(),  // Release GIL during wait
              "Wait for all pending inferences")
 
-        .def("get_completed_count", &mlperf_ov::CppSUT::get_completed_count,
+        .def("get_completed_count", &mlperf_ov::ResNetCppSUT::get_completed_count,
              "Get number of completed samples")
 
-        .def("get_issued_count", &mlperf_ov::CppSUT::get_issued_count,
+        .def("get_issued_count", &mlperf_ov::ResNetCppSUT::get_issued_count,
              "Get number of issued samples")
 
-        .def("reset_counters", &mlperf_ov::CppSUT::reset_counters,
+        .def("reset_counters", &mlperf_ov::ResNetCppSUT::reset_counters,
              "Reset counters")
 
-        .def("set_store_predictions", &mlperf_ov::CppSUT::set_store_predictions,
+        .def("set_store_predictions", &mlperf_ov::ResNetCppSUT::set_store_predictions,
              py::arg("store"),
              "Enable/disable storing predictions")
 
-        .def("get_predictions", &mlperf_ov::CppSUT::get_predictions,
+        .def("get_predictions", &mlperf_ov::ResNetCppSUT::get_predictions,
              "Get stored predictions")
 
         .def("set_response_callback",
-             [](mlperf_ov::CppSUT& self, py::function callback) {
+             [](mlperf_ov::ResNetCppSUT& self, py::function callback) {
                  // Wrap Python callback to be called from C++
                  // Note: This callback will be called from C++ thread,
                  // so we need to acquire GIL
@@ -118,67 +116,6 @@ PYBIND11_MODULE(_cpp_sut, m) {
              },
              py::arg("callback"),
              "Set response callback (called when inference completes)");
-
-    // CppOfflineSUT - optimized for Offline scenario with batch inference
-    py::class_<mlperf_ov::CppOfflineSUT>(m, "CppOfflineSUT")
-        .def(py::init<const std::string&, const std::string&, int, int>(),
-             py::arg("model_path"),
-             py::arg("device") = "CPU",
-             py::arg("batch_size") = 32,
-             py::arg("num_streams") = 0,
-             "Create C++ Offline SUT instance with batch inference")
-
-        .def("load", &mlperf_ov::CppOfflineSUT::load,
-             py::call_guard<py::gil_scoped_release>(),
-             "Load and compile the model")
-
-        .def("is_loaded", &mlperf_ov::CppOfflineSUT::is_loaded,
-             "Check if model is loaded")
-
-        .def("get_batch_size", &mlperf_ov::CppOfflineSUT::get_batch_size,
-             "Get batch size")
-
-        .def("get_input_name", &mlperf_ov::CppOfflineSUT::get_input_name,
-             "Get input tensor name")
-
-        .def("get_output_name", &mlperf_ov::CppOfflineSUT::get_output_name,
-             "Get output tensor name")
-
-        .def("get_sample_size", &mlperf_ov::CppOfflineSUT::get_sample_size,
-             "Get single sample size in floats")
-
-        .def("infer_batch",
-             [](mlperf_ov::CppOfflineSUT& self,
-                py::array_t<float, py::array::c_style | py::array::forcecast> input,
-                int num_samples) {
-                 py::buffer_info buf = input.request();
-                 const float* data = static_cast<const float*>(buf.ptr);
-
-                 // Release GIL during inference
-                 std::vector<std::vector<float>> results;
-                 {
-                     py::gil_scoped_release release;
-                     results = self.infer_batch(data, num_samples);
-                 }
-
-                 // Convert results to list of numpy arrays
-                 py::list py_results;
-                 for (const auto& result : results) {
-                     py::array_t<float> arr(result.size());
-                     std::memcpy(arr.mutable_data(), result.data(), result.size() * sizeof(float));
-                     py_results.append(arr);
-                 }
-                 return py_results;
-             },
-             py::arg("input"),
-             py::arg("num_samples"),
-             "Infer a batch of samples (GIL released during inference)")
-
-        .def("get_completed_count", &mlperf_ov::CppOfflineSUT::get_completed_count,
-             "Get number of completed samples")
-
-        .def("reset_counters", &mlperf_ov::CppOfflineSUT::reset_counters,
-             "Reset counters");
 
     // BertCppSUT - optimized for BERT with 3 int64 inputs and 2 float outputs
     py::class_<mlperf_ov::BertCppSUT>(m, "BertCppSUT")
@@ -443,5 +380,5 @@ PYBIND11_MODULE(_cpp_sut, m) {
              "Set response callback (receives query_id, boxes, scores, labels)");
 
     // Version info
-    m.attr("__version__") = "1.2.0";
+    m.attr("__version__") = "1.0.0";
 }
