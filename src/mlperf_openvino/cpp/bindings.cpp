@@ -380,5 +380,5 @@ PYBIND11_MODULE(_cpp_sut, m) {
              "Set response callback (receives query_id, boxes, scores, labels)");
 
     // Version info
-    m.attr("__version__") = "1.4.0";
+    m.attr("__version__") = "1.0.0";
 }

@@ -33,7 +33,6 @@ class ModelType(Enum):
     BERT = "bert"
     RETINANET = "retinanet"
     WHISPER = "whisper"
-    SDXL = "sdxl"
 
 
 @dataclass
