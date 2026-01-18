@@ -6,7 +6,6 @@ Supports multiple models: ResNet50, BERT, RetinaNet, Whisper.
 
 import json
 import logging
-import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -409,11 +408,61 @@ class BenchmarkRunner:
         if self.config.test_mode == TestMode.ACCURACY_ONLY:
             self._compute_accuracy()
             self._results["accuracy"] = self._accuracy_results
+            self._save_mlperf_accuracy_log()
 
         lg.DestroySUT(sut_handle)
         lg.DestroyQSL(qsl_handle)
 
         return self._results
+
+    def _save_mlperf_accuracy_log(self) -> None:
+        """Save accuracy results in MLPerf-compatible format.
+
+        Writes mlperf_log_accuracy.json to the results directory.
+        This file is required for official MLPerf submission.
+        """
+        if not self._accuracy_results:
+            return
+
+        # Determine primary accuracy metric based on model type
+        model_type = self.config.model.model_type
+        if model_type == ModelType.RESNET50:
+            primary_metric = "top1_accuracy"
+            metric_value = self._accuracy_results.get("top1_accuracy", 0.0)
+        elif model_type == ModelType.BERT:
+            primary_metric = "f1"
+            metric_value = self._accuracy_results.get("f1", 0.0)
+        elif model_type == ModelType.RETINANET:
+            primary_metric = "mAP"
+            metric_value = self._accuracy_results.get("mAP", 0.0)
+        elif model_type == ModelType.WHISPER:
+            primary_metric = "word_accuracy"
+            metric_value = self._accuracy_results.get("word_accuracy", 0.0)
+        else:
+            primary_metric = "accuracy"
+            metric_value = 0.0
+
+        # MLPerf accuracy log format
+        accuracy_log = {
+            "accuracy_results": {
+                primary_metric: metric_value,
+                **self._accuracy_results,
+            },
+            "model": self.config.model.name,
+            "model_type": model_type.value if model_type else "unknown",
+            "scenario": self.config.scenario.value,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+        # Write to mlperf_log_accuracy.json in results directory
+        results_dir = Path(self.config.results_dir)
+        results_dir.mkdir(parents=True, exist_ok=True)
+        accuracy_log_path = results_dir / "mlperf_log_accuracy.json"
+
+        with open(accuracy_log_path, "w") as f:
+            json.dump(accuracy_log, f, indent=2, default=str)
+
+        logger.info(f"MLPerf accuracy log saved to {accuracy_log_path}")
 
     def _compute_accuracy(self) -> None:
         """Compute accuracy metrics based on model type."""

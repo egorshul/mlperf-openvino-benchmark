@@ -96,8 +96,8 @@ class WhisperOptimumSUT:
         self._progress_update_interval = 0.5  # seconds
 
         # Create LoadGen handles
-        self._sut = None
-        self._qsl = None
+        self._sut_handle = None
+        self._qsl_handle = None
 
         # Load model and processor
         self._load_model()
@@ -271,22 +271,30 @@ class WhisperOptimumSUT:
 
         lg.QuerySamplesComplete(responses)
 
-    def get_sut(self):
-        """Get LoadGen SUT handle."""
-        if self._sut is None:
-            self._sut = lg.ConstructSUT(self.issue_queries, self.flush_queries)
-        return self._sut
+    def get_sut(self) -> Any:
+        """Get LoadGen SUT handle.
 
-    def get_qsl(self):
-        """Get LoadGen QSL handle."""
-        if self._qsl is None:
-            self._qsl = lg.ConstructQSL(
+        Returns:
+            LoadGen SUT handle for benchmark execution.
+        """
+        if self._sut_handle is None:
+            self._sut_handle = lg.ConstructSUT(self.issue_queries, self.flush_queries)
+        return self._sut_handle
+
+    def get_qsl(self) -> Any:
+        """Get LoadGen QSL handle.
+
+        Returns:
+            LoadGen QSL handle for sample management.
+        """
+        if self._qsl_handle is None:
+            self._qsl_handle = lg.ConstructQSL(
                 self.qsl.total_sample_count,
                 self.qsl.performance_sample_count,
                 self.qsl.load_query_samples,
                 self.qsl.unload_query_samples
             )
-        return self._qsl
+        return self._qsl_handle
 
     def get_predictions(self) -> Dict[int, str]:
         """Get all predictions."""
@@ -359,8 +367,8 @@ class WhisperSUT:
         self._progress_update_interval = 0.5  # seconds
 
         # Create LoadGen handles
-        self._sut = None
-        self._qsl = None
+        self._sut_handle = None
+        self._qsl_handle = None
 
         # Tokenizer for decoding (lazy loaded)
         self._tokenizer = None
@@ -715,30 +723,38 @@ class WhisperSUT:
 
         lg.QuerySamplesComplete(responses)
     
-    def get_sut(self):
-        """Get LoadGen SUT handle."""
-        if self._sut is None:
-            self._sut = lg.ConstructSUT(
+    def get_sut(self) -> Any:
+        """Get LoadGen SUT handle.
+
+        Returns:
+            LoadGen SUT handle for benchmark execution.
+        """
+        if self._sut_handle is None:
+            self._sut_handle = lg.ConstructSUT(
                 self.issue_queries,
                 self.flush_queries
             )
-        return self._sut
-    
-    def get_qsl(self):
-        """Get LoadGen QSL handle."""
-        if self._qsl is None:
-            self._qsl = lg.ConstructQSL(
+        return self._sut_handle
+
+    def get_qsl(self) -> Any:
+        """Get LoadGen QSL handle.
+
+        Returns:
+            LoadGen QSL handle for sample management.
+        """
+        if self._qsl_handle is None:
+            self._qsl_handle = lg.ConstructQSL(
                 self.qsl.total_sample_count,
                 self.qsl.performance_sample_count,
                 self.qsl.load_query_samples,
                 self.qsl.unload_query_samples
             )
-        return self._qsl
-    
+        return self._qsl_handle
+
     def get_predictions(self) -> Dict[int, str]:
         """Get all predictions."""
         return self._predictions.copy()
-    
+
     def reset(self) -> None:
         """Reset state for new run."""
         self._predictions.clear()
@@ -788,8 +804,9 @@ class WhisperEncoderOnlySUT:
         self._last_progress_update = 0.0
         self._progress_update_interval = 0.5  # seconds
 
-        self._sut = None
-        self._qsl = None
+        # Create LoadGen handles
+        self._sut_handle = None
+        self._qsl_handle = None
 
     def _start_progress(self, total: int, desc: str = "Processing") -> None:
         """Start progress tracking."""
@@ -881,30 +898,38 @@ class WhisperEncoderOnlySUT:
 
         lg.QuerySamplesComplete(responses)
 
-    def get_sut(self):
-        """Get LoadGen SUT handle."""
-        if self._sut is None:
-            self._sut = lg.ConstructSUT(
+    def get_sut(self) -> Any:
+        """Get LoadGen SUT handle.
+
+        Returns:
+            LoadGen SUT handle for benchmark execution.
+        """
+        if self._sut_handle is None:
+            self._sut_handle = lg.ConstructSUT(
                 self.issue_queries,
                 self.flush_queries
             )
-        return self._sut
-    
-    def get_qsl(self):
-        """Get LoadGen QSL handle."""
-        if self._qsl is None:
-            self._qsl = lg.ConstructQSL(
+        return self._sut_handle
+
+    def get_qsl(self) -> Any:
+        """Get LoadGen QSL handle.
+
+        Returns:
+            LoadGen QSL handle for sample management.
+        """
+        if self._qsl_handle is None:
+            self._qsl_handle = lg.ConstructQSL(
                 self.qsl.total_sample_count,
                 self.qsl.performance_sample_count,
                 self.qsl.load_query_samples,
                 self.qsl.unload_query_samples
             )
-        return self._qsl
-    
+        return self._qsl_handle
+
     def get_predictions(self) -> Dict[int, np.ndarray]:
         """Get all encoder outputs."""
         return self._predictions.copy()
-    
+
     def reset(self) -> None:
         """Reset state for new run."""
         self._predictions.clear()
