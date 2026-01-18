@@ -627,18 +627,21 @@ class LibriSpeechDataset(BaseDataset):
         # Try to use Whisper's EnglishTextNormalizer (MLCommons standard)
         normalizer = None
         try:
-            from transformers.models.whisper.english_normalizer import EnglishTextNormalizer
-            normalizer = EnglishTextNormalizer()
-            logger.info("Using EnglishTextNormalizer for WER calculation (MLCommons standard)")
-        except ImportError:
+            # Method 1: Use WhisperTokenizer's normalize method (recommended)
+            from transformers import WhisperTokenizer
+            tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-large-v3")
+            # The tokenizer has a normalize() method that uses EnglishTextNormalizer internally
+            normalizer = tokenizer.normalize
+            logger.info("Using WhisperTokenizer.normalize for WER calculation (MLCommons standard)")
+        except Exception as e1:
             try:
-                # Alternative import path
-                from transformers.models.whisper import english_normalizer
-                normalizer = english_normalizer.EnglishTextNormalizer()
-                logger.info("Using EnglishTextNormalizer for WER calculation (MLCommons standard)")
-            except ImportError:
+                # Method 2: Try BasicTextNormalizer (doesn't need spelling mapping)
+                from transformers.models.whisper.english_normalizer import BasicTextNormalizer
+                normalizer = BasicTextNormalizer()
+                logger.info("Using BasicTextNormalizer for WER calculation")
+            except Exception as e2:
                 logger.warning(
-                    "EnglishTextNormalizer not available, using basic normalization. "
+                    f"Text normalizer not available ({e1}), using basic normalization. "
                     "This may result in LOWER accuracy scores! "
                     "Install/upgrade transformers: pip install transformers>=4.30"
                 )
