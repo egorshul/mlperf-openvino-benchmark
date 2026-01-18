@@ -54,7 +54,6 @@ class OpenVINOConfig:
     enable_profiling: bool = False
     cache_dir: str = "./cache"
     performance_hint: str = "THROUGHPUT"  # THROUGHPUT or LATENCY
-    inference_precision: str = "FP32"
     bind_thread: bool = True
     threads_per_stream: int = 0
     enable_hyper_threading: bool = True
@@ -235,7 +234,6 @@ class BenchmarkConfig:
             enable_profiling=ov_data.get("enable_profiling", False),
             cache_dir=ov_data.get("cache_dir", "./cache"),
             performance_hint=ov_data.get("performance_hint", "THROUGHPUT"),
-            inference_precision=ov_data.get("inference_precision", "FP32"),
             bind_thread=cpu_data.get("bind_thread", True),
             threads_per_stream=cpu_data.get("threads_per_stream", 0),
             enable_hyper_threading=cpu_data.get("enable_hyper_threading", True),

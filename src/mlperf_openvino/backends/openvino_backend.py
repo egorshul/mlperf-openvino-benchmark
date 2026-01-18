@@ -90,6 +90,9 @@ class OpenVINOBackend(BaseBackend):
         # Initialize OpenVINO Core
         self._core = Core()
 
+        # Log available devices and their properties
+        self._log_device_info()
+
         # Create cache directory if specified
         if self.config.cache_dir:
             cache_path = Path(self.config.cache_dir)
@@ -231,6 +234,62 @@ class OpenVINOBackend(BaseBackend):
             self._request_queue.put(req)
 
         logger.info(f"Created {nireq} inference requests")
+
+    def _log_device_info(self) -> None:
+        """Log available devices and their supported properties."""
+        try:
+            available_devices = self._core.available_devices
+            logger.info(f"Available devices: {available_devices}")
+
+            # Log info for the target device
+            device = self.config.device
+            if device in available_devices or device == "CPU":
+                try:
+                    full_name = self._core.get_property(device, "FULL_DEVICE_NAME")
+                    logger.info(f"Device '{device}' full name: {full_name}")
+                except Exception:
+                    pass
+
+                # Log supported properties (useful for debugging custom plugins)
+                try:
+                    supported_props = self._core.get_property(device, "SUPPORTED_PROPERTIES")
+                    logger.debug(f"Device '{device}' supported properties: {supported_props}")
+                except Exception:
+                    pass
+            else:
+                logger.warning(f"Target device '{device}' not in available devices: {available_devices}")
+        except Exception as e:
+            logger.debug(f"Could not get device info: {e}")
+
+    def get_device_properties(self) -> Dict[str, Any]:
+        """
+        Get all supported properties for the configured device.
+
+        Useful for debugging and understanding device capabilities.
+
+        Returns:
+            Dictionary of property names to their values
+        """
+        if not self._core:
+            return {}
+
+        result = {}
+        device = self.config.device
+
+        try:
+            # Get list of supported properties
+            supported = self._core.get_property(device, "SUPPORTED_PROPERTIES")
+
+            for prop in supported:
+                try:
+                    value = self._core.get_property(device, prop)
+                    result[prop] = value
+                except Exception:
+                    result[prop] = "<not readable>"
+        except Exception as e:
+            logger.debug(f"Could not get device properties: {e}")
+
+        return result
 
     def add_infer_requests(self, count: int) -> None:
         """Add more inference requests for higher parallelism (e.g., Server mode)."""
@@ -518,7 +577,6 @@ class OpenVINOBackend(BaseBackend):
                 "device": self.config.device,
                 "optimal_nireq": self._optimal_nireq,
                 "performance_hint": self.config.performance_hint,
-                "inference_precision": self.config.inference_precision,
             })
             
             # Get device info

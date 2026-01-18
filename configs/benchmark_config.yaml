@@ -157,10 +157,7 @@ openvino:
   
   # Performance hints
   performance_hint: "THROUGHPUT"  # THROUGHPUT or LATENCY
-  
-  # Precision options
-  inference_precision: "FP32"  # FP32, FP16, INT8
-  
+
   # CPU-specific options
   cpu:
     bind_thread: true

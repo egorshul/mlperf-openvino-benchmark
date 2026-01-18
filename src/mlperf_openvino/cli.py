@@ -366,6 +366,32 @@ def info():
     try:
         import openvino as ov
         click.echo(f"  OpenVINO: {ov.__version__}")
+
+        # Show available devices
+        core = ov.Core()
+        devices = core.available_devices
+        click.echo(f"\nOpenVINO Devices:")
+        for device in devices:
+            try:
+                full_name = core.get_property(device, "FULL_DEVICE_NAME")
+                click.echo(f"  {device}: {full_name}")
+            except Exception:
+                click.echo(f"  {device}")
+
+            # Show key properties for each device
+            try:
+                opt_nireq = core.get_property(device, "OPTIMAL_NUMBER_OF_INFER_REQUESTS")
+                click.echo(f"    - Optimal infer requests: {opt_nireq}")
+            except Exception:
+                pass
+
+            try:
+                supported = core.get_property(device, "SUPPORTED_PROPERTIES")
+                # Show count of supported properties
+                click.echo(f"    - Supported properties: {len(supported)}")
+            except Exception:
+                pass
+
     except ImportError:
         click.echo("  OpenVINO: Not installed")
 
@@ -785,6 +811,87 @@ def list_models():
     click.echo("Quick start:")
     click.echo("  mlperf-ov setup --model <model_id>")
     click.echo("  mlperf-ov run --model <model_id> --mode both")
+    click.echo("")
+
+
+@main.command('device-info')
+@click.option('--device', '-d', type=str, default='CPU',
+              help='Device to show info for (e.g., CPU, GPU, or custom device name)')
+@click.option('--all-properties', is_flag=True,
+              help='Show all supported properties with their values')
+def device_info(device: str, all_properties: bool):
+    """
+    Show detailed information about an OpenVINO device.
+
+    Useful for debugging custom plugins and understanding device capabilities.
+
+    Examples:
+
+        mlperf-ov device-info --device CPU
+
+        mlperf-ov device-info --device MY_ACCELERATOR --all-properties
+    """
+    try:
+        import openvino as ov
+    except ImportError:
+        click.echo("Error: OpenVINO is not installed")
+        return
+
+    core = ov.Core()
+    available = core.available_devices
+
+    click.echo(f"\nAvailable devices: {available}")
+    click.echo("")
+
+    if device not in available:
+        click.echo(f"Warning: Device '{device}' not found in available devices.")
+        click.echo("It may become available after registering a custom plugin.")
+        click.echo("")
+        return
+
+    click.echo(f"Device: {device}")
+    click.echo("-" * 50)
+
+    # Basic info
+    try:
+        full_name = core.get_property(device, "FULL_DEVICE_NAME")
+        click.echo(f"Full name: {full_name}")
+    except Exception:
+        pass
+
+    # Key performance properties
+    perf_props = [
+        ("OPTIMAL_NUMBER_OF_INFER_REQUESTS", "Optimal infer requests"),
+        ("RANGE_FOR_STREAMS", "Streams range"),
+        ("RANGE_FOR_ASYNC_INFER_REQUESTS", "Async requests range"),
+    ]
+
+    click.echo("\nPerformance properties:")
+    for prop, desc in perf_props:
+        try:
+            value = core.get_property(device, prop)
+            click.echo(f"  {desc}: {value}")
+        except Exception:
+            pass
+
+    # All properties if requested
+    if all_properties:
+        click.echo("\nAll supported properties:")
+        try:
+            supported = core.get_property(device, "SUPPORTED_PROPERTIES")
+            for prop in sorted(supported):
+                try:
+                    value = core.get_property(device, prop)
+                    # Truncate long values
+                    value_str = str(value)
+                    if len(value_str) > 60:
+                        value_str = value_str[:57] + "..."
+                    click.echo(f"  {prop}: {value_str}")
+                except Exception:
+                    click.echo(f"  {prop}: <not readable>")
+        except Exception as e:
+            click.echo(f"  Could not get properties: {e}")
+
     click.echo("")
 
 
