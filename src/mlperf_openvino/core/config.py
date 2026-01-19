@@ -57,7 +57,7 @@ class OpenVINOConfig:
     bind_thread: bool = True
     threads_per_stream: int = 0
     enable_hyper_threading: bool = True
-    input_layout: str = ""  # Input data layout: "NHWC" to add transpose, empty = no change
+    input_layout: str = "NHWC"  # Input data layout: "NHWC" adds transpose for image models
     
     def to_properties(self) -> Dict[str, Any]:
         """Convert to OpenVINO properties dictionary."""
@@ -101,7 +101,7 @@ class ModelConfig:
     input_shape: List[int]
     input_name: str = "input"
     output_name: str = "output"
-    data_format: str = "NCHW"
+    data_format: str = "NHWC"  # Default for image models
     dtype: str = "FP32"
     
     # Accuracy targets
@@ -213,7 +213,7 @@ class BenchmarkConfig:
             input_shape=model_data.get("input_shape", [1, 3, 224, 224]),
             input_name=model_data.get("input_name", "input"),
             output_name=model_data.get("output_name", "output"),
-            data_format=model_data.get("data_format", "NCHW"),
+            data_format=model_data.get("data_format", "NHWC"),
             dtype=model_data.get("dtype", "FP32"),
             accuracy_target=model_data.get("accuracy_target", 0.0),
             accuracy_threshold=model_data.get("accuracy_threshold", 0.99),
@@ -274,10 +274,10 @@ class BenchmarkConfig:
                 name="ResNet50-v1.5",
                 task="image_classification",
                 model_type=ModelType.RESNET50,
-                input_shape=[1, 3, 224, 224],
+                input_shape=[1, 224, 224, 3],  # NHWC format
                 input_name="input",
                 output_name="output",
-                data_format="NCHW",
+                data_format="NHWC",
                 dtype="FP32",
                 accuracy_target=0.7646,
                 accuracy_threshold=0.99,
@@ -378,10 +378,10 @@ class BenchmarkConfig:
                 name="RetinaNet",
                 task="object_detection",
                 model_type=ModelType.RETINANET,
-                input_shape=[1, 3, 800, 800],  # (batch, channels, height, width)
+                input_shape=[1, 800, 800, 3],  # NHWC format
                 input_name="input",
                 output_name="output",
-                data_format="NCHW",
+                data_format="NHWC",
                 dtype="FP32",
                 accuracy_target=0.3757,  # mAP (official MLPerf v5.1)
                 accuracy_threshold=0.99,
