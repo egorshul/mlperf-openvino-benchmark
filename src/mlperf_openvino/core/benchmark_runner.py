@@ -78,14 +78,28 @@ class BenchmarkRunner:
         # Initialize model-specific components
         model_type = self.config.model.model_type
 
-        # Initialize backend (skip for Whisper/SDXL with directory path - they handle their own loading)
-        model_path = Path(self.config.model.model_path)
-        if model_type == ModelType.WHISPER and model_path.is_dir():
-            logger.info(f"Whisper model directory: {self.config.model.model_path}")
-            self.backend = None  # Will be set up in _setup_whisper
-        elif model_type == ModelType.SDXL:
+        # Check model type (handle both enum and string comparison for robustness)
+        is_sdxl = (model_type == ModelType.SDXL or
+                   (hasattr(model_type, 'value') and model_type.value == 'sdxl'))
+        is_whisper = (model_type == ModelType.WHISPER or
+                      (hasattr(model_type, 'value') and model_type.value == 'whisper'))
+
+        # Initialize backend (skip for Whisper/SDXL - they use their own pipelines)
+        if is_sdxl:
             logger.info(f"SDXL model directory: {self.config.model.model_path}")
-            self.backend = None  # SDXL uses its own pipeline
+            self.backend = None  # SDXL uses its own pipeline (OVStableDiffusionXLPipeline)
+        elif is_whisper:
+            model_path = Path(self.config.model.model_path) if self.config.model.model_path else None
+            if model_path and model_path.is_dir():
+                logger.info(f"Whisper model directory: {self.config.model.model_path}")
+                self.backend = None  # Will be set up in _setup_whisper
+            else:
+                logger.info(f"Loading Whisper model from {self.config.model.model_path}")
+                self.backend = OpenVINOBackend(
+                    model_path=self.config.model.model_path,
+                    config=self.config.openvino,
+                )
+                self.backend.load()
         else:
             logger.info(f"Loading model from {self.config.model.model_path}")
             self.backend = OpenVINOBackend(
@@ -94,16 +108,16 @@ class BenchmarkRunner:
             )
             self.backend.load()
 
-        if model_type == ModelType.RESNET50:
+        if is_sdxl:
+            self._setup_sdxl()
+        elif is_whisper:
+            self._setup_whisper()
+        elif model_type == ModelType.RESNET50:
             self._setup_resnet50()
         elif model_type == ModelType.BERT:
             self._setup_bert()
         elif model_type == ModelType.RETINANET:
             self._setup_retinanet()
-        elif model_type == ModelType.WHISPER:
-            self._setup_whisper()
-        elif model_type == ModelType.SDXL:
-            self._setup_sdxl()
         else:
             raise ValueError(f"Unsupported model type: {model_type}")
 
