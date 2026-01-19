@@ -277,17 +277,9 @@ class SDXLOptimumSUT:
             latents=latents,
         )
 
-        # Extract image from result
+        # Extract image from result and convert to numpy array
         image = result.images[0]
-
-        # Convert PIL Image to numpy array
-        if hasattr(image, 'numpy'):
-            image_array = np.array(image)
-        else:
-            # PIL Image
-            image_array = np.array(image)
-
-        return image_array
+        return np.array(image)
 
     def issue_queries(self, query_samples: List[Any]) -> None:
         """Process queries from LoadGen."""

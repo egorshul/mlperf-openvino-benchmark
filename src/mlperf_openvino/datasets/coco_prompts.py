@@ -299,7 +299,15 @@ class COCOPromptsDataset(BaseDataset):
                 # Handle different latents file formats
                 if isinstance(latents, dict):
                     # Format: {'latents': tensor} or similar
-                    latents = latents.get('latents', latents.get('noise', list(latents.values())[0]))
+                    if 'latents' in latents:
+                        latents = latents['latents']
+                    elif 'noise' in latents:
+                        latents = latents['noise']
+                    elif latents:
+                        latents = list(latents.values())[0]
+                    else:
+                        logger.warning("Empty latents dict")
+                        return
 
                 if isinstance(latents, torch.Tensor):
                     # Single tensor with shape [num_samples, 4, H, W]

@@ -8,7 +8,7 @@ import os
 import shutil
 import urllib.request
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 from urllib.error import URLError
 
 logger = logging.getLogger(__name__)
@@ -332,7 +332,7 @@ def _download_with_retry(
     download_func,
     max_retries: int = 3,
     initial_delay: float = 2.0,
-) -> any:
+) -> Any:
     """
     Execute download function with retry logic and exponential backoff.
 
