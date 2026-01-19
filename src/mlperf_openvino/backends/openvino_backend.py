@@ -111,6 +111,10 @@ class OpenVINOBackend(BaseBackend):
         else:
             raise ValueError(f"Unsupported model format: {model_path.suffix}")
 
+        # Apply input layout conversion if specified (adds Transpose to model graph)
+        if self.config.input_layout:
+            self._apply_input_layout()
+
         # Get model info before compilation
         self._extract_model_info()
 
@@ -172,9 +176,40 @@ class OpenVINOBackend(BaseBackend):
         # Enable profiling if requested
         if self.config.enable_profiling:
             properties[ov.properties.enable_profiling()] = True
-        
+
         return properties
-    
+
+    def _apply_input_layout(self) -> None:
+        """Apply input layout conversion using PrePostProcessor.
+
+        Adds Transpose operation to model graph to convert from specified
+        input layout (e.g., NHWC) to model's expected layout (NCHW).
+        """
+        from openvino.preprocess import PrePostProcessor
+
+        input_layout = self.config.input_layout.upper()
+        logger.info(f"Applying input layout conversion: {input_layout} -> model layout")
+
+        ppp = PrePostProcessor(self._model)
+
+        # Configure all image inputs (4D tensors)
+        for i, input_node in enumerate(self._model.inputs):
+            shape = input_node.partial_shape
+            # Only apply to 4D tensors (likely images: NCHW or NHWC)
+            if len(shape) == 4:
+                input_name = input_node.any_name
+                logger.info(f"  Input '{input_name}': setting layout {input_layout}")
+
+                # Set the tensor layout (what user provides)
+                ppp.input(i).tensor().set_layout(ov.Layout(input_layout))
+
+                # Set the model layout (what model expects) - typically NCHW
+                ppp.input(i).model().set_layout(ov.Layout("NCHW"))
+
+        # Build the preprocessed model (adds Transpose operations)
+        self._model = ppp.build()
+        logger.info("Input layout conversion applied to model graph")
+
     def _extract_model_info(self) -> None:
         """Extract input/output information from the model."""
         # Get input info

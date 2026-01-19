@@ -57,6 +57,7 @@ class OpenVINOConfig:
     bind_thread: bool = True
     threads_per_stream: int = 0
     enable_hyper_threading: bool = True
+    input_layout: str = ""  # Input data layout: "NHWC" to add transpose, empty = no change
     
     def to_properties(self) -> Dict[str, Any]:
         """Convert to OpenVINO properties dictionary."""
