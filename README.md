@@ -22,13 +22,24 @@ cd mlperf-openvino-benchmark
 pip install -e .
 
 # With specific model dependencies
-pip install -e ".[resnet]"    # ResNet50
-pip install -e ".[bert]"      # BERT
-pip install -e ".[whisper]"   # Whisper
-pip install -e ".[sdxl]"      # Stable Diffusion XL
+pip install -e ".[resnet]"     # ResNet50
+pip install -e ".[bert]"       # BERT
+pip install -e ".[retinanet]"  # RetinaNet
+pip install -e ".[whisper]"    # Whisper
+pip install -e ".[sdxl]"       # Stable Diffusion XL
 
 # All dependencies
 pip install -e ".[all]"
+```
+
+### C++ SUT (Optional, for better performance)
+
+```bash
+# Requirements: CMake 3.14+, C++17 compiler, pybind11
+./build_cpp.sh
+
+# Verify installation
+python -c "from mlperf_openvino.cpp import CPP_AVAILABLE; print(f'C++ SUT: {CPP_AVAILABLE}')"
 ```
 
 ## Quick Start
@@ -43,6 +54,10 @@ mlperf-ov download-dataset --dataset imagenet
 # BERT
 mlperf-ov download --model bert
 mlperf-ov download-dataset --dataset squad
+
+# RetinaNet
+mlperf-ov download --model retinanet
+mlperf-ov download-dataset --dataset openimages
 
 # Whisper
 mlperf-ov download --model whisper --format openvino
@@ -64,43 +79,6 @@ mlperf-ov run --model resnet50 --mode performance --scenario Offline
 
 # Both accuracy and performance
 mlperf-ov run --model resnet50 --mode both
-```
-
-## SDXL Benchmark
-
-SDXL generates 1024x1024 images from text prompts using COCO 2014 captions (5000 samples).
-
-**MLPerf v5.1 accuracy targets:**
-- CLIP Score: 31.68 - 31.81
-- FID Score: 23.01 - 23.95
-
-```bash
-# Download and setup
-mlperf-ov download --model sdxl --format openvino
-mlperf-ov download-dataset --dataset coco2014
-
-# Run benchmark
-mlperf-ov run --model sdxl \
-  --model-path ./models/stable-diffusion-xl-base-1.0-openvino \
-  --data-path ./data/coco2014 \
-  --mode accuracy
-```
-
-**Manual model download** (if automatic fails):
-
-```bash
-# Option 1: Using optimum-cli
-pip install optimum[openvino]
-optimum-cli export openvino \
-  --model stabilityai/stable-diffusion-xl-base-1.0 \
-  ./models/stable-diffusion-xl-base-1.0-openvino
-
-# Option 2: Using huggingface-cli
-huggingface-cli download stabilityai/stable-diffusion-xl-base-1.0 \
-  --local-dir ./models/stable-diffusion-xl-base-1.0
-optimum-cli export openvino \
-  --model ./models/stable-diffusion-xl-base-1.0 \
-  ./models/stable-diffusion-xl-base-1.0-openvino
 ```
 
 ## CLI Reference
@@ -125,40 +103,6 @@ mlperf-ov info                 # System information
 --batch-size, -b     Batch size
 --num-threads        CPU threads (0 = auto)
 --num-streams        Inference streams
-```
-
-## Performance Tips
-
-```bash
-mlperf-ov run --model <model> \
-  --scenario Offline \
-  --performance-hint THROUGHPUT \
-  --batch-size <batch> \
-  --num-streams AUTO
-```
-
-Recommended batch sizes:
-- ResNet50: 32
-- BERT: 8
-- RetinaNet: 4
-- Whisper: 2
-- SDXL: 1
-
-## Project Structure
-
-```
-src/mlperf_openvino/
-├── cli.py                 # CLI interface
-├── core/
-│   ├── benchmark_runner.py
-│   ├── sdxl_sut.py       # SDXL implementation
-│   └── ...
-├── datasets/
-│   ├── coco_prompts.py   # COCO for SDXL
-│   └── ...
-└── utils/
-    ├── dataset_downloader.py
-    └── model_downloader.py
 ```
 
 ## License
