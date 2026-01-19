@@ -89,22 +89,28 @@ void RetinaNetCppSUT::load() {
     model_ = core_.read_model(model_path_);
 
     // Apply input layout conversion if specified (NHWC -> NCHW)
-    if (!input_layout_.empty()) {
-        ov::preprocess::PrePostProcessor ppp(model_);
+    if (!input_layout_.empty() && model_) {
+        try {
+            ov::preprocess::PrePostProcessor ppp(model_);
 
-        // Configure all 4D inputs (images)
-        for (size_t i = 0; i < model_->inputs().size(); ++i) {
-            const auto& input = model_->inputs()[i];
-            if (input.get_partial_shape().size() == 4) {
-                // Set input tensor layout (what user provides)
-                ppp.input(i).tensor().set_layout(ov::Layout(input_layout_));
-                // Set model layout (what model expects)
-                ppp.input(i).model().set_layout(ov::Layout("NCHW"));
+            // Configure all 4D inputs (images)
+            for (size_t i = 0; i < model_->inputs().size(); ++i) {
+                const auto& input = model_->inputs()[i];
+                auto shape = input.get_partial_shape();
+                if (shape.rank().is_static() && shape.rank().get_length() == 4) {
+                    // Set input tensor layout (what user provides)
+                    ppp.input(i).tensor().set_layout(ov::Layout(input_layout_));
+                    // Set model layout (what model expects)
+                    ppp.input(i).model().set_layout(ov::Layout("NCHW"));
+                }
             }
-        }
 
-        // Build model with preprocessing
-        model_ = ppp.build();
+            // Build model with preprocessing
+            model_ = ppp.build();
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: Failed to apply input layout conversion: " << e.what() << std::endl;
+            // Continue without layout conversion
+        }
     }
 
     // Get input info
@@ -152,14 +158,27 @@ void RetinaNetCppSUT::load() {
     // Create InferRequest pool
     int num_requests = std::max(optimal_nireq_ * 2, 16);
 
+    // Get actual shape from compiled model's input tensor (handles PrePostProcessor layout changes)
+    ov::Shape actual_shape;
+    {
+        auto temp_request = compiled_model_.create_infer_request();
+        auto input_tensor = temp_request.get_input_tensor();
+        actual_shape = input_tensor.get_shape();
+
+        // Handle dynamic batch
+        if (actual_shape.size() > 0 && actual_shape[0] == 0) {
+            actual_shape[0] = 1;
+        }
+    }
+
     for (int i = 0; i < num_requests; ++i) {
         auto ctx = std::make_unique<RetinaNetInferContext>();
         ctx->request = compiled_model_.create_infer_request();
         ctx->pool_id = static_cast<size_t>(i);
         ctx->sut = this;
 
-        // Pre-allocate input tensor
-        ctx->input_tensor = ov::Tensor(ov::element::f32, input_shape_);
+        // Pre-allocate input tensor with correct shape from compiled model
+        ctx->input_tensor = ov::Tensor(ov::element::f32, actual_shape);
         ctx->request.set_input_tensor(ctx->input_tensor);
 
         // Set completion callback

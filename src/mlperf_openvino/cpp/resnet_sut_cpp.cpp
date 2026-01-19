@@ -59,25 +59,31 @@ void ResNetCppSUT::load() {
     model_ = core_.read_model(model_path_);
 
     // Apply input layout conversion if specified (NHWC -> NCHW)
-    if (!input_layout_.empty()) {
-        ov::preprocess::PrePostProcessor ppp(model_);
+    if (!input_layout_.empty() && model_) {
+        try {
+            ov::preprocess::PrePostProcessor ppp(model_);
 
-        // Configure all 4D inputs (images)
-        for (size_t i = 0; i < model_->inputs().size(); ++i) {
-            const auto& input = model_->inputs()[i];
-            if (input.get_partial_shape().size() == 4) {
-                // Set input tensor layout (what user provides)
-                ppp.input(i).tensor().set_layout(ov::Layout(input_layout_));
-                // Set model layout (what model expects)
-                ppp.input(i).model().set_layout(ov::Layout("NCHW"));
+            // Configure all 4D inputs (images)
+            for (size_t i = 0; i < model_->inputs().size(); ++i) {
+                const auto& input = model_->inputs()[i];
+                auto shape = input.get_partial_shape();
+                if (shape.rank().is_static() && shape.rank().get_length() == 4) {
+                    // Set input tensor layout (what user provides)
+                    ppp.input(i).tensor().set_layout(ov::Layout(input_layout_));
+                    // Set model layout (what model expects)
+                    ppp.input(i).model().set_layout(ov::Layout("NCHW"));
+                }
             }
-        }
 
-        // Build model with preprocessing
-        model_ = ppp.build();
+            // Build model with preprocessing
+            model_ = ppp.build();
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: Failed to apply input layout conversion: " << e.what() << std::endl;
+            // Continue without layout conversion
+        }
     }
 
-    // Get input/output info
+    // Get input/output info from model (before compilation)
     const auto& inputs = model_->inputs();
     const auto& outputs = model_->outputs();
 
@@ -86,8 +92,10 @@ void ResNetCppSUT::load() {
     }
 
     input_name_ = inputs[0].get_any_name();
-    input_shape_ = inputs[0].get_partial_shape().get_min_shape();
     input_type_ = inputs[0].get_element_type();
+
+    // Store original model shape (will update from compiled model if needed)
+    input_shape_ = inputs[0].get_partial_shape().get_min_shape();
 
     // Cache output index: for models with ArgMax+Softmax outputs, use softmax (index 1)
     // For single-output models, use index 0
@@ -129,10 +137,17 @@ void ResNetCppSUT::load() {
     // Create InferRequest pool with 2x optimal requests for better pipelining
     int num_requests = std::max(optimal_nireq_ * 2, 16);
 
-    // Calculate actual shape (handle dynamic batch)
-    ov::Shape actual_shape = input_shape_;
-    if (actual_shape.size() > 0 && actual_shape[0] == 0) {
-        actual_shape[0] = 1;  // Set batch size to 1
+    // Get actual shape from compiled model's input tensor (handles PrePostProcessor layout changes)
+    ov::Shape actual_shape;
+    {
+        auto temp_request = compiled_model_.create_infer_request();
+        auto input_tensor = temp_request.get_input_tensor();
+        actual_shape = input_tensor.get_shape();
+
+        // Handle dynamic batch
+        if (actual_shape.size() > 0 && actual_shape[0] == 0) {
+            actual_shape[0] = 1;
+        }
     }
 
     for (int i = 0; i < num_requests; ++i) {
@@ -141,8 +156,8 @@ void ResNetCppSUT::load() {
         ctx->pool_id = static_cast<size_t>(i);
         ctx->sut = this;
 
-        // Pre-allocate input tensor with correct shape (for dynamic batch models)
-        // Store in context to ensure it stays alive during inference
+        // Pre-allocate input tensor with correct shape from compiled model
+        // This correctly handles PrePostProcessor layout changes
         ctx->input_tensor = ov::Tensor(input_type_, actual_shape);
         ctx->request.set_input_tensor(ctx->input_tensor);
 
