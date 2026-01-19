@@ -58,11 +58,13 @@ public:
      * @param device Target device (CPU, GPU, etc.)
      * @param num_streams Number of inference streams (0 = auto)
      * @param performance_hint Performance hint (THROUGHPUT or LATENCY)
+     * @param input_layout Input data layout (NHWC or empty for no conversion)
      */
     ResNetCppSUT(const std::string& model_path,
            const std::string& device = "CPU",
            int num_streams = 0,
-           const std::string& performance_hint = "THROUGHPUT");
+           const std::string& performance_hint = "THROUGHPUT",
+           const std::string& input_layout = "");
 
     ~ResNetCppSUT();
 
@@ -155,6 +157,7 @@ private:
     std::string device_;
     int num_streams_;
     std::string performance_hint_;
+    std::string input_layout_;  // Input data layout (NHWC for conversion, empty for none)
 
     // OpenVINO objects
     ov::Core core_;

@@ -14,11 +14,13 @@ namespace mlperf_ov {
 RetinaNetCppSUT::RetinaNetCppSUT(const std::string& model_path,
                                    const std::string& device,
                                    int num_streams,
-                                   const std::string& performance_hint)
+                                   const std::string& performance_hint,
+                                   const std::string& input_layout)
     : model_path_(model_path),
       device_(device),
       num_streams_(num_streams),
-      performance_hint_(performance_hint) {
+      performance_hint_(performance_hint),
+      input_layout_(input_layout) {
 }
 
 RetinaNetCppSUT::~RetinaNetCppSUT() {
@@ -85,6 +87,25 @@ void RetinaNetCppSUT::load() {
     }
 
     model_ = core_.read_model(model_path_);
+
+    // Apply input layout conversion if specified (NHWC -> NCHW)
+    if (!input_layout_.empty()) {
+        ov::preprocess::PrePostProcessor ppp(model_);
+
+        // Configure all 4D inputs (images)
+        for (size_t i = 0; i < model_->inputs().size(); ++i) {
+            const auto& input = model_->inputs()[i];
+            if (input.get_partial_shape().size() == 4) {
+                // Set input tensor layout (what user provides)
+                ppp.input(i).tensor().set_layout(ov::Layout(input_layout_));
+                // Set model layout (what model expects)
+                ppp.input(i).model().set_layout(ov::Layout("NCHW"));
+            }
+        }
+
+        // Build model with preprocessing
+        model_ = ppp.build();
+    }
 
     // Get input info
     const auto& inputs = model_->inputs();

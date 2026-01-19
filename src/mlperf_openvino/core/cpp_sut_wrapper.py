@@ -159,8 +159,9 @@ class ResNetCppSUTWrapper:
                 pass
 
         performance_hint = config.openvino.performance_hint
+        input_layout = config.openvino.input_layout
 
-        self._cpp_sut = ResNetCppSUT(model_path, device, num_streams, performance_hint)
+        self._cpp_sut = ResNetCppSUT(model_path, device, num_streams, performance_hint, input_layout)
         self._cpp_sut.load()
 
         # Get input/output names
@@ -579,8 +580,9 @@ class RetinaNetCppSUTWrapper:
                 pass
 
         performance_hint = config.openvino.performance_hint
+        input_layout = config.openvino.input_layout
 
-        self._cpp_sut = RetinaNetCppSUT(model_path, device, num_streams, performance_hint)
+        self._cpp_sut = RetinaNetCppSUT(model_path, device, num_streams, performance_hint, input_layout)
         self._cpp_sut.load()
 
         # Get info
