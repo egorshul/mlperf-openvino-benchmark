@@ -234,6 +234,17 @@ class SDXLOptimumSUT:
         # Use pre-computed latents if available (for reproducibility)
         latents = features.get('latents', None)
 
+        # Convert numpy latents to torch tensor if needed
+        # The pipeline expects torch tensors, not numpy arrays
+        if latents is not None:
+            try:
+                import torch
+                if isinstance(latents, np.ndarray):
+                    latents = torch.from_numpy(latents).float()
+            except ImportError:
+                logger.warning("PyTorch not available, cannot convert latents")
+                latents = None
+
         # Generate image
         generator = self._get_generator(seed=sample_idx)
 
