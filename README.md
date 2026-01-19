@@ -87,6 +87,7 @@ mlperf-ov run --model resnet50 --mode performance --scenario Server
 mlperf-ov run                  # Run benchmark
 mlperf-ov download-model       # Download model
 mlperf-ov download-dataset     # Download dataset
+mlperf-ov setup                # Download model + dataset
 mlperf-ov list-models          # List supported models
 mlperf-ov info                 # System information
 ```
