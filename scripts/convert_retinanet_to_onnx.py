@@ -119,7 +119,15 @@ def load_checkpoint(model, checkpoint_path: str):
     checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
 
     # Handle different checkpoint formats
-    if isinstance(checkpoint, dict):
+    if isinstance(checkpoint, torch.jit.ScriptModule):
+        # TorchScript model - extract state_dict
+        logger.info("Checkpoint is a TorchScript module, extracting state_dict...")
+        state_dict = checkpoint.state_dict()
+    elif isinstance(checkpoint, torch.nn.Module):
+        # Regular PyTorch model
+        logger.info("Checkpoint is a PyTorch module, extracting state_dict...")
+        state_dict = checkpoint.state_dict()
+    elif isinstance(checkpoint, dict):
         if 'model' in checkpoint:
             state_dict = checkpoint['model']
         elif 'state_dict' in checkpoint:
@@ -127,6 +135,7 @@ def load_checkpoint(model, checkpoint_path: str):
         else:
             state_dict = checkpoint
     else:
+        # Try to use as state_dict directly
         state_dict = checkpoint
 
     # Try to load with strict=False first to see mismatches
