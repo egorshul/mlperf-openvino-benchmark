@@ -543,11 +543,33 @@ class COCOPromptsDataset(BaseDataset):
             for img, idx in zip(images, indices):
                 prompt = self.get_prompt(idx)
 
-                # Prepare image
+                # Prepare image - handle various formats
                 if isinstance(img, np.ndarray):
-                    pil_img = Image.fromarray(img.astype(np.uint8))
+                    # Handle different numpy array formats
+                    if img.dtype == np.float32 or img.dtype == np.float64:
+                        # Convert from [0, 1] float to [0, 255] uint8
+                        if img.max() <= 1.0:
+                            img = (img * 255).astype(np.uint8)
+                        else:
+                            img = img.astype(np.uint8)
+                    elif img.dtype != np.uint8:
+                        img = img.astype(np.uint8)
+
+                    # Ensure RGB format (H, W, 3)
+                    if img.ndim == 2:
+                        # Grayscale to RGB
+                        img = np.stack([img, img, img], axis=-1)
+                    elif img.ndim == 3 and img.shape[0] == 3:
+                        # CHW to HWC
+                        img = np.transpose(img, (1, 2, 0))
+
+                    pil_img = Image.fromarray(img)
                 else:
                     pil_img = img
+
+                # Ensure RGB mode
+                if pil_img.mode != 'RGB':
+                    pil_img = pil_img.convert('RGB')
 
                 image_input = preprocess(pil_img).unsqueeze(0).to(device)
                 text_input = tokenizer([prompt]).to(device)
@@ -567,7 +589,9 @@ class COCOPromptsDataset(BaseDataset):
             return float(np.mean(scores)) if scores else 0.0
 
         except Exception as e:
-            logger.warning(f"Error computing CLIP score: {e}")
+            import traceback
+            logger.error(f"Error computing CLIP score: {e}")
+            logger.error(traceback.format_exc())
             return 0.0
 
     def _compute_fid_score(
