@@ -152,6 +152,106 @@ SDXL is a text-to-image generation model. The benchmark:
 - VAE decoder (latent to image)
 - Two CLIP text encoders
 
+#### Manual Download and Conversion (if automatic download fails)
+
+If you encounter network errors (HTTPSConnectionPool, MaxRetryError), follow these manual steps:
+
+**Option 1: Using huggingface-cli (recommended)**
+
+```bash
+# Install huggingface CLI
+pip install huggingface_hub
+
+# Login (optional, for faster downloads)
+huggingface-cli login
+
+# Download the model
+huggingface-cli download stabilityai/stable-diffusion-xl-base-1.0 \
+  --local-dir ./models/stable-diffusion-xl-base-1.0 \
+  --local-dir-use-symlinks False
+
+# Convert to OpenVINO format
+optimum-cli export openvino \
+  --model ./models/stable-diffusion-xl-base-1.0 \
+  --task stable-diffusion-xl \
+  ./models/stable-diffusion-xl-base-1.0-openvino
+```
+
+**Option 2: Using git lfs**
+
+```bash
+# Install git-lfs
+sudo apt-get install git-lfs  # or: brew install git-lfs
+git lfs install
+
+# Clone the model repository
+git clone https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0 \
+  ./models/stable-diffusion-xl-base-1.0
+
+# Convert to OpenVINO
+optimum-cli export openvino \
+  --model ./models/stable-diffusion-xl-base-1.0 \
+  --task stable-diffusion-xl \
+  ./models/stable-diffusion-xl-base-1.0-openvino
+```
+
+**Option 3: Python script for manual conversion**
+
+```python
+from optimum.intel import OVStableDiffusionXLPipeline
+from diffusers import StableDiffusionXLPipeline
+import torch
+
+# Load PyTorch model (downloads if not cached)
+pytorch_pipeline = StableDiffusionXLPipeline.from_pretrained(
+    "stabilityai/stable-diffusion-xl-base-1.0",
+    torch_dtype=torch.float32,
+    use_safetensors=True,
+)
+
+# Export to OpenVINO
+ov_pipeline = OVStableDiffusionXLPipeline.from_pretrained(
+    "stabilityai/stable-diffusion-xl-base-1.0",
+    export=True,
+    compile=False,
+)
+ov_pipeline.save_pretrained("./models/stable-diffusion-xl-base-1.0-openvino")
+```
+
+**Network troubleshooting tips:**
+
+```bash
+# Increase timeout for slow connections
+export HF_HUB_DOWNLOAD_TIMEOUT=3600
+
+# Use mirror (if available in your region)
+export HF_ENDPOINT=https://hf-mirror.com
+
+# Resume interrupted downloads
+export HF_HUB_ENABLE_HF_TRANSFER=0
+
+# Disable SSL verification (use with caution)
+export CURL_CA_BUNDLE=""
+```
+
+**Expected directory structure after conversion:**
+
+```
+models/stable-diffusion-xl-base-1.0-openvino/
+├── model_index.json
+├── scheduler/
+├── text_encoder/
+│   └── openvino_model.xml, openvino_model.bin
+├── text_encoder_2/
+│   └── openvino_model.xml, openvino_model.bin
+├── tokenizer/
+├── tokenizer_2/
+├── unet/
+│   └── openvino_model.xml, openvino_model.bin
+└── vae_decoder/
+    └── openvino_model.xml, openvino_model.bin
+```
+
 ### Whisper Large v3
 
 Speech recognition model using LibriSpeech dataset:
