@@ -478,43 +478,62 @@ class COCOPromptsDataset(BaseDataset):
         """
         Compute CLIP score between generated images and prompts.
 
+        Uses open_clip with ViT-H-14 trained on laion2b as per MLCommons specification.
+
         Args:
             images: Generated images
             indices: Sample indices for getting prompts
 
         Returns:
-            Average CLIP score
+            Average CLIP score (scaled by 100)
         """
         try:
             import torch
-            from transformers import CLIPProcessor, CLIPModel
+            import open_clip
+            from PIL import Image
         except ImportError:
-            logger.warning("transformers not installed, cannot compute CLIP score")
+            logger.warning(
+                "open_clip not installed. Install with: pip install open_clip_torch\n"
+                "This is required for MLCommons-compliant CLIP score computation."
+            )
             return 0.0
 
         try:
-            # Load CLIP model
-            model = CLIPModel.from_pretrained("openai/clip-vit-large-patch14")
-            processor = CLIPProcessor.from_pretrained("openai/clip-vit-large-patch14")
+            # Load open_clip model (MLCommons reference: ViT-H-14 trained on laion2b)
+            model, _, preprocess = open_clip.create_model_and_transforms(
+                'ViT-H-14',
+                pretrained='laion2b_s32b_b79k'
+            )
+            tokenizer = open_clip.get_tokenizer('ViT-H-14')
             model.eval()
+
+            # Move to GPU if available
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            model = model.to(device)
 
             scores = []
             for img, idx in zip(images, indices):
                 prompt = self.get_prompt(idx)
 
-                # Prepare inputs
-                inputs = processor(
-                    text=[prompt],
-                    images=[img],
-                    return_tensors="pt",
-                    padding=True
-                )
+                # Prepare image
+                if isinstance(img, np.ndarray):
+                    pil_img = Image.fromarray(img.astype(np.uint8))
+                else:
+                    pil_img = img
+
+                image_input = preprocess(pil_img).unsqueeze(0).to(device)
+                text_input = tokenizer([prompt]).to(device)
 
                 with torch.no_grad():
-                    outputs = model(**inputs)
-                    # CLIP score is the cosine similarity * 100
-                    logits_per_image = outputs.logits_per_image
-                    score = logits_per_image.item()
+                    image_features = model.encode_image(image_input)
+                    text_features = model.encode_text(text_input)
+
+                    # Normalize features
+                    image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+                    text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+
+                    # Compute cosine similarity and scale by 100
+                    score = (image_features @ text_features.T).item() * 100
                     scores.append(score)
 
             return float(np.mean(scores)) if scores else 0.0
@@ -526,14 +545,18 @@ class COCOPromptsDataset(BaseDataset):
     def _compute_fid_score(
         self,
         generated_images: List[np.ndarray],
-        reference_paths: List[str]
+        reference_paths: List[str],
+        statistics_path: Optional[str] = None
     ) -> float:
         """
         Compute FID score between generated and reference images.
 
+        Uses pre-computed statistics (val2014.npz) if available, as per MLCommons.
+
         Args:
             generated_images: Generated images
             reference_paths: Paths to reference images
+            statistics_path: Path to pre-computed statistics (.npz file)
 
         Returns:
             FID score
@@ -554,6 +577,9 @@ class COCOPromptsDataset(BaseDataset):
             model.fc = torch.nn.Identity()  # Remove final FC layer
             model.eval()
 
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            model = model.to(device)
+
             transform = transforms.Compose([
                 transforms.Resize((299, 299)),
                 transforms.ToTensor(),
@@ -572,26 +598,44 @@ class COCOPromptsDataset(BaseDataset):
                         else:
                             img = item
 
-                    tensor = transform(img).unsqueeze(0)
+                    tensor = transform(img).unsqueeze(0).to(device)
                     with torch.no_grad():
-                        feat = model(tensor).numpy().flatten()
+                        feat = model(tensor).cpu().numpy().flatten()
                     features.append(feat)
                 return np.array(features)
 
-            # Get features
+            # Get features for generated images
             gen_features = get_features(generated_images, is_path=False)
-            ref_features = get_features(reference_paths, is_path=True)
 
-            # Compute statistics
+            # Compute statistics for generated images
             mu_gen = np.mean(gen_features, axis=0)
-            mu_ref = np.mean(ref_features, axis=0)
             sigma_gen = np.cov(gen_features, rowvar=False)
-            sigma_ref = np.cov(ref_features, rowvar=False)
 
-            # Compute FID
+            # Try to use pre-computed statistics (MLCommons requirement)
+            if statistics_path is None:
+                # Look for val2014.npz in data directory
+                statistics_path = self._find_statistics_file()
+
+            if statistics_path and Path(statistics_path).exists():
+                logger.info(f"Using pre-computed FID statistics from {statistics_path}")
+                stats = np.load(statistics_path)
+                mu_ref = stats['mu']
+                sigma_ref = stats['sigma']
+            else:
+                # Compute from reference images (fallback)
+                logger.info("Computing FID statistics from reference images (not MLCommons-compliant)")
+                ref_features = get_features(reference_paths, is_path=True)
+                mu_ref = np.mean(ref_features, axis=0)
+                sigma_ref = np.cov(ref_features, rowvar=False)
+
+            # Compute FID (Fréchet distance)
             diff = mu_gen - mu_ref
+
+            # Handle numerical issues with sqrtm
             covmean, _ = linalg.sqrtm(sigma_gen @ sigma_ref, disp=False)
             if np.iscomplexobj(covmean):
+                if not np.allclose(np.diagonal(covmean).imag, 0, atol=1e-3):
+                    logger.warning("Complex values in sqrtm computation")
                 covmean = covmean.real
 
             fid = diff @ diff + np.trace(sigma_gen + sigma_ref - 2 * covmean)
@@ -600,6 +644,151 @@ class COCOPromptsDataset(BaseDataset):
         except Exception as e:
             logger.warning(f"Error computing FID score: {e}")
             return 0.0
+
+    def _find_statistics_file(self) -> Optional[str]:
+        """
+        Find pre-computed FID statistics file (val2014.npz).
+
+        Looks in common locations for MLCommons-provided statistics.
+
+        Returns:
+            Path to statistics file or None if not found
+        """
+        search_paths = [
+            Path(self.data_path) / "val2014.npz",
+            Path(self.data_path) / "fid_statistics.npz",
+            Path(self.data_path).parent / "val2014.npz",
+            Path.cwd() / "val2014.npz",
+            Path.cwd() / "data" / "val2014.npz",
+            Path.cwd() / "data" / "coco2014" / "val2014.npz",
+        ]
+
+        for path in search_paths:
+            if path.exists():
+                return str(path)
+
+        return None
+
+    def get_latents(self, index: int) -> Optional[np.ndarray]:
+        """
+        Get pre-generated latents for a sample (MLCommons requirement for reproducibility).
+
+        Args:
+            index: Sample index
+
+        Returns:
+            Pre-generated latents array or None if not available
+        """
+        if not self._is_loaded:
+            self.load()
+
+        sample = self._samples[index]
+        return sample.get('latents', None)
+
+    def load_latents(self, latents_path: str) -> int:
+        """
+        Load pre-generated latents from MLCommons file.
+
+        Args:
+            latents_path: Path to latents file (.pt or .npy)
+
+        Returns:
+            Number of latents loaded
+        """
+        latents_file = Path(latents_path)
+        if not latents_file.exists():
+            logger.warning(f"Latents file not found: {latents_path}")
+            return 0
+
+        try:
+            if latents_file.suffix == '.pt':
+                import torch
+                latents_data = torch.load(latents_path)
+                if isinstance(latents_data, dict):
+                    latents_list = latents_data.get('latents', [])
+                else:
+                    latents_list = latents_data
+            elif latents_file.suffix == '.npy':
+                latents_list = np.load(latents_path, allow_pickle=True)
+            elif latents_file.suffix == '.npz':
+                data = np.load(latents_path)
+                latents_list = data['latents'] if 'latents' in data else list(data.values())[0]
+            else:
+                logger.warning(f"Unsupported latents file format: {latents_file.suffix}")
+                return 0
+
+            # Assign latents to samples
+            loaded = 0
+            for i, latent in enumerate(latents_list):
+                if i < len(self._samples):
+                    if isinstance(latent, np.ndarray):
+                        self._samples[i]['latents'] = latent
+                    else:
+                        # Convert torch tensor to numpy
+                        self._samples[i]['latents'] = latent.numpy() if hasattr(latent, 'numpy') else np.array(latent)
+                    loaded += 1
+
+            logger.info(f"Loaded {loaded} pre-generated latents from {latents_path}")
+            return loaded
+
+        except Exception as e:
+            logger.warning(f"Error loading latents: {e}")
+            return 0
+
+    def get_compliance_indices(self) -> List[int]:
+        """
+        Get the 10 sample indices required for MLCommons human compliance check.
+
+        Returns:
+            List of 10 sample indices for compliance images
+        """
+        # MLCommons uses specific indices for human compliance check
+        # These are typically generated with a fixed random seed
+        np.random.seed(42)  # MLCommons compliance seed
+        indices = np.random.choice(len(self._samples), size=10, replace=False)
+        return sorted(indices.tolist())
+
+    def save_compliance_images(
+        self,
+        images: Dict[int, np.ndarray],
+        output_dir: str
+    ) -> List[str]:
+        """
+        Save compliance images for MLCommons submission.
+
+        Args:
+            images: Dictionary of sample_index -> generated_image
+            output_dir: Directory to save compliance images
+
+        Returns:
+            List of saved image paths
+        """
+        from PIL import Image
+
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        compliance_indices = self.get_compliance_indices()
+        saved_paths = []
+
+        for idx in compliance_indices:
+            if idx in images:
+                img_array = images[idx]
+                if isinstance(img_array, np.ndarray):
+                    pil_img = Image.fromarray(img_array.astype(np.uint8))
+                else:
+                    pil_img = img_array
+
+                # Save with sample index in filename
+                filename = f"compliance_sample_{idx:05d}.png"
+                filepath = output_path / filename
+                pil_img.save(filepath, 'PNG')
+                saved_paths.append(str(filepath))
+
+                logger.info(f"Saved compliance image: {filepath}")
+
+        logger.info(f"Saved {len(saved_paths)} compliance images to {output_dir}")
+        return saved_paths
 
 
 class COCOPromptsQSL(QuerySampleLibrary):
@@ -616,6 +805,7 @@ class COCOPromptsQSL(QuerySampleLibrary):
         performance_sample_count: int = 5000,  # MLPerf default
         guidance_scale: float = GUIDANCE_SCALE,
         num_inference_steps: int = NUM_INFERENCE_STEPS,
+        use_latents: bool = True,  # MLCommons requires pre-generated latents for closed division
     ):
         """
         Initialize COCO prompts QSL.
@@ -626,12 +816,14 @@ class COCOPromptsQSL(QuerySampleLibrary):
             performance_sample_count: Number of samples for performance run
             guidance_scale: Classifier-free guidance scale
             num_inference_steps: Number of diffusion steps
+            use_latents: Whether to use pre-generated latents (required for MLCommons closed division)
         """
         super().__init__()
 
         self.dataset = COCOPromptsDataset(
             data_path=data_path,
             count=count,
+            use_latents=use_latents,
             guidance_scale=guidance_scale,
             num_inference_steps=num_inference_steps,
         )

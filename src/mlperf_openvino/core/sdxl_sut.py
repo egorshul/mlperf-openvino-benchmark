@@ -49,11 +49,12 @@ from ..datasets.coco_prompts import COCOPromptsQSL
 
 logger = logging.getLogger(__name__)
 
-# SDXL default parameters
+# SDXL default parameters (MLCommons reference implementation)
 DEFAULT_GUIDANCE_SCALE = 8.0
 DEFAULT_NUM_INFERENCE_STEPS = 20
 DEFAULT_IMAGE_SIZE = 1024
-DEFAULT_NEGATIVE_PROMPT = ""
+# MLCommons official negative prompt
+DEFAULT_NEGATIVE_PROMPT = "normal quality, low quality, worst quality, low res, blurry, nsfw, nude"
 
 
 class SDXLOptimumSUT:

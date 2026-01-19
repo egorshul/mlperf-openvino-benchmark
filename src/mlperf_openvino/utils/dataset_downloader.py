@@ -127,8 +127,24 @@ DATASET_REGISTRY: Dict[str, Dict] = {
             "filename": "val2014.zip",
             "size_gb": 6.0,
         },
+        # MLCommons pre-computed files for official submission
+        "fid_statistics": {
+            "url": "https://github.com/mlcommons/inference/raw/master/text_to_image/tools/val2014.npz",
+            "filename": "val2014.npz",
+            "size_mb": 10,
+        },
+        "latents": {
+            "url": "https://github.com/mlcommons/inference/raw/master/text_to_image/tools/latents.pt",
+            "filename": "latents.pt",
+            "size_mb": 500,
+        },
+        "captions_tsv": {
+            "url": "https://github.com/mlcommons/inference/raw/master/text_to_image/coco2014/captions/captions.tsv",
+            "filename": "captions.tsv",
+            "size_mb": 1,
+        },
         "num_samples": 5000,  # MLPerf uses 5000 samples
-        "note": "For MLPerf SDXL benchmark",
+        "note": "For MLPerf SDXL benchmark (closed division)",
     },
 }
 
@@ -1463,6 +1479,53 @@ def download_coco2014(
             logger.info("Resizing images to 1024x1024 for SDXL benchmark...")
             _resize_coco_images(val_dir, images_dir, prompts_file, target_size=1024)
 
+    # Download MLCommons pre-computed files for official submission
+    fid_stats_file = data_dir / "val2014.npz"
+    latents_file = data_dir / "latents.pt"
+    mlcommons_captions = data_dir / "captions.tsv"
+
+    # Download FID statistics (required for MLCommons-compliant FID computation)
+    if "fid_statistics" in dataset_info:
+        if not fid_stats_file.exists() or force:
+            logger.info("Downloading MLCommons FID statistics (val2014.npz)...")
+            try:
+                _download_file(
+                    dataset_info["fid_statistics"]["url"],
+                    str(fid_stats_file),
+                    expected_size_mb=dataset_info["fid_statistics"]["size_mb"]
+                )
+            except Exception as e:
+                logger.warning(f"Failed to download FID statistics: {e}")
+                logger.warning("FID computation will use reference images instead (not MLCommons-compliant)")
+
+    # Download pre-generated latents (required for reproducibility in closed division)
+    if "latents" in dataset_info:
+        if not latents_file.exists() or force:
+            logger.info("Downloading MLCommons pre-generated latents...")
+            try:
+                _download_file(
+                    dataset_info["latents"]["url"],
+                    str(latents_file),
+                    expected_size_mb=dataset_info["latents"]["size_mb"]
+                )
+            except Exception as e:
+                logger.warning(f"Failed to download latents: {e}")
+                logger.warning("Will use randomly generated latents (not MLCommons closed-division compliant)")
+
+    # Download official MLCommons captions file
+    if "captions_tsv" in dataset_info:
+        if not mlcommons_captions.exists() or force:
+            logger.info("Downloading MLCommons official captions file...")
+            try:
+                _download_file(
+                    dataset_info["captions_tsv"]["url"],
+                    str(mlcommons_captions),
+                    expected_size_mb=dataset_info["captions_tsv"]["size_mb"]
+                )
+            except Exception as e:
+                logger.warning(f"Failed to download MLCommons captions: {e}")
+                logger.warning("Using locally generated captions file")
+
     # Count samples
     actual_samples = sum(1 for _ in open(prompts_file, 'r'))
 
@@ -1473,6 +1536,8 @@ def download_coco2014(
         "prompts_file": str(prompts_file),
         "captions_file": str(captions_file),
         "images_dir": str(images_dir) if images_dir.exists() else None,
+        "fid_statistics": str(fid_stats_file) if fid_stats_file.exists() else None,
+        "latents_file": str(latents_file) if latents_file.exists() else None,
         "num_samples": actual_samples,
     }
 
