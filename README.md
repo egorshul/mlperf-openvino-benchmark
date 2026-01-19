@@ -74,11 +74,11 @@ mlperf-ov download-dataset --dataset coco2014
 # Accuracy test
 mlperf-ov run --model resnet50 --mode accuracy
 
-# Performance test
+# Performance test (Offline scenario)
 mlperf-ov run --model resnet50 --mode performance --scenario Offline
 
-# Both accuracy and performance
-mlperf-ov run --model resnet50 --mode both
+# Performance test (Server scenario)
+mlperf-ov run --model resnet50 --mode performance --scenario Server
 ```
 
 ## CLI Reference
@@ -95,7 +95,7 @@ mlperf-ov info                 # System information
 
 ```
 --model, -m          Model: resnet50, bert, retinanet, whisper, sdxl
---mode               Mode: accuracy, performance, both
+--mode               Mode: accuracy, performance
 --scenario, -s       Scenario: Offline, Server
 --model-path         Path to model
 --data-path          Path to dataset
