@@ -48,23 +48,23 @@ python -c "from mlperf_openvino.cpp import CPP_AVAILABLE; print(f'C++ SUT: {CPP_
 
 ```bash
 # ResNet50
-mlperf-ov download --model resnet50
+mlperf-ov download-model --model resnet50
 mlperf-ov download-dataset --dataset imagenet
 
 # BERT
-mlperf-ov download --model bert
+mlperf-ov download-model --model bert
 mlperf-ov download-dataset --dataset squad
 
 # RetinaNet
-mlperf-ov download --model retinanet
+mlperf-ov download-model --model retinanet
 mlperf-ov download-dataset --dataset openimages
 
 # Whisper
-mlperf-ov download --model whisper --format openvino
+mlperf-ov download-model --model whisper --format openvino
 mlperf-ov download-dataset --dataset librispeech
 
 # SDXL
-mlperf-ov download --model sdxl --format openvino
+mlperf-ov download-model --model sdxl --format openvino
 mlperf-ov download-dataset --dataset coco2014
 ```
 
@@ -85,7 +85,7 @@ mlperf-ov run --model resnet50 --mode performance --scenario Server
 
 ```bash
 mlperf-ov run                  # Run benchmark
-mlperf-ov download             # Download model
+mlperf-ov download-model       # Download model
 mlperf-ov download-dataset     # Download dataset
 mlperf-ov list-models          # List supported models
 mlperf-ov info                 # System information
