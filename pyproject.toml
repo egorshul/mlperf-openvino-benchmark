@@ -65,8 +65,17 @@ whisper = [
     "jiwer>=3.0.0",  # For Word Accuracy calculation
     "optimum[openvino]>=1.16.0",  # For OpenVINO export
 ]
+sdxl = [
+    "optimum[openvino]>=1.16.0",  # For OVStableDiffusionXLPipeline
+    "diffusers>=0.25.0",  # For SDXL pipeline
+    "transformers>=4.30.0",  # For CLIP tokenizer
+    "torch>=2.0.0",  # For tensor operations
+    "torchvision>=0.15.0",  # For InceptionV3 (FID)
+    "open_clip_torch>=2.20.0",  # For CLIP score (MLCommons)
+    "scipy>=1.10.0",  # For FID computation (linalg.sqrtm)
+]
 all = [
-    "mlperf-openvino-benchmark[dev,resnet,bert,retinanet,whisper]",
+    "mlperf-openvino-benchmark[dev,resnet,bert,retinanet,whisper,sdxl]",
 ]
 
 [project.scripts]
