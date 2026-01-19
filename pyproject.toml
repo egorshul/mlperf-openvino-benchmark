@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mlperf-openvino-benchmark"
 version = "1.0.0"
-description = "MLPerf v5.1 compatible inference benchmark using OpenVINO backend for CPU"
+description = "MLPerf v5.1 compatible inference benchmark using OpenVINO backend"
 readme = "README.md"
 requires-python = ">=3.9"
 

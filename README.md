@@ -1,6 +1,6 @@
 # MLPerf v5.1 OpenVINO Benchmark
 
-MLPerf Inference v5.1 benchmark implementation using OpenVINO backend for CPU.
+MLPerf Inference v5.1 benchmark implementation using OpenVINO backend.
 
 ## Supported Models
 
