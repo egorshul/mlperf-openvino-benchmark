@@ -47,6 +47,13 @@ MODEL_REGISTRY: Dict[str, Dict] = {
         },
         "description": "Whisper Large v3 for speech recognition",
     },
+    "sdxl": {
+        "huggingface": {
+            "model_id": "stabilityai/stable-diffusion-xl-base-1.0",
+            "filename": "sdxl-base-1.0",
+        },
+        "description": "Stable Diffusion XL 1.0 for text-to-image generation (MLPerf)",
+    },
 }
 
 
@@ -444,6 +451,215 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
         "encoder_path": str(ov_model_path / "encoder_model.xml"),
         "decoder_path": str(ov_model_path / "decoder_model.xml"),
         "model_path": str(ov_model_path),
+    }
+
+
+def download_sdxl_model(
+    output_dir: str,
+    model_id: str = "stabilityai/stable-diffusion-xl-base-1.0",
+    export_to_openvino: bool = True,
+    compress_weights: bool = False,
+) -> Dict[str, str]:
+    """
+    Download and export Stable Diffusion XL model to OpenVINO format.
+
+    SDXL components:
+    - Text Encoder 1 (CLIP ViT-L/14)
+    - Text Encoder 2 (OpenCLIP ViT-bigG)
+    - UNet (2.6B parameters)
+    - VAE Decoder
+
+    Args:
+        output_dir: Directory to save the model
+        model_id: HuggingFace model ID
+        export_to_openvino: Whether to export to OpenVINO IR format
+        compress_weights: Whether to apply INT8 weight compression
+
+    Returns:
+        Dictionary with paths to model components
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    model_name = model_id.split("/")[-1]
+
+    if export_to_openvino:
+        return _export_sdxl_to_openvino(output_dir, model_id, compress_weights)
+    else:
+        return _download_sdxl_from_hf(output_dir, model_id)
+
+
+def _download_sdxl_from_hf(output_dir: str, model_id: str) -> Dict[str, str]:
+    """
+    Download SDXL model from HuggingFace (PyTorch format).
+
+    Args:
+        output_dir: Output directory
+        model_id: HuggingFace model ID
+
+    Returns:
+        Dictionary with model paths
+    """
+    try:
+        from diffusers import StableDiffusionXLPipeline
+    except ImportError:
+        raise ImportError(
+            "diffusers is required for SDXL download. "
+            "Install with: pip install diffusers transformers accelerate"
+        )
+
+    logger.info(f"Downloading SDXL model: {model_id}")
+
+    output_path = Path(output_dir)
+    model_path = output_path / model_id.split("/")[-1]
+
+    # Download pipeline
+    def do_download():
+        return StableDiffusionXLPipeline.from_pretrained(
+            model_id,
+            torch_dtype="auto",
+        )
+
+    pipeline = _download_with_retry(do_download, max_retries=3)
+
+    # Save locally
+    pipeline.save_pretrained(str(model_path))
+
+    logger.info(f"Model saved to {model_path}")
+
+    return {
+        "model_path": str(model_path),
+    }
+
+
+def _export_sdxl_to_openvino(
+    output_dir: str,
+    model_id: str,
+    compress_weights: bool = False,
+) -> Dict[str, str]:
+    """
+    Export SDXL model to OpenVINO IR format.
+
+    Creates separate models for each component:
+    - text_encoder/openvino_model.xml
+    - text_encoder_2/openvino_model.xml
+    - unet/openvino_model.xml
+    - vae_decoder/openvino_model.xml
+
+    Args:
+        output_dir: Output directory
+        model_id: HuggingFace model ID
+        compress_weights: Apply INT8 weight compression
+
+    Returns:
+        Dictionary with paths to component models
+    """
+    try:
+        from optimum.intel import OVStableDiffusionXLPipeline
+    except ImportError:
+        raise ImportError(
+            "optimum-intel is required for SDXL export to OpenVINO. "
+            "Install with: pip install optimum[openvino] diffusers transformers"
+        )
+
+    # Configure HuggingFace Hub for reliable downloads
+    _configure_hf_download()
+
+    logger.info(f"Exporting SDXL model to OpenVINO: {model_id}")
+
+    output_path = Path(output_dir)
+    model_name = model_id.split("/")[-1]
+    ov_model_path = output_path / f"{model_name}-openvino"
+
+    # Check if already exported
+    if ov_model_path.exists():
+        required_components = [
+            "text_encoder/openvino_model.xml",
+            "text_encoder_2/openvino_model.xml",
+            "unet/openvino_model.xml",
+            "vae_decoder/openvino_model.xml",
+        ]
+        all_exist = all((ov_model_path / comp).exists() for comp in required_components)
+
+        if all_exist:
+            logger.info(f"OpenVINO model already exists at {ov_model_path}")
+            return {
+                "model_path": str(ov_model_path),
+                "text_encoder_path": str(ov_model_path / "text_encoder"),
+                "text_encoder_2_path": str(ov_model_path / "text_encoder_2"),
+                "unet_path": str(ov_model_path / "unet"),
+                "vae_decoder_path": str(ov_model_path / "vae_decoder"),
+            }
+
+    # Export options
+    export_kwargs = {}
+
+    if compress_weights:
+        try:
+            from optimum.intel import OVWeightQuantizationConfig
+            export_kwargs["quantization_config"] = OVWeightQuantizationConfig(
+                bits=8,
+                sym=False,
+            )
+            logger.info("Applying INT8 weight compression")
+        except ImportError:
+            logger.warning("OVWeightQuantizationConfig not available, skipping compression")
+
+    # Export model with retry logic
+    logger.info("Downloading and exporting SDXL model (this may take 10-30 minutes)...")
+    logger.info("SDXL is ~6.5GB - download will resume if interrupted.")
+
+    def do_export():
+        return OVStableDiffusionXLPipeline.from_pretrained(
+            model_id,
+            export=True,
+            compile=False,
+            **export_kwargs
+        )
+
+    pipeline = _download_with_retry(do_export, max_retries=3)
+
+    # Save model
+    logger.info(f"Saving OpenVINO model to {ov_model_path}")
+    pipeline.save_pretrained(str(ov_model_path))
+
+    # Also save tokenizers explicitly
+    logger.info("Saving tokenizers...")
+    try:
+        from transformers import CLIPTokenizer
+
+        # Tokenizer 1 (CLIP)
+        tokenizer_1 = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
+        tokenizer_1.save_pretrained(str(ov_model_path / "tokenizer"))
+
+        # Tokenizer 2 (from SDXL)
+        tokenizer_2 = CLIPTokenizer.from_pretrained(
+            model_id,
+            subfolder="tokenizer_2"
+        )
+        tokenizer_2.save_pretrained(str(ov_model_path / "tokenizer_2"))
+    except Exception as e:
+        logger.warning(f"Could not save tokenizers separately: {e}")
+
+    logger.info(f"OpenVINO model saved to {ov_model_path}")
+
+    # List saved components
+    logger.info("Saved model components:")
+    for component_dir in ov_model_path.iterdir():
+        if component_dir.is_dir():
+            xml_files = list(component_dir.glob("*.xml"))
+            if xml_files:
+                for xml in xml_files:
+                    bin_file = xml.with_suffix(".bin")
+                    size_mb = bin_file.stat().st_size / (1024 * 1024) if bin_file.exists() else 0
+                    logger.info(f"  {component_dir.name}/{xml.name} ({size_mb:.1f} MB)")
+
+    return {
+        "model_path": str(ov_model_path),
+        "text_encoder_path": str(ov_model_path / "text_encoder"),
+        "text_encoder_2_path": str(ov_model_path / "text_encoder_2"),
+        "unet_path": str(ov_model_path / "unet"),
+        "vae_decoder_path": str(ov_model_path / "vae_decoder"),
     }
 
 

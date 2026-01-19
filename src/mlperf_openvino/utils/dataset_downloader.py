@@ -115,6 +115,33 @@ DATASET_REGISTRY: Dict[str, Dict] = {
             'https://inference.mlcommons-storage.org/metadata/whisper-dataset.uri'
         ),
     },
+    "coco-2014": {
+        "description": "COCO 2014 validation set with captions for SDXL text-to-image (MLPerf)",
+        "val_images": {
+            "url": "http://images.cocodataset.org/zips/val2014.zip",
+            "filename": "val2014.zip",
+            "size_gb": 6.2,
+            "num_images": 40504,
+        },
+        "annotations": {
+            "url": "http://images.cocodataset.org/annotations/annotations_trainval2014.zip",
+            "filename": "annotations_trainval2014.zip",
+            "size_mb": 241,
+        },
+        # MLPerf SDXL uses specific captions file
+        "mlperf_captions": {
+            "url": "https://raw.githubusercontent.com/mlcommons/inference/master/text_to_image/coco2014/captions/captions_5k.tsv",
+            "filename": "captions_5k.tsv",
+            "num_samples": 5000,
+        },
+        # Pre-generated latents for consistent evaluation
+        "mlperf_latents": {
+            "url": "https://raw.githubusercontent.com/mlcommons/inference/master/text_to_image/tools/latents.pt",
+            "filename": "latents.pt",
+        },
+        "num_samples": 5000,  # MLPerf uses 5000 samples
+        "note": "MLPerf SDXL benchmark dataset",
+    },
 }
 
 
@@ -628,6 +655,118 @@ def download_whisper_mlperf(output_dir: str) -> Dict[str, str]:
         logger.error(f"Failed to download: {e}")
         logger.info("Falling back to manual LibriSpeech download...")
         return download_librispeech(output_dir, subset="mlperf")
+
+
+def download_coco2014(
+    output_dir: str,
+    force: bool = False,
+    mlperf_only: bool = True,
+) -> Dict[str, str]:
+    """
+    Download COCO 2014 dataset for SDXL text-to-image benchmark.
+
+    For MLPerf submissions, downloads:
+    - captions_5k.tsv (5000 prompts)
+    - latents.pt (pre-generated latents for reproducibility)
+    - Optionally: val2014 images for FID computation
+
+    Args:
+        output_dir: Directory to save dataset
+        force: Force re-download
+        mlperf_only: If True, only download MLPerf files (captions + latents)
+                     If False, also download full val2014 images
+
+    Returns:
+        Dictionary with dataset paths
+    """
+    import zipfile
+
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    data_dir = output_path / "coco2014"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    dataset_info = DATASET_REGISTRY["coco-2014"]
+    results = {"data_path": str(data_dir)}
+
+    # Download MLPerf captions file
+    captions_info = dataset_info["mlperf_captions"]
+    captions_file = data_dir / captions_info["filename"]
+
+    if not captions_file.exists() or force:
+        logger.info("Downloading MLPerf captions (5000 prompts)...")
+        _download_file(
+            captions_info["url"],
+            str(captions_file),
+            show_progress=False
+        )
+
+    results["captions_path"] = str(captions_file)
+    results["num_samples"] = captions_info["num_samples"]
+
+    # Download pre-generated latents
+    latents_info = dataset_info["mlperf_latents"]
+    latents_file = data_dir / latents_info["filename"]
+
+    if not latents_file.exists() or force:
+        logger.info("Downloading pre-generated latents...")
+        _download_file(
+            latents_info["url"],
+            str(latents_file),
+            show_progress=False
+        )
+
+    results["latents_path"] = str(latents_file)
+
+    # Optionally download full val2014 images (for FID computation)
+    if not mlperf_only:
+        images_info = dataset_info["val_images"]
+        images_dir = data_dir / "val2014"
+        archive_path = output_path / images_info["filename"]
+
+        if not images_dir.exists() or force:
+            if not archive_path.exists() or force:
+                logger.info(f"Downloading COCO val2014 images (~{images_info['size_gb']} GB)...")
+                logger.info("This may take a while...")
+                _download_file(
+                    images_info["url"],
+                    str(archive_path),
+                    expected_size_mb=images_info["size_gb"] * 1024
+                )
+
+            # Extract
+            logger.info("Extracting images...")
+            with zipfile.ZipFile(archive_path, 'r') as zip_ref:
+                zip_ref.extractall(data_dir)
+
+        results["images_dir"] = str(images_dir)
+        results["num_images"] = images_info["num_images"]
+
+        # Download annotations
+        ann_info = dataset_info["annotations"]
+        ann_archive = output_path / ann_info["filename"]
+        ann_dir = data_dir / "annotations"
+
+        if not ann_dir.exists() or force:
+            if not ann_archive.exists() or force:
+                logger.info("Downloading COCO annotations...")
+                _download_file(
+                    ann_info["url"],
+                    str(ann_archive),
+                    expected_size_mb=ann_info["size_mb"]
+                )
+
+            # Extract
+            logger.info("Extracting annotations...")
+            with zipfile.ZipFile(ann_archive, 'r') as zip_ref:
+                zip_ref.extractall(data_dir)
+
+        results["annotations_dir"] = str(ann_dir)
+
+    logger.info(f"COCO 2014 dataset ready at {data_dir}")
+
+    return results
 
 
 def download_squad(
@@ -1253,7 +1392,7 @@ def download_dataset(
     Download a dataset by name.
 
     Args:
-        dataset_name: "imagenet", "squad", "openimages", or "librispeech"
+        dataset_name: "imagenet", "squad", "openimages", "librispeech", or "coco-2014"
         output_dir: Directory to save dataset
         subset: Optional subset name
         force: Force re-download
@@ -1271,6 +1410,9 @@ def download_dataset(
         return download_librispeech(output_dir, subset or "mlperf", force)
     elif dataset_name == "whisper-mlperf":
         return download_whisper_mlperf(output_dir)
+    elif dataset_name in ("coco-2014", "coco2014", "sdxl"):
+        # "sdxl" is an alias for convenience
+        return download_coco2014(output_dir, force)
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
@@ -1282,6 +1424,7 @@ def list_available_datasets() -> Dict[str, str]:
         "squad": DATASET_REGISTRY["squad"]["description"],
         "openimages": DATASET_REGISTRY["openimages"]["description"],
         "librispeech": DATASET_REGISTRY["librispeech"]["description"],
+        "coco-2014": DATASET_REGISTRY["coco-2014"]["description"],
     }
 
 

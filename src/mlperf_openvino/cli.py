@@ -1,7 +1,7 @@
 """
 Command Line Interface for MLPerf OpenVINO Benchmark.
 
-Supports: ResNet50, BERT, RetinaNet, Whisper
+Supports: ResNet50, BERT, RetinaNet, Whisper, SDXL
 """
 
 import logging
@@ -38,6 +38,7 @@ def main():
     - BERT-Large (Question Answering on SQuAD)
     - RetinaNet (Object Detection on OpenImages)
     - Whisper (Speech Recognition on LibriSpeech)
+    - SDXL (Text-to-Image on COCO 2014)
     """
     pass
 
@@ -52,12 +53,14 @@ def get_default_config(model: str) -> BenchmarkConfig:
         return BenchmarkConfig.default_retinanet()
     elif model == 'whisper':
         return BenchmarkConfig.default_whisper()
+    elif model == 'sdxl':
+        return BenchmarkConfig.default_sdxl()
     else:
         return BenchmarkConfig.default_resnet50()
 
 
 @main.command()
-@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper']),
+@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl']),
               default='resnet50', help='Model to benchmark')
 @click.option('--scenario', '-s', type=click.Choice(['Offline', 'Server']),
               default='Offline', help='Test scenario')
@@ -254,16 +257,21 @@ def _print_dataset_help(model: str) -> None:
     elif model == 'whisper':
         click.echo("Please download the LibriSpeech dataset.")
         click.echo("Run: mlperf-ov download-dataset --dataset librispeech")
+    elif model == 'sdxl':
+        click.echo("Please download the COCO 2014 dataset.")
+        click.echo("Run: mlperf-ov download-dataset --dataset coco-2014")
 
 
 @main.command()
-@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper']),
+@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl']),
               default='resnet50', help='Model to download')
 @click.option('--output-dir', '-o', type=click.Path(),
               default='./models', help='Output directory')
 @click.option('--format', '-f', type=click.Choice(['onnx', 'openvino']),
               default='onnx', help='Model format')
-def download(model: str, output_dir: str, format: str):
+@click.option('--compress-weights', is_flag=True,
+              help='Apply INT8 weight compression (SDXL only)')
+def download(model: str, output_dir: str, format: str, compress_weights: bool):
     """
     Download model files.
 
@@ -274,6 +282,8 @@ def download(model: str, output_dir: str, format: str):
         mlperf-ov download --model bert --format onnx
 
         mlperf-ov download --model whisper --format openvino
+
+        mlperf-ov download --model sdxl --format openvino
     """
     click.echo(f"Downloading {model} model...")
 
@@ -292,6 +302,20 @@ def download(model: str, output_dir: str, format: str):
             if 'encoder_path' in paths:
                 click.echo(f"  Encoder: {paths['encoder_path']}")
                 click.echo(f"  Decoder: {paths['decoder_path']}")
+        elif model == 'sdxl':
+            from .utils.model_downloader import download_sdxl_model
+            export_to_openvino = (format == 'openvino')
+            paths = download_sdxl_model(
+                str(output_path),
+                export_to_openvino=export_to_openvino,
+                compress_weights=compress_weights,
+            )
+            click.echo(f"Model downloaded to: {paths['model_path']}")
+            if 'unet_path' in paths:
+                click.echo(f"  Text Encoder 1: {paths['text_encoder_path']}")
+                click.echo(f"  Text Encoder 2: {paths['text_encoder_2_path']}")
+                click.echo(f"  UNet: {paths['unet_path']}")
+                click.echo(f"  VAE Decoder: {paths['vae_decoder_path']}")
         else:
             model_path = download_model(model, str(output_path), format)
             click.echo(f"Model downloaded to: {model_path}")
@@ -425,10 +449,11 @@ def info():
     click.echo("  - BERT-Large (Question Answering)")
     click.echo("  - RetinaNet (Object Detection)")
     click.echo("  - Whisper (Speech Recognition)")
+    click.echo("  - SDXL (Text-to-Image Generation)")
 
 
 @main.command('download-dataset')
-@click.option('--dataset', '-d', type=click.Choice(['imagenet', 'librispeech', 'squad', 'openimages']),
+@click.option('--dataset', '-d', type=click.Choice(['imagenet', 'librispeech', 'squad', 'openimages', 'coco-2014']),
               required=True, help='Dataset to download')
 @click.option('--output-dir', '-o', type=click.Path(),
               default='./data', help='Output directory')
@@ -437,7 +462,10 @@ def info():
 @click.option('--count', '-c', type=int, default=None,
               help='Max images to download (OpenImages only, default=all)')
 @click.option('--force', is_flag=True, help='Force re-download')
-def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str], count: Optional[int], force: bool):
+@click.option('--full-images', is_flag=True,
+              help='Download full val2014 images (COCO only, for FID computation)')
+def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str],
+                         count: Optional[int], force: bool, full_images: bool):
     """
     Download dataset files.
 
@@ -454,6 +482,12 @@ def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str], c
 
         # Download LibriSpeech dev-clean
         mlperf-ov download-dataset --dataset librispeech --subset dev-clean
+
+        # Download COCO 2014 for SDXL (captions + latents)
+        mlperf-ov download-dataset --dataset coco-2014
+
+        # Download COCO 2014 with full images for FID
+        mlperf-ov download-dataset --dataset coco-2014 --full-images
     """
     from .utils.dataset_downloader import download_dataset, get_dataset_info
 
@@ -478,6 +512,9 @@ def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str], c
         if dataset == 'openimages':
             from .utils.dataset_downloader import download_openimages
             paths = download_openimages(output_dir, force=force, max_images=count)
+        elif dataset == 'coco-2014':
+            from .utils.dataset_downloader import download_coco2014
+            paths = download_coco2014(output_dir, force=force, mlperf_only=not full_images)
         else:
             paths = download_dataset(dataset, output_dir, subset, force)
 
@@ -488,6 +525,10 @@ def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str], c
             click.echo(f"  Val map: {paths['val_map']}")
         if 'transcript_path' in paths:
             click.echo(f"  Transcripts: {paths['transcript_path']}")
+        if 'captions_path' in paths:
+            click.echo(f"  Captions: {paths['captions_path']}")
+        if 'latents_path' in paths:
+            click.echo(f"  Latents: {paths['latents_path']}")
         if 'num_samples' in paths:
             click.echo(f"  Samples: {paths['num_samples']}")
 
@@ -497,7 +538,7 @@ def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str], c
 
 
 @main.command('setup')
-@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper']),
+@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl']),
               required=True, help='Model to set up')
 @click.option('--output-dir', '-o', type=click.Path(),
               default='.', help='Base output directory')
@@ -523,8 +564,11 @@ def setup_cmd(model: str, output_dir: str, format: str):
 
         # Set up Whisper benchmark with OpenVINO format
         mlperf-ov setup --model whisper --format openvino
+
+        # Set up SDXL benchmark
+        mlperf-ov setup --model sdxl --format openvino
     """
-    from .utils.model_downloader import download_model, download_whisper_model
+    from .utils.model_downloader import download_model, download_whisper_model, download_sdxl_model
     from .utils.dataset_downloader import download_dataset
 
     output_path = Path(output_dir)
@@ -545,6 +589,13 @@ def setup_cmd(model: str, output_dir: str, format: str):
                 export_to_openvino=export_to_openvino
             )
             model_path = model_paths['model_path']
+        elif model == 'sdxl':
+            # SDXL requires OpenVINO format
+            model_paths = download_sdxl_model(
+                str(models_dir),
+                export_to_openvino=True,  # Always use OpenVINO for SDXL
+            )
+            model_path = model_paths['model_path']
         else:
             model_path = download_model(model, str(models_dir), format)
         click.echo(f"  Model: {model_path}\n")
@@ -563,6 +614,8 @@ def setup_cmd(model: str, output_dir: str, format: str):
             dataset_paths = download_dataset('openimages', str(data_dir))
         elif model == 'whisper':
             dataset_paths = download_dataset('librispeech', str(data_dir), 'dev-clean')
+        elif model == 'sdxl':
+            dataset_paths = download_dataset('coco-2014', str(data_dir))
 
         click.echo(f"  Dataset: {dataset_paths.get('data_path', 'N/A')}\n")
     except Exception as e:
@@ -584,7 +637,7 @@ def setup_cmd(model: str, output_dir: str, format: str):
 
 
 @main.command('perf-tips')
-@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper']),
+@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl']),
               default='resnet50', help='Model to show tips for')
 def perf_tips(model: str):
     """
@@ -617,6 +670,8 @@ def perf_tips(model: str):
         click.echo("   Recommended: --batch-size 2 to 8 (large model)")
     elif model == 'whisper':
         click.echo("   Recommended: --batch-size 1 to 4 (sequential decoding)")
+    elif model == 'sdxl':
+        click.echo("   Recommended: --batch-size 1 to 2 (very large model, high memory)")
     click.echo("")
 
     click.echo("3. USE OPTIMAL NUMBER OF STREAMS")
@@ -650,6 +705,8 @@ def perf_tips(model: str):
         batch = 8
     elif model == 'retinanet':
         batch = 4
+    elif model == 'sdxl':
+        batch = 1
     else:
         batch = 2
 
@@ -798,6 +855,14 @@ def list_models():
             'dataset': 'LibriSpeech',
             'metric': 'Word Accuracy',
             'target': '97.93%',
+        },
+        {
+            'name': 'Stable Diffusion XL',
+            'id': 'sdxl',
+            'task': 'Text-to-Image Generation',
+            'dataset': 'COCO 2014',
+            'metric': 'FID / CLIP Score',
+            'target': 'FID: 23.01-23.95, CLIP: 31.69-31.81',
         },
     ]
 
