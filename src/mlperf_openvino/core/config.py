@@ -32,6 +32,7 @@ class ModelType(Enum):
     BERT = "bert"
     RETINANET = "retinanet"
     WHISPER = "whisper"
+    SDXL = "sdxl"
 
 
 @dataclass
@@ -410,7 +411,40 @@ class BenchmarkConfig:
                 path="./data/openimages",
             ),
         )
-    
+
+    @classmethod
+    def default_sdxl(cls) -> "BenchmarkConfig":
+        """Create default Stable Diffusion XL configuration for COCO 2014."""
+        return cls(
+            model=ModelConfig(
+                name="SDXL",
+                task="text_to_image",
+                model_type=ModelType.SDXL,
+                input_shape=[1, 77],  # Tokenized prompt shape
+                input_name="prompt",
+                output_name="images",
+                data_format="NCHW",  # Output images in NCHW
+                dtype="FP16",  # SDXL typically uses FP16
+                accuracy_target=23.5,  # FID score target (lower is better)
+                accuracy_threshold=1.0,  # Allow ±2% variation
+                offline=ScenarioConfig(
+                    min_duration_ms=60000,
+                    min_query_count=5000,  # MLPerf official: 5000 samples
+                    samples_per_query=1,
+                ),
+                server=ScenarioConfig(
+                    min_duration_ms=60000,
+                    min_query_count=5000,
+                    target_latency_ns=20000000000,  # 20s per image
+                    target_qps=1.0,
+                ),
+            ),
+            dataset=DatasetConfig(
+                name="coco2014",
+                path="./data/coco2014",
+            ),
+        )
+
     def get_scenario_config(self) -> ScenarioConfig:
         """Get configuration for the current scenario."""
         if self.scenario == Scenario.OFFLINE:

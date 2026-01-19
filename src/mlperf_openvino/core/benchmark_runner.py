@@ -98,6 +98,8 @@ class BenchmarkRunner:
             self._setup_retinanet()
         elif model_type == ModelType.WHISPER:
             self._setup_whisper()
+        elif model_type == ModelType.SDXL:
+            self._setup_sdxl()
         else:
             raise ValueError(f"Unsupported model type: {model_type}")
 
@@ -291,6 +293,35 @@ class BenchmarkRunner:
             scenario=self.config.scenario,
         )
 
+    def _setup_sdxl(self) -> None:
+        """Set up Stable Diffusion XL benchmark."""
+        from ..datasets.coco_captions import COCOCaptionsQSL
+        from .sdxl_sut import SDXLPipeline, SDXLSUT
+
+        logger.info(f"Loading COCO Captions dataset from {self.config.dataset.path}")
+        self.qsl = COCOCaptionsQSL(
+            data_path=self.config.dataset.path,
+            count=self.config.dataset.num_samples if self.config.dataset.num_samples > 0 else None,
+            performance_sample_count=5000,  # MLPerf default
+        )
+        self.qsl.load()
+
+        logger.info(f"Creating SDXL pipeline from {self.config.model.model_path}")
+        pipeline = SDXLPipeline(
+            model_path=self.config.model.model_path,
+            device=self.config.openvino.device,
+            dtype=self.config.model.dtype,
+        )
+        pipeline.load()
+
+        logger.info(f"Creating SDXL SUT for scenario: {self.config.scenario}")
+        self.sut = SDXLSUT(
+            config=self.config,
+            pipeline=pipeline,
+            qsl=self.qsl,
+            scenario=self.config.scenario,
+        )
+
     def _get_test_settings(self) -> "lg.TestSettings":
         """Create LoadGen test settings."""
         settings = lg.TestSettings()
@@ -440,6 +471,9 @@ class BenchmarkRunner:
         elif model_type == ModelType.WHISPER:
             primary_metric = "word_accuracy"
             metric_value = self._accuracy_results.get("word_accuracy", 0.0)
+        elif model_type == ModelType.SDXL:
+            primary_metric = "fid"
+            metric_value = self._accuracy_results.get("fid", 0.0)
         else:
             primary_metric = "accuracy"
             metric_value = 0.0
@@ -481,6 +515,8 @@ class BenchmarkRunner:
             self._compute_retinanet_accuracy()
         elif model_type == ModelType.WHISPER:
             self._compute_whisper_accuracy()
+        elif model_type == ModelType.SDXL:
+            self._compute_sdxl_accuracy()
 
     def _compute_resnet50_accuracy(self) -> None:
         """Compute ResNet50 accuracy (Top-1)."""
@@ -543,6 +579,28 @@ class BenchmarkRunner:
 
         logger.info(f"Word Accuracy: {self._accuracy_results.get('word_accuracy', 0):.4f}")
         logger.info(f"WER: {self._accuracy_results.get('wer', 0):.4f}")
+
+    def _compute_sdxl_accuracy(self) -> None:
+        """Compute SDXL accuracy (FID and CLIP score)."""
+        self._accuracy_results = self.sut.compute_accuracy()
+
+        fid = self._accuracy_results.get('fid', 0)
+        clip_score = self._accuracy_results.get('clip_score', 0)
+
+        logger.info(f"FID Score: {fid:.4f}")
+        logger.info(f"CLIP Score: {clip_score:.4f}")
+
+        # Check if within MLPerf targets
+        fid_valid = self._accuracy_results.get('fid_valid', False)
+        clip_valid = self._accuracy_results.get('clip_valid', False)
+
+        if fid_valid and clip_valid:
+            logger.info("Accuracy PASSED: FID and CLIP within MLPerf targets")
+        else:
+            if not fid_valid:
+                logger.warning(f"FID {fid:.4f} outside target [23.01, 23.95]")
+            if not clip_valid:
+                logger.warning(f"CLIP {clip_score:.4f} outside target [31.69, 31.81]")
 
     def run_accuracy(self) -> Dict[str, float]:
         """Run accuracy-only test."""
@@ -640,5 +698,12 @@ class BenchmarkRunner:
             elif model_type == 'whisper':
                 print(f"Word Accuracy: {acc.get('word_accuracy', 0):.4f}")
                 print(f"WER: {acc.get('wer', 0):.4f}")
+            elif model_type == 'sdxl':
+                print(f"FID Score: {acc.get('fid', 0):.4f}")
+                print(f"CLIP Score: {acc.get('clip_score', 0):.4f}")
+                if acc.get('fid_valid') and acc.get('clip_valid'):
+                    print("Status: PASSED (within MLPerf targets)")
+                else:
+                    print("Status: FAILED (outside MLPerf targets)")
 
         print("="*60 + "\n")
