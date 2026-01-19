@@ -4,13 +4,13 @@ MLPerf Inference v5.1 benchmark implementation using OpenVINO backend for CPU.
 
 ## Supported Models
 
-| Model | Task | Dataset | Metric | Target |
-|-------|------|---------|--------|--------|
-| ResNet50 | Image Classification | ImageNet 2012 | Top-1 Accuracy | 76.46% |
-| BERT-Large | Question Answering | SQuAD v1.1 | F1 Score | 90.87% |
-| RetinaNet | Object Detection | OpenImages | mAP | 37.57% |
-| Whisper Large v3 | Speech Recognition | LibriSpeech | Word Accuracy | 97.93% |
-| SDXL | Text-to-Image | COCO 2014 | CLIP / FID | 31.7 / 23.5 |
+| Model | Task | Dataset | Metric | Reference | Required (99%) |
+|-------|------|---------|--------|-----------|----------------|
+| ResNet50 | Image Classification | ImageNet 2012 | Top-1 Accuracy | 76.46% | ≥ 75.70% |
+| BERT-Large | Question Answering | SQuAD v1.1 | F1 Score | 90.87% | ≥ 89.97% |
+| RetinaNet | Object Detection | OpenImages | mAP | 37.57% | ≥ 37.19% |
+| Whisper Large v3 | Speech Recognition | LibriSpeech | Word Accuracy | 97.93% | ≥ 96.95% |
+| SDXL | Text-to-Image | COCO 2014 | CLIP / FID | 31.69 / 23.01 | 31.68-31.81 / 23.01-23.95 |
 
 ## Installation
 
@@ -104,7 +104,3 @@ mlperf-ov info                 # System information
 --num-threads        CPU threads (0 = auto)
 --num-streams        Inference streams
 ```
-
-## License
-
-Apache License 2.0
