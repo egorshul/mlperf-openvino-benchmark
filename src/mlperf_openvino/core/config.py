@@ -58,7 +58,7 @@ class OpenVINOConfig:
     bind_thread: bool = True
     threads_per_stream: int = 0
     enable_hyper_threading: bool = True
-    input_layout: str = ""  # Input data layout: set to "NHWC" to add transpose for NHWC data
+    input_layout: str = "NHWC"  # Input data layout: "NHWC" adds transpose for image models
     
     def to_properties(self) -> Dict[str, Any]:
         """Convert to OpenVINO properties dictionary."""
@@ -102,7 +102,7 @@ class ModelConfig:
     input_shape: List[int]
     input_name: str = "input"
     output_name: str = "output"
-    data_format: str = "NCHW"  # Data format: NCHW for image models (matches model input)
+    data_format: str = "NHWC"  # Data format: NHWC for image models (converted via PrePostProcessor)
     dtype: str = "FP32"
     
     # Accuracy targets
@@ -275,10 +275,10 @@ class BenchmarkConfig:
                 name="ResNet50-v1.5",
                 task="image_classification",
                 model_type=ModelType.RESNET50,
-                input_shape=[1, 3, 224, 224],  # NCHW format
+                input_shape=[1, 224, 224, 3],  # NHWC format
                 input_name="input",
                 output_name="output",
-                data_format="NCHW",
+                data_format="NHWC",
                 dtype="FP32",
                 accuracy_target=0.7646,
                 accuracy_threshold=0.99,
@@ -379,10 +379,10 @@ class BenchmarkConfig:
                 name="RetinaNet",
                 task="object_detection",
                 model_type=ModelType.RETINANET,
-                input_shape=[1, 3, 800, 800],  # NCHW format
+                input_shape=[1, 800, 800, 3],  # NHWC format
                 input_name="input",
                 output_name="output",
-                data_format="NCHW",
+                data_format="NHWC",
                 dtype="FP32",
                 accuracy_target=0.3757,  # mAP (official MLPerf v5.1)
                 accuracy_threshold=0.99,
