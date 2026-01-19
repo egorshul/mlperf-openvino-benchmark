@@ -83,10 +83,13 @@ def build_retinanet_model(num_classes: int = 264):
     logger.info("Building RetinaNet with ResNeXt50_32x4d backbone...")
 
     # Build backbone: ResNeXt50_32x4d with FPN + P6P7
+    # IMPORTANT: MLPerf uses returned_layers=[2, 3, 4] which corresponds to C3, C4, C5
+    # with 512, 1024, 2048 channels respectively. This matches the checkpoint architecture.
     backbone = resnet_fpn_backbone(
         backbone_name='resnext50_32x4d',
         weights=None,
-        trainable_layers=5,
+        trainable_layers=3,  # Default for MLPerf
+        returned_layers=[2, 3, 4],  # C3, C4, C5 - matches MLPerf checkpoint
         extra_blocks=LastLevelP6P7(256, 256),
     )
 
