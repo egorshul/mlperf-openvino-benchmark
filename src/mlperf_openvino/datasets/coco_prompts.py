@@ -499,12 +499,13 @@ class COCOPromptsDataset(BaseDataset):
             return 0.0
 
         try:
-            # Load open_clip model (MLCommons reference: ViT-H-14 trained on laion2b)
+            # Load open_clip model (MLCommons reference: ViT-B/32 with openai weights)
+            # Note: MLCommons clip_encoder.py defaults to ViT-B/32 with "openai" pretrained
             model, _, preprocess = open_clip.create_model_and_transforms(
-                'ViT-H-14',
-                pretrained='laion2b_s32b_b79k'
+                'ViT-B-32',
+                pretrained='openai'
             )
-            tokenizer = open_clip.get_tokenizer('ViT-H-14')
+            tokenizer = open_clip.get_tokenizer('ViT-B-32')
             model.eval()
 
             # Move to GPU if available
