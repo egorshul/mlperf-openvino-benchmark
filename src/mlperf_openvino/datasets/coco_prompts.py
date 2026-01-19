@@ -350,6 +350,24 @@ class COCOPromptsDataset(BaseDataset):
         """Get caption/prompt for sample."""
         return self._samples[index]['caption']
 
+    def get_samples(self, indices: List[int]) -> Tuple[List[Dict[str, Any]], List[str]]:
+        """
+        Get multiple preprocessed samples.
+
+        Args:
+            indices: List of sample indices
+
+        Returns:
+            Tuple of (list of input_dicts, list of captions)
+        """
+        inputs = []
+        labels = []
+        for idx in indices:
+            input_dict, caption = self.get_sample(idx)
+            inputs.append(input_dict)
+            labels.append(caption)
+        return inputs, labels
+
     def get_reference_image_path(self, index: int) -> Optional[str]:
         """Get reference image path for accuracy calculation."""
         return self._samples[index].get('image_path')
