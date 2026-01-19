@@ -7,7 +7,6 @@ name = "mlperf-openvino-benchmark"
 version = "1.0.0"
 description = "MLPerf v5.1 compatible inference benchmark using OpenVINO backend for CPU performance testing"
 readme = "README.md"
-license = {text = "Apache-2.0"}
 requires-python = ">=3.9"
 authors = [
     {name = "MLPerf OpenVINO Benchmark Team"}
@@ -17,7 +16,6 @@ classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
