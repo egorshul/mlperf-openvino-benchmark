@@ -1,7 +1,7 @@
 """
 Main benchmark runner for MLPerf OpenVINO Benchmark.
 
-Supports multiple models: ResNet50, BERT, RetinaNet, Whisper.
+Supports multiple models: ResNet50, BERT, RetinaNet, Whisper, SDXL.
 """
 
 import json
@@ -43,6 +43,7 @@ class BenchmarkRunner:
     - BERT-Large (Question Answering)
     - RetinaNet (Object Detection)
     - Whisper (Speech Recognition)
+    - Stable Diffusion XL (Text-to-Image)
     """
 
     def __init__(self, config: BenchmarkConfig):
@@ -77,11 +78,14 @@ class BenchmarkRunner:
         # Initialize model-specific components
         model_type = self.config.model.model_type
 
-        # Initialize backend (skip for Whisper with directory path - it handles its own loading)
+        # Initialize backend (skip for Whisper/SDXL with directory path - they handle their own loading)
         model_path = Path(self.config.model.model_path)
         if model_type == ModelType.WHISPER and model_path.is_dir():
             logger.info(f"Whisper model directory: {self.config.model.model_path}")
             self.backend = None  # Will be set up in _setup_whisper
+        elif model_type == ModelType.SDXL:
+            logger.info(f"SDXL model directory: {self.config.model.model_path}")
+            self.backend = None  # SDXL uses its own pipeline
         else:
             logger.info(f"Loading model from {self.config.model.model_path}")
             self.backend = OpenVINOBackend(
@@ -98,6 +102,8 @@ class BenchmarkRunner:
             self._setup_retinanet()
         elif model_type == ModelType.WHISPER:
             self._setup_whisper()
+        elif model_type == ModelType.SDXL:
+            self._setup_sdxl()
         else:
             raise ValueError(f"Unsupported model type: {model_type}")
 
@@ -289,6 +295,54 @@ class BenchmarkRunner:
             scenario=self.config.scenario,
         )
 
+    def _setup_sdxl(self) -> None:
+        """Set up Stable Diffusion XL benchmark."""
+        from ..datasets.coco_prompts import COCOPromptsQSL
+
+        logger.info(f"Loading COCO prompts dataset from {self.config.dataset.path}")
+        self.qsl = COCOPromptsQSL(
+            data_path=self.config.dataset.path,
+            count=self.config.dataset.num_samples if self.config.dataset.num_samples > 0 else None,
+            performance_sample_count=5000,  # MLPerf default
+        )
+        self.qsl.load()
+
+        model_path = Path(self.config.model.model_path)
+
+        # Try Optimum-Intel pipeline first
+        try:
+            from .sdxl_sut import SDXLOptimumSUT, OPTIMUM_SDXL_AVAILABLE
+
+            if OPTIMUM_SDXL_AVAILABLE and model_path.is_dir():
+                # Check if this looks like an optimum-exported model
+                config_file = model_path / "model_index.json"
+                if not config_file.exists():
+                    config_file = model_path / "config.json"
+
+                if config_file.exists():
+                    logger.info("Using Optimum-Intel for SDXL inference")
+                    self.sut = SDXLOptimumSUT(
+                        config=self.config,
+                        model_path=model_path,
+                        qsl=self.qsl,
+                        scenario=self.config.scenario,
+                    )
+                    return
+        except Exception as e:
+            logger.warning(f"Could not use Optimum-Intel for SDXL: {e}")
+            logger.info("Falling back to manual component loading")
+
+        # Fallback: Manual component loading
+        from .sdxl_sut import SDXLManualSUT
+
+        logger.info(f"Setting up SDXL with manual component loading")
+        self.sut = SDXLManualSUT(
+            config=self.config,
+            model_path=model_path,
+            qsl=self.qsl,
+            scenario=self.config.scenario,
+        )
+
     def _get_test_settings(self) -> "lg.TestSettings":
         """Create LoadGen test settings."""
         settings = lg.TestSettings()
@@ -438,6 +492,9 @@ class BenchmarkRunner:
         elif model_type == ModelType.WHISPER:
             primary_metric = "word_accuracy"
             metric_value = self._accuracy_results.get("word_accuracy", 0.0)
+        elif model_type == ModelType.SDXL:
+            primary_metric = "clip_score"
+            metric_value = self._accuracy_results.get("clip_score", 0.0)
         else:
             primary_metric = "accuracy"
             metric_value = 0.0
@@ -479,6 +536,8 @@ class BenchmarkRunner:
             self._compute_retinanet_accuracy()
         elif model_type == ModelType.WHISPER:
             self._compute_whisper_accuracy()
+        elif model_type == ModelType.SDXL:
+            self._compute_sdxl_accuracy()
 
     def _compute_resnet50_accuracy(self) -> None:
         """Compute ResNet50 accuracy (Top-1)."""
@@ -541,6 +600,31 @@ class BenchmarkRunner:
 
         logger.info(f"Word Accuracy: {self._accuracy_results.get('word_accuracy', 0):.4f}")
         logger.info(f"WER: {self._accuracy_results.get('wer', 0):.4f}")
+
+    def _compute_sdxl_accuracy(self) -> None:
+        """Compute SDXL accuracy (CLIP Score and FID - MLPerf v5.1 metrics)."""
+        self._accuracy_results = self.sut.compute_accuracy()
+
+        clip_score = self._accuracy_results.get('clip_score', 0.0)
+        fid_score = self._accuracy_results.get('fid_score', 0.0)
+
+        logger.info(f"CLIP Score: {clip_score:.4f}")
+        logger.info(f"FID Score: {fid_score:.4f}")
+
+        # MLPerf v5.1 thresholds for SDXL
+        # CLIP_SCORE: >= 31.68632 and <= 31.81332
+        # FID_SCORE: >= 23.01086 and <= 23.95007
+        clip_valid = 31.68632 <= clip_score <= 31.81332
+        fid_valid = 23.01086 <= fid_score <= 23.95007
+
+        if clip_valid and fid_valid:
+            logger.info("SDXL accuracy: PASSED (within MLPerf thresholds)")
+        else:
+            logger.warning("SDXL accuracy: Outside MLPerf thresholds")
+            if not clip_valid:
+                logger.warning(f"  CLIP Score {clip_score:.4f} not in [31.68632, 31.81332]")
+            if not fid_valid:
+                logger.warning(f"  FID Score {fid_score:.4f} not in [23.01086, 23.95007]")
 
     def run_accuracy(self) -> Dict[str, float]:
         """Run accuracy-only test."""
@@ -638,5 +722,8 @@ class BenchmarkRunner:
             elif model_type == 'whisper':
                 print(f"Word Accuracy: {acc.get('word_accuracy', 0):.4f}")
                 print(f"WER: {acc.get('wer', 0):.4f}")
+            elif model_type == 'sdxl':
+                print(f"CLIP Score: {acc.get('clip_score', 0):.4f}")
+                print(f"FID Score: {acc.get('fid_score', 0):.4f}")
 
         print("="*60 + "\n")

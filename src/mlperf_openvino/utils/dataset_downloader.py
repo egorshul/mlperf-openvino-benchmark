@@ -115,6 +115,21 @@ DATASET_REGISTRY: Dict[str, Dict] = {
             'https://inference.mlcommons-storage.org/metadata/whisper-dataset.uri'
         ),
     },
+    "coco2014": {
+        "description": "COCO 2014 captions dataset for SDXL text-to-image generation",
+        "captions": {
+            "url": "http://images.cocodataset.org/annotations/annotations_trainval2014.zip",
+            "filename": "annotations_trainval2014.zip",
+            "size_mb": 241,
+        },
+        "images": {
+            "url": "http://images.cocodataset.org/zips/val2014.zip",
+            "filename": "val2014.zip",
+            "size_gb": 6.0,
+        },
+        "num_samples": 5000,  # MLPerf uses 5000 samples
+        "note": "For MLPerf SDXL benchmark",
+    },
 }
 
 
@@ -1243,6 +1258,142 @@ def _convert_openimages_to_coco(
     logger.info(f"COCO annotations: {len(coco['images'])} images, {len(coco['annotations'])} annotations")
 
 
+def download_coco2014(
+    output_dir: str,
+    force: bool = False,
+    download_images: bool = False,
+    num_samples: int = 5000
+) -> Dict[str, str]:
+    """
+    Download COCO 2014 captions dataset for SDXL text-to-image benchmark.
+
+    For MLPerf SDXL benchmark, downloads the captions from COCO 2014 validation set
+    and creates a prompt file in the MLCommons format.
+
+    Args:
+        output_dir: Directory to save dataset
+        force: Force re-download
+        download_images: Whether to download reference images (large, ~6GB)
+        num_samples: Number of samples to use (MLPerf uses 5000)
+
+    Returns:
+        Dictionary with dataset paths
+    """
+    import json
+    import zipfile
+
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    data_dir = output_path / "coco2014"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    dataset_info = DATASET_REGISTRY["coco2014"]
+
+    # Download annotations
+    annotations_zip = output_path / dataset_info["captions"]["filename"]
+    annotations_dir = data_dir / "annotations"
+
+    captions_file = annotations_dir / "captions_val2014.json"
+
+    if not captions_file.exists() or force:
+        if not annotations_zip.exists() or force:
+            logger.info(f"Downloading COCO 2014 annotations (~{dataset_info['captions']['size_mb']} MB)...")
+            _download_file(
+                dataset_info["captions"]["url"],
+                str(annotations_zip),
+                expected_size_mb=dataset_info["captions"]["size_mb"]
+            )
+
+        # Extract annotations
+        logger.info("Extracting annotations...")
+        with zipfile.ZipFile(annotations_zip, 'r') as zip_ref:
+            zip_ref.extractall(data_dir)
+
+    # Load captions and create prompts file
+    prompts_file = data_dir / "coco-1024.tsv"
+    prompts_txt = data_dir / "prompts.txt"
+
+    if not prompts_file.exists() or force:
+        logger.info("Processing captions...")
+
+        with open(captions_file, 'r') as f:
+            coco_data = json.load(f)
+
+        # Get one caption per image (first caption)
+        image_to_caption = {}
+        for ann in coco_data['annotations']:
+            image_id = ann['image_id']
+            if image_id not in image_to_caption:
+                image_to_caption[image_id] = ann['caption']
+
+        # Create image_id to filename mapping
+        id_to_filename = {}
+        for img in coco_data['images']:
+            id_to_filename[img['id']] = img['file_name']
+
+        # Write prompts in TSV format (MLCommons format)
+        with open(prompts_file, 'w', encoding='utf-8') as tsv_f, \
+             open(prompts_txt, 'w', encoding='utf-8') as txt_f:
+
+            count = 0
+            for image_id, caption in image_to_caption.items():
+                if count >= num_samples:
+                    break
+
+                # Clean caption
+                caption = caption.strip().replace('\t', ' ').replace('\n', ' ')
+
+                # TSV format: image_id<tab>caption
+                tsv_f.write(f"{image_id}\t{caption}\n")
+                # Simple text format: one caption per line
+                txt_f.write(f"{caption}\n")
+                count += 1
+
+        logger.info(f"Created prompts file with {count} samples")
+
+    # Optionally download reference images
+    images_dir = data_dir / "coco-1024"
+
+    if download_images:
+        images_zip = output_path / dataset_info["images"]["filename"]
+
+        if not images_dir.exists() or force:
+            if not images_zip.exists() or force:
+                logger.info(f"Downloading COCO 2014 validation images (~{dataset_info['images']['size_gb']} GB)...")
+                logger.info("This may take a while...")
+                _download_file(
+                    dataset_info["images"]["url"],
+                    str(images_zip),
+                    expected_size_mb=dataset_info["images"]["size_gb"] * 1024
+                )
+
+            # Extract images
+            logger.info("Extracting images...")
+            with zipfile.ZipFile(images_zip, 'r') as zip_ref:
+                zip_ref.extractall(data_dir)
+
+            # Rename val2014 to coco-1024 for MLCommons compatibility
+            val_dir = data_dir / "val2014"
+            if val_dir.exists():
+                if images_dir.exists():
+                    shutil.rmtree(images_dir)
+                val_dir.rename(images_dir)
+
+    # Count samples
+    actual_samples = sum(1 for _ in open(prompts_file, 'r'))
+
+    logger.info(f"COCO 2014 dataset ready at {data_dir}")
+
+    return {
+        "data_path": str(data_dir),
+        "prompts_file": str(prompts_file),
+        "captions_file": str(captions_file),
+        "images_dir": str(images_dir) if images_dir.exists() else None,
+        "num_samples": actual_samples,
+    }
+
+
 def download_dataset(
     dataset_name: str,
     output_dir: str,
@@ -1253,7 +1404,7 @@ def download_dataset(
     Download a dataset by name.
 
     Args:
-        dataset_name: "imagenet", "squad", "openimages", or "librispeech"
+        dataset_name: "imagenet", "squad", "openimages", "librispeech", or "coco2014"
         output_dir: Directory to save dataset
         subset: Optional subset name
         force: Force re-download
@@ -1271,6 +1422,8 @@ def download_dataset(
         return download_librispeech(output_dir, subset or "mlperf", force)
     elif dataset_name == "whisper-mlperf":
         return download_whisper_mlperf(output_dir)
+    elif dataset_name == "coco2014":
+        return download_coco2014(output_dir, force)
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
@@ -1282,6 +1435,7 @@ def list_available_datasets() -> Dict[str, str]:
         "squad": DATASET_REGISTRY["squad"]["description"],
         "openimages": DATASET_REGISTRY["openimages"]["description"],
         "librispeech": DATASET_REGISTRY["librispeech"]["description"],
+        "coco2014": DATASET_REGISTRY["coco2014"]["description"],
     }
 
 
