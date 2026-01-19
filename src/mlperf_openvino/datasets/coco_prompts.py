@@ -294,11 +294,38 @@ class COCOPromptsDataset(BaseDataset):
         if latents_file.exists():
             try:
                 import torch
-                latents = torch.load(latents_file)
-                for idx, lat in enumerate(latents):
-                    if idx < len(self._samples):
-                        self._latents_cache[idx] = lat.numpy()
-                logger.info(f"Loaded {len(self._latents_cache)} pre-computed latents")
+                latents = torch.load(latents_file, map_location='cpu')
+
+                # Handle different latents file formats
+                if isinstance(latents, dict):
+                    # Format: {'latents': tensor} or similar
+                    latents = latents.get('latents', latents.get('noise', list(latents.values())[0]))
+
+                if isinstance(latents, torch.Tensor):
+                    # Single tensor with shape [num_samples, 4, H, W]
+                    if latents.dim() == 4:
+                        logger.info(f"Latents tensor shape: {latents.shape}")
+                        for idx in range(min(latents.shape[0], len(self._samples))):
+                            lat = latents[idx]  # Shape: [4, H, W]
+                            self._latents_cache[idx] = lat.numpy()
+                    else:
+                        logger.warning(f"Unexpected latents tensor dimensions: {latents.dim()}")
+                elif isinstance(latents, (list, tuple)):
+                    # List of tensors, one per sample
+                    for idx, lat in enumerate(latents):
+                        if idx < len(self._samples):
+                            if hasattr(lat, 'numpy'):
+                                self._latents_cache[idx] = lat.numpy()
+                            else:
+                                self._latents_cache[idx] = np.array(lat)
+
+                if self._latents_cache:
+                    # Log shape of first latent for debugging
+                    first_shape = list(self._latents_cache.values())[0].shape
+                    logger.info(f"Loaded {len(self._latents_cache)} pre-computed latents, shape per sample: {first_shape}")
+                else:
+                    logger.warning("No latents were loaded from file")
+
             except Exception as e:
                 logger.warning(f"Failed to load latents: {e}")
 

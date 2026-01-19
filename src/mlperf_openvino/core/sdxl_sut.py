@@ -234,13 +234,31 @@ class SDXLOptimumSUT:
         # Use pre-computed latents if available (for reproducibility)
         latents = features.get('latents', None)
 
-        # Convert numpy latents to torch tensor if needed
-        # The pipeline expects torch tensors, not numpy arrays
+        # Convert numpy latents to torch tensor and ensure correct shape
+        # The pipeline expects torch tensors with shape [batch, 4, height/8, width/8]
+        # For 1024x1024 images: [1, 4, 128, 128]
         if latents is not None:
             try:
                 import torch
                 if isinstance(latents, np.ndarray):
                     latents = torch.from_numpy(latents).float()
+
+                # Ensure correct shape for SDXL latents
+                # Expected: [1, 4, 128, 128] for 1024x1024 image
+                if latents.dim() == 3:
+                    # Shape is [C, H, W] - add batch dimension
+                    latents = latents.unsqueeze(0)
+
+                # Check if shape is valid
+                if latents.shape[1] != 4:
+                    # If channels != 4, latents format may be incompatible
+                    # Skip using pre-computed latents
+                    logger.warning(
+                        f"Latents have {latents.shape[1]} channels, expected 4. "
+                        "Using random latents instead."
+                    )
+                    latents = None
+
             except ImportError:
                 logger.warning("PyTorch not available, cannot convert latents")
                 latents = None
