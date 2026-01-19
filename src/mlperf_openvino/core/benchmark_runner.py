@@ -115,6 +115,7 @@ class BenchmarkRunner:
             preprocessing=self.config.model.preprocessing,
             count=self.config.dataset.num_samples if self.config.dataset.num_samples > 0 else None,
             performance_sample_count=1024,
+            data_format=self.config.model.data_format,
         )
         self.qsl.load()
 
@@ -161,6 +162,7 @@ class BenchmarkRunner:
             annotations_file=self.config.dataset.val_map,
             count=self.config.dataset.num_samples if self.config.dataset.num_samples > 0 else None,
             performance_sample_count=24576,  # MLPerf default
+            data_format=self.config.model.data_format,
         )
         self.qsl.load()
 

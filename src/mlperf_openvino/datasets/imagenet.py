@@ -40,27 +40,30 @@ class ImageNetDataset(BaseDataset):
         preprocessing: Optional[PreprocessingConfig] = None,
         count: Optional[int] = None,
         cache_preprocessed: bool = True,
+        data_format: str = "NCHW",
         **kwargs
     ):
         """
         Initialize ImageNet dataset.
-        
+
         Args:
             data_path: Path to ImageNet validation images
             val_map_path: Path to validation map file
             preprocessing: Preprocessing configuration
             count: Number of samples to use
             cache_preprocessed: Whether to cache preprocessed images
+            data_format: Data format - "NCHW" or "NHWC"
         """
         if not PIL_AVAILABLE:
             raise ImportError("Pillow is required for image loading. Install with: pip install Pillow")
-        
+
         super().__init__(data_path, count, **kwargs)
-        
+
         self.val_map_path = val_map_path
         self.preprocessing = preprocessing or PreprocessingConfig()
         self.cache_preprocessed = cache_preprocessed
-        
+        self.data_format = data_format.upper()
+
         self._image_paths: List[str] = []
         self._preprocessed_cache: Dict[int, np.ndarray] = {}
     
@@ -162,13 +165,16 @@ class ImageNetDataset(BaseDataset):
         # Apply std normalization
         std = np.array(self.preprocessing.std, dtype=np.float32)
         img_array = img_array / std
-        
-        # Convert to NCHW format
-        img_array = np.transpose(img_array, (2, 0, 1))
-        
-        # Add batch dimension
-        img_array = np.expand_dims(img_array, axis=0)
-        
+
+        # Convert to target format
+        if self.data_format == "NCHW":
+            # HWC -> CHW, then add batch -> NCHW
+            img_array = np.transpose(img_array, (2, 0, 1))
+            img_array = np.expand_dims(img_array, axis=0)
+        else:  # NHWC
+            # Keep HWC, add batch -> NHWC
+            img_array = np.expand_dims(img_array, axis=0)
+
         return img_array
     
     def get_sample(self, index: int) -> Tuple[np.ndarray, int]:

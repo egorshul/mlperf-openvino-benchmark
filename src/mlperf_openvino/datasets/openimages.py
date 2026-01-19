@@ -230,6 +230,7 @@ class OpenImagesDataset(BaseDataset):
         input_size: int = INPUT_SIZE,
         cache_preprocessed: bool = True,
         use_disk_cache: bool = True,  # Use preprocessed numpy files
+        data_format: str = "NCHW",
     ):
         """
         Initialize OpenImages dataset.
@@ -241,6 +242,7 @@ class OpenImagesDataset(BaseDataset):
             input_size: Input image size
             cache_preprocessed: Whether to cache preprocessed images in memory
             use_disk_cache: Whether to use/create preprocessed numpy cache on disk
+            data_format: Data format - "NCHW" or "NHWC"
         """
         if not PIL_AVAILABLE:
             raise ImportError("Pillow is required. Install with: pip install Pillow")
@@ -252,6 +254,7 @@ class OpenImagesDataset(BaseDataset):
         self.input_size = input_size
         self.cache_preprocessed = cache_preprocessed
         self.use_disk_cache = use_disk_cache
+        self.data_format = data_format.upper()
 
         self._samples: List[Dict[str, Any]] = []
         self._annotations: Dict[str, List[Dict]] = defaultdict(list)
@@ -579,9 +582,14 @@ class OpenImagesDataset(BaseDataset):
         # MLPerf RetinaNet does NOT use ImageNet mean/std normalization
         img_array = np.array(img, dtype=np.float32) / 255.0
 
-        # Convert to NCHW format
-        img_array = np.transpose(img_array, (2, 0, 1))
-        img_array = np.expand_dims(img_array, axis=0)
+        # Convert to target format
+        if self.data_format == "NCHW":
+            # HWC -> CHW, then add batch -> NCHW
+            img_array = np.transpose(img_array, (2, 0, 1))
+            img_array = np.expand_dims(img_array, axis=0)
+        else:  # NHWC
+            # Keep HWC, add batch -> NHWC
+            img_array = np.expand_dims(img_array, axis=0)
 
         preprocess_info = {
             'orig_width': orig_width,
@@ -865,6 +873,7 @@ class OpenImagesQSL(QuerySampleLibrary):
         count: Optional[int] = None,
         performance_sample_count: int = 24576,  # MLPerf default
         input_size: int = INPUT_SIZE,
+        data_format: str = "NCHW",
     ):
         """
         Initialize OpenImages QSL.
@@ -875,6 +884,7 @@ class OpenImagesQSL(QuerySampleLibrary):
             count: Number of samples to use
             performance_sample_count: Number of samples for performance run
             input_size: Input image size
+            data_format: Data format - "NCHW" or "NHWC"
         """
         super().__init__()
 
@@ -884,6 +894,7 @@ class OpenImagesQSL(QuerySampleLibrary):
             count=count,
             input_size=input_size,
             cache_preprocessed=True,
+            data_format=data_format,
         )
 
         self._performance_sample_count = performance_sample_count
