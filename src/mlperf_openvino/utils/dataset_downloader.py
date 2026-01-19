@@ -1258,6 +1258,89 @@ def _convert_openimages_to_coco(
     logger.info(f"COCO annotations: {len(coco['images'])} images, {len(coco['annotations'])} annotations")
 
 
+def _resize_coco_images(
+    source_dir: Path,
+    output_dir: Path,
+    prompts_file: Path,
+    target_size: int = 1024
+) -> int:
+    """
+    Resize COCO images to target size for SDXL FID computation.
+
+    Args:
+        source_dir: Directory with original COCO images (val2014)
+        output_dir: Directory to save resized images (coco-1024)
+        prompts_file: TSV file with image IDs to resize
+        target_size: Target image size (1024 for SDXL)
+
+    Returns:
+        Number of images resized
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        logger.warning("PIL not installed, cannot resize images")
+        return 0
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Read image IDs from prompts file
+    image_ids = []
+    with open(prompts_file, 'r') as f:
+        for line in f:
+            parts = line.strip().split('\t')
+            if parts:
+                image_ids.append(parts[0])
+
+    logger.info(f"Resizing {len(image_ids)} images to {target_size}x{target_size}...")
+
+    resized_count = 0
+    for i, image_id in enumerate(image_ids):
+        # Find source image
+        source_path = source_dir / f"COCO_val2014_{int(image_id):012d}.jpg"
+        if not source_path.exists():
+            # Try alternative naming
+            source_path = source_dir / f"{image_id}.jpg"
+            if not source_path.exists():
+                continue
+
+        output_path = output_dir / f"{image_id}.png"
+        if output_path.exists():
+            resized_count += 1
+            continue
+
+        try:
+            with Image.open(source_path) as img:
+                # Convert to RGB if needed
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+
+                # Resize to target size (center crop + resize)
+                width, height = img.size
+                min_dim = min(width, height)
+
+                # Center crop to square
+                left = (width - min_dim) // 2
+                top = (height - min_dim) // 2
+                img = img.crop((left, top, left + min_dim, top + min_dim))
+
+                # Resize to target
+                img = img.resize((target_size, target_size), Image.LANCZOS)
+
+                # Save as PNG
+                img.save(output_path, 'PNG')
+                resized_count += 1
+
+        except Exception as e:
+            logger.warning(f"Failed to resize {source_path}: {e}")
+
+        if (i + 1) % 500 == 0:
+            logger.info(f"Resized {i + 1}/{len(image_ids)} images")
+
+    logger.info(f"Resized {resized_count} images to {output_dir}")
+    return resized_count
+
+
 def download_coco2014(
     output_dir: str,
     force: bool = False,
@@ -1352,13 +1435,15 @@ def download_coco2014(
 
         logger.info(f"Created prompts file with {count} samples")
 
-    # Optionally download reference images
+    # Download and resize reference images for FID computation
     images_dir = data_dir / "coco-1024"
 
     if download_images:
         images_zip = output_path / dataset_info["images"]["filename"]
+        val_dir = data_dir / "val2014"
 
-        if not images_dir.exists() or force:
+        # Download if needed
+        if not val_dir.exists() and not images_dir.exists():
             if not images_zip.exists() or force:
                 logger.info(f"Downloading COCO 2014 validation images (~{dataset_info['images']['size_gb']} GB)...")
                 logger.info("This may take a while...")
@@ -1373,12 +1458,10 @@ def download_coco2014(
             with zipfile.ZipFile(images_zip, 'r') as zip_ref:
                 zip_ref.extractall(data_dir)
 
-            # Rename val2014 to coco-1024 for MLCommons compatibility
-            val_dir = data_dir / "val2014"
-            if val_dir.exists():
-                if images_dir.exists():
-                    shutil.rmtree(images_dir)
-                val_dir.rename(images_dir)
+        # Resize images to 1024x1024 for SDXL FID computation
+        if val_dir.exists() and not images_dir.exists():
+            logger.info("Resizing images to 1024x1024 for SDXL benchmark...")
+            _resize_coco_images(val_dir, images_dir, prompts_file, target_size=1024)
 
     # Count samples
     actual_samples = sum(1 for _ in open(prompts_file, 'r'))

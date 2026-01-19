@@ -425,8 +425,11 @@ def info():
               help='Dataset subset (e.g., "dev-clean" for librispeech)')
 @click.option('--count', '-c', type=int, default=None,
               help='Max images to download (OpenImages only, default=all)')
+@click.option('--with-images', is_flag=True,
+              help='Download reference images (COCO 2014 only, ~6GB, required for FID computation)')
 @click.option('--force', is_flag=True, help='Force re-download')
-def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str], count: Optional[int], force: bool):
+def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str],
+                         count: Optional[int], with_images: bool, force: bool):
     """
     Download dataset files.
 
@@ -444,8 +447,11 @@ def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str], c
         # Download LibriSpeech dev-clean
         mlperf-ov download-dataset --dataset librispeech --subset dev-clean
 
-        # Download COCO 2014 captions for SDXL
+        # Download COCO 2014 captions for SDXL (prompts only)
         mlperf-ov download-dataset --dataset coco2014
+
+        # Download COCO 2014 with reference images for FID computation
+        mlperf-ov download-dataset --dataset coco2014 --with-images
     """
     from .utils.dataset_downloader import download_dataset, get_dataset_info
 
@@ -462,6 +468,8 @@ def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str], c
         click.echo(f"Subset: {subset}")
     if count and dataset == 'openimages':
         click.echo(f"Max images: {count}")
+    if with_images and dataset == 'coco2014':
+        click.echo("Including reference images (~6GB)")
 
     click.echo("")
 
@@ -470,6 +478,10 @@ def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str], c
         if dataset == 'openimages':
             from .utils.dataset_downloader import download_openimages
             paths = download_openimages(output_dir, force=force, max_images=count)
+        # Special handling for COCO 2014 with images
+        elif dataset == 'coco2014':
+            from .utils.dataset_downloader import download_coco2014
+            paths = download_coco2014(output_dir, force=force, download_images=with_images)
         else:
             paths = download_dataset(dataset, output_dir, subset, force)
 
