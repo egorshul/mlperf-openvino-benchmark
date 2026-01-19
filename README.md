@@ -170,10 +170,9 @@ huggingface-cli download stabilityai/stable-diffusion-xl-base-1.0 \
   --local-dir ./models/stable-diffusion-xl-base-1.0 \
   --local-dir-use-symlinks False
 
-# Convert to OpenVINO format
+# Convert to OpenVINO format (task is auto-detected)
 optimum-cli export openvino \
   --model ./models/stable-diffusion-xl-base-1.0 \
-  --task stable-diffusion-xl \
   ./models/stable-diffusion-xl-base-1.0-openvino
 ```
 
@@ -188,10 +187,9 @@ git lfs install
 git clone https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0 \
   ./models/stable-diffusion-xl-base-1.0
 
-# Convert to OpenVINO
+# Convert to OpenVINO (task is auto-detected)
 optimum-cli export openvino \
   --model ./models/stable-diffusion-xl-base-1.0 \
-  --task stable-diffusion-xl \
   ./models/stable-diffusion-xl-base-1.0-openvino
 ```
 
