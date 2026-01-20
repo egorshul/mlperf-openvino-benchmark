@@ -139,9 +139,35 @@ void ResNetMultiDieCppSUT::load() {
     input_shape_ = inputs[0].get_partial_shape().get_min_shape();
     input_type_ = inputs[0].get_element_type();
 
-    // Use first output (usually softmax/logits)
+    // Find float32 output (classification logits)
+    // List all outputs first for debugging
+    std::cout << "[ResNetMultiDieCppSUT] Model outputs:" << std::endl;
+    for (size_t i = 0; i < outputs.size(); ++i) {
+        std::cout << "  [" << i << "] " << outputs[i].get_any_name()
+                  << " type=" << outputs[i].get_element_type()
+                  << " shape=" << outputs[i].get_partial_shape() << std::endl;
+    }
+
     output_idx_ = 0;
+    bool found_float = false;
+    for (size_t i = 0; i < outputs.size(); ++i) {
+        auto out_type = outputs[i].get_element_type();
+        if (out_type == ov::element::f32 || out_type == ov::element::f16) {
+            output_idx_ = i;
+            found_float = true;
+            break;
+        }
+    }
+
+    if (!found_float) {
+        std::cerr << "[ResNetMultiDieCppSUT] Warning: No float output found, using output 0" << std::endl;
+    }
+
     output_name_ = outputs[output_idx_].get_any_name();
+    output_type_ = outputs[output_idx_].get_element_type();
+
+    std::cout << "[ResNetMultiDieCppSUT] Using output: " << output_name_
+              << " (type=" << output_type_ << ", idx=" << output_idx_ << ")" << std::endl;
 
     // Reshape model for batch size
     if (batch_size_ > 1 || input_shape_[0] == 0) {
@@ -301,8 +327,43 @@ void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx
     try {
         // Get batched output
         ov::Tensor output_tensor = ctx->request.get_output_tensor(output_idx_);
-        const float* output_data = output_tensor.data<float>();
         size_t output_bytes_per_sample = single_output_size_ * sizeof(float);
+
+        // Handle different output types
+        std::vector<float> converted_output;
+        const float* output_data = nullptr;
+
+        if (output_type_ == ov::element::f32) {
+            output_data = output_tensor.data<float>();
+        } else if (output_type_ == ov::element::i64) {
+            // Convert int64 to float
+            const int64_t* i64_data = output_tensor.data<int64_t>();
+            size_t total_elements = single_output_size_ * actual_batch_size;
+            converted_output.resize(total_elements);
+            for (size_t j = 0; j < total_elements; ++j) {
+                converted_output[j] = static_cast<float>(i64_data[j]);
+            }
+            output_data = converted_output.data();
+        } else if (output_type_ == ov::element::i32) {
+            // Convert int32 to float
+            const int32_t* i32_data = output_tensor.data<int32_t>();
+            size_t total_elements = single_output_size_ * actual_batch_size;
+            converted_output.resize(total_elements);
+            for (size_t j = 0; j < total_elements; ++j) {
+                converted_output[j] = static_cast<float>(i32_data[j]);
+            }
+            output_data = converted_output.data();
+        } else if (output_type_ == ov::element::f16) {
+            // Convert f16 to float using OpenVINO's conversion
+            converted_output.resize(single_output_size_ * actual_batch_size);
+            const ov::float16* f16_data = output_tensor.data<ov::float16>();
+            for (size_t j = 0; j < converted_output.size(); ++j) {
+                converted_output[j] = static_cast<float>(f16_data[j]);
+            }
+            output_data = converted_output.data();
+        } else {
+            throw std::runtime_error("Unsupported output type: " + output_type_.to_string());
+        }
 
         // Process each sample in batch
         for (int i = 0; i < actual_batch_size; ++i) {

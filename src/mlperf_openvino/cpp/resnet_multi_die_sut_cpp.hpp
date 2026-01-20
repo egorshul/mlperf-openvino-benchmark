@@ -208,6 +208,7 @@ private:
     std::string output_name_;
     ov::Shape input_shape_;
     ov::element::Type input_type_;
+    ov::element::Type output_type_;
     size_t output_idx_ = 0;
     size_t single_output_size_ = 0;  // Size of one sample's output
 
