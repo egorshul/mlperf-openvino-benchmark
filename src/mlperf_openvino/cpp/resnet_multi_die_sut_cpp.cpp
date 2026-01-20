@@ -110,19 +110,11 @@ void ResNetMultiDieCppSUT::load() {
         return;
     }
 
-    std::cout << "[ResNetMultiDieCppSUT] Loading model from " << model_path_ << std::endl;
-
     // Discover available dies
     active_devices_ = discover_dies();
     if (active_devices_.empty()) {
         throw std::runtime_error("No " + device_prefix_ + " dies found");
     }
-
-    std::cout << "[ResNetMultiDieCppSUT] Found " << active_devices_.size() << " dies: ";
-    for (const auto& d : active_devices_) {
-        std::cout << d << " ";
-    }
-    std::cout << std::endl;
 
     // Read model
     model_ = core_.read_model(model_path_);
@@ -140,39 +132,20 @@ void ResNetMultiDieCppSUT::load() {
     input_type_ = inputs[0].get_element_type();
 
     // Find float32 output (classification logits)
-    // List all outputs first for debugging
-    std::cout << "[ResNetMultiDieCppSUT] Model outputs:" << std::endl;
-    for (size_t i = 0; i < outputs.size(); ++i) {
-        std::cout << "  [" << i << "] " << outputs[i].get_any_name()
-                  << " type=" << outputs[i].get_element_type()
-                  << " shape=" << outputs[i].get_partial_shape() << std::endl;
-    }
-
     output_idx_ = 0;
-    bool found_float = false;
     for (size_t i = 0; i < outputs.size(); ++i) {
         auto out_type = outputs[i].get_element_type();
         if (out_type == ov::element::f32 || out_type == ov::element::f16) {
             output_idx_ = i;
-            found_float = true;
             break;
         }
-    }
-
-    if (!found_float) {
-        std::cerr << "[ResNetMultiDieCppSUT] Warning: No float output found, using output 0" << std::endl;
     }
 
     output_name_ = outputs[output_idx_].get_any_name();
     output_type_ = outputs[output_idx_].get_element_type();
 
-    std::cout << "[ResNetMultiDieCppSUT] Using output: " << output_name_
-              << " (type=" << output_type_ << ", idx=" << output_idx_ << ")" << std::endl;
-
     // Reshape model for batch size
     if (batch_size_ > 1 || input_shape_[0] == 0) {
-        std::cout << "[ResNetMultiDieCppSUT] Reshaping model for batch_size=" << batch_size_ << std::endl;
-
         std::map<std::string, ov::PartialShape> new_shapes;
         for (const auto& input : inputs) {
             ov::PartialShape new_shape = input.get_partial_shape();
@@ -188,19 +161,11 @@ void ResNetMultiDieCppSUT::load() {
     // Build compile properties
     ov::AnyMap properties = build_compile_properties();
 
-    std::cout << "[ResNetMultiDieCppSUT] Compile properties: ";
-    for (const auto& [k, v] : compile_properties_) {
-        std::cout << k << "=" << v << " ";
-    }
-    std::cout << std::endl;
-
     // Compile model for each die
     int total_requests = 0;
     for (const auto& device_name : active_devices_) {
         auto die_ctx = std::make_unique<DieContext>();
         die_ctx->device_name = device_name;
-
-        std::cout << "[ResNetMultiDieCppSUT] Compiling for " << device_name << "..." << std::flush;
 
         die_ctx->compiled_model = core_.compile_model(model_, device_name, properties);
 
@@ -210,8 +175,6 @@ void ResNetMultiDieCppSUT::load() {
         } catch (...) {
             die_ctx->optimal_nireq = 4;
         }
-
-        std::cout << " OK (optimal_nireq=" << die_ctx->optimal_nireq << ")" << std::endl;
 
         // Create inference requests for this die
         // Use 8x optimal for maximum pipelining
@@ -252,9 +215,6 @@ void ResNetMultiDieCppSUT::load() {
     for (size_t i = 1; i < output_shape.size(); ++i) {  // Skip batch dimension
         single_output_size_ *= output_shape[i];
     }
-
-    std::cout << "[ResNetMultiDieCppSUT] Loaded: " << active_devices_.size() << " dies, "
-              << total_requests << " total requests, batch_size=" << batch_size_ << std::endl;
 
     loaded_ = true;
 }

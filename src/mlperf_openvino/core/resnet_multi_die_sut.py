@@ -326,6 +326,11 @@ class ResNetMultiDieCppSUTWrapper:
     def name(self) -> str:
         return f"MultiDieCpp-{self.num_dies}dies"
 
+    @property
+    def _sample_count(self) -> int:
+        """Return completed sample count for stats."""
+        return self._cpp_sut.get_completed_count()
+
     def get_predictions(self) -> Dict[int, Any]:
         """Get stored predictions."""
         cpp_preds = self._cpp_sut.get_predictions()
