@@ -29,9 +29,15 @@ CPP_AVAILABLE = False
 ResNetCppSUT = None
 BertCppSUT = None
 RetinaNetCppSUT = None
+ResNetMultiDieCppSUT = None
 
 try:
-    from ._cpp_sut import ResNetCppSUT, BertCppSUT, RetinaNetCppSUT
+    from ._cpp_sut import (
+        ResNetCppSUT,
+        BertCppSUT,
+        RetinaNetCppSUT,
+        ResNetMultiDieCppSUT,
+    )
     CPP_AVAILABLE = True
 except ImportError as e:
     import warnings
@@ -42,6 +48,6 @@ except ImportError as e:
     )
 
 __all__ = [
-    "ResNetCppSUT", "BertCppSUT", "RetinaNetCppSUT",
+    "ResNetCppSUT", "BertCppSUT", "RetinaNetCppSUT", "ResNetMultiDieCppSUT",
     "CPP_AVAILABLE",
 ]

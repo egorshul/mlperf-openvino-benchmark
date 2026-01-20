@@ -22,8 +22,8 @@ except ImportError:
     lg = None
 
 try:
-    from .._cpp_sut import ResNetMultiDieCppSUT
-    CPP_SUT_AVAILABLE = True
+    from ..cpp import ResNetMultiDieCppSUT, CPP_AVAILABLE
+    CPP_SUT_AVAILABLE = CPP_AVAILABLE and ResNetMultiDieCppSUT is not None
 except ImportError:
     CPP_SUT_AVAILABLE = False
     ResNetMultiDieCppSUT = None
