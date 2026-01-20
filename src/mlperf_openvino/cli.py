@@ -158,17 +158,23 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         benchmark_config.openvino.num_threads = num_threads
 
     # Auto-select optimal settings based on scenario
+    # NOTE: AUTO hints are for CPU only, skip for accelerators
+    is_accelerator = benchmark_config.openvino.is_accelerator_device()
+
     if performance_hint == 'AUTO':
-        if scenario == 'Offline':
-            # Offline: optimize for maximum THROUGHPUT with batching
+        if is_accelerator:
+            # Accelerators: don't set performance hint, don't auto-batch
+            actual_hint = None  # Will not be applied
+            click.echo(f"AUTO: Accelerator device - no default hints applied")
+            # Keep batch_size as user specified (default=1)
+        elif scenario == 'Offline':
+            # CPU Offline: optimize for maximum THROUGHPUT with batching
             actual_hint = 'THROUGHPUT'
             if batch_size == 1:  # User didn't specify batch size
                 click.echo("AUTO: Using optimized settings for Offline (THROUGHPUT, batch=32)")
                 batch_size = 32  # Larger batch for throughput
         else:
-            # Server: THROUGHPUT hint for parallelism, batch=1 for low latency
-            # LATENCY hint uses only 1 stream which kills throughput
-            # THROUGHPUT with batch=1 gives good balance of latency and throughput
+            # CPU Server: THROUGHPUT hint for parallelism, batch=1 for low latency
             actual_hint = 'THROUGHPUT'
             click.echo("AUTO: Using optimized settings for Server (THROUGHPUT, batch=1)")
             # Keep batch_size=1 for Server (each query = 1 sample)
@@ -177,7 +183,10 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
 
     benchmark_config.openvino.num_streams = num_streams
     benchmark_config.openvino.batch_size = batch_size
-    benchmark_config.openvino.performance_hint = actual_hint
+
+    # Only set performance_hint for CPU devices
+    if not is_accelerator and actual_hint:
+        benchmark_config.openvino.performance_hint = actual_hint
 
     if model_path:
         benchmark_config.model.model_path = model_path
