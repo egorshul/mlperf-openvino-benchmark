@@ -105,23 +105,27 @@ class MultiDeviceSUT:
         self._last_progress_update = 0.0
         self._progress_update_interval = 0.5
 
-        # Per-die async queues for Server mode
+        # Per-die async queues (used for both Offline and Server)
         self._async_queues: Dict[str, AsyncInferQueue] = {}
         self._input_dtype = None
         self._issued_count = 0
         self._die_round_robin = 0
         self._die_lock = threading.Lock()
 
-        if scenario == Scenario.SERVER:
-            self._setup_async_server()
+        # Offline mode: accumulated responses
+        self._offline_responses: List[Tuple[int, array.array]] = []
+        self._offline_lock = threading.Lock()
+
+        # Setup async queues for all modes (async is always faster)
+        self._setup_async_queues()
 
         logger.info(
             f"MultiDeviceSUT initialized with {self.backend.num_dies} dies: "
             f"{self.backend.active_devices}"
         )
 
-    def _setup_async_server(self) -> None:
-        """Setup async inference queues for all dies in Server mode."""
+    def _setup_async_queues(self) -> None:
+        """Setup async inference queues for all dies."""
         self._start_time = time.time()
         self._issued_count = 0
 
@@ -145,28 +149,38 @@ class MultiDeviceSUT:
         # Create AsyncInferQueue for each die
         for die_name in self.backend.active_devices:
             ctx = self.backend._die_contexts[die_name]
-            num_requests = max(ctx.optimal_nireq * 2, 8)
+            # More requests = better pipelining, especially for accelerators
+            num_requests = max(ctx.optimal_nireq * 4, 16)
 
             async_queue = AsyncInferQueue(ctx.compiled_model, num_requests)
 
             # Create die-specific callback
             def make_callback(die):
                 def callback(infer_request, userdata):
-                    query_id, sample_idx = userdata
+                    query_id, sample_idx, is_offline = userdata
                     try:
                         output = infer_request.get_output_tensor(0).data
-                        self._predictions[sample_idx] = output.copy()
+                        output_copy = output.copy()
+                        self._predictions[sample_idx] = output_copy
 
-                        response = lg.QuerySampleResponse(
-                            query_id,
-                            output.ctypes.data,
-                            output.nbytes
-                        )
-                        lg.QuerySamplesComplete([response])
+                        if is_offline:
+                            # Offline: accumulate responses, send all at once
+                            response_array = array.array('B', output_copy.tobytes())
+                            with self._offline_lock:
+                                self._offline_responses.append((query_id, response_array))
+                        else:
+                            # Server: send response immediately
+                            response = lg.QuerySampleResponse(
+                                query_id,
+                                output_copy.ctypes.data,
+                                output_copy.nbytes
+                            )
+                            lg.QuerySamplesComplete([response])
                     except Exception as e:
                         logger.error(f"Callback error on {die}: {e}")
-                        response = lg.QuerySampleResponse(query_id, 0, 0)
-                        lg.QuerySamplesComplete([response])
+                        if not is_offline:
+                            response = lg.QuerySampleResponse(query_id, 0, 0)
+                            lg.QuerySamplesComplete([response])
 
                     self._sample_count += 1
                 return callback
@@ -181,17 +195,18 @@ class MultiDeviceSUT:
 
         def progress_thread():
             while not self._progress_thread_stop:
-                time.sleep(1.0)
+                time.sleep(0.5)
                 elapsed = time.time() - self._start_time
-                throughput = self._sample_count / elapsed if elapsed > 0 else 0
-                issued = self._issued_count
-                pending = issued - self._sample_count
-                dies_str = ",".join(self.backend.active_devices)
-                print(
-                    f"\rMulti-die [{dies_str}]: issued={issued}, done={self._sample_count}, "
-                    f"pending={pending}, {throughput:.1f} samples/sec",
-                    end="", flush=True
-                )
+                if elapsed > 0:
+                    throughput = self._sample_count / elapsed
+                    issued = self._issued_count
+                    pending = issued - self._sample_count
+                    dies_str = ",".join(self.backend.active_devices)
+                    sys.stderr.write(
+                        f"\rMulti-die [{dies_str}]: issued={issued}, done={self._sample_count}, "
+                        f"pending={pending}, {throughput:.1f} samples/sec   "
+                    )
+                    sys.stderr.flush()
 
         self._progress_thread = threading.Thread(target=progress_thread, daemon=True)
         self._progress_thread.start()
@@ -258,39 +273,59 @@ class MultiDeviceSUT:
         return results
 
     def _issue_query_offline(self, query_samples: List["lg.QuerySample"]) -> None:
-        """Process queries in Offline mode using all dies."""
+        """Process queries in Offline mode using async inference on all dies."""
+        self._start_time = time.time()
+        self._offline_responses.clear()
+
+        qsl = self.qsl
+        input_name = self.input_name
+        input_dtype = self._input_dtype
+        num_dies = len(self.backend.active_devices)
+
+        total_samples = len(query_samples)
+        logger.info(f"Offline: Processing {total_samples} samples on {num_dies} dies")
+
+        # Submit all samples to async queues (round-robin across dies)
+        for qs in query_samples:
+            sample_idx = qs.index
+            query_id = qs.id
+
+            # Get input data
+            if hasattr(qsl, '_loaded_samples') and sample_idx in qsl._loaded_samples:
+                input_data = qsl._loaded_samples[sample_idx]
+            else:
+                features = qsl.get_features(sample_idx)
+                input_data = features.get("input", features.get(input_name))
+
+            # Convert dtype if needed
+            if input_dtype is not None and input_data.dtype != input_dtype:
+                input_data = input_data.astype(input_dtype, copy=False)
+
+            # Select die (round-robin)
+            die_name = self._get_next_die()
+            async_queue = self._async_queues[die_name]
+
+            # Start async inference (is_offline=True)
+            async_queue.start_async({input_name: input_data}, userdata=(query_id, sample_idx, True))
+            self._issued_count += 1
+
+        # Wait for all dies to complete
+        for die_name, async_queue in self._async_queues.items():
+            async_queue.wait_all()
+
+        # Build and send all responses
         responses = []
-        response_arrays = []
+        for query_id, response_array in self._offline_responses:
+            bi = response_array.buffer_info()
+            response = lg.QuerySampleResponse(query_id, bi[0], bi[1])
+            responses.append(response)
 
-        batch_size = self.config.openvino.batch_size if self.config.openvino.batch_size > 0 else 1
-
-        sample_ids = [qs.id for qs in query_samples]
-        sample_indices = [qs.index for qs in query_samples]
-
-        total_samples = len(sample_indices)
-        self._start_progress(total_samples, desc=f"Offline inference ({self.backend.num_dies} X dies)")
-
-        for i in range(0, len(sample_indices), batch_size):
-            batch_indices = sample_indices[i:i + batch_size]
-            batch_ids = sample_ids[i:i + batch_size]
-
-            batch_results = self._process_batch(batch_indices)
-
-            for (idx, result), query_id in zip(batch_results, batch_ids):
-                self._predictions[idx] = result
-
-                response_array = array.array('B', result.tobytes())
-                response_arrays.append(response_array)
-                bi = response_array.buffer_info()
-
-                response = lg.QuerySampleResponse(query_id, bi[0], bi[1])
-                responses.append(response)
-
-            self._sample_count += len(batch_indices)
-            self._update_progress(len(batch_indices))
-
-        self._close_progress()
         lg.QuerySamplesComplete(responses)
+
+        elapsed = time.time() - self._start_time
+        throughput = total_samples / elapsed if elapsed > 0 else 0
+        logger.info(f"Offline: Completed {total_samples} samples in {elapsed:.2f}s ({throughput:.1f} samples/sec)")
+
         self._query_count += 1
 
     def _issue_query_server(self, query_samples: List["lg.QuerySample"]) -> None:
@@ -318,8 +353,8 @@ class MultiDeviceSUT:
             die_name = self._get_next_die()
             async_queue = self._async_queues[die_name]
 
-            # Start async inference
-            async_queue.start_async({input_name: input_data}, userdata=(query_id, sample_idx))
+            # Start async inference (is_offline=False - send response immediately)
+            async_queue.start_async({input_name: input_data}, userdata=(query_id, sample_idx, False))
             self._issued_count += 1
 
         self._query_count += 1
