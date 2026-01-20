@@ -121,6 +121,14 @@ class BenchmarkRunner:
 
         device = self.config.openvino.device
 
+        # Log device configuration for debugging
+        logger.info(f"Device configuration: device='{device}', "
+                   f"is_x_device={self.config.openvino.is_x_device()}, "
+                   f"is_multi_device={self.config.openvino.is_multi_device()}")
+
+        # List available devices
+        self._log_available_devices()
+
         # Check if using multi-device X (all dies)
         if self.config.openvino.is_multi_device():
             logger.info("Creating multi-device backend for X accelerator (all dies)")
@@ -152,6 +160,29 @@ class BenchmarkRunner:
         )
         backend.load()
         return backend
+
+    def _log_available_devices(self) -> None:
+        """Log all available OpenVINO devices."""
+        try:
+            from openvino import Core
+            from ..backends.device_discovery import discover_x_devices, is_x_die
+
+            core = Core()
+            all_devices = core.available_devices
+
+            logger.info(f"Available OpenVINO devices: {all_devices}")
+
+            # Show X devices specifically
+            x_devices = [d for d in all_devices if d.startswith("X")]
+            if x_devices:
+                x_dies = discover_x_devices(core)
+                logger.info(f"X accelerator devices found: {x_devices}")
+                logger.info(f"X dies (physical): {x_dies}")
+            else:
+                logger.info("No X accelerator devices found")
+
+        except Exception as e:
+            logger.warning(f"Could not enumerate devices: {e}")
 
     def _create_sut_for_backend(
         self,

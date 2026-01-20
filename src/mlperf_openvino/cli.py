@@ -289,32 +289,49 @@ def _validate_x_device(device: str) -> None:
         )
 
         core = Core()
+        all_devices = core.available_devices
+
+        click.echo(f"\nOpenVINO available devices: {all_devices}")
+
+        # Show all X-related devices
+        x_all = [d for d in all_devices if d.startswith("X")]
+        if x_all:
+            click.echo(f"X-related devices: {x_all}")
 
         # Validate device
         is_valid, error = validate_x_device(core, device)
         if not is_valid:
-            click.echo(f"Error: {error}")
-            click.echo("\nAvailable devices:")
-            for d in core.available_devices:
+            click.echo(f"\nError: {error}")
+            click.echo("\nAll available devices:")
+            for d in all_devices:
                 click.echo(f"  - {d}")
             sys.exit(1)
 
-        # Show discovered X devices
+        # Show discovered X dies (physical only, no simulators)
         x_dies = discover_x_devices(core)
         if x_dies:
-            click.echo(f"Discovered X dies: {x_dies}")
+            click.echo(f"\nDiscovered X dies (physical): {x_dies}")
             for die in x_dies:
                 card_info = get_card_and_die(die)
                 if card_info:
                     card, die_on_card = card_info
                     click.echo(f"  {die}: Card {card}, Die {die_on_card}")
+
+            # Show what will be used
+            if device.upper() == "X":
+                click.echo(f"\nWill use ALL {len(x_dies)} dies for inference: {x_dies}")
+            elif is_x_die(device):
+                click.echo(f"\nWill use single die: {device}")
         else:
-            click.echo("Warning: No X dies discovered")
+            click.echo("\nWarning: No physical X dies discovered")
+            click.echo("Only simulators may be available - check device list above")
 
     except ImportError as e:
         logger.warning(f"Could not validate X device: {e}")
     except Exception as e:
         logger.error(f"Error validating X device: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 
