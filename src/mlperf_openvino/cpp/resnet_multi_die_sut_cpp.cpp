@@ -16,16 +16,20 @@
 #include <regex>
 #include <stdexcept>
 
+#include <openvino/core/preprocess/pre_post_process.hpp>
+
 namespace mlperf_ov {
 
 ResNetMultiDieCppSUT::ResNetMultiDieCppSUT(const std::string& model_path,
                                const std::string& device_prefix,
                                int batch_size,
-                               const std::unordered_map<std::string, std::string>& compile_properties)
+                               const std::unordered_map<std::string, std::string>& compile_properties,
+                               bool use_nhwc_input)
     : model_path_(model_path),
       device_prefix_(device_prefix),
       batch_size_(batch_size),
-      compile_properties_(compile_properties) {
+      compile_properties_(compile_properties),
+      use_nhwc_input_(use_nhwc_input) {
 }
 
 ResNetMultiDieCppSUT::~ResNetMultiDieCppSUT() {
@@ -156,6 +160,26 @@ void ResNetMultiDieCppSUT::load() {
 
         // Update input shape after reshape
         input_shape_ = model_->inputs()[0].get_partial_shape().get_min_shape();
+    }
+
+    // Add NHWC->NCHW transpose if using NHWC input
+    if (use_nhwc_input_) {
+        ov::preprocess::PrePostProcessor ppp(model_);
+        // Input tensor is NHWC, model expects NCHW
+        ppp.input().tensor().set_layout("NHWC");
+        ppp.input().model().set_layout("NCHW");
+        model_ = ppp.build();
+
+        // Update input shape for NHWC: [N,C,H,W] -> [N,H,W,C]
+        // Original NCHW shape: [batch, 3, 224, 224]
+        // New NHWC shape: [batch, 224, 224, 3]
+        if (input_shape_.size() == 4) {
+            size_t n = input_shape_[0];
+            size_t c = input_shape_[1];
+            size_t h = input_shape_[2];
+            size_t w = input_shape_[3];
+            input_shape_ = ov::Shape{n, h, w, c};
+        }
     }
 
     // Build compile properties

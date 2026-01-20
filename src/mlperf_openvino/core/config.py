@@ -43,6 +43,7 @@ class PreprocessingConfig:
     mean: Tuple[float, float, float] = (123.68, 116.78, 103.94)
     std: Tuple[float, float, float] = (1.0, 1.0, 1.0)
     channel_order: str = "RGB"
+    output_layout: str = "NCHW"  # "NCHW" or "NHWC"
 
 
 @dataclass

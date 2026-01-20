@@ -70,11 +70,13 @@ public:
      * @param device_prefix Device prefix (e.g., "NPU", "VPU")
      * @param batch_size Batch size for inference
      * @param compile_properties Device-specific compile properties
+     * @param use_nhwc_input If true, expect NHWC input and add transpose to model
      */
     ResNetMultiDieCppSUT(const std::string& model_path,
                    const std::string& device_prefix,
                    int batch_size = 1,
-                   const std::unordered_map<std::string, std::string>& compile_properties = {});
+                   const std::unordered_map<std::string, std::string>& compile_properties = {},
+                   bool use_nhwc_input = false);
 
     ~ResNetMultiDieCppSUT();
 
@@ -190,6 +192,7 @@ private:
     std::string device_prefix_;
     int batch_size_;
     std::unordered_map<std::string, std::string> compile_properties_;
+    bool use_nhwc_input_;
 
     // OpenVINO objects
     ov::Core core_;

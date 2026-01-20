@@ -180,11 +180,16 @@ class ImageNetDataset(BaseDataset):
         std = np.array(self.preprocessing.std, dtype=np.float32)
         img_array = img_array / std
 
-        # Convert to NCHW format
-        img_array = np.transpose(img_array, (2, 0, 1))
-
-        # Add batch dimension
-        img_array = np.expand_dims(img_array, axis=0)
+        # Convert to target layout
+        output_layout = getattr(self.preprocessing, 'output_layout', 'NCHW')
+        if output_layout == "NCHW":
+            # HWC -> CHW
+            img_array = np.transpose(img_array, (2, 0, 1))
+            # Add batch dimension -> NCHW
+            img_array = np.expand_dims(img_array, axis=0)
+        else:
+            # Keep HWC, add batch dimension -> NHWC
+            img_array = np.expand_dims(img_array, axis=0)
 
         return img_array
     
