@@ -481,6 +481,7 @@ def create_sut(
     Factory function to create the best available SUT.
 
     Uses async C++ SUT with InferRequest pool for maximum throughput.
+    Note: X accelerator devices should use MultiDeviceSUT, not this function.
 
     Args:
         config: Benchmark configuration
@@ -492,6 +493,14 @@ def create_sut(
     Returns:
         SUT instance
     """
+    # X devices are not supported by C++ SUT - they require MultiDeviceSUT
+    device = config.openvino.device.upper()
+    if device.startswith("X"):
+        raise ValueError(
+            f"C++ SUT does not support X accelerator devices (got: {device}). "
+            "Use MultiDeviceSUT via BenchmarkRunner._create_sut_for_backend() instead."
+        )
+
     if CPP_AVAILABLE and not force_python:
         logger.info(f"Using ResNet C++ SUT for {scenario.value} mode")
         return ResNetCppSUTWrapper(config, model_path, qsl, scenario)
@@ -516,6 +525,7 @@ def create_bert_sut(
     Factory function to create BERT SUT.
 
     Uses C++ SUT if available for maximum performance.
+    Note: X accelerator devices should use MultiDeviceSUT, not this function.
 
     Args:
         config: Benchmark configuration
@@ -527,6 +537,14 @@ def create_bert_sut(
     Returns:
         BERT SUT instance
     """
+    # X devices are not supported by C++ SUT - they require MultiDeviceSUT
+    device = config.openvino.device.upper()
+    if device.startswith("X"):
+        raise ValueError(
+            f"C++ SUT does not support X accelerator devices (got: {device}). "
+            "Use MultiDeviceSUT via BenchmarkRunner._create_sut_for_backend() instead."
+        )
+
     if CPP_AVAILABLE and BertCppSUT is not None and not force_python:
         logger.info(f"Using BERT C++ SUT for {scenario.value} mode")
         return BertCppSUTWrapper(config, model_path, qsl, scenario)
@@ -768,6 +786,7 @@ def create_retinanet_sut(
     Factory function to create RetinaNet SUT.
 
     Uses C++ SUT if available for maximum performance.
+    Note: X accelerator devices should use MultiDeviceSUT, not this function.
 
     Args:
         config: Benchmark configuration
@@ -779,6 +798,14 @@ def create_retinanet_sut(
     Returns:
         RetinaNet SUT instance
     """
+    # X devices are not supported by C++ SUT - they require MultiDeviceSUT
+    device = config.openvino.device.upper()
+    if device.startswith("X"):
+        raise ValueError(
+            f"C++ SUT does not support X accelerator devices (got: {device}). "
+            "Use MultiDeviceSUT via BenchmarkRunner._create_sut_for_backend() instead."
+        )
+
     if CPP_AVAILABLE and RetinaNetCppSUT is not None and not force_python:
         logger.info(f"Using RetinaNet C++ SUT for {scenario.value} mode")
         return RetinaNetCppSUTWrapper(config, model_path, qsl, scenario)

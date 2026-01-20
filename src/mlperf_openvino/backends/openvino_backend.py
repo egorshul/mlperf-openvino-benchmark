@@ -87,6 +87,14 @@ class OpenVINOBackend(BaseBackend):
 
         logger.info(f"Loading model from {self.model_path}")
 
+        # Validate device - "X" without die number requires MultiDeviceBackend
+        if self.config.device.upper() == "X":
+            raise ValueError(
+                "Device 'X' (all dies) requires MultiDeviceBackend. "
+                "Use a specific die (e.g., 'X.0') for OpenVINOBackend, "
+                "or use '--device X' which automatically uses MultiDeviceBackend."
+            )
+
         # Initialize OpenVINO Core
         self._core = Core()
 
