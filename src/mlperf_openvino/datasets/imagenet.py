@@ -351,7 +351,7 @@ class ImageNetQSL(QuerySampleLibrary):
         if not self._dataset.is_loaded:
             self._dataset.load()
         
-        logger.info(f"Loading {len(sample_list)} query samples...")
+        logger.debug(f"Loading {len(sample_list)} query samples...")
         
         for sample_id in sample_list:
             if sample_id not in self._loaded_samples:

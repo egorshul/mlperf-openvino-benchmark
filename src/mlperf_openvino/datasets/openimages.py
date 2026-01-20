@@ -914,7 +914,7 @@ class OpenImagesQSL(QuerySampleLibrary):
         if not to_load:
             return
 
-        logger.info(f"Loading {len(to_load)} OpenImages samples into memory...")
+        logger.debug(f"Loading {len(to_load)} OpenImages samples into memory...")
 
         # Use parallel loading for faster preprocessing
         from concurrent.futures import ThreadPoolExecutor, as_completed
