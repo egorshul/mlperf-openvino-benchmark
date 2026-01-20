@@ -122,53 +122,70 @@ class ImageNetDataset(BaseDataset):
     
     def _preprocess_image(self, image_path: str) -> np.ndarray:
         """
-        Preprocess a single image.
-        
+        Preprocess a single image following MLCommons reference (pre_process_vgg).
+
         Args:
             image_path: Path to the image
-            
+
         Returns:
             Preprocessed image as numpy array (NCHW format)
         """
         # Load image
         img = Image.open(image_path).convert("RGB")
-        
-        # Resize
-        if self.preprocessing.resize:
-            img = img.resize(
-                self.preprocessing.resize,
-                Image.Resampling.BILINEAR
-            )
-        
-        # Center crop
+
+        # Get target dimensions from center_crop (default 224x224)
         if self.preprocessing.center_crop:
             crop_h, crop_w = self.preprocessing.center_crop
-            w, h = img.size
-            left = (w - crop_w) // 2
-            top = (h - crop_h) // 2
-            img = img.crop((left, top, left + crop_w, top + crop_h))
-        
+        else:
+            crop_h, crop_w = 224, 224
+
+        # Resize with aspect ratio preservation (MLCommons reference)
+        # Scale so that after center crop we get the target size
+        # MLCommons uses scale=87.5%, so target_size / 0.875 ≈ 256 for 224
+        w, h = img.size
+        scale = 87.5
+        new_height = int(100.0 * crop_h / scale)  # 256 for crop_h=224
+        new_width = int(100.0 * crop_w / scale)   # 256 for crop_w=224
+
+        if h > w:
+            # Width is smaller, scale based on width
+            new_w = new_width
+            new_h = int(new_height * h / w)
+        else:
+            # Height is smaller, scale based on height
+            new_h = new_height
+            new_w = int(new_width * w / h)
+
+        # Resize preserving aspect ratio (use LANCZOS for quality, similar to INTER_AREA)
+        img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+        # Center crop
+        w, h = img.size
+        left = (w - crop_w) // 2
+        top = (h - crop_h) // 2
+        img = img.crop((left, top, left + crop_w, top + crop_h))
+
         # Convert to numpy
         img_array = np.array(img, dtype=np.float32)
-        
+
         # Channel order (already RGB from PIL)
         if self.preprocessing.channel_order == "BGR":
             img_array = img_array[:, :, ::-1]
-        
+
         # Apply mean subtraction
         mean = np.array(self.preprocessing.mean, dtype=np.float32)
         img_array = img_array - mean
-        
+
         # Apply std normalization
         std = np.array(self.preprocessing.std, dtype=np.float32)
         img_array = img_array / std
-        
+
         # Convert to NCHW format
         img_array = np.transpose(img_array, (2, 0, 1))
-        
+
         # Add batch dimension
         img_array = np.expand_dims(img_array, axis=0)
-        
+
         return img_array
     
     def get_sample(self, index: int) -> Tuple[np.ndarray, int]:
