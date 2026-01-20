@@ -192,13 +192,39 @@ class BenchmarkRunner:
         self,
         qsl: QuerySampleLibrary,
     ) -> Any:
-        """Create appropriate SUT based on backend type."""
+        """Create appropriate SUT based on backend type.
+
+        For multi-die accelerators, prefer C++ SUT for maximum performance.
+        Falls back to Python SUT if C++ is not available.
+        """
         from ..backends.multi_device_backend import MultiDeviceBackend
-        from .multi_device_sut import MultiDeviceSUT
         from .sut import OpenVINOSUT
 
         if isinstance(self.backend, MultiDeviceBackend):
-            logger.info(f"Creating MultiDeviceSUT for {self.backend.num_dies} accelerator dies")
+            # Try C++ multi-die SUT first (much faster)
+            try:
+                from .multi_die_cpp_sut_wrapper import (
+                    MultiDieCppSUTWrapper,
+                    is_cpp_multi_die_sut_available
+                )
+
+                if is_cpp_multi_die_sut_available():
+                    logger.info(f"Creating C++ MultiDieSUT for {self.backend.num_dies} accelerator dies")
+                    sut = MultiDieCppSUTWrapper(
+                        config=self.config,
+                        qsl=qsl,
+                        scenario=self.config.scenario,
+                    )
+                    sut.load()
+                    return sut
+            except ImportError as e:
+                logger.warning(f"C++ multi-die SUT not available: {e}")
+            except Exception as e:
+                logger.warning(f"Failed to create C++ multi-die SUT: {e}, falling back to Python")
+
+            # Fall back to Python multi-device SUT
+            from .multi_device_sut import MultiDeviceSUT
+            logger.info(f"Creating Python MultiDeviceSUT for {self.backend.num_dies} accelerator dies")
             return MultiDeviceSUT(
                 config=self.config,
                 backend=self.backend,

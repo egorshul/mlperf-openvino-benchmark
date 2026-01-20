@@ -8,6 +8,7 @@
  * - ResNetCppSUT: async inference for ResNet50 (single float32 input)
  * - BertCppSUT: async inference for BERT (3x int64 inputs, 2x float32 outputs)
  * - RetinaNetCppSUT: async inference for RetinaNet (1x float32 input, 3x outputs)
+ * - MultiDieCppSUT: multi-die accelerator inference with batching
  */
 
 #include <pybind11/pybind11.h>
@@ -20,6 +21,7 @@
 #include "resnet_sut_cpp.hpp"
 #include "bert_sut_cpp.hpp"
 #include "retinanet_sut_cpp.hpp"
+#include "multi_die_sut_cpp.hpp"
 
 namespace py = pybind11;
 
@@ -378,6 +380,99 @@ PYBIND11_MODULE(_cpp_sut, m) {
              },
              py::arg("callback"),
              "Set response callback (receives query_id, boxes, scores, labels)");
+
+    // MultiDieCppSUT - optimized for multi-die accelerators with batching
+    py::class_<mlperf_ov::MultiDieCppSUT>(m, "MultiDieCppSUT")
+        .def(py::init<const std::string&, const std::string&, int,
+                      const std::unordered_map<std::string, std::string>&>(),
+             py::arg("model_path"),
+             py::arg("device_prefix"),
+             py::arg("batch_size") = 1,
+             py::arg("compile_properties") = std::unordered_map<std::string, std::string>{},
+             "Create multi-die accelerator SUT")
+
+        .def("load", &mlperf_ov::MultiDieCppSUT::load,
+             py::call_guard<py::gil_scoped_release>(),
+             "Load model and compile for all available dies")
+
+        .def("is_loaded", &mlperf_ov::MultiDieCppSUT::is_loaded,
+             "Check if model is loaded")
+
+        .def("get_num_dies", &mlperf_ov::MultiDieCppSUT::get_num_dies,
+             "Get number of active dies")
+
+        .def("get_active_devices", &mlperf_ov::MultiDieCppSUT::get_active_devices,
+             "Get list of active device names")
+
+        .def("get_batch_size", &mlperf_ov::MultiDieCppSUT::get_batch_size,
+             "Get batch size")
+
+        .def("get_total_requests", &mlperf_ov::MultiDieCppSUT::get_total_requests,
+             "Get total number of inference requests across all dies")
+
+        .def("get_input_name", &mlperf_ov::MultiDieCppSUT::get_input_name,
+             "Get input tensor name")
+
+        .def("get_output_name", &mlperf_ov::MultiDieCppSUT::get_output_name,
+             "Get output tensor name")
+
+        .def("start_async_batch",
+             [](mlperf_ov::MultiDieCppSUT& self,
+                py::array_t<float, py::array::c_style | py::array::forcecast> input,
+                const std::vector<uint64_t>& query_ids,
+                const std::vector<int>& sample_indices,
+                int actual_batch_size) {
+                 py::buffer_info buf = input.request();
+                 const float* data = static_cast<const float*>(buf.ptr);
+                 size_t size = buf.size * sizeof(float);
+
+                 py::gil_scoped_release release;
+                 self.start_async_batch(data, size, query_ids, sample_indices, actual_batch_size);
+             },
+             py::arg("input"),
+             py::arg("query_ids"),
+             py::arg("sample_indices"),
+             py::arg("actual_batch_size"),
+             "Start async batch inference (GIL released)")
+
+        .def("wait_all", &mlperf_ov::MultiDieCppSUT::wait_all,
+             py::call_guard<py::gil_scoped_release>(),
+             "Wait for all pending inferences")
+
+        .def("get_completed_count", &mlperf_ov::MultiDieCppSUT::get_completed_count,
+             "Get number of completed samples")
+
+        .def("get_issued_count", &mlperf_ov::MultiDieCppSUT::get_issued_count,
+             "Get number of issued samples")
+
+        .def("reset_counters", &mlperf_ov::MultiDieCppSUT::reset_counters,
+             "Reset counters")
+
+        .def("set_store_predictions", &mlperf_ov::MultiDieCppSUT::set_store_predictions,
+             py::arg("store"),
+             "Enable/disable storing predictions")
+
+        .def("get_predictions", &mlperf_ov::MultiDieCppSUT::get_predictions,
+             "Get stored predictions")
+
+        .def("set_response_callback",
+             [](mlperf_ov::MultiDieCppSUT& self, py::function callback) {
+                 self.set_response_callback(
+                     [callback](uint64_t query_id, const float* data, size_t size) {
+                         py::gil_scoped_acquire acquire;
+
+                         if (data != nullptr && size > 0) {
+                             size_t num_elements = size / sizeof(float);
+                             py::array_t<float> arr(num_elements);
+                             std::memcpy(arr.mutable_data(), data, size);
+                             callback(query_id, arr);
+                         } else {
+                             callback(query_id, py::none());
+                         }
+                     });
+             },
+             py::arg("callback"),
+             "Set response callback (called for each sample in batch)");
 
     // Version info
     m.attr("__version__") = "1.0.0";
