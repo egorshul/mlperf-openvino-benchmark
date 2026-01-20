@@ -1,8 +1,7 @@
 """
-Multi-device SUT (System Under Test) for X accelerator with multiple dies.
+Multi-device SUT (System Under Test) for accelerators with multiple dies.
 
-This SUT distributes inference workload across all available X dies
-for maximum throughput in MLPerf benchmarks.
+Optimized for maximum throughput on multi-die accelerators.
 """
 
 import array
@@ -10,16 +9,10 @@ import logging
 import sys
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
-
-try:
-    from tqdm import tqdm
-    TQDM_AVAILABLE = True
-except ImportError:
-    TQDM_AVAILABLE = False
-    tqdm = None
 
 try:
     import mlperf_loadgen as lg
@@ -45,10 +38,13 @@ logger = logging.getLogger(__name__)
 
 class MultiDeviceSUT:
     """
-    System Under Test for multi-die X accelerator inference.
+    System Under Test for multi-die accelerator inference.
 
-    Distributes inference workload across all available X dies
-    using AsyncInferQueue per die for optimal throughput.
+    Optimized for maximum throughput:
+    - Proper batching support (batch_size > 1)
+    - AsyncInferQueue per die for pipelining
+    - Round-robin distribution across dies
+    - Minimal Python overhead in hot path
     """
 
     def __init__(
@@ -58,25 +54,14 @@ class MultiDeviceSUT:
         qsl: QuerySampleLibrary,
         scenario: Scenario = Scenario.OFFLINE,
     ):
-        """
-        Initialize multi-device SUT.
-
-        Args:
-            config: Benchmark configuration
-            backend: Multi-device backend instance
-            qsl: Query Sample Library
-            scenario: Test scenario
-        """
         if not LOADGEN_AVAILABLE:
-            raise ImportError(
-                "MLPerf LoadGen is not installed. Please install with: "
-                "pip install mlcommons-loadgen"
-            )
+            raise ImportError("MLPerf LoadGen is not installed")
 
         self.config = config
         self.backend = backend
         self.qsl = qsl
         self.scenario = scenario
+        self.batch_size = config.openvino.batch_size
 
         # Ensure backend is loaded
         if not self.backend.is_loaded:
@@ -91,6 +76,9 @@ class MultiDeviceSUT:
         if self.output_name not in self.backend.output_names:
             self.output_name = self.backend.output_names[0]
 
+        # Get input shape (after reshape) for batching
+        self._input_shape = self.backend.input_shapes.get(self.input_name)
+
         # Results storage
         self._predictions: Dict[int, Any] = {}
 
@@ -98,37 +86,32 @@ class MultiDeviceSUT:
         self._query_count = 0
         self._sample_count = 0
         self._start_time = 0.0
-        self._end_time = 0.0
 
-        # Progress tracking
-        self._progress_bar: Optional[Any] = None
-        self._last_progress_update = 0.0
-        self._progress_update_interval = 0.5
-
-        # Per-die async queues (used for both Offline and Server)
+        # Per-die async queues
         self._async_queues: Dict[str, AsyncInferQueue] = {}
         self._input_dtype = None
         self._issued_count = 0
-        self._die_round_robin = 0
+        self._completed_count = 0
+        self._die_index = 0
         self._die_lock = threading.Lock()
 
         # Offline mode: accumulated responses
-        self._offline_responses: List[Tuple[int, array.array]] = []
+        self._offline_responses: List[Tuple] = []  # (query_ids, response_arrays)
         self._offline_lock = threading.Lock()
 
-        # Setup async queues for all modes (async is always faster)
+        # Progress thread
+        self._progress_thread_stop = False
+        self._progress_thread = None
+
+        # Setup async queues
         self._setup_async_queues()
 
         logger.info(
-            f"MultiDeviceSUT initialized with {self.backend.num_dies} dies: "
-            f"{self.backend.active_devices}"
+            f"MultiDeviceSUT: {self.backend.num_dies} dies, batch_size={self.batch_size}"
         )
 
     def _setup_async_queues(self) -> None:
         """Setup async inference queues for all dies."""
-        self._start_time = time.time()
-        self._issued_count = 0
-
         # Get input dtype from first die
         first_die = self.backend.active_devices[0]
         ctx = self.backend._die_contexts[first_die]
@@ -146,194 +129,207 @@ class MultiDeviceSUT:
         else:
             self._input_dtype = np.float32
 
-        # Create AsyncInferQueue for each die
+        # Create AsyncInferQueue for each die with high queue depth
         for die_name in self.backend.active_devices:
             ctx = self.backend._die_contexts[die_name]
-            # More requests = better pipelining, especially for accelerators
-            num_requests = max(ctx.optimal_nireq * 4, 16)
+            # High queue depth for maximum pipelining
+            num_requests = max(ctx.optimal_nireq * 8, 32)
 
             async_queue = AsyncInferQueue(ctx.compiled_model, num_requests)
-
-            # Create die-specific callback
-            def make_callback(die):
-                def callback(infer_request, userdata):
-                    query_id, sample_idx, is_offline = userdata
-                    try:
-                        output = infer_request.get_output_tensor(0).data
-                        output_copy = output.copy()
-                        self._predictions[sample_idx] = output_copy
-
-                        if is_offline:
-                            # Offline: accumulate responses, send all at once
-                            response_array = array.array('B', output_copy.tobytes())
-                            with self._offline_lock:
-                                self._offline_responses.append((query_id, response_array))
-                        else:
-                            # Server: send response immediately
-                            response = lg.QuerySampleResponse(
-                                query_id,
-                                output_copy.ctypes.data,
-                                output_copy.nbytes
-                            )
-                            lg.QuerySamplesComplete([response])
-                    except Exception as e:
-                        logger.error(f"Callback error on {die}: {e}")
-                        if not is_offline:
-                            response = lg.QuerySampleResponse(query_id, 0, 0)
-                            lg.QuerySamplesComplete([response])
-
-                    self._sample_count += 1
-                return callback
-
-            async_queue.set_callback(make_callback(die_name))
+            async_queue.set_callback(self._make_callback(die_name))
             self._async_queues[die_name] = async_queue
 
-            logger.info(f"Created AsyncInferQueue for {die_name} with {num_requests} requests")
+            logger.info(f"AsyncInferQueue for {die_name}: {num_requests} requests")
 
-        # Start progress monitoring thread
+    def _make_callback(self, die_name: str):
+        """Create callback for async inference completion."""
+        def callback(infer_request, userdata):
+            query_ids, sample_indices, actual_batch_size, is_offline = userdata
+            try:
+                # Get batched output
+                output = infer_request.get_output_tensor(0).data
+
+                # Split batch output to individual samples
+                for i in range(actual_batch_size):
+                    sample_idx = sample_indices[i]
+                    query_id = query_ids[i]
+
+                    # Extract single sample from batch
+                    if self.batch_size > 1:
+                        sample_output = output[i].copy()
+                    else:
+                        sample_output = output.copy()
+
+                    self._predictions[sample_idx] = sample_output
+
+                    if is_offline:
+                        # Offline: accumulate for batch response
+                        response_array = array.array('B', sample_output.tobytes())
+                        with self._offline_lock:
+                            self._offline_responses.append((query_id, response_array))
+                    else:
+                        # Server: immediate response
+                        response = lg.QuerySampleResponse(
+                            query_id,
+                            sample_output.ctypes.data,
+                            sample_output.nbytes
+                        )
+                        lg.QuerySamplesComplete([response])
+
+                self._completed_count += actual_batch_size
+
+            except Exception as e:
+                logger.error(f"Callback error on {die_name}: {e}")
+                import traceback
+                traceback.print_exc()
+
+        return callback
+
+    def _get_next_die(self) -> str:
+        """Get next die for round-robin distribution (lock-free for speed)."""
+        idx = self._die_index
+        self._die_index = (idx + 1) % len(self.backend.active_devices)
+        return self.backend.active_devices[idx]
+
+    def _start_progress_thread(self):
+        """Start progress monitoring thread."""
         self._progress_thread_stop = False
+        self._start_time = time.time()
 
-        def progress_thread():
+        def progress_fn():
             while not self._progress_thread_stop:
-                time.sleep(0.5)
+                time.sleep(0.3)
                 elapsed = time.time() - self._start_time
-                if elapsed > 0:
-                    throughput = self._sample_count / elapsed
-                    issued = self._issued_count
-                    pending = issued - self._sample_count
-                    dies_str = ",".join(self.backend.active_devices)
+                if elapsed > 0 and self._completed_count > 0:
+                    throughput = self._completed_count / elapsed
+                    pending = self._issued_count - self._completed_count
                     sys.stderr.write(
-                        f"\rMulti-die [{dies_str}]: issued={issued}, done={self._sample_count}, "
-                        f"pending={pending}, {throughput:.1f} samples/sec   "
+                        f"\r[{self.backend.num_dies} dies] "
+                        f"done={self._completed_count}, pending={pending}, "
+                        f"{throughput:.1f} samples/sec   "
                     )
                     sys.stderr.flush()
 
-        self._progress_thread = threading.Thread(target=progress_thread, daemon=True)
+        self._progress_thread = threading.Thread(target=progress_fn, daemon=True)
         self._progress_thread.start()
 
-    def _get_next_die(self) -> str:
-        """Get next die for round-robin distribution."""
-        with self._die_lock:
-            die = self.backend.active_devices[self._die_round_robin % len(self.backend.active_devices)]
-            self._die_round_robin += 1
-        return die
+    def _stop_progress_thread(self):
+        """Stop progress thread and print final stats."""
+        self._progress_thread_stop = True
+        if self._progress_thread:
+            self._progress_thread.join(timeout=1.0)
 
-    def _start_progress(self, total: int, desc: str = "Processing") -> None:
-        """Start progress tracking."""
-        self._start_time = time.time()
-        if TQDM_AVAILABLE:
-            self._progress_bar = tqdm(
-                total=total,
-                desc=desc,
-                unit="samples",
-                file=sys.stderr,
-                dynamic_ncols=True,
+        elapsed = time.time() - self._start_time
+        if elapsed > 0 and self._completed_count > 0:
+            throughput = self._completed_count / elapsed
+            sys.stderr.write(
+                f"\nCompleted: {self._completed_count} samples in {elapsed:.2f}s "
+                f"({throughput:.1f} samples/sec)\n"
             )
-        else:
-            logger.info(f"Starting: {desc} ({total} samples)")
-            self._last_progress_update = time.time()
-
-    def _update_progress(self, n: int = 1) -> None:
-        """Update progress by n samples."""
-        if TQDM_AVAILABLE and self._progress_bar is not None:
-            self._progress_bar.update(n)
-        else:
-            current_time = time.time()
-            if current_time - self._last_progress_update >= self._progress_update_interval:
-                elapsed = current_time - self._start_time
-                throughput = self._sample_count / elapsed if elapsed > 0 else 0
-                logger.info(f"Progress: {self._sample_count} samples, {throughput:.1f} samples/sec")
-                self._last_progress_update = current_time
-
-    def _close_progress(self) -> None:
-        """Close progress tracking."""
-        if TQDM_AVAILABLE and self._progress_bar is not None:
-            self._progress_bar.close()
-            self._progress_bar = None
-        else:
-            elapsed = time.time() - self._start_time
-            throughput = self._sample_count / elapsed if elapsed > 0 else 0
-            logger.info(f"Completed: {self._sample_count} samples in {elapsed:.1f}s ({throughput:.1f} samples/sec)")
-
-    def _process_batch(self, sample_ids: List[int]) -> List[Tuple[int, np.ndarray]]:
-        """Process a batch using multi-device backend."""
-        batch_inputs = []
-        for sample_id in sample_ids:
-            features = self.qsl.get_features(sample_id)
-            data = features.get("input", features.get(self.input_name))
-            batch_inputs.append({self.input_name: data})
-
-        batch_outputs = self.backend.predict_batch(batch_inputs)
-
-        results = []
-        for sample_id, output in zip(sample_ids, batch_outputs):
-            result = output.get(self.output_name, list(output.values())[0])
-            results.append((sample_id, result))
-
-        return results
+            sys.stderr.flush()
 
     def _issue_query_offline(self, query_samples: List["lg.QuerySample"]) -> None:
-        """Process queries in Offline mode using async inference on all dies."""
+        """Process queries in Offline mode with batching."""
         self._start_time = time.time()
         self._offline_responses.clear()
+        self._issued_count = 0
+        self._completed_count = 0
 
         qsl = self.qsl
         input_name = self.input_name
         input_dtype = self._input_dtype
-        num_dies = len(self.backend.active_devices)
+        batch_size = self.batch_size
+        num_samples = len(query_samples)
 
-        total_samples = len(query_samples)
-        logger.info(f"Offline: Processing {total_samples} samples on {num_dies} dies")
+        logger.info(f"Offline: {num_samples} samples, batch_size={batch_size}, "
+                   f"{self.backend.num_dies} dies")
 
-        # Submit all samples to async queues (round-robin across dies)
-        for qs in query_samples:
-            sample_idx = qs.index
-            query_id = qs.id
+        self._start_progress_thread()
 
-            # Get input data
-            if hasattr(qsl, '_loaded_samples') and sample_idx in qsl._loaded_samples:
-                input_data = qsl._loaded_samples[sample_idx]
+        # Process in batches
+        i = 0
+        while i < num_samples:
+            # Determine actual batch size (may be smaller at end)
+            end_idx = min(i + batch_size, num_samples)
+            actual_batch_size = end_idx - i
+
+            # Collect batch data
+            query_ids = []
+            sample_indices = []
+            batch_data = []
+
+            for j in range(i, end_idx):
+                qs = query_samples[j]
+                sample_idx = qs.index
+                query_id = qs.id
+
+                query_ids.append(query_id)
+                sample_indices.append(sample_idx)
+
+                # Get input data
+                if hasattr(qsl, '_loaded_samples') and sample_idx in qsl._loaded_samples:
+                    input_data = qsl._loaded_samples[sample_idx]
+                else:
+                    features = qsl.get_features(sample_idx)
+                    input_data = features.get("input", features.get(input_name))
+
+                # Remove batch dimension if present (squeeze from [1,C,H,W] to [C,H,W])
+                if input_data.ndim == 4 and input_data.shape[0] == 1:
+                    input_data = input_data[0]
+
+                batch_data.append(input_data)
+
+            # Stack into batch tensor [batch_size, C, H, W]
+            if actual_batch_size == batch_size:
+                batched_input = np.stack(batch_data, axis=0)
             else:
-                features = qsl.get_features(sample_idx)
-                input_data = features.get("input", features.get(input_name))
+                # Pad incomplete batch
+                padded = batch_data + [batch_data[-1]] * (batch_size - actual_batch_size)
+                batched_input = np.stack(padded, axis=0)
 
-            # Convert dtype if needed
-            if input_dtype is not None and input_data.dtype != input_dtype:
-                input_data = input_data.astype(input_dtype, copy=False)
+            # Convert dtype
+            if input_dtype is not None and batched_input.dtype != input_dtype:
+                batched_input = batched_input.astype(input_dtype, copy=False)
 
-            # Select die (round-robin)
+            # Ensure contiguous
+            if not batched_input.flags['C_CONTIGUOUS']:
+                batched_input = np.ascontiguousarray(batched_input)
+
+            # Select die and submit
             die_name = self._get_next_die()
             async_queue = self._async_queues[die_name]
 
-            # Start async inference (is_offline=True)
-            async_queue.start_async({input_name: input_data}, userdata=(query_id, sample_idx, True))
-            self._issued_count += 1
+            userdata = (query_ids, sample_indices, actual_batch_size, True)
+            async_queue.start_async({input_name: batched_input}, userdata=userdata)
 
-        # Wait for all dies to complete
-        for die_name, async_queue in self._async_queues.items():
+            self._issued_count += actual_batch_size
+            i = end_idx
+
+        # Wait for all to complete
+        for async_queue in self._async_queues.values():
             async_queue.wait_all()
 
-        # Build and send all responses
+        self._stop_progress_thread()
+
+        # Send all responses
         responses = []
         for query_id, response_array in self._offline_responses:
             bi = response_array.buffer_info()
-            response = lg.QuerySampleResponse(query_id, bi[0], bi[1])
-            responses.append(response)
+            responses.append(lg.QuerySampleResponse(query_id, bi[0], bi[1]))
 
         lg.QuerySamplesComplete(responses)
-
-        elapsed = time.time() - self._start_time
-        throughput = total_samples / elapsed if elapsed > 0 else 0
-        logger.info(f"Offline: Completed {total_samples} samples in {elapsed:.2f}s ({throughput:.1f} samples/sec)")
-
         self._query_count += 1
+        self._sample_count = self._completed_count
 
     def _issue_query_server(self, query_samples: List["lg.QuerySample"]) -> None:
-        """Process queries in Server mode distributing across all dies."""
+        """Process queries in Server mode (low latency, batch=1 typically)."""
         qsl = self.qsl
         input_name = self.input_name
         input_dtype = self._input_dtype
+        batch_size = self.batch_size
 
+        # For Server mode, process immediately
+        # If batch_size > 1, we still need to batch, but for latency we use batch=1
         for qs in query_samples:
             sample_idx = qs.index
             query_id = qs.id
@@ -345,16 +341,31 @@ class MultiDeviceSUT:
                 features = qsl.get_features(sample_idx)
                 input_data = features.get("input", features.get(input_name))
 
-            # Convert dtype if needed
+            # Ensure correct batch dimension
+            if batch_size == 1:
+                # Keep as-is or ensure [1, C, H, W]
+                if input_data.ndim == 3:
+                    input_data = input_data[np.newaxis, ...]
+            else:
+                # Batch > 1: pad single sample to full batch
+                if input_data.ndim == 4 and input_data.shape[0] == 1:
+                    input_data = input_data[0]
+                if input_data.ndim == 3:
+                    # Replicate to fill batch (only first result matters)
+                    input_data = np.stack([input_data] * batch_size, axis=0)
+
+            # Convert dtype
             if input_dtype is not None and input_data.dtype != input_dtype:
                 input_data = input_data.astype(input_dtype, copy=False)
 
-            # Select die (round-robin)
+            # Select die and submit
             die_name = self._get_next_die()
             async_queue = self._async_queues[die_name]
 
-            # Start async inference (is_offline=False - send response immediately)
-            async_queue.start_async({input_name: input_data}, userdata=(query_id, sample_idx, False))
+            # actual_batch_size=1 means only first output is used
+            userdata = ([query_id], [sample_idx], 1, False)
+            async_queue.start_async({input_name: input_data}, userdata=userdata)
+
             self._issued_count += 1
 
         self._query_count += 1
@@ -370,25 +381,10 @@ class MultiDeviceSUT:
 
     def flush_queries(self) -> None:
         """Flush any pending queries."""
-        # Wait for all async queues to complete
-        for die_name, async_queue in self._async_queues.items():
+        for async_queue in self._async_queues.values():
             async_queue.wait_all()
 
-        # Stop progress thread
-        if hasattr(self, '_progress_thread_stop'):
-            self._progress_thread_stop = True
-
-        # Print final stats
-        if self._async_queues:
-            elapsed = time.time() - self._start_time
-            throughput = self._sample_count / elapsed if elapsed > 0 else 0
-            print(
-                f"\nMulti-die completed: {self._sample_count} samples in {elapsed:.1f}s "
-                f"({throughput:.1f} samples/sec) using {self.backend.num_dies} dies"
-            )
-
-        if self._progress_bar is not None:
-            self._close_progress()
+        self._stop_progress_thread()
 
     def get_sut(self) -> "lg.ConstructSUT":
         """Get the LoadGen SUT object."""
@@ -405,17 +401,16 @@ class MultiDeviceSUT:
 
     @property
     def name(self) -> str:
-        """Get SUT name."""
-        return f"MultiDevice-X-{self.config.model.name}"
+        return f"MultiDevice-{self.backend.num_dies}dies"
 
     def get_predictions(self) -> Dict[int, Any]:
-        """Get all predictions."""
         return self._predictions
 
     def reset(self) -> None:
-        """Reset SUT state."""
         self._predictions.clear()
         self._query_count = 0
         self._sample_count = 0
         self._issued_count = 0
-        self._die_round_robin = 0
+        self._completed_count = 0
+        self._die_index = 0
+        self._offline_responses.clear()
