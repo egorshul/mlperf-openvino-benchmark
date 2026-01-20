@@ -8,7 +8,7 @@
  * 4. All callbacks in C++ without GIL
  */
 
-#include "multi_die_sut_cpp.hpp"
+#include "resnet_multi_die_sut_cpp.hpp"
 
 #include <algorithm>
 #include <cstring>
