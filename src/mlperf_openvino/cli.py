@@ -1,7 +1,7 @@
 """
 Command Line Interface for MLPerf OpenVINO Benchmark.
 
-Supports: ResNet50, BERT, RetinaNet, Whisper
+Supports: ResNet50, BERT, RetinaNet, Whisper, SDXL
 """
 
 import logging
@@ -38,6 +38,7 @@ def main():
     - BERT-Large (Question Answering on SQuAD)
     - RetinaNet (Object Detection on OpenImages)
     - Whisper (Speech Recognition on LibriSpeech)
+    - SDXL (Text-to-Image on COCO 2014)
     """
     pass
 
@@ -52,12 +53,14 @@ def get_default_config(model: str) -> BenchmarkConfig:
         return BenchmarkConfig.default_retinanet()
     elif model == 'whisper':
         return BenchmarkConfig.default_whisper()
+    elif model == 'sdxl':
+        return BenchmarkConfig.default_sdxl()
     else:
         return BenchmarkConfig.default_resnet50()
 
 
 @main.command()
-@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper']),
+@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl']),
               default='resnet50', help='Model to benchmark')
 @click.option('--scenario', '-s', type=click.Choice(['Offline', 'Server']),
               default='Offline', help='Test scenario')
@@ -254,16 +257,19 @@ def _print_dataset_help(model: str) -> None:
     elif model == 'whisper':
         click.echo("Please download the LibriSpeech dataset.")
         click.echo("Run: mlperf-ov download-dataset --dataset librispeech")
+    elif model == 'sdxl':
+        click.echo("Please download the COCO 2014 captions dataset.")
+        click.echo("Run: mlperf-ov download-dataset --dataset coco2014")
 
 
-@main.command()
-@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper']),
+@main.command('download-model')
+@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl']),
               default='resnet50', help='Model to download')
 @click.option('--output-dir', '-o', type=click.Path(),
               default='./models', help='Output directory')
 @click.option('--format', '-f', type=click.Choice(['onnx', 'openvino']),
               default='onnx', help='Model format')
-def download(model: str, output_dir: str, format: str):
+def download_model_cmd(model: str, output_dir: str, format: str):
     """
     Download model files.
 
@@ -292,55 +298,20 @@ def download(model: str, output_dir: str, format: str):
             if 'encoder_path' in paths:
                 click.echo(f"  Encoder: {paths['encoder_path']}")
                 click.echo(f"  Decoder: {paths['decoder_path']}")
+        elif model == 'sdxl':
+            from .utils.model_downloader import download_sdxl_model
+            export_to_openvino = (format == 'openvino')
+            paths = download_sdxl_model(
+                str(output_path),
+                export_to_openvino=export_to_openvino
+            )
+            click.echo(f"Model downloaded to: {paths['model_path']}")
         else:
             model_path = download_model(model, str(output_path), format)
             click.echo(f"Model downloaded to: {model_path}")
     except Exception as e:
         click.echo(f"Error downloading model: {e}")
         sys.exit(1)
-
-
-@main.command()
-@click.option('--model-path', '-m', type=click.Path(exists=True), required=True,
-              help='Path to model file')
-@click.option('--iterations', '-n', type=int, default=100,
-              help='Number of iterations')
-@click.option('--warmup', type=int, default=10,
-              help='Number of warmup iterations')
-@click.option('--num-threads', type=int, default=0,
-              help='Number of threads (0 = auto)')
-def benchmark_latency(model_path: str, iterations: int, warmup: int, num_threads: int):
-    """
-    Run quick latency benchmark (without LoadGen).
-
-    Example:
-
-        mlperf-ov benchmark-latency -m ./models/resnet50.onnx -n 100
-    """
-    from .backends.openvino_backend import OpenVINOBackend
-    from .core.config import OpenVINOConfig
-
-    click.echo(f"Loading model: {model_path}")
-
-    config = OpenVINOConfig(
-        num_threads=num_threads,
-        performance_hint="LATENCY",
-    )
-
-    backend = OpenVINOBackend(model_path, config)
-    backend.load()
-
-    click.echo(f"Running benchmark ({warmup} warmup + {iterations} iterations)...")
-    results = backend.benchmark(num_iterations=iterations, warmup_iterations=warmup)
-
-    click.echo("\nResults:")
-    click.echo(f"  Mean latency:   {results['mean_latency_ms']:.2f} ms")
-    click.echo(f"  Median latency: {results['median_latency_ms']:.2f} ms")
-    click.echo(f"  Min latency:    {results['min_latency_ms']:.2f} ms")
-    click.echo(f"  Max latency:    {results['max_latency_ms']:.2f} ms")
-    click.echo(f"  P90 latency:    {results['p90_latency_ms']:.2f} ms")
-    click.echo(f"  P99 latency:    {results['p99_latency_ms']:.2f} ms")
-    click.echo(f"  Throughput:     {results['throughput_fps']:.2f} FPS")
 
 
 @main.command()
@@ -399,10 +370,11 @@ def info():
     click.echo("  - BERT-Large (Question Answering)")
     click.echo("  - RetinaNet (Object Detection)")
     click.echo("  - Whisper (Speech Recognition)")
+    click.echo("  - SDXL (Text-to-Image Generation)")
 
 
 @main.command('download-dataset')
-@click.option('--dataset', '-d', type=click.Choice(['imagenet', 'librispeech', 'squad', 'openimages']),
+@click.option('--dataset', '-d', type=click.Choice(['imagenet', 'librispeech', 'squad', 'openimages', 'coco2014']),
               required=True, help='Dataset to download')
 @click.option('--output-dir', '-o', type=click.Path(),
               default='./data', help='Output directory')
@@ -410,8 +382,11 @@ def info():
               help='Dataset subset (e.g., "dev-clean" for librispeech)')
 @click.option('--count', '-c', type=int, default=None,
               help='Max images to download (OpenImages only, default=all)')
+@click.option('--with-images', is_flag=True,
+              help='Download reference images (COCO 2014 only, ~6GB, required for FID computation)')
 @click.option('--force', is_flag=True, help='Force re-download')
-def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str], count: Optional[int], force: bool):
+def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str],
+                         count: Optional[int], with_images: bool, force: bool):
     """
     Download dataset files.
 
@@ -428,6 +403,12 @@ def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str], c
 
         # Download LibriSpeech dev-clean
         mlperf-ov download-dataset --dataset librispeech --subset dev-clean
+
+        # Download COCO 2014 captions for SDXL (prompts only)
+        mlperf-ov download-dataset --dataset coco2014
+
+        # Download COCO 2014 with reference images for FID computation
+        mlperf-ov download-dataset --dataset coco2014 --with-images
     """
     from .utils.dataset_downloader import download_dataset, get_dataset_info
 
@@ -444,6 +425,8 @@ def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str], c
         click.echo(f"Subset: {subset}")
     if count and dataset == 'openimages':
         click.echo(f"Max images: {count}")
+    if with_images and dataset == 'coco2014':
+        click.echo("Including reference images (~6GB)")
 
     click.echo("")
 
@@ -452,6 +435,10 @@ def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str], c
         if dataset == 'openimages':
             from .utils.dataset_downloader import download_openimages
             paths = download_openimages(output_dir, force=force, max_images=count)
+        # Special handling for COCO 2014 with images
+        elif dataset == 'coco2014':
+            from .utils.dataset_downloader import download_coco2014
+            paths = download_coco2014(output_dir, force=force, download_images=with_images)
         else:
             paths = download_dataset(dataset, output_dir, subset, force)
 
@@ -471,7 +458,7 @@ def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str], c
 
 
 @main.command('setup')
-@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper']),
+@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl']),
               required=True, help='Model to set up')
 @click.option('--output-dir', '-o', type=click.Path(),
               default='.', help='Base output directory')
@@ -497,8 +484,11 @@ def setup_cmd(model: str, output_dir: str, format: str):
 
         # Set up Whisper benchmark with OpenVINO format
         mlperf-ov setup --model whisper --format openvino
+
+        # Set up SDXL benchmark
+        mlperf-ov setup --model sdxl --format openvino
     """
-    from .utils.model_downloader import download_model, download_whisper_model
+    from .utils.model_downloader import download_model, download_whisper_model, download_sdxl_model
     from .utils.dataset_downloader import download_dataset
 
     output_path = Path(output_dir)
@@ -515,6 +505,13 @@ def setup_cmd(model: str, output_dir: str, format: str):
         if model == 'whisper':
             export_to_openvino = (format == 'openvino')
             model_paths = download_whisper_model(
+                str(models_dir),
+                export_to_openvino=export_to_openvino
+            )
+            model_path = model_paths['model_path']
+        elif model == 'sdxl':
+            export_to_openvino = (format == 'openvino')
+            model_paths = download_sdxl_model(
                 str(models_dir),
                 export_to_openvino=export_to_openvino
             )
@@ -537,6 +534,8 @@ def setup_cmd(model: str, output_dir: str, format: str):
             dataset_paths = download_dataset('openimages', str(data_dir))
         elif model == 'whisper':
             dataset_paths = download_dataset('librispeech', str(data_dir), 'dev-clean')
+        elif model == 'sdxl':
+            dataset_paths = download_dataset('coco2014', str(data_dir))
 
         click.echo(f"  Dataset: {dataset_paths.get('data_path', 'N/A')}\n")
     except Exception as e:
@@ -555,182 +554,6 @@ def setup_cmd(model: str, output_dir: str, format: str):
     click.echo(f"    --data-path {data_path}")
 
     click.echo("")
-
-
-@main.command('perf-tips')
-@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper']),
-              default='resnet50', help='Model to show tips for')
-def perf_tips(model: str):
-    """
-    Show performance optimization tips for maximum throughput.
-
-    IMPORTANT: For maximum performance, use Offline mode, not Server mode!
-    """
-    click.echo("\n" + "="*70)
-    click.echo("PERFORMANCE OPTIMIZATION TIPS")
-    click.echo("="*70 + "\n")
-
-    click.echo("1. USE OFFLINE MODE FOR MAXIMUM THROUGHPUT")
-    click.echo("   " + "-"*50)
-    click.echo("   Server mode is for LATENCY testing (rate-limited)")
-    click.echo("   Offline mode is for THROUGHPUT testing (maximum speed)")
-    click.echo("")
-    click.echo("   BAD (slow):  --scenario Server")
-    click.echo("   GOOD (fast): --scenario Offline")
-    click.echo("")
-
-    click.echo("2. INCREASE BATCH SIZE")
-    click.echo("   " + "-"*50)
-    click.echo("   Larger batch size = better throughput (more parallelism)")
-    click.echo("")
-    if model == 'resnet50':
-        click.echo("   Recommended: --batch-size 8 to 64 (depends on RAM)")
-    elif model == 'bert':
-        click.echo("   Recommended: --batch-size 4 to 16")
-    elif model == 'retinanet':
-        click.echo("   Recommended: --batch-size 2 to 8 (large model)")
-    elif model == 'whisper':
-        click.echo("   Recommended: --batch-size 1 to 4 (sequential decoding)")
-    click.echo("")
-
-    click.echo("3. USE OPTIMAL NUMBER OF STREAMS")
-    click.echo("   " + "-"*50)
-    click.echo("   Streams allow parallel inference requests")
-    click.echo("")
-    click.echo("   --num-streams AUTO   (recommended, auto-detect)")
-    click.echo("   --num-streams <N>    (N = number of physical cores)")
-    click.echo("")
-
-    click.echo("4. USE PERFORMANCE HINT")
-    click.echo("   " + "-"*50)
-    click.echo("   --performance-hint THROUGHPUT  (for max throughput)")
-    click.echo("   --performance-hint LATENCY     (for min latency)")
-    click.echo("")
-
-    click.echo("5. CONSIDER LOWER PRECISION (if accuracy allows)")
-    click.echo("   " + "-"*50)
-    click.echo("   FP32 = highest accuracy, slowest")
-    click.echo("   FP16 = good accuracy, 1.5-2x faster")
-    click.echo("   INT8 = acceptable accuracy, 2-4x faster")
-    click.echo("")
-
-    click.echo("="*70)
-    click.echo("RECOMMENDED COMMAND FOR MAXIMUM THROUGHPUT:")
-    click.echo("="*70 + "\n")
-
-    if model == 'resnet50':
-        batch = 32
-    elif model == 'bert':
-        batch = 8
-    elif model == 'retinanet':
-        batch = 4
-    else:
-        batch = 2
-
-    click.echo(f"  mlperf-ov run --model {model} \\")
-    click.echo("    --scenario Offline \\")
-    click.echo("    --mode performance \\")
-    click.echo(f"    --batch-size {batch} \\")
-    click.echo("    --num-streams AUTO \\")
-    click.echo("    --performance-hint THROUGHPUT \\")
-    click.echo("    --model-path ./models/<model> \\")
-    click.echo("    --data-path ./data/<dataset>")
-    click.echo("")
-
-    click.echo("="*70)
-    click.echo("WHY SERVER MODE IS SLOW:")
-    click.echo("="*70 + "\n")
-    click.echo("  Server mode simulates real-world server load with:")
-    click.echo("  - Rate-limited query arrival (target_qps)")
-    click.echo("  - Latency requirements (target_latency_ns)")
-    click.echo("  - This INTENTIONALLY limits throughput!")
-    click.echo("")
-    click.echo("  Use Server mode only to test latency compliance,")
-    click.echo("  NOT for maximum throughput benchmarks.")
-    click.echo("")
-
-
-@main.command('benchmark-throughput')
-@click.option('--model-path', '-m', type=click.Path(exists=True), required=True,
-              help='Path to model file')
-@click.option('--batch-size', '-b', type=int, default=1,
-              help='Batch size for inference')
-@click.option('--num-streams', type=str, default='AUTO',
-              help='Number of inference streams')
-@click.option('--iterations', '-n', type=int, default=100,
-              help='Number of iterations')
-@click.option('--warmup', type=int, default=10,
-              help='Number of warmup iterations')
-@click.option('--num-threads', type=int, default=0,
-              help='Number of threads (0 = auto)')
-def benchmark_throughput(model_path: str, batch_size: int, num_streams: str,
-                         iterations: int, warmup: int, num_threads: int):
-    """
-    Run quick throughput benchmark using async inference.
-
-    This is the fastest way to measure your hardware's maximum throughput
-    without LoadGen overhead.
-
-    Example:
-
-        mlperf-ov benchmark-throughput -m ./models/resnet50.onnx -b 32 -n 200
-    """
-    import time
-    from .backends.openvino_backend import OpenVINOBackend
-    from .core.config import OpenVINOConfig
-
-    click.echo(f"\nLoading model: {model_path}")
-
-    config = OpenVINOConfig(
-        num_threads=num_threads,
-        num_streams=num_streams,
-        performance_hint="THROUGHPUT",
-    )
-
-    backend = OpenVINOBackend(model_path, config)
-    backend.load()
-
-    click.echo(f"Device: CPU")
-    click.echo(f"Streams: {backend.num_streams}")
-    click.echo(f"Batch size: {batch_size}")
-
-    # Create dummy inputs
-    dummy_inputs = []
-    for _ in range(batch_size):
-        inputs = {}
-        for name, shape in backend.input_shapes.items():
-            inputs[name] = np.random.randn(*shape).astype(np.float32)
-        dummy_inputs.append(inputs)
-
-    # Warmup
-    click.echo(f"\nWarming up ({warmup} iterations)...")
-    for _ in range(warmup):
-        backend.predict_batch(dummy_inputs)
-
-    # Benchmark with async inference
-    click.echo(f"Running throughput benchmark ({iterations} iterations x {batch_size} batch)...")
-
-    total_samples = 0
-    start_time = time.perf_counter()
-
-    for _ in range(iterations):
-        backend.predict_batch(dummy_inputs)
-        total_samples += batch_size
-
-    end_time = time.perf_counter()
-    elapsed = end_time - start_time
-
-    throughput = total_samples / elapsed
-    latency_per_sample = (elapsed / total_samples) * 1000
-
-    click.echo("\n" + "="*50)
-    click.echo("THROUGHPUT RESULTS:")
-    click.echo("="*50)
-    click.echo(f"  Total samples:     {total_samples}")
-    click.echo(f"  Total time:        {elapsed:.2f} seconds")
-    click.echo(f"  Throughput:        {throughput:.2f} samples/sec")
-    click.echo(f"  Latency/sample:    {latency_per_sample:.2f} ms")
-    click.echo("="*50 + "\n")
 
 
 @main.command('list-models')
@@ -772,6 +595,14 @@ def list_models():
             'dataset': 'LibriSpeech',
             'metric': 'Word Accuracy',
             'target': '97.93%',
+        },
+        {
+            'name': 'Stable Diffusion XL',
+            'id': 'sdxl',
+            'task': 'Text-to-Image',
+            'dataset': 'COCO 2014',
+            'metric': 'CLIP Score / FID',
+            'target': '31.69-31.81 / 23.01-23.95',
         },
     ]
 

@@ -10,7 +10,6 @@ from .config import (
     TestMode,
 )
 from .benchmark_runner import BenchmarkRunner
-from .sut import OpenVINOSUT
 
 __all__ = [
     "BenchmarkConfig",
@@ -21,5 +20,4 @@ __all__ = [
     "ScenarioConfig",
     "TestMode",
     "BenchmarkRunner",
-    "OpenVINOSUT",
 ]

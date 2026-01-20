@@ -361,7 +361,7 @@ class OpenImagesDataset(BaseDataset):
                     file_size = Path(image_path).stat().st_size
                     if file_size < 1000:  # Likely corrupted if < 1KB
                         return False, f"{image_id} (corrupted, {file_size} bytes)"
-                except:
+                except OSError:
                     pass
                 return False, f"{image_id}: {e}"
 
@@ -424,7 +424,7 @@ class OpenImagesDataset(BaseDataset):
             if img_path.exists():
                 try:
                     img_path.unlink()
-                except:
+                except OSError:
                     pass
 
         # Re-download from S3
@@ -606,7 +606,7 @@ class OpenImagesDataset(BaseDataset):
                 old_size = image_path.stat().st_size
                 logger.info(f"Deleting corrupted {image_id} ({old_size} bytes)")
                 image_path.unlink()
-            except:
+            except OSError:
                 pass
 
         # Re-download from S3 with retries

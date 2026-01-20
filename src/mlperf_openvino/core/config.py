@@ -32,6 +32,7 @@ class ModelType(Enum):
     BERT = "bert"
     RETINANET = "retinanet"
     WHISPER = "whisper"
+    SDXL = "sdxl"
 
 
 @dataclass
@@ -409,6 +410,43 @@ class BenchmarkConfig:
             dataset=DatasetConfig(
                 name="openimages",
                 path="./data/openimages",
+            ),
+        )
+
+    @classmethod
+    def default_sdxl(cls) -> "BenchmarkConfig":
+        """Create default Stable Diffusion XL configuration for COCO 2014."""
+        return cls(
+            model=ModelConfig(
+                name="Stable-Diffusion-XL",
+                task="text_to_image",
+                model_type=ModelType.SDXL,
+                input_shape=[1, 77],  # (batch, max_token_length) for text input
+                input_name="input_ids",
+                output_name="sample",
+                data_format="NC",
+                dtype="FP32",
+                # MLPerf v5.1 accuracy targets for SDXL (closed division)
+                # CLIP_SCORE: >= 31.68632 and <= 31.81332
+                # FID_SCORE: >= 23.01086 and <= 23.95007
+                accuracy_target=31.68632,  # Minimum CLIP score
+                accuracy_threshold=0.99,
+                preprocessing=PreprocessingConfig(),  # Not used for text input
+                offline=ScenarioConfig(
+                    min_duration_ms=60000,
+                    min_query_count=5000,  # MLPerf official (COCO subset)
+                    samples_per_query=1,
+                ),
+                server=ScenarioConfig(
+                    min_duration_ms=60000,
+                    min_query_count=5000,  # Server uses min_duration primarily
+                    target_latency_ns=20000000000,  # 20 seconds for image generation
+                    target_qps=10.0,  # Lower QPS due to high latency
+                ),
+            ),
+            dataset=DatasetConfig(
+                name="coco2014",
+                path="./data/coco2014",
             ),
         )
     

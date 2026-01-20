@@ -115,6 +115,37 @@ DATASET_REGISTRY: Dict[str, Dict] = {
             'https://inference.mlcommons-storage.org/metadata/whisper-dataset.uri'
         ),
     },
+    "coco2014": {
+        "description": "COCO 2014 captions dataset for SDXL text-to-image generation",
+        "captions": {
+            "url": "http://images.cocodataset.org/annotations/annotations_trainval2014.zip",
+            "filename": "annotations_trainval2014.zip",
+            "size_mb": 241,
+        },
+        "images": {
+            "url": "http://images.cocodataset.org/zips/val2014.zip",
+            "filename": "val2014.zip",
+            "size_gb": 6.0,
+        },
+        # MLCommons pre-computed files for official submission
+        "fid_statistics": {
+            "url": "https://github.com/mlcommons/inference/raw/master/text_to_image/tools/val2014.npz",
+            "filename": "val2014.npz",
+            "size_mb": 10,
+        },
+        "latents": {
+            "url": "https://github.com/mlcommons/inference/raw/master/text_to_image/tools/latents.pt",
+            "filename": "latents.pt",
+            "size_mb": 500,
+        },
+        "captions_tsv": {
+            "url": "https://github.com/mlcommons/inference/raw/master/text_to_image/coco2014/captions/captions.tsv",
+            "filename": "captions.tsv",
+            "size_mb": 1,
+        },
+        "num_samples": 5000,  # MLPerf uses 5000 samples
+        "note": "For MLPerf SDXL benchmark (closed division)",
+    },
 }
 
 
@@ -1243,6 +1274,274 @@ def _convert_openimages_to_coco(
     logger.info(f"COCO annotations: {len(coco['images'])} images, {len(coco['annotations'])} annotations")
 
 
+def _resize_coco_images(
+    source_dir: Path,
+    output_dir: Path,
+    prompts_file: Path,
+    target_size: int = 1024
+) -> int:
+    """
+    Resize COCO images to target size for SDXL FID computation.
+
+    Args:
+        source_dir: Directory with original COCO images (val2014)
+        output_dir: Directory to save resized images (coco-1024)
+        prompts_file: TSV file with image IDs to resize
+        target_size: Target image size (1024 for SDXL)
+
+    Returns:
+        Number of images resized
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        logger.warning("PIL not installed, cannot resize images")
+        return 0
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Read image IDs from prompts file
+    image_ids = []
+    with open(prompts_file, 'r') as f:
+        for line in f:
+            parts = line.strip().split('\t')
+            if parts:
+                image_ids.append(parts[0])
+
+    logger.info(f"Resizing {len(image_ids)} images to {target_size}x{target_size}...")
+
+    resized_count = 0
+    for i, image_id in enumerate(image_ids):
+        # Find source image
+        source_path = source_dir / f"COCO_val2014_{int(image_id):012d}.jpg"
+        if not source_path.exists():
+            # Try alternative naming
+            source_path = source_dir / f"{image_id}.jpg"
+            if not source_path.exists():
+                continue
+
+        output_path = output_dir / f"{image_id}.png"
+        if output_path.exists():
+            resized_count += 1
+            continue
+
+        try:
+            with Image.open(source_path) as img:
+                # Convert to RGB if needed
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+
+                # Resize to target size (center crop + resize)
+                width, height = img.size
+                min_dim = min(width, height)
+
+                # Center crop to square
+                left = (width - min_dim) // 2
+                top = (height - min_dim) // 2
+                img = img.crop((left, top, left + min_dim, top + min_dim))
+
+                # Resize to target
+                img = img.resize((target_size, target_size), Image.LANCZOS)
+
+                # Save as PNG
+                img.save(output_path, 'PNG')
+                resized_count += 1
+
+        except Exception as e:
+            logger.warning(f"Failed to resize {source_path}: {e}")
+
+        if (i + 1) % 500 == 0:
+            logger.info(f"Resized {i + 1}/{len(image_ids)} images")
+
+    logger.info(f"Resized {resized_count} images to {output_dir}")
+    return resized_count
+
+
+def download_coco2014(
+    output_dir: str,
+    force: bool = False,
+    download_images: bool = False,
+    num_samples: int = 5000
+) -> Dict[str, str]:
+    """
+    Download COCO 2014 captions dataset for SDXL text-to-image benchmark.
+
+    For MLPerf SDXL benchmark, downloads the captions from COCO 2014 validation set
+    and creates a prompt file in the MLCommons format.
+
+    Args:
+        output_dir: Directory to save dataset
+        force: Force re-download
+        download_images: Whether to download reference images (large, ~6GB)
+        num_samples: Number of samples to use (MLPerf uses 5000)
+
+    Returns:
+        Dictionary with dataset paths
+    """
+    import json
+    import zipfile
+
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    data_dir = output_path / "coco2014"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    dataset_info = DATASET_REGISTRY["coco2014"]
+
+    # Download annotations
+    annotations_zip = output_path / dataset_info["captions"]["filename"]
+    annotations_dir = data_dir / "annotations"
+
+    captions_file = annotations_dir / "captions_val2014.json"
+
+    if not captions_file.exists() or force:
+        if not annotations_zip.exists() or force:
+            logger.info(f"Downloading COCO 2014 annotations (~{dataset_info['captions']['size_mb']} MB)...")
+            _download_file(
+                dataset_info["captions"]["url"],
+                str(annotations_zip),
+                expected_size_mb=dataset_info["captions"]["size_mb"]
+            )
+
+        # Extract annotations
+        logger.info("Extracting annotations...")
+        with zipfile.ZipFile(annotations_zip, 'r') as zip_ref:
+            zip_ref.extractall(data_dir)
+
+    # Load captions and create prompts file
+    prompts_file = data_dir / "coco-1024.tsv"
+    prompts_txt = data_dir / "prompts.txt"
+
+    if not prompts_file.exists() or force:
+        logger.info("Processing captions...")
+
+        with open(captions_file, 'r') as f:
+            coco_data = json.load(f)
+
+        # Get one caption per image (first caption)
+        image_to_caption = {}
+        for ann in coco_data['annotations']:
+            image_id = ann['image_id']
+            if image_id not in image_to_caption:
+                image_to_caption[image_id] = ann['caption']
+
+        # Create image_id to filename mapping
+        id_to_filename = {}
+        for img in coco_data['images']:
+            id_to_filename[img['id']] = img['file_name']
+
+        # Write prompts in TSV format (MLCommons format)
+        with open(prompts_file, 'w', encoding='utf-8') as tsv_f, \
+             open(prompts_txt, 'w', encoding='utf-8') as txt_f:
+
+            count = 0
+            for image_id, caption in image_to_caption.items():
+                if count >= num_samples:
+                    break
+
+                # Clean caption
+                caption = caption.strip().replace('\t', ' ').replace('\n', ' ')
+
+                # TSV format: image_id<tab>caption
+                tsv_f.write(f"{image_id}\t{caption}\n")
+                # Simple text format: one caption per line
+                txt_f.write(f"{caption}\n")
+                count += 1
+
+        logger.info(f"Created prompts file with {count} samples")
+
+    # Download and resize reference images for FID computation
+    images_dir = data_dir / "coco-1024"
+
+    if download_images:
+        images_zip = output_path / dataset_info["images"]["filename"]
+        val_dir = data_dir / "val2014"
+
+        # Download if needed
+        if not val_dir.exists() and not images_dir.exists():
+            if not images_zip.exists() or force:
+                logger.info(f"Downloading COCO 2014 validation images (~{dataset_info['images']['size_gb']} GB)...")
+                logger.info("This may take a while...")
+                _download_file(
+                    dataset_info["images"]["url"],
+                    str(images_zip),
+                    expected_size_mb=dataset_info["images"]["size_gb"] * 1024
+                )
+
+            # Extract images
+            logger.info("Extracting images...")
+            with zipfile.ZipFile(images_zip, 'r') as zip_ref:
+                zip_ref.extractall(data_dir)
+
+        # Resize images to 1024x1024 for SDXL FID computation
+        if val_dir.exists() and not images_dir.exists():
+            logger.info("Resizing images to 1024x1024 for SDXL benchmark...")
+            _resize_coco_images(val_dir, images_dir, prompts_file, target_size=1024)
+
+    # Download MLCommons pre-computed files for official submission
+    fid_stats_file = data_dir / "val2014.npz"
+    latents_file = data_dir / "latents.pt"
+    mlcommons_captions = data_dir / "captions.tsv"
+
+    # Download FID statistics (required for MLCommons-compliant FID computation)
+    if "fid_statistics" in dataset_info:
+        if not fid_stats_file.exists() or force:
+            logger.info("Downloading MLCommons FID statistics (val2014.npz)...")
+            try:
+                _download_file(
+                    dataset_info["fid_statistics"]["url"],
+                    str(fid_stats_file),
+                    expected_size_mb=dataset_info["fid_statistics"]["size_mb"]
+                )
+            except Exception as e:
+                logger.warning(f"Failed to download FID statistics: {e}")
+                logger.warning("FID computation will use reference images instead (not MLCommons-compliant)")
+
+    # Download pre-generated latents (required for reproducibility in closed division)
+    if "latents" in dataset_info:
+        if not latents_file.exists() or force:
+            logger.info("Downloading MLCommons pre-generated latents...")
+            try:
+                _download_file(
+                    dataset_info["latents"]["url"],
+                    str(latents_file),
+                    expected_size_mb=dataset_info["latents"]["size_mb"]
+                )
+            except Exception as e:
+                logger.warning(f"Failed to download latents: {e}")
+                logger.warning("Will use randomly generated latents (not MLCommons closed-division compliant)")
+
+    # Download official MLCommons captions file
+    if "captions_tsv" in dataset_info:
+        if not mlcommons_captions.exists() or force:
+            logger.info("Downloading MLCommons official captions file...")
+            try:
+                _download_file(
+                    dataset_info["captions_tsv"]["url"],
+                    str(mlcommons_captions),
+                    expected_size_mb=dataset_info["captions_tsv"]["size_mb"]
+                )
+            except Exception as e:
+                logger.warning(f"Failed to download MLCommons captions: {e}")
+                logger.warning("Using locally generated captions file")
+
+    # Count samples
+    actual_samples = sum(1 for _ in open(prompts_file, 'r'))
+
+    logger.info(f"COCO 2014 dataset ready at {data_dir}")
+
+    return {
+        "data_path": str(data_dir),
+        "prompts_file": str(prompts_file),
+        "captions_file": str(captions_file),
+        "images_dir": str(images_dir) if images_dir.exists() else None,
+        "fid_statistics": str(fid_stats_file) if fid_stats_file.exists() else None,
+        "latents_file": str(latents_file) if latents_file.exists() else None,
+        "num_samples": actual_samples,
+    }
+
+
 def download_dataset(
     dataset_name: str,
     output_dir: str,
@@ -1253,7 +1552,7 @@ def download_dataset(
     Download a dataset by name.
 
     Args:
-        dataset_name: "imagenet", "squad", "openimages", or "librispeech"
+        dataset_name: "imagenet", "squad", "openimages", "librispeech", or "coco2014"
         output_dir: Directory to save dataset
         subset: Optional subset name
         force: Force re-download
@@ -1271,6 +1570,8 @@ def download_dataset(
         return download_librispeech(output_dir, subset or "mlperf", force)
     elif dataset_name == "whisper-mlperf":
         return download_whisper_mlperf(output_dir)
+    elif dataset_name == "coco2014":
+        return download_coco2014(output_dir, force)
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
@@ -1282,6 +1583,7 @@ def list_available_datasets() -> Dict[str, str]:
         "squad": DATASET_REGISTRY["squad"]["description"],
         "openimages": DATASET_REGISTRY["openimages"]["description"],
         "librispeech": DATASET_REGISTRY["librispeech"]["description"],
+        "coco2014": DATASET_REGISTRY["coco2014"]["description"],
     }
 
 

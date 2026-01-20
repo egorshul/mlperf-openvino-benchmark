@@ -113,7 +113,7 @@ models:
     output_name: "sequences"
     data_format: "NCT"  # batch, channels (mels), time
     dtype: "FP32"
-    
+
     # Audio preprocessing parameters
     audio:
       sample_rate: 16000
@@ -121,20 +121,20 @@ models:
       hop_length: 160
       n_mels: 80
       chunk_length_sec: 30
-    
+
     # Generation parameters
     generation:
       max_new_tokens: 448
       language: "en"
       task: "transcribe"
       no_timestamps: true
-    
+
     accuracy_target: 0.979329  # Word Accuracy (official MLPerf v5.1)
     accuracy_threshold: 0.99  # Must achieve 99% of reference accuracy
-    
+
     sources:
       huggingface_model_id: "openai/whisper-large-v3"
-    
+
     offline:
       min_duration_ms: 60000  # 60s for testing (600000 for official submission)
       min_query_count: 2513  # MLPerf official requirement (LibriSpeech dev-clean+dev-other)
@@ -143,6 +143,49 @@ models:
     server:
       target_latency_ns: 1000000000  # 1 second for ASR
       target_qps: 500.0  # High default for max throughput
+      min_duration_ms: 60000  # 60s for testing (600000 for official submission)
+      # Note: Server mode uses min_duration, not min_query_count
+
+  sdxl:
+    name: "Stable-Diffusion-XL"
+    task: "text_to_image"
+    dataset: "coco2014"
+    input_shape: [1, 77]  # (batch, max_token_length) for text input
+    input_name: "input_ids"
+    output_name: "sample"
+    data_format: "NC"
+    dtype: "FP32"
+
+    # Image generation parameters
+    generation:
+      image_size: 1024
+      guidance_scale: 8.0
+      num_inference_steps: 20
+      negative_prompt: ""
+
+    # MLPerf v5.1 accuracy targets for SDXL (closed division)
+    # CLIP_SCORE: >= 31.68632 and <= 31.81332
+    # FID_SCORE: >= 23.01086 and <= 23.95007
+    accuracy_target: 31.68632  # Minimum CLIP score
+    accuracy_threshold: 1.0  # Must be within range
+
+    accuracy_metrics:
+      clip_score_min: 31.68632
+      clip_score_max: 31.81332
+      fid_score_min: 23.01086
+      fid_score_max: 23.95007
+
+    sources:
+      huggingface_model_id: "stabilityai/stable-diffusion-xl-base-1.0"
+
+    offline:
+      min_duration_ms: 60000  # 60s for testing (600000 for official submission)
+      min_query_count: 5000  # MLPerf official requirement (COCO subset)
+      samples_per_query: 1
+
+    server:
+      target_latency_ns: 20000000000  # 20 seconds for image generation
+      target_qps: 10.0  # Lower QPS due to high latency
       min_duration_ms: 60000  # 60s for testing (600000 for official submission)
       # Note: Server mode uses min_duration, not min_query_count
 
@@ -206,6 +249,12 @@ datasets:
     path: "./data/librispeech"
     subset: "dev-clean"  # dev-clean, dev-other, test-clean, test-other
     transcript_file: "transcripts.txt"
+
+  coco2014:
+    path: "./data/coco2014"
+    prompts_file: "coco-1024.tsv"
+    captions_file: "annotations/captions_val2014.json"
+    images_dir: "coco-1024"  # Optional reference images for FID
 
 # Output settings
 output:

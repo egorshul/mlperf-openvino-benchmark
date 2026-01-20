@@ -8,7 +8,7 @@ import os
 import shutil
 import urllib.request
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 from urllib.error import URLError
 
 logger = logging.getLogger(__name__)
@@ -46,6 +46,13 @@ MODEL_REGISTRY: Dict[str, Dict] = {
             "filename": "whisper-large-v3",
         },
         "description": "Whisper Large v3 for speech recognition",
+    },
+    "sdxl": {
+        "huggingface": {
+            "model_id": "stabilityai/stable-diffusion-xl-base-1.0",
+            "filename": "stable-diffusion-xl-base-1.0",
+        },
+        "description": "Stable Diffusion XL 1.0 for text-to-image generation",
     },
 }
 
@@ -325,7 +332,7 @@ def _download_with_retry(
     download_func,
     max_retries: int = 3,
     initial_delay: float = 2.0,
-) -> any:
+) -> Any:
     """
     Execute download function with retry logic and exponential backoff.
 
@@ -509,5 +516,146 @@ def export_whisper_encoder_only(
     )
     
     logger.info(f"Encoder exported to {encoder_path}")
-    
+
     return str(encoder_path)
+
+
+def download_sdxl_model(
+    output_dir: str,
+    model_id: str = "stabilityai/stable-diffusion-xl-base-1.0",
+    export_to_openvino: bool = True,
+) -> Dict[str, str]:
+    """
+    Download and optionally export SDXL model to OpenVINO format.
+
+    Args:
+        output_dir: Directory to save the model
+        model_id: HuggingFace model ID
+        export_to_openvino: Whether to export to OpenVINO IR format
+
+    Returns:
+        Dictionary with paths to model components
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    model_name = model_id.split("/")[-1]
+
+    if export_to_openvino:
+        return _export_sdxl_to_openvino(output_dir, model_id)
+    else:
+        return _download_sdxl_from_hf(output_dir, model_id)
+
+
+def _download_sdxl_from_hf(output_dir: str, model_id: str) -> Dict[str, str]:
+    """
+    Download SDXL model from HuggingFace.
+
+    Args:
+        output_dir: Output directory
+        model_id: HuggingFace model ID
+
+    Returns:
+        Dictionary with model paths
+    """
+    try:
+        from diffusers import StableDiffusionXLPipeline
+    except ImportError:
+        raise ImportError(
+            "diffusers is required for SDXL download. "
+            "Install with: pip install diffusers"
+        )
+
+    logger.info(f"Downloading SDXL model: {model_id}")
+
+    output_path = Path(output_dir)
+    model_path = output_path / model_id.split("/")[-1]
+
+    # Download pipeline
+    def do_download():
+        return StableDiffusionXLPipeline.from_pretrained(
+            model_id,
+            use_safetensors=True,
+        )
+
+    pipeline = _download_with_retry(do_download, max_retries=3)
+
+    # Save locally
+    pipeline.save_pretrained(str(model_path))
+
+    logger.info(f"Model saved to {model_path}")
+
+    return {
+        "model_path": str(model_path),
+    }
+
+
+def _export_sdxl_to_openvino(output_dir: str, model_id: str) -> Dict[str, str]:
+    """
+    Export SDXL model to OpenVINO IR format.
+
+    Uses Optimum-Intel for optimal OpenVINO export with all components
+    (text encoders, UNet, VAE).
+
+    Args:
+        output_dir: Output directory
+        model_id: HuggingFace model ID
+
+    Returns:
+        Dictionary with paths to OpenVINO IR models
+    """
+    try:
+        from optimum.intel import OVStableDiffusionXLPipeline
+    except ImportError:
+        raise ImportError(
+            "optimum-intel is required for SDXL export to OpenVINO. "
+            "Install with: pip install optimum[openvino] diffusers"
+        )
+
+    # Configure HuggingFace Hub for reliable downloads
+    _configure_hf_download()
+
+    logger.info(f"Exporting SDXL model to OpenVINO: {model_id}")
+
+    output_path = Path(output_dir)
+    model_name = model_id.split("/")[-1]
+    ov_model_path = output_path / f"{model_name}-openvino"
+
+    # Check if already exported
+    if ov_model_path.exists():
+        unet_path = ov_model_path / "unet" / "openvino_model.xml"
+        vae_path = ov_model_path / "vae_decoder" / "openvino_model.xml"
+
+        if unet_path.exists() and vae_path.exists():
+            logger.info(f"OpenVINO model already exists at {ov_model_path}")
+            return {
+                "model_path": str(ov_model_path),
+                "unet_path": str(unet_path),
+                "vae_decoder_path": str(vae_path),
+            }
+
+    # Export model with retry logic
+    logger.info("Downloading and exporting SDXL model (this may take a long time)...")
+    logger.info("Large files (6+ GB) - download will resume if interrupted.")
+
+    def do_export():
+        return OVStableDiffusionXLPipeline.from_pretrained(
+            model_id,
+            export=True,
+            compile=False,
+        )
+
+    pipeline = _download_with_retry(do_export, max_retries=3)
+
+    # Save model
+    pipeline.save_pretrained(str(ov_model_path))
+
+    logger.info(f"OpenVINO model saved to {ov_model_path}")
+
+    return {
+        "model_path": str(ov_model_path),
+        "unet_path": str(ov_model_path / "unet" / "openvino_model.xml"),
+        "vae_decoder_path": str(ov_model_path / "vae_decoder" / "openvino_model.xml"),
+        "text_encoder_path": str(ov_model_path / "text_encoder" / "openvino_model.xml"),
+        "text_encoder_2_path": str(ov_model_path / "text_encoder_2" / "openvino_model.xml"),
+    }
