@@ -262,43 +262,39 @@ class MultiDeviceBackend(BaseBackend):
             raise
 
     def _build_compile_properties(self) -> Dict[str, Any]:
-        """Build compilation properties for accelerator device."""
+        """Build compilation properties for accelerator device.
+
+        For accelerators, only use properties explicitly passed via -p/--properties.
+        Default CPU hints like PERFORMANCE_HINT are not applied automatically.
+        """
         properties = {}
-
-        # Performance hint
-        if self.config.performance_hint:
-            hint_enum = getattr(
-                ov.properties.hint.PerformanceMode,
-                self.config.performance_hint,
-                None
-            )
-            if hint_enum:
-                properties[ov.properties.hint.performance_mode()] = hint_enum
-
-        # Number of streams
-        if self.config.num_streams != "AUTO":
-            try:
-                properties[ov.properties.hint.num_requests()] = int(self.config.num_streams)
-            except ValueError:
-                pass
 
         # Enable profiling if requested
         if self.config.enable_profiling:
             properties[ov.properties.enable_profiling()] = True
 
-        # Add device-specific properties from config
+        # Add ONLY user-specified device properties from -p/--properties
+        # Don't add default hints - accelerators may not support them
         if hasattr(self.config, 'device_properties') and self.config.device_properties:
             for key, value in self.config.device_properties.items():
                 # Try to convert numeric strings
                 try:
-                    if value.isdigit():
-                        properties[key] = int(value)
-                    elif value.upper() in ('TRUE', 'FALSE'):
-                        properties[key] = value.upper() == 'TRUE'
+                    if isinstance(value, str):
+                        if value.isdigit():
+                            properties[key] = int(value)
+                        elif value.upper() in ('TRUE', 'FALSE'):
+                            properties[key] = value.upper() == 'TRUE'
+                        else:
+                            properties[key] = value
                     else:
                         properties[key] = value
                 except (AttributeError, ValueError):
                     properties[key] = value
+
+        if properties:
+            logger.info(f"Accelerator compile properties: {properties}")
+        else:
+            logger.info("No custom compile properties specified for accelerator")
 
         return properties
 
