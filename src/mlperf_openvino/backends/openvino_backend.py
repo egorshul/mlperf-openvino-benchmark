@@ -142,34 +142,84 @@ class OpenVINOBackend(BaseBackend):
     def _build_compile_properties(self) -> Dict[str, Any]:
         """Build compilation properties from config."""
         properties = {}
-        
+
+        # Use device-specific property builders from config
+        if self.config.is_x_device():
+            return self._build_x_compile_properties()
+        else:
+            return self._build_cpu_compile_properties()
+
+    def _build_cpu_compile_properties(self) -> Dict[str, Any]:
+        """Build CPU-specific compilation properties."""
+        properties = {}
+
         # Performance hint
         if self.config.performance_hint:
-            hint_enum = getattr(ov.properties.hint.PerformanceMode, 
+            hint_enum = getattr(ov.properties.hint.PerformanceMode,
                               self.config.performance_hint, None)
             if hint_enum:
                 properties[ov.properties.hint.performance_mode()] = hint_enum
-        
+
         # Number of streams
         if self.config.num_streams != "AUTO":
             try:
                 properties[ov.properties.hint.num_requests()] = int(self.config.num_streams)
             except ValueError:
                 pass  # Use AUTO
-        
+
         # Number of threads
         if self.config.num_threads > 0:
             properties[ov.properties.inference_num_threads()] = self.config.num_threads
-        
+
         # CPU-specific options
-        if self.config.device.upper() == "CPU":
-            if self.config.bind_thread:
-                properties[ov.properties.hint.enable_cpu_pinning()] = True
-        
+        if self.config.bind_thread:
+            properties[ov.properties.hint.enable_cpu_pinning()] = True
+
         # Enable profiling if requested
         if self.config.enable_profiling:
             properties[ov.properties.enable_profiling()] = True
-        
+
+        return properties
+
+    def _build_x_compile_properties(self) -> Dict[str, Any]:
+        """Build X accelerator-specific compilation properties."""
+        properties = {}
+
+        # Performance hint
+        if self.config.performance_hint:
+            hint_enum = getattr(ov.properties.hint.PerformanceMode,
+                              self.config.performance_hint, None)
+            if hint_enum:
+                properties[ov.properties.hint.performance_mode()] = hint_enum
+
+        # Number of streams
+        if self.config.num_streams != "AUTO":
+            try:
+                properties[ov.properties.hint.num_requests()] = int(self.config.num_streams)
+            except ValueError:
+                pass  # Use AUTO
+
+        # Enable profiling if requested
+        if self.config.enable_profiling:
+            properties[ov.properties.enable_profiling()] = True
+
+        # Add user-specified device properties for X device
+        if hasattr(self.config, 'device_properties') and self.config.device_properties:
+            for key, value in self.config.device_properties.items():
+                # Try to convert types
+                try:
+                    if isinstance(value, str):
+                        if value.isdigit():
+                            properties[key] = int(value)
+                        elif value.upper() in ('TRUE', 'FALSE'):
+                            properties[key] = value.upper() == 'TRUE'
+                        else:
+                            properties[key] = value
+                    else:
+                        properties[key] = value
+                except (AttributeError, ValueError):
+                    properties[key] = value
+
         return properties
     
     def _extract_model_info(self) -> None:

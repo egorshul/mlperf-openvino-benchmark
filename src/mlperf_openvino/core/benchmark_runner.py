@@ -95,18 +95,10 @@ class BenchmarkRunner:
                 self.backend = None  # Will be set up in _setup_whisper
             else:
                 logger.info(f"Loading Whisper model from {self.config.model.model_path}")
-                self.backend = OpenVINOBackend(
-                    model_path=self.config.model.model_path,
-                    config=self.config.openvino,
-                )
-                self.backend.load()
+                self.backend = self._create_backend()
         else:
             logger.info(f"Loading model from {self.config.model.model_path}")
-            self.backend = OpenVINOBackend(
-                model_path=self.config.model.model_path,
-                config=self.config.openvino,
-            )
-            self.backend.load()
+            self.backend = self._create_backend()
 
         if is_sdxl:
             self._setup_sdxl()
@@ -122,6 +114,70 @@ class BenchmarkRunner:
             raise ValueError(f"Unsupported model type: {model_type}")
 
         logger.info("Setup complete")
+
+    def _create_backend(self) -> Union["OpenVINOBackend", "MultiDeviceBackend"]:
+        """Create the appropriate backend based on device configuration."""
+        from ..backends.multi_device_backend import MultiDeviceBackend
+
+        device = self.config.openvino.device
+
+        # Check if using multi-device X (all dies)
+        if self.config.openvino.is_multi_device():
+            logger.info("Creating multi-device backend for X accelerator (all dies)")
+            backend = MultiDeviceBackend(
+                model_path=self.config.model.model_path,
+                config=self.config.openvino,
+                target_devices=None,  # Auto-discover all X dies
+            )
+            backend.load()
+            return backend
+
+        # Check if using specific X die (e.g., X.0)
+        if self.config.openvino.is_x_device():
+            from ..backends.device_discovery import is_x_die
+            if is_x_die(device):
+                logger.info(f"Creating single-device backend for X die: {device}")
+                backend = OpenVINOBackend(
+                    model_path=self.config.model.model_path,
+                    config=self.config.openvino,
+                )
+                backend.load()
+                return backend
+
+        # Default: CPU or other device
+        logger.info(f"Creating backend for device: {device}")
+        backend = OpenVINOBackend(
+            model_path=self.config.model.model_path,
+            config=self.config.openvino,
+        )
+        backend.load()
+        return backend
+
+    def _create_sut_for_backend(
+        self,
+        qsl: QuerySampleLibrary,
+    ) -> Any:
+        """Create appropriate SUT based on backend type."""
+        from ..backends.multi_device_backend import MultiDeviceBackend
+        from .multi_device_sut import MultiDeviceSUT
+        from .sut import OpenVINOSUT
+
+        if isinstance(self.backend, MultiDeviceBackend):
+            logger.info(f"Creating MultiDeviceSUT for {self.backend.num_dies} X dies")
+            return MultiDeviceSUT(
+                config=self.config,
+                backend=self.backend,
+                qsl=qsl,
+                scenario=self.config.scenario,
+            )
+        else:
+            logger.info(f"Creating OpenVINOSUT for device: {self.config.openvino.device}")
+            return OpenVINOSUT(
+                config=self.config,
+                backend=self.backend,
+                qsl=qsl,
+                scenario=self.config.scenario,
+            )
 
     def _setup_resnet50(self) -> None:
         """Set up ResNet50 benchmark."""
@@ -139,13 +195,18 @@ class BenchmarkRunner:
         self.qsl.load()
 
         logger.info(f"Creating SUT for scenario: {self.config.scenario}")
-        # Use create_sut to automatically select C++ or Python SUT
-        self.sut = create_sut(
-            config=self.config,
-            model_path=self.config.model.model_path,
-            qsl=self.qsl,
-            scenario=self.config.scenario,
-        )
+
+        # Use multi-device SUT for X accelerator
+        if self.config.openvino.is_x_device():
+            self.sut = self._create_sut_for_backend(self.qsl)
+        else:
+            # Use create_sut to automatically select C++ or Python SUT for CPU
+            self.sut = create_sut(
+                config=self.config,
+                model_path=self.config.model.model_path,
+                qsl=self.qsl,
+                scenario=self.config.scenario,
+            )
 
     def _setup_bert(self) -> None:
         """Set up BERT benchmark."""
@@ -162,13 +223,18 @@ class BenchmarkRunner:
         self.qsl.load()
 
         logger.info(f"Creating BERT SUT for scenario: {self.config.scenario}")
-        # Use create_bert_sut to automatically select C++ or Python SUT
-        self.sut = create_bert_sut(
-            config=self.config,
-            model_path=self.config.model.model_path,
-            qsl=self.qsl,
-            scenario=self.config.scenario,
-        )
+
+        # Use multi-device SUT for X accelerator
+        if self.config.openvino.is_x_device():
+            self.sut = self._create_sut_for_backend(self.qsl)
+        else:
+            # Use create_bert_sut to automatically select C++ or Python SUT for CPU
+            self.sut = create_bert_sut(
+                config=self.config,
+                model_path=self.config.model.model_path,
+                qsl=self.qsl,
+                scenario=self.config.scenario,
+            )
 
     def _setup_retinanet(self) -> None:
         """Set up RetinaNet benchmark."""
@@ -185,13 +251,18 @@ class BenchmarkRunner:
         self.qsl.load()
 
         logger.info(f"Creating RetinaNet SUT for scenario: {self.config.scenario}")
-        # Use create_retinanet_sut to automatically select C++ or Python SUT
-        self.sut = create_retinanet_sut(
-            config=self.config,
-            model_path=self.config.model.model_path,
-            qsl=self.qsl,
-            scenario=self.config.scenario,
-        )
+
+        # Use multi-device SUT for X accelerator
+        if self.config.openvino.is_x_device():
+            self.sut = self._create_sut_for_backend(self.qsl)
+        else:
+            # Use create_retinanet_sut to automatically select C++ or Python SUT for CPU
+            self.sut = create_retinanet_sut(
+                config=self.config,
+                model_path=self.config.model.model_path,
+                qsl=self.qsl,
+                scenario=self.config.scenario,
+            )
 
     def _setup_whisper(self) -> None:
         """Set up Whisper benchmark."""

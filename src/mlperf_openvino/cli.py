@@ -74,6 +74,10 @@ def get_default_config(model: str) -> BenchmarkConfig:
               default='./results', help='Output directory for results')
 @click.option('--config', '-c', type=click.Path(exists=True),
               help='Path to configuration file')
+@click.option('--device', '-d', type=str, default='CPU',
+              help='Device for inference: CPU (default), X (all X dies), or X.<N> (specific die)')
+@click.option('--properties', '-p', type=str, default='',
+              help='Device-specific properties (KEY=VALUE,KEY2=VALUE2,...)')
 @click.option('--num-threads', type=int, default=0,
               help='Number of threads (0 = auto)')
 @click.option('--num-streams', type=str, default='AUTO',
@@ -93,8 +97,9 @@ def get_default_config(model: str) -> BenchmarkConfig:
 @click.option('--verbose', '-v', is_flag=True, help='Enable verbose output')
 def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         data_path: Optional[str], output_dir: str, config: Optional[str],
-        num_threads: int, num_streams: str, batch_size: int, performance_hint: str,
-        duration: int, target_qps: float, count: int, warmup: int, verbose: bool):
+        device: str, properties: str, num_threads: int, num_streams: str,
+        batch_size: int, performance_hint: str, duration: int, target_qps: float,
+        count: int, warmup: int, verbose: bool):
     """
     Run MLPerf benchmark.
 
@@ -130,6 +135,24 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
     # Override with CLI options
     benchmark_config.scenario = Scenario(scenario)
     benchmark_config.results_dir = output_dir
+
+    # Set device
+    benchmark_config.openvino.device = device.upper() if device else "CPU"
+
+    # Parse and set device properties
+    if properties:
+        from .backends.device_discovery import parse_device_properties, validate_device_properties
+        parsed_props = parse_device_properties(properties)
+        benchmark_config.openvino.device_properties = parsed_props
+
+        # Validate properties
+        is_valid, warnings = validate_device_properties(parsed_props, device)
+        for warning in warnings:
+            logger.warning(warning)
+
+    # Validate X device availability if specified
+    if benchmark_config.openvino.is_x_device():
+        _validate_x_device(benchmark_config.openvino.device)
 
     if num_threads > 0:
         benchmark_config.openvino.num_threads = num_threads
@@ -195,7 +218,18 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
     click.echo(f"Task: {benchmark_config.model.task}")
     click.echo(f"Scenario: {benchmark_config.scenario.value}")
     click.echo(f"Device: {benchmark_config.openvino.device}")
-    click.echo(f"Threads: {benchmark_config.openvino.num_threads or 'auto'}")
+
+    # Show X device details if applicable
+    if benchmark_config.openvino.is_x_device():
+        if benchmark_config.openvino.is_multi_device():
+            click.echo("  Mode: Multi-die (all available X dies)")
+        else:
+            click.echo(f"  Mode: Single die ({benchmark_config.openvino.device})")
+        if benchmark_config.openvino.device_properties:
+            click.echo(f"  Properties: {benchmark_config.openvino.device_properties}")
+    else:
+        click.echo(f"Threads: {benchmark_config.openvino.num_threads or 'auto'}")
+
     click.echo(f"Streams: {benchmark_config.openvino.num_streams}")
     click.echo(f"Batch size: {benchmark_config.openvino.batch_size}")
     click.echo(f"Performance hint: {benchmark_config.openvino.performance_hint}")
@@ -241,6 +275,47 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
     # Save results
     results_path = runner.save_results()
     click.echo(f"Results saved to: {results_path}")
+
+
+def _validate_x_device(device: str) -> None:
+    """Validate X device availability and print device info."""
+    try:
+        from openvino import Core
+        from .backends.device_discovery import (
+            discover_x_devices,
+            validate_x_device,
+            is_x_die,
+            get_card_and_die,
+        )
+
+        core = Core()
+
+        # Validate device
+        is_valid, error = validate_x_device(core, device)
+        if not is_valid:
+            click.echo(f"Error: {error}")
+            click.echo("\nAvailable devices:")
+            for d in core.available_devices:
+                click.echo(f"  - {d}")
+            sys.exit(1)
+
+        # Show discovered X devices
+        x_dies = discover_x_devices(core)
+        if x_dies:
+            click.echo(f"Discovered X dies: {x_dies}")
+            for die in x_dies:
+                card_info = get_card_and_die(die)
+                if card_info:
+                    card, die_on_card = card_info
+                    click.echo(f"  {die}: Card {card}, Die {die_on_card}")
+        else:
+            click.echo("Warning: No X dies discovered")
+
+    except ImportError as e:
+        logger.warning(f"Could not validate X device: {e}")
+    except Exception as e:
+        logger.error(f"Error validating X device: {e}")
+        sys.exit(1)
 
 
 def _print_dataset_help(model: str) -> None:

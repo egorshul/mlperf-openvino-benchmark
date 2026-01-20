@@ -59,22 +59,62 @@ class OpenVINOConfig:
     bind_thread: bool = True
     threads_per_stream: int = 0
     enable_hyper_threading: bool = True
-    
+    # Device-specific properties for X accelerator (passed via -p/--properties CLI)
+    device_properties: Dict[str, str] = field(default_factory=dict)
+
+    def is_x_device(self) -> bool:
+        """Check if the configured device is an X accelerator."""
+        return self.device.upper().startswith("X")
+
+    def is_multi_device(self) -> bool:
+        """Check if using multiple X dies (device == 'X' without specific die number)."""
+        return self.device.upper() == "X"
+
     def to_properties(self) -> Dict[str, Any]:
         """Convert to OpenVINO properties dictionary."""
+        if self.is_x_device():
+            return self.to_x_properties()
+        else:
+            return self.to_cpu_properties()
+
+    def to_cpu_properties(self) -> Dict[str, Any]:
+        """Get CPU-specific compilation properties."""
         properties = {
             "NUM_STREAMS": self.num_streams if self.num_streams != "AUTO" else "AUTO",
             "INFERENCE_NUM_THREADS": self.num_threads if self.num_threads > 0 else None,
             "CACHE_DIR": self.cache_dir,
             "PERFORMANCE_HINT": self.performance_hint,
         }
-        
+
         # CPU-specific properties
-        if self.device.upper() == "CPU":
-            properties["AFFINITY"] = "CORE" if self.bind_thread else "NONE"
-            if self.threads_per_stream > 0:
-                properties["INFERENCE_THREADS_PER_STREAM"] = self.threads_per_stream
-        
+        properties["AFFINITY"] = "CORE" if self.bind_thread else "NONE"
+        if self.threads_per_stream > 0:
+            properties["INFERENCE_THREADS_PER_STREAM"] = self.threads_per_stream
+
+        # Remove None values
+        return {k: v for k, v in properties.items() if v is not None}
+
+    def to_x_properties(self) -> Dict[str, Any]:
+        """Get X accelerator-specific compilation properties."""
+        properties = {
+            "NUM_STREAMS": self.num_streams if self.num_streams != "AUTO" else "AUTO",
+            "CACHE_DIR": self.cache_dir,
+            "PERFORMANCE_HINT": self.performance_hint,
+        }
+
+        # Add user-specified device properties
+        for key, value in self.device_properties.items():
+            # Try to convert types
+            try:
+                if value.isdigit():
+                    properties[key] = int(value)
+                elif value.upper() in ('TRUE', 'FALSE'):
+                    properties[key] = value.upper() == 'TRUE'
+                else:
+                    properties[key] = value
+            except (AttributeError, ValueError):
+                properties[key] = value
+
         # Remove None values
         return {k: v for k, v in properties.items() if v is not None}
 
