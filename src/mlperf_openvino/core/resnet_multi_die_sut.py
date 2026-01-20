@@ -241,36 +241,62 @@ class ResNetMultiDieCppSUTWrapper:
         self._query_count += 1
 
     def _issue_query_server(self, query_samples: List) -> None:
-        """Process queries in Server mode."""
+        """Process queries in Server mode with micro-batching.
+
+        Server mode optimization: collect incoming queries into micro-batches
+        for better throughput while maintaining low latency.
+        """
         self._setup_response_callback(is_offline=False)
         batch_size = self.batch_size
+        num_samples = len(query_samples)
 
-        for qs in query_samples:
-            input_data = self._get_input_data(qs.index)
+        # Process in batches (micro-batching for Server mode)
+        i = 0
+        while i < num_samples:
+            end_idx = min(i + batch_size, num_samples)
+            actual_batch_size = end_idx - i
 
-            # Handle batch dimension
-            if batch_size == 1:
-                if input_data.ndim == 3:
-                    input_data = input_data[np.newaxis, ...]
-            else:
+            # Collect batch
+            query_ids = []
+            sample_indices = []
+            batch_data = []
+
+            for j in range(i, end_idx):
+                qs = query_samples[j]
+                query_ids.append(qs.id)
+                sample_indices.append(qs.index)
+
+                input_data = self._get_input_data(qs.index)
+
+                # Remove batch dim if present
                 if input_data.ndim == 4 and input_data.shape[0] == 1:
                     input_data = input_data[0]
-                if input_data.ndim == 3:
-                    input_data = np.stack([input_data] * batch_size, axis=0)
+
+                batch_data.append(input_data)
+
+            # Stack into batch
+            if actual_batch_size == batch_size:
+                batched_input = np.stack(batch_data, axis=0)
+            else:
+                # Pad incomplete batch
+                padded = batch_data + [batch_data[-1]] * (batch_size - actual_batch_size)
+                batched_input = np.stack(padded, axis=0)
 
             # Ensure float32 and contiguous
-            if input_data.dtype != np.float32:
-                input_data = input_data.astype(np.float32)
-            if not input_data.flags['C_CONTIGUOUS']:
-                input_data = np.ascontiguousarray(input_data)
+            if batched_input.dtype != np.float32:
+                batched_input = batched_input.astype(np.float32)
+            if not batched_input.flags['C_CONTIGUOUS']:
+                batched_input = np.ascontiguousarray(batched_input)
 
-            # Submit single sample (actual_batch_size=1)
+            # Submit batch to C++ SUT
             self._cpp_sut.start_async_batch(
-                input_data,
-                [qs.id],
-                [qs.index],
-                1
+                batched_input,
+                query_ids,
+                sample_indices,
+                actual_batch_size
             )
+
+            i = end_idx
 
         self._query_count += 1
 
