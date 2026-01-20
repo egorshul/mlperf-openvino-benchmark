@@ -84,8 +84,8 @@ def get_default_config(model: str) -> BenchmarkConfig:
               help='Number of inference streams')
 @click.option('--batch-size', '-b', type=int, default=1,
               help='Inference batch size')
-@click.option('--nhwc', is_flag=True,
-              help='Use NHWC input layout (adds transpose to model, optimizes preprocessing)')
+@click.option('--nchw', is_flag=True,
+              help='Use NCHW input layout (default is NHWC for ResNet50)')
 @click.option('--performance-hint', type=click.Choice(['THROUGHPUT', 'LATENCY', 'AUTO']),
               default='AUTO', help='Performance hint (AUTO selects based on scenario)')
 @click.option('--duration', type=int, default=60000,
@@ -100,7 +100,7 @@ def get_default_config(model: str) -> BenchmarkConfig:
 def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         data_path: Optional[str], output_dir: str, config: Optional[str],
         device: str, properties: str, num_threads: int, num_streams: str,
-        batch_size: int, nhwc: bool, performance_hint: str, duration: int, target_qps: float,
+        batch_size: int, nchw: bool, performance_hint: str, duration: int, target_qps: float,
         count: int, warmup: int, verbose: bool):
     """
     Run MLPerf benchmark.
@@ -181,9 +181,12 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
     benchmark_config.openvino.num_streams = num_streams
     benchmark_config.openvino.batch_size = batch_size
 
-    # Set NHWC input layout if requested
-    if nhwc:
-        if hasattr(benchmark_config, 'preprocessing') and benchmark_config.preprocessing:
+    # Set input layout (NHWC is default for ResNet50, --nchw overrides)
+    if hasattr(benchmark_config, 'preprocessing') and benchmark_config.preprocessing:
+        if nchw:
+            benchmark_config.preprocessing.output_layout = 'NCHW'
+        else:
+            # Default to NHWC for ResNet50 (optimized preprocessing)
             benchmark_config.preprocessing.output_layout = 'NHWC'
 
     # Only set performance_hint for CPU devices
@@ -232,6 +235,9 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         click.echo(f"Scenario: {benchmark_config.scenario.value}")
     click.echo(f"Device: {benchmark_config.openvino.device}")
     click.echo(f"Batch size: {benchmark_config.openvino.batch_size}")
+    if hasattr(benchmark_config, 'preprocessing') and benchmark_config.preprocessing:
+        input_layout = getattr(benchmark_config.preprocessing, 'output_layout', 'NCHW')
+        click.echo(f"Input layout: {input_layout}")
     click.echo("")
 
     # Create runner
