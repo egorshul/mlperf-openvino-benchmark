@@ -9,6 +9,7 @@
  * - BertCppSUT: async inference for BERT (3x int64 inputs, 2x float32 outputs)
  * - RetinaNetCppSUT: async inference for RetinaNet (1x float32 input, 3x outputs)
  * - ResNetMultiDieCppSUT: multi-die accelerator inference with batching
+ * - RetinaNetMultiDieCppSUT: multi-die accelerator inference for RetinaNet
  */
 
 #include <pybind11/pybind11.h>
@@ -22,6 +23,7 @@
 #include "bert_sut_cpp.hpp"
 #include "retinanet_sut_cpp.hpp"
 #include "resnet_multi_die_sut_cpp.hpp"
+#include "retinanet_multi_die_sut_cpp.hpp"
 
 namespace py = pybind11;
 
@@ -477,6 +479,115 @@ PYBIND11_MODULE(_cpp_sut, m) {
              },
              py::arg("callback"),
              "Set response callback (called for each sample in batch)");
+
+    // RetinaNetMultiDieCppSUT - multi-die accelerator for RetinaNet
+    py::class_<mlperf_ov::RetinaNetMultiDieCppSUT>(m, "RetinaNetMultiDieCppSUT")
+        .def(py::init<const std::string&, const std::string&,
+                      const std::unordered_map<std::string, std::string>&, bool>(),
+             py::arg("model_path"),
+             py::arg("device_prefix"),
+             py::arg("compile_properties") = std::unordered_map<std::string, std::string>{},
+             py::arg("use_nhwc_input") = false,
+             "Create multi-die accelerator SUT for RetinaNet")
+
+        .def("load", &mlperf_ov::RetinaNetMultiDieCppSUT::load,
+             py::call_guard<py::gil_scoped_release>(),
+             "Load model and compile for all available dies")
+
+        .def("is_loaded", &mlperf_ov::RetinaNetMultiDieCppSUT::is_loaded,
+             "Check if model is loaded")
+
+        .def("get_num_dies", &mlperf_ov::RetinaNetMultiDieCppSUT::get_num_dies,
+             "Get number of active dies")
+
+        .def("get_active_devices", &mlperf_ov::RetinaNetMultiDieCppSUT::get_active_devices,
+             "Get list of active device names")
+
+        .def("get_total_requests", &mlperf_ov::RetinaNetMultiDieCppSUT::get_total_requests,
+             "Get total number of inference requests")
+
+        .def("get_input_name", &mlperf_ov::RetinaNetMultiDieCppSUT::get_input_name,
+             "Get input tensor name")
+
+        .def("get_input_shape", &mlperf_ov::RetinaNetMultiDieCppSUT::get_input_shape,
+             "Get input tensor shape")
+
+        .def("start_async",
+             [](mlperf_ov::RetinaNetMultiDieCppSUT& self,
+                py::array_t<float> input,
+                uint64_t query_id,
+                int sample_idx) {
+                 py::gil_scoped_release release;
+                 auto buf = input.request();
+                 self.start_async(
+                     static_cast<const float*>(buf.ptr),
+                     buf.size,
+                     query_id,
+                     sample_idx);
+             },
+             py::arg("input"),
+             py::arg("query_id"),
+             py::arg("sample_idx"),
+             "Start async inference")
+
+        .def("wait_all", &mlperf_ov::RetinaNetMultiDieCppSUT::wait_all,
+             py::call_guard<py::gil_scoped_release>(),
+             "Wait for all pending inferences")
+
+        .def("get_completed_count", &mlperf_ov::RetinaNetMultiDieCppSUT::get_completed_count,
+             "Get completed inference count")
+
+        .def("get_issued_count", &mlperf_ov::RetinaNetMultiDieCppSUT::get_issued_count,
+             "Get issued inference count")
+
+        .def("reset_counters", &mlperf_ov::RetinaNetMultiDieCppSUT::reset_counters,
+             "Reset counters")
+
+        .def("set_store_predictions", &mlperf_ov::RetinaNetMultiDieCppSUT::set_store_predictions,
+             py::arg("store"),
+             "Enable/disable storing predictions")
+
+        .def("get_predictions",
+             [](mlperf_ov::RetinaNetMultiDieCppSUT& self) {
+                 auto preds = self.get_predictions();
+                 py::dict result;
+                 for (const auto& [idx, pred] : preds) {
+                     py::dict pred_dict;
+                     pred_dict["boxes"] = py::array_t<float>(pred.boxes.size(), pred.boxes.data());
+                     pred_dict["scores"] = py::array_t<float>(pred.scores.size(), pred.scores.data());
+                     pred_dict["labels"] = py::array_t<float>(pred.labels.size(), pred.labels.data());
+                     pred_dict["num_detections"] = pred.num_detections;
+                     result[py::int_(idx)] = pred_dict;
+                 }
+                 return result;
+             },
+             "Get stored predictions")
+
+        .def("clear_predictions", &mlperf_ov::RetinaNetMultiDieCppSUT::clear_predictions,
+             "Clear stored predictions")
+
+        .def("set_response_callback",
+             [](mlperf_ov::RetinaNetMultiDieCppSUT& self, py::function callback) {
+                 self.set_response_callback(
+                     [callback](uint64_t query_id,
+                                const float* boxes, size_t boxes_size,
+                                const float* scores, size_t scores_size,
+                                const float* labels, size_t labels_size) {
+                         py::gil_scoped_acquire acquire;
+
+                         py::array_t<float> boxes_arr(boxes_size);
+                         py::array_t<float> scores_arr(scores_size);
+                         py::array_t<float> labels_arr(labels_size);
+
+                         std::memcpy(boxes_arr.mutable_data(), boxes, boxes_size * sizeof(float));
+                         std::memcpy(scores_arr.mutable_data(), scores, scores_size * sizeof(float));
+                         std::memcpy(labels_arr.mutable_data(), labels, labels_size * sizeof(float));
+
+                         callback(query_id, boxes_arr, scores_arr, labels_arr);
+                     });
+             },
+             py::arg("callback"),
+             "Set response callback");
 
     // Version info
     m.attr("__version__") = "1.0.0";

@@ -200,37 +200,15 @@ class BenchmarkRunner:
         from ..backends.multi_device_backend import MultiDeviceBackend
         from .sut import OpenVINOSUT
 
+        model_type = self.config.model.model_type
+
         if isinstance(self.backend, MultiDeviceBackend):
-            # Try C++ multi-die SUT first (much faster)
-            try:
-                from .resnet_multi_die_sut import (
-                    ResNetMultiDieCppSUTWrapper,
-                    is_resnet_multi_die_cpp_available
-                )
-
-                if is_resnet_multi_die_cpp_available():
-                    print(f"SUT: C++ ResNetMultiDieSUT ({self.backend.num_dies} dies)")
-                    sut = ResNetMultiDieCppSUTWrapper(
-                        config=self.config,
-                        qsl=qsl,
-                        scenario=self.config.scenario,
-                    )
-                    sut.load()
-                    return sut
-            except ImportError as e:
-                logger.warning(f"C++ ResNet multi-die SUT not available: {e}")
-            except Exception as e:
-                logger.warning(f"Failed to create C++ ResNet multi-die SUT: {e}, falling back to Python")
-
-            # Fall back to Python multi-device SUT
-            from .resnet_multi_device_sut import ResNetMultiDeviceSUT
-            print(f"SUT: Python ResNetMultiDeviceSUT ({self.backend.num_dies} dies)")
-            return ResNetMultiDeviceSUT(
-                config=self.config,
-                backend=self.backend,
-                qsl=qsl,
-                scenario=self.config.scenario,
-            )
+            # Check model type and use appropriate multi-die SUT
+            if model_type == ModelType.RETINANET:
+                return self._create_retinanet_multi_die_sut(qsl)
+            else:
+                # ResNet50 and other models
+                return self._create_resnet_multi_die_sut(qsl)
         else:
             print(f"SUT: OpenVINOSUT (device: {self.config.openvino.device})")
             return OpenVINOSUT(
@@ -239,6 +217,71 @@ class BenchmarkRunner:
                 qsl=qsl,
                 scenario=self.config.scenario,
             )
+
+    def _create_resnet_multi_die_sut(self, qsl: QuerySampleLibrary) -> Any:
+        """Create ResNet multi-die SUT."""
+        # Try C++ multi-die SUT first (much faster)
+        try:
+            from .resnet_multi_die_sut import (
+                ResNetMultiDieCppSUTWrapper,
+                is_resnet_multi_die_cpp_available
+            )
+
+            if is_resnet_multi_die_cpp_available():
+                print(f"SUT: C++ ResNetMultiDieSUT ({self.backend.num_dies} dies)")
+                sut = ResNetMultiDieCppSUTWrapper(
+                    config=self.config,
+                    qsl=qsl,
+                    scenario=self.config.scenario,
+                )
+                sut.load()
+                return sut
+        except ImportError as e:
+            logger.warning(f"C++ ResNet multi-die SUT not available: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to create C++ ResNet multi-die SUT: {e}, falling back to Python")
+
+        # Fall back to Python multi-device SUT
+        from .resnet_multi_device_sut import ResNetMultiDeviceSUT
+        print(f"SUT: Python ResNetMultiDeviceSUT ({self.backend.num_dies} dies)")
+        return ResNetMultiDeviceSUT(
+            config=self.config,
+            backend=self.backend,
+            qsl=qsl,
+            scenario=self.config.scenario,
+        )
+
+    def _create_retinanet_multi_die_sut(self, qsl: QuerySampleLibrary) -> Any:
+        """Create RetinaNet multi-die SUT."""
+        # Try C++ multi-die SUT first (much faster)
+        try:
+            from .retinanet_multi_die_sut import (
+                RetinaNetMultiDieCppSUTWrapper,
+                is_retinanet_multi_die_cpp_available
+            )
+
+            if is_retinanet_multi_die_cpp_available():
+                print(f"SUT: C++ RetinaNetMultiDieSUT ({self.backend.num_dies} dies)")
+                sut = RetinaNetMultiDieCppSUTWrapper(
+                    config=self.config,
+                    qsl=qsl,
+                    scenario=self.config.scenario,
+                )
+                sut.load()
+                return sut
+        except ImportError as e:
+            logger.warning(f"C++ RetinaNet multi-die SUT not available: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to create C++ RetinaNet multi-die SUT: {e}, falling back to Python")
+
+        # Fall back to Python SUT
+        from .retinanet_sut import RetinaNetSUT
+        print(f"SUT: Python RetinaNetSUT")
+        return RetinaNetSUT(
+            config=self.config,
+            qsl=qsl,
+            scenario=self.config.scenario,
+        )
 
     def _setup_resnet50(self) -> None:
         """Set up ResNet50 benchmark."""
@@ -302,12 +345,18 @@ class BenchmarkRunner:
         from ..datasets.openimages import OpenImagesQSL
         from .cpp_sut_wrapper import create_retinanet_sut
 
+        # Get output layout from preprocessing config
+        output_layout = "NCHW"
+        if hasattr(self.config.model, 'preprocessing') and self.config.model.preprocessing:
+            output_layout = getattr(self.config.model.preprocessing, 'output_layout', 'NCHW')
+
         logger.info(f"Loading OpenImages dataset from {self.config.dataset.path}")
         self.qsl = OpenImagesQSL(
             data_path=self.config.dataset.path,
             annotations_file=self.config.dataset.val_map,
             count=self.config.dataset.num_samples if self.config.dataset.num_samples > 0 else None,
             performance_sample_count=24576,  # MLPerf default
+            output_layout=output_layout,
         )
         self.qsl.load()
 

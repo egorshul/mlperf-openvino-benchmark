@@ -230,6 +230,7 @@ class OpenImagesDataset(BaseDataset):
         input_size: int = INPUT_SIZE,
         cache_preprocessed: bool = True,
         use_disk_cache: bool = True,  # Use preprocessed numpy files
+        output_layout: str = "NCHW",  # "NCHW" or "NHWC"
     ):
         """
         Initialize OpenImages dataset.
@@ -241,6 +242,7 @@ class OpenImagesDataset(BaseDataset):
             input_size: Input image size
             cache_preprocessed: Whether to cache preprocessed images in memory
             use_disk_cache: Whether to use/create preprocessed numpy cache on disk
+            output_layout: Output tensor layout ("NCHW" or "NHWC")
         """
         if not PIL_AVAILABLE:
             raise ImportError("Pillow is required. Install with: pip install Pillow")
@@ -252,6 +254,7 @@ class OpenImagesDataset(BaseDataset):
         self.input_size = input_size
         self.cache_preprocessed = cache_preprocessed
         self.use_disk_cache = use_disk_cache
+        self.output_layout = output_layout
 
         self._samples: List[Dict[str, Any]] = []
         self._annotations: Dict[str, List[Dict]] = defaultdict(list)
@@ -561,7 +564,7 @@ class OpenImagesDataset(BaseDataset):
         MLPerf reference preprocessing:
         1. Resize to [800, 800] (simple resize, no aspect ratio preservation)
         2. Normalize: divide by 255.0 ONLY (NO ImageNet mean/std!)
-        3. Convert to NCHW format
+        3. Convert to NCHW or NHWC format based on output_layout
 
         Args:
             image_path: Path to image file
@@ -579,8 +582,13 @@ class OpenImagesDataset(BaseDataset):
         # MLPerf RetinaNet does NOT use ImageNet mean/std normalization
         img_array = np.array(img, dtype=np.float32) / 255.0
 
-        # Convert to NCHW format
-        img_array = np.transpose(img_array, (2, 0, 1))
+        # Convert to target layout
+        output_layout = getattr(self, 'output_layout', 'NCHW')
+        if output_layout == "NCHW":
+            # HWC -> CHW
+            img_array = np.transpose(img_array, (2, 0, 1))
+        # else: keep HWC for NHWC
+
         img_array = np.expand_dims(img_array, axis=0)
 
         preprocess_info = {
@@ -865,6 +873,7 @@ class OpenImagesQSL(QuerySampleLibrary):
         count: Optional[int] = None,
         performance_sample_count: int = 24576,  # MLPerf default
         input_size: int = INPUT_SIZE,
+        output_layout: str = "NCHW",
     ):
         """
         Initialize OpenImages QSL.
@@ -875,6 +884,7 @@ class OpenImagesQSL(QuerySampleLibrary):
             count: Number of samples to use
             performance_sample_count: Number of samples for performance run
             input_size: Input image size
+            output_layout: Output tensor layout ("NCHW" or "NHWC")
         """
         super().__init__()
 
@@ -884,6 +894,7 @@ class OpenImagesQSL(QuerySampleLibrary):
             count=count,
             input_size=input_size,
             cache_preprocessed=True,
+            output_layout=output_layout,
         )
 
         self._performance_sample_count = performance_sample_count
