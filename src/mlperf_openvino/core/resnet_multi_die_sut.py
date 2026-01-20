@@ -72,8 +72,8 @@ class ResNetMultiDieCppSUTWrapper:
 
         # Check if using NHWC input layout
         use_nhwc = False
-        if hasattr(config, 'preprocessing') and config.preprocessing:
-            use_nhwc = getattr(config.preprocessing, 'output_layout', 'NCHW') == 'NHWC'
+        if hasattr(config.model, 'preprocessing') and config.model.preprocessing:
+            use_nhwc = getattr(config.model.preprocessing, 'output_layout', 'NCHW') == 'NHWC'
 
         # Create C++ SUT
         device_prefix = config.openvino.get_device_prefix()

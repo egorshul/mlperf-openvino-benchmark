@@ -182,12 +182,12 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
     benchmark_config.openvino.batch_size = batch_size
 
     # Set input layout (NHWC is default for ResNet50, --nchw overrides)
-    if hasattr(benchmark_config, 'preprocessing') and benchmark_config.preprocessing:
+    if hasattr(benchmark_config.model, 'preprocessing') and benchmark_config.model.preprocessing:
         if nchw:
-            benchmark_config.preprocessing.output_layout = 'NCHW'
+            benchmark_config.model.preprocessing.output_layout = 'NCHW'
         else:
             # Default to NHWC for ResNet50 (optimized preprocessing)
-            benchmark_config.preprocessing.output_layout = 'NHWC'
+            benchmark_config.model.preprocessing.output_layout = 'NHWC'
 
     # Only set performance_hint for CPU devices
     if not is_accelerator and actual_hint:
@@ -235,8 +235,8 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         click.echo(f"Scenario: {benchmark_config.scenario.value}")
     click.echo(f"Device: {benchmark_config.openvino.device}")
     click.echo(f"Batch size: {benchmark_config.openvino.batch_size}")
-    if hasattr(benchmark_config, 'preprocessing') and benchmark_config.preprocessing:
-        input_layout = getattr(benchmark_config.preprocessing, 'output_layout', 'NCHW')
+    if hasattr(benchmark_config.model, 'preprocessing') and benchmark_config.model.preprocessing:
+        input_layout = getattr(benchmark_config.model.preprocessing, 'output_layout', 'NCHW')
         click.echo(f"Input layout: {input_layout}")
     click.echo("")
 
