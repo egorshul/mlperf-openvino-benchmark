@@ -502,11 +502,11 @@ def create_sut(
         )
 
     if CPP_AVAILABLE and not force_python:
-        logger.info(f"Using ResNet C++ SUT for {scenario.value} mode")
+        print(f"SUT: C++ ResNetCppSUT (device: {config.openvino.device})")
         return ResNetCppSUTWrapper(config, model_path, qsl, scenario)
 
     # Fall back to Python SUT
-    logger.info(f"Using Python SUT for {scenario.value} mode")
+    print(f"SUT: Python OpenVINOSUT (device: {config.openvino.device})")
     from .sut import OpenVINOSUT
     from ..backends.openvino_backend import OpenVINOBackend
 
@@ -546,11 +546,11 @@ def create_bert_sut(
         )
 
     if CPP_AVAILABLE and BertCppSUT is not None and not force_python:
-        logger.info(f"Using BERT C++ SUT for {scenario.value} mode")
+        print(f"SUT: C++ BertCppSUT (device: {config.openvino.device})")
         return BertCppSUTWrapper(config, model_path, qsl, scenario)
 
     # Fall back to Python BertSUT
-    logger.info(f"Using Python BERT SUT for {scenario.value} mode")
+    print(f"SUT: Python BertSUT (device: {config.openvino.device})")
     from .bert_sut import BertSUT
     from ..backends.openvino_backend import OpenVINOBackend
 
@@ -807,11 +807,11 @@ def create_retinanet_sut(
         )
 
     if CPP_AVAILABLE and RetinaNetCppSUT is not None and not force_python:
-        logger.info(f"Using RetinaNet C++ SUT for {scenario.value} mode")
+        print(f"SUT: C++ RetinaNetCppSUT (device: {config.openvino.device})")
         return RetinaNetCppSUTWrapper(config, model_path, qsl, scenario)
 
     # Fall back to Python RetinaNetSUT
-    logger.info(f"Using Python RetinaNet SUT for {scenario.value} mode")
+    print(f"SUT: Python RetinaNetSUT (device: {config.openvino.device})")
     from .retinanet_sut import RetinaNetSUT
     from ..backends.openvino_backend import OpenVINOBackend
 

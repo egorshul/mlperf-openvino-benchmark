@@ -80,7 +80,7 @@ def discover_accelerator_devices(core: "Core", device_prefix: str) -> List[str]:
     if simulators_found:
         logger.debug(f"Found {device_prefix} simulators (excluded): {simulators_found}")
 
-    logger.info(f"Discovered {len(dies)} {device_prefix} dies: {dies}")
+    logger.debug(f"Discovered {len(dies)} {device_prefix} dies: {dies}")
     return dies
 
 

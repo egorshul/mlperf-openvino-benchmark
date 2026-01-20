@@ -242,7 +242,11 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
 
     click.echo(f"Streams: {benchmark_config.openvino.num_streams}")
     click.echo(f"Batch size: {benchmark_config.openvino.batch_size}")
-    click.echo(f"Performance hint: {benchmark_config.openvino.performance_hint}")
+
+    # Only show performance hint for CPU (not relevant for accelerators)
+    if not benchmark_config.openvino.is_accelerator_device():
+        click.echo(f"Performance hint: {benchmark_config.openvino.performance_hint}")
+
     click.echo("")
 
     # Create runner

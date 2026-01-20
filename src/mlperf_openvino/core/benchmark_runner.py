@@ -209,7 +209,7 @@ class BenchmarkRunner:
                 )
 
                 if is_cpp_multi_die_sut_available():
-                    logger.info(f"Creating C++ MultiDieSUT for {self.backend.num_dies} accelerator dies")
+                    print(f"SUT: C++ MultiDieSUT ({self.backend.num_dies} dies)")
                     sut = MultiDieCppSUTWrapper(
                         config=self.config,
                         qsl=qsl,
@@ -224,7 +224,7 @@ class BenchmarkRunner:
 
             # Fall back to Python multi-device SUT
             from .multi_device_sut import MultiDeviceSUT
-            logger.info(f"Creating Python MultiDeviceSUT for {self.backend.num_dies} accelerator dies")
+            print(f"SUT: Python MultiDeviceSUT ({self.backend.num_dies} dies)")
             return MultiDeviceSUT(
                 config=self.config,
                 backend=self.backend,
@@ -232,7 +232,7 @@ class BenchmarkRunner:
                 scenario=self.config.scenario,
             )
         else:
-            logger.info(f"Creating OpenVINOSUT for device: {self.config.openvino.device}")
+            print(f"SUT: OpenVINOSUT (device: {self.config.openvino.device})")
             return OpenVINOSUT(
                 config=self.config,
                 backend=self.backend,
@@ -839,37 +839,37 @@ class BenchmarkRunner:
         return info
 
     def print_summary(self) -> None:
-        """Print benchmark summary to console."""
+        """Print accuracy summary to console.
+
+        Note: Performance results are shown in MLPerf LoadGen's "MLPerf Results Summary"
+        which is the authoritative source for performance metrics.
+        """
+        # Only print accuracy summary if accuracy results are available
+        if "accuracy" not in self._results:
+            return
+
         print("\n" + "="*60)
-        print("BENCHMARK SUMMARY")
+        print("ACCURACY SUMMARY")
         print("="*60)
-        print(f"Model:     {self._results.get('model', 'N/A')}")
-        print(f"Type:      {self._results.get('model_type', 'N/A')}")
-        print(f"Scenario:  {self._results.get('scenario', 'N/A')}")
-        print(f"Device:    {self._results.get('device', 'N/A')}")
-        print("-"*60)
-        print(f"Duration:  {self._results.get('duration_seconds', 0):.2f} seconds")
-        print(f"Samples:   {self._results.get('samples_processed', 0)}")
-        print(f"Throughput: {self._results.get('throughput_samples_per_sec', 0):.2f} samples/sec")
+        print(f"Model: {self._results.get('model', 'N/A')}")
 
-        if "accuracy" in self._results:
-            print("-"*60)
-            acc = self._results["accuracy"]
-            model_type = self._results.get('model_type', '')
+        acc = self._results["accuracy"]
+        model_type = self._results.get('model_type', '')
 
-            if model_type == 'resnet50':
-                print(f"Top-1 Accuracy: {acc.get('top1_accuracy', 0):.4f} "
-                      f"({acc.get('correct', 0)}/{acc.get('total', 0)})")
-            elif model_type == 'bert':
-                print(f"F1 Score: {acc.get('f1', 0):.2f}")
-                print(f"Exact Match: {acc.get('exact_match', 0):.2f}")
-            elif model_type == 'retinanet':
-                print(f"mAP@0.5: {acc.get('mAP', 0):.4f}")
-            elif model_type == 'whisper':
-                print(f"Word Accuracy: {acc.get('word_accuracy', 0):.4f}")
-                print(f"WER: {acc.get('wer', 0):.4f}")
-            elif model_type == 'sdxl':
-                print(f"CLIP Score: {acc.get('clip_score', 0):.4f}")
-                print(f"FID Score: {acc.get('fid_score', 0):.4f}")
+        if model_type == 'resnet50':
+            print(f"Top-1 Accuracy: {acc.get('top1_accuracy', 0):.4f} "
+                  f"({acc.get('correct', 0)}/{acc.get('total', 0)})")
+        elif model_type == 'bert':
+            print(f"F1 Score: {acc.get('f1', 0):.2f}")
+            print(f"Exact Match: {acc.get('exact_match', 0):.2f}")
+        elif model_type == 'retinanet':
+            print(f"mAP@0.5: {acc.get('mAP', 0):.4f}")
+        elif model_type == 'whisper':
+            print(f"Word Accuracy: {acc.get('word_accuracy', 0):.4f}")
+            print(f"WER: {acc.get('wer', 0):.4f}")
+        elif model_type == 'sdxl':
+            print(f"CLIP Score: {acc.get('clip_score', 0):.4f}")
+            print(f"FID Score: {acc.get('fid_score', 0):.4f}")
 
-        print("="*60 + "\n")
+        print("="*60)
+        print("(Performance results: see 'MLPerf Results Summary' above)\n")
