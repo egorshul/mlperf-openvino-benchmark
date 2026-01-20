@@ -91,7 +91,7 @@ class ResNetMultiDieCppSUTWrapper:
         self._progress_stop = False
         self._progress_thread = None
 
-        logger.info(f"ResNetMultiDieCppSUTWrapper: device_prefix={device_prefix}, batch_size={self.batch_size}")
+        logger.debug(f"ResNetMultiDieCppSUTWrapper: device_prefix={device_prefix}, batch_size={self.batch_size}")
 
     def load(self) -> None:
         """Load and compile the model."""
@@ -100,7 +100,7 @@ class ResNetMultiDieCppSUTWrapper:
         # Get actual input name from C++ SUT
         self.input_name = self._cpp_sut.get_input_name()
 
-        logger.info(
+        logger.debug(
             f"C++ SUT loaded: {self._cpp_sut.get_num_dies()} dies, "
             f"{self._cpp_sut.get_total_requests()} total requests"
         )
@@ -139,44 +139,14 @@ class ResNetMultiDieCppSUTWrapper:
         self._cpp_sut.set_response_callback(callback)
 
     def _start_progress_thread(self):
-        """Start progress monitoring."""
+        """Start progress monitoring (silent)."""
         self._progress_stop = False
         self._start_time = time.time()
-
-        def progress_fn():
-            while not self._progress_stop:
-                time.sleep(0.3)
-                elapsed = time.time() - self._start_time
-                completed = self._cpp_sut.get_completed_count()
-                issued = self._cpp_sut.get_issued_count()
-                if elapsed > 0 and completed > 0:
-                    throughput = completed / elapsed
-                    pending = issued - completed
-                    sys.stderr.write(
-                        f"\r[C++ {self.num_dies} dies] "
-                        f"done={completed}, pending={pending}, "
-                        f"{throughput:.1f} samples/sec   "
-                    )
-                    sys.stderr.flush()
-
-        self._progress_thread = threading.Thread(target=progress_fn, daemon=True)
-        self._progress_thread.start()
+        self._progress_thread = None
 
     def _stop_progress_thread(self):
         """Stop progress thread."""
         self._progress_stop = True
-        if self._progress_thread:
-            self._progress_thread.join(timeout=1.0)
-
-        elapsed = time.time() - self._start_time
-        completed = self._cpp_sut.get_completed_count()
-        if elapsed > 0 and completed > 0:
-            throughput = completed / elapsed
-            sys.stderr.write(
-                f"\nC++ SUT completed: {completed} samples in {elapsed:.2f}s "
-                f"({throughput:.1f} samples/sec)\n"
-            )
-            sys.stderr.flush()
 
     def _get_input_data(self, sample_idx: int) -> np.ndarray:
         """Get input data for a sample."""
@@ -198,7 +168,7 @@ class ResNetMultiDieCppSUTWrapper:
         batch_size = self.batch_size
         num_samples = len(query_samples)
 
-        logger.info(f"C++ Offline: {num_samples} samples, batch_size={batch_size}")
+        logger.debug(f"C++ Offline: {num_samples} samples, batch_size={batch_size}")
 
         # Process in batches
         i = 0
