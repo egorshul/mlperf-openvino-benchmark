@@ -225,28 +225,11 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
     # Print configuration summary
     click.echo(f"Model: {benchmark_config.model.name}")
     click.echo(f"Task: {benchmark_config.model.task}")
-    click.echo(f"Scenario: {benchmark_config.scenario.value}")
+    click.echo(f"Mode: {mode}")
+    if mode == 'performance':
+        click.echo(f"Scenario: {benchmark_config.scenario.value}")
     click.echo(f"Device: {benchmark_config.openvino.device}")
-
-    # Show accelerator device details if applicable
-    if benchmark_config.openvino.is_accelerator_device():
-        device_prefix = benchmark_config.openvino.get_device_prefix()
-        if benchmark_config.openvino.is_multi_device():
-            click.echo(f"  Mode: Multi-die (all available {device_prefix} dies)")
-        else:
-            click.echo(f"  Mode: Single die ({benchmark_config.openvino.device})")
-        if benchmark_config.openvino.device_properties:
-            click.echo(f"  Properties: {benchmark_config.openvino.device_properties}")
-    else:
-        click.echo(f"Threads: {benchmark_config.openvino.num_threads or 'auto'}")
-
-    click.echo(f"Streams: {benchmark_config.openvino.num_streams}")
     click.echo(f"Batch size: {benchmark_config.openvino.batch_size}")
-
-    # Only show performance hint for CPU (not relevant for accelerators)
-    if not benchmark_config.openvino.is_accelerator_device():
-        click.echo(f"Performance hint: {benchmark_config.openvino.performance_hint}")
-
     click.echo("")
 
     # Create runner

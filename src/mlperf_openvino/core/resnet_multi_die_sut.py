@@ -1,5 +1,5 @@
 """
-Python wrapper for C++ MultiDieCppSUT.
+Python wrapper for C++ ResNetMultiDieCppSUT.
 
 Provides MLPerf LoadGen integration while using the high-performance
 C++ backend for inference on multi-die accelerators.
@@ -22,11 +22,11 @@ except ImportError:
     lg = None
 
 try:
-    from .._cpp_sut import MultiDieCppSUT
+    from .._cpp_sut import ResNetMultiDieCppSUT
     CPP_SUT_AVAILABLE = True
 except ImportError:
     CPP_SUT_AVAILABLE = False
-    MultiDieCppSUT = None
+    ResNetMultiDieCppSUT = None
 
 from ..datasets.base import QuerySampleLibrary
 from ..core.config import BenchmarkConfig, Scenario
@@ -34,7 +34,7 @@ from ..core.config import BenchmarkConfig, Scenario
 logger = logging.getLogger(__name__)
 
 
-class MultiDieCppSUTWrapper:
+class ResNetMultiDieCppSUTWrapper:
     """
     Wrapper for C++ multi-die SUT with MLPerf LoadGen integration.
 
@@ -72,7 +72,7 @@ class MultiDieCppSUTWrapper:
 
         # Create C++ SUT
         device_prefix = config.openvino.get_device_prefix()
-        self._cpp_sut = MultiDieCppSUT(
+        self._cpp_sut = ResNetMultiDieCppSUT(
             config.model.model_path,
             device_prefix,
             self.batch_size,
@@ -91,7 +91,7 @@ class MultiDieCppSUTWrapper:
         self._progress_stop = False
         self._progress_thread = None
 
-        logger.info(f"MultiDieCppSUTWrapper: device_prefix={device_prefix}, batch_size={self.batch_size}")
+        logger.info(f"ResNetMultiDieCppSUTWrapper: device_prefix={device_prefix}, batch_size={self.batch_size}")
 
     def load(self) -> None:
         """Load and compile the model."""
@@ -342,6 +342,6 @@ class MultiDieCppSUTWrapper:
         self._query_count = 0
 
 
-def is_cpp_multi_die_sut_available() -> bool:
+def is_resnet_multi_die_cpp_available() -> bool:
     """Check if C++ multi-die SUT is available."""
     return CPP_SUT_AVAILABLE and LOADGEN_AVAILABLE

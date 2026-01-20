@@ -1,5 +1,5 @@
 /**
- * C++ SUT for multi-die accelerators with maximum throughput.
+ * C++ SUT for ResNet50 on multi-die accelerators with maximum throughput.
  *
  * Key features:
  * - Multiple compiled models (one per die)
@@ -28,7 +28,7 @@
 namespace mlperf_ov {
 
 // Forward declaration
-class MultiDieCppSUT;
+class ResNetMultiDieCppSUT;
 
 /**
  * Context for a single die.
@@ -42,12 +42,12 @@ struct DieContext {
 /**
  * Context for each inference request.
  */
-struct MultiDieInferContext {
+struct ResNetMultiDieInferContext {
     ov::InferRequest request;
     ov::Tensor input_tensor;
     std::string die_name;
     size_t pool_id = 0;
-    MultiDieCppSUT* sut = nullptr;
+    ResNetMultiDieCppSUT* sut = nullptr;
 
     // Batch info
     std::vector<uint64_t> query_ids;
@@ -61,7 +61,7 @@ struct MultiDieInferContext {
  * Distributes inference across all available dies using round-robin.
  * Each die has its own compiled model and request pool.
  */
-class MultiDieCppSUT {
+class ResNetMultiDieCppSUT {
 public:
     /**
      * Constructor.
@@ -71,12 +71,12 @@ public:
      * @param batch_size Batch size for inference
      * @param compile_properties Device-specific compile properties
      */
-    MultiDieCppSUT(const std::string& model_path,
+    ResNetMultiDieCppSUT(const std::string& model_path,
                    const std::string& device_prefix,
                    int batch_size = 1,
                    const std::unordered_map<std::string, std::string>& compile_properties = {});
 
-    ~MultiDieCppSUT();
+    ~ResNetMultiDieCppSUT();
 
     /**
      * Load model and compile for all available dies.
@@ -177,7 +177,7 @@ public:
     /**
      * Called when inference completes - handles batch response.
      */
-    void on_inference_complete(MultiDieInferContext* ctx);
+    void on_inference_complete(ResNetMultiDieInferContext* ctx);
 
 private:
     // Model configuration
@@ -195,7 +195,7 @@ private:
     std::vector<std::string> active_devices_;
 
     // InferRequest pool (shared across all dies)
-    std::vector<std::unique_ptr<MultiDieInferContext>> infer_contexts_;
+    std::vector<std::unique_ptr<ResNetMultiDieInferContext>> infer_contexts_;
     std::mutex pool_mutex_;
     std::condition_variable pool_cv_;
     std::queue<size_t> available_ids_;

@@ -18,7 +18,7 @@
 
 namespace mlperf_ov {
 
-MultiDieCppSUT::MultiDieCppSUT(const std::string& model_path,
+ResNetMultiDieCppSUT::ResNetMultiDieCppSUT(const std::string& model_path,
                                const std::string& device_prefix,
                                int batch_size,
                                const std::unordered_map<std::string, std::string>& compile_properties)
@@ -28,7 +28,7 @@ MultiDieCppSUT::MultiDieCppSUT(const std::string& model_path,
       compile_properties_(compile_properties) {
 }
 
-MultiDieCppSUT::~MultiDieCppSUT() {
+ResNetMultiDieCppSUT::~ResNetMultiDieCppSUT() {
     wait_all();
     {
         std::lock_guard<std::mutex> lock(callback_mutex_);
@@ -36,7 +36,7 @@ MultiDieCppSUT::~MultiDieCppSUT() {
     }
 }
 
-std::vector<std::string> MultiDieCppSUT::discover_dies() {
+std::vector<std::string> ResNetMultiDieCppSUT::discover_dies() {
     std::vector<std::string> dies;
     auto all_devices = core_.get_available_devices();
 
@@ -75,7 +75,7 @@ std::vector<std::string> MultiDieCppSUT::discover_dies() {
     return dies;
 }
 
-ov::AnyMap MultiDieCppSUT::build_compile_properties() {
+ov::AnyMap ResNetMultiDieCppSUT::build_compile_properties() {
     ov::AnyMap properties;
 
     // Convert string properties to ov::Any
@@ -105,12 +105,12 @@ ov::AnyMap MultiDieCppSUT::build_compile_properties() {
     return properties;
 }
 
-void MultiDieCppSUT::load() {
+void ResNetMultiDieCppSUT::load() {
     if (loaded_) {
         return;
     }
 
-    std::cout << "[MultiDieCppSUT] Loading model from " << model_path_ << std::endl;
+    std::cout << "[ResNetMultiDieCppSUT] Loading model from " << model_path_ << std::endl;
 
     // Discover available dies
     active_devices_ = discover_dies();
@@ -118,7 +118,7 @@ void MultiDieCppSUT::load() {
         throw std::runtime_error("No " + device_prefix_ + " dies found");
     }
 
-    std::cout << "[MultiDieCppSUT] Found " << active_devices_.size() << " dies: ";
+    std::cout << "[ResNetMultiDieCppSUT] Found " << active_devices_.size() << " dies: ";
     for (const auto& d : active_devices_) {
         std::cout << d << " ";
     }
@@ -145,7 +145,7 @@ void MultiDieCppSUT::load() {
 
     // Reshape model for batch size
     if (batch_size_ > 1 || input_shape_[0] == 0) {
-        std::cout << "[MultiDieCppSUT] Reshaping model for batch_size=" << batch_size_ << std::endl;
+        std::cout << "[ResNetMultiDieCppSUT] Reshaping model for batch_size=" << batch_size_ << std::endl;
 
         std::map<std::string, ov::PartialShape> new_shapes;
         for (const auto& input : inputs) {
@@ -162,7 +162,7 @@ void MultiDieCppSUT::load() {
     // Build compile properties
     ov::AnyMap properties = build_compile_properties();
 
-    std::cout << "[MultiDieCppSUT] Compile properties: ";
+    std::cout << "[ResNetMultiDieCppSUT] Compile properties: ";
     for (const auto& [k, v] : compile_properties_) {
         std::cout << k << "=" << v << " ";
     }
@@ -174,7 +174,7 @@ void MultiDieCppSUT::load() {
         auto die_ctx = std::make_unique<DieContext>();
         die_ctx->device_name = device_name;
 
-        std::cout << "[MultiDieCppSUT] Compiling for " << device_name << "..." << std::flush;
+        std::cout << "[ResNetMultiDieCppSUT] Compiling for " << device_name << "..." << std::flush;
 
         die_ctx->compiled_model = core_.compile_model(model_, device_name, properties);
 
@@ -192,7 +192,7 @@ void MultiDieCppSUT::load() {
         int num_requests = std::max(die_ctx->optimal_nireq * 8, 32);
 
         for (int i = 0; i < num_requests; ++i) {
-            auto ctx = std::make_unique<MultiDieInferContext>();
+            auto ctx = std::make_unique<ResNetMultiDieInferContext>();
             ctx->request = die_ctx->compiled_model.create_infer_request();
             ctx->die_name = device_name;
             ctx->pool_id = infer_contexts_.size();
@@ -207,7 +207,7 @@ void MultiDieCppSUT::load() {
             ctx->sample_indices.reserve(batch_size_);
 
             // Set callback
-            MultiDieInferContext* ctx_ptr = ctx.get();
+            ResNetMultiDieInferContext* ctx_ptr = ctx.get();
             ctx->request.set_callback([ctx_ptr](std::exception_ptr) {
                 ctx_ptr->sut->on_inference_complete(ctx_ptr);
             });
@@ -227,21 +227,21 @@ void MultiDieCppSUT::load() {
         single_output_size_ *= output_shape[i];
     }
 
-    std::cout << "[MultiDieCppSUT] Loaded: " << active_devices_.size() << " dies, "
+    std::cout << "[ResNetMultiDieCppSUT] Loaded: " << active_devices_.size() << " dies, "
               << total_requests << " total requests, batch_size=" << batch_size_ << std::endl;
 
     loaded_ = true;
 }
 
-std::vector<std::string> MultiDieCppSUT::get_active_devices() const {
+std::vector<std::string> ResNetMultiDieCppSUT::get_active_devices() const {
     return active_devices_;
 }
 
-int MultiDieCppSUT::get_total_requests() const {
+int ResNetMultiDieCppSUT::get_total_requests() const {
     return static_cast<int>(infer_contexts_.size());
 }
 
-size_t MultiDieCppSUT::get_idle_request() {
+size_t ResNetMultiDieCppSUT::get_idle_request() {
     std::unique_lock<std::mutex> lock(pool_mutex_);
     pool_cv_.wait(lock, [this]() { return !available_ids_.empty(); });
 
@@ -250,7 +250,7 @@ size_t MultiDieCppSUT::get_idle_request() {
     return id;
 }
 
-void MultiDieCppSUT::return_request(size_t id) {
+void ResNetMultiDieCppSUT::return_request(size_t id) {
     {
         std::lock_guard<std::mutex> lock(pool_mutex_);
         available_ids_.push(id);
@@ -258,12 +258,12 @@ void MultiDieCppSUT::return_request(size_t id) {
     pool_cv_.notify_one();
 }
 
-const std::string& MultiDieCppSUT::get_next_die() {
+const std::string& ResNetMultiDieCppSUT::get_next_die() {
     size_t idx = die_index_.fetch_add(1) % active_devices_.size();
     return active_devices_[idx];
 }
 
-void MultiDieCppSUT::start_async_batch(const float* input_data,
+void ResNetMultiDieCppSUT::start_async_batch(const float* input_data,
                                         size_t input_size,
                                         const std::vector<uint64_t>& query_ids,
                                         const std::vector<int>& sample_indices,
@@ -274,7 +274,7 @@ void MultiDieCppSUT::start_async_batch(const float* input_data,
 
     // Get idle request
     size_t id = get_idle_request();
-    MultiDieInferContext* ctx = infer_contexts_[id].get();
+    ResNetMultiDieInferContext* ctx = infer_contexts_[id].get();
 
     // Store batch info
     ctx->query_ids = query_ids;
@@ -292,7 +292,7 @@ void MultiDieCppSUT::start_async_batch(const float* input_data,
     issued_count_ += actual_batch_size;
 }
 
-void MultiDieCppSUT::on_inference_complete(MultiDieInferContext* ctx) {
+void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx) {
     callbacks_running_++;
 
     size_t pool_id = ctx->pool_id;
@@ -329,7 +329,7 @@ void MultiDieCppSUT::on_inference_complete(MultiDieInferContext* ctx) {
         }
 
     } catch (const std::exception& e) {
-        std::cerr << "[MultiDieCppSUT] Callback error on " << ctx->die_name << ": " << e.what() << std::endl;
+        std::cerr << "[ResNetMultiDieCppSUT] Callback error on " << ctx->die_name << ": " << e.what() << std::endl;
 
         // Still notify LoadGen to avoid hang
         for (int i = 0; i < actual_batch_size; ++i) {
@@ -346,13 +346,13 @@ void MultiDieCppSUT::on_inference_complete(MultiDieInferContext* ctx) {
     callbacks_running_--;
 }
 
-void MultiDieCppSUT::wait_all() {
+void ResNetMultiDieCppSUT::wait_all() {
     while (pending_count_.load() > 0 || callbacks_running_.load() > 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 }
 
-void MultiDieCppSUT::reset_counters() {
+void ResNetMultiDieCppSUT::reset_counters() {
     wait_all();
 
     issued_count_ = 0;
@@ -364,12 +364,12 @@ void MultiDieCppSUT::reset_counters() {
     }
 }
 
-std::unordered_map<int, std::vector<float>> MultiDieCppSUT::get_predictions() const {
+std::unordered_map<int, std::vector<float>> ResNetMultiDieCppSUT::get_predictions() const {
     std::lock_guard<std::mutex> lock(predictions_mutex_);
     return predictions_;
 }
 
-void MultiDieCppSUT::set_response_callback(ResponseCallback callback) {
+void ResNetMultiDieCppSUT::set_response_callback(ResponseCallback callback) {
     std::lock_guard<std::mutex> lock(callback_mutex_);
     response_callback_ = callback;
 }

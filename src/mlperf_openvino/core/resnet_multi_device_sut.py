@@ -36,7 +36,7 @@ from ..core.config import BenchmarkConfig, Scenario
 logger = logging.getLogger(__name__)
 
 
-class MultiDeviceSUT:
+class ResNetMultiDeviceSUT:
     """
     System Under Test for multi-die accelerator inference.
 
@@ -107,7 +107,7 @@ class MultiDeviceSUT:
         self._setup_async_queues()
 
         logger.info(
-            f"MultiDeviceSUT: {self.backend.num_dies} dies, batch_size={self.batch_size}"
+            f"ResNetMultiDeviceSUT: {self.backend.num_dies} dies, batch_size={self.batch_size}"
         )
 
     def _setup_async_queues(self) -> None:

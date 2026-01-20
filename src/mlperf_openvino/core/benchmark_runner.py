@@ -203,14 +203,14 @@ class BenchmarkRunner:
         if isinstance(self.backend, MultiDeviceBackend):
             # Try C++ multi-die SUT first (much faster)
             try:
-                from .multi_die_cpp_sut_wrapper import (
-                    MultiDieCppSUTWrapper,
-                    is_cpp_multi_die_sut_available
+                from .resnet_multi_die_sut import (
+                    ResNetMultiDieCppSUTWrapper,
+                    is_resnet_multi_die_cpp_available
                 )
 
-                if is_cpp_multi_die_sut_available():
-                    print(f"SUT: C++ MultiDieSUT ({self.backend.num_dies} dies)")
-                    sut = MultiDieCppSUTWrapper(
+                if is_resnet_multi_die_cpp_available():
+                    print(f"SUT: C++ ResNetMultiDieSUT ({self.backend.num_dies} dies)")
+                    sut = ResNetMultiDieCppSUTWrapper(
                         config=self.config,
                         qsl=qsl,
                         scenario=self.config.scenario,
@@ -218,14 +218,14 @@ class BenchmarkRunner:
                     sut.load()
                     return sut
             except ImportError as e:
-                logger.warning(f"C++ multi-die SUT not available: {e}")
+                logger.warning(f"C++ ResNet multi-die SUT not available: {e}")
             except Exception as e:
-                logger.warning(f"Failed to create C++ multi-die SUT: {e}, falling back to Python")
+                logger.warning(f"Failed to create C++ ResNet multi-die SUT: {e}, falling back to Python")
 
             # Fall back to Python multi-device SUT
-            from .multi_device_sut import MultiDeviceSUT
-            print(f"SUT: Python MultiDeviceSUT ({self.backend.num_dies} dies)")
-            return MultiDeviceSUT(
+            from .resnet_multi_device_sut import ResNetMultiDeviceSUT
+            print(f"SUT: Python ResNetMultiDeviceSUT ({self.backend.num_dies} dies)")
+            return ResNetMultiDeviceSUT(
                 config=self.config,
                 backend=self.backend,
                 qsl=qsl,
