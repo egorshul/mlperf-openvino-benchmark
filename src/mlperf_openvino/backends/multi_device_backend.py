@@ -190,9 +190,8 @@ class MultiDeviceBackend(BaseBackend):
         else:
             raise ValueError(f"Unsupported model format: {model_path.suffix}")
 
-        # Reshape model for batch size if specified
-        if self.config.batch_size > 1:
-            self._reshape_model_for_batch(self.config.batch_size)
+        # Reshape model for the configured batch size
+        self._reshape_model_for_batch(self.config.batch_size)
 
         # Extract model info (after reshape)
         self._extract_model_info()
