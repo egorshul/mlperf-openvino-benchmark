@@ -379,15 +379,17 @@ void ResNetMultiDieCppSUT::reset_counters() {
     issued_count_ = 0;
     completed_count_ = 0;
     die_index_ = 0;
-    {
-        std::lock_guard<std::mutex> lock(predictions_mutex_);
-        predictions_.clear();
-    }
+    // Note: Don't clear predictions here - they accumulate across LoadGen calls
 }
 
 std::unordered_map<int, std::vector<float>> ResNetMultiDieCppSUT::get_predictions() const {
     std::lock_guard<std::mutex> lock(predictions_mutex_);
     return predictions_;
+}
+
+void ResNetMultiDieCppSUT::clear_predictions() {
+    std::lock_guard<std::mutex> lock(predictions_mutex_);
+    predictions_.clear();
 }
 
 void ResNetMultiDieCppSUT::set_response_callback(ResponseCallback callback) {

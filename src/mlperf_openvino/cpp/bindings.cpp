@@ -455,6 +455,9 @@ PYBIND11_MODULE(_cpp_sut, m) {
         .def("get_predictions", &mlperf_ov::ResNetMultiDieCppSUT::get_predictions,
              "Get stored predictions")
 
+        .def("clear_predictions", &mlperf_ov::ResNetMultiDieCppSUT::clear_predictions,
+             "Clear stored predictions")
+
         .def("set_response_callback",
              [](mlperf_ov::ResNetMultiDieCppSUT& self, py::function callback) {
                  self.set_response_callback(

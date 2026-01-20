@@ -164,6 +164,11 @@ public:
     std::unordered_map<int, std::vector<float>> get_predictions() const;
 
     /**
+     * Clear stored predictions.
+     */
+    void clear_predictions();
+
+    /**
      * Callback type for batch responses.
      * Called with (query_id, output_data, output_size) for each sample in batch.
      */
