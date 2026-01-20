@@ -164,22 +164,23 @@ void ResNetMultiDieCppSUT::load() {
 
     // Add NHWC->NCHW transpose if using NHWC input
     if (use_nhwc_input_) {
+        std::cout << "[NHWC] Original input shape: ";
+        for (auto d : input_shape_) std::cout << d << " ";
+        std::cout << std::endl;
+
         ov::preprocess::PrePostProcessor ppp(model_);
         // Input tensor is NHWC, model expects NCHW
         ppp.input().tensor().set_layout("NHWC");
         ppp.input().model().set_layout("NCHW");
         model_ = ppp.build();
 
-        // Update input shape for NHWC: [N,C,H,W] -> [N,H,W,C]
-        // Original NCHW shape: [batch, 3, 224, 224]
-        // New NHWC shape: [batch, 224, 224, 3]
-        if (input_shape_.size() == 4) {
-            size_t n = input_shape_[0];
-            size_t c = input_shape_[1];
-            size_t h = input_shape_[2];
-            size_t w = input_shape_[3];
-            input_shape_ = ov::Shape{n, h, w, c};
-        }
+        // Get actual input shape from the transformed model
+        input_shape_ = model_->inputs()[0].get_partial_shape().get_min_shape();
+        input_name_ = model_->inputs()[0].get_any_name();
+
+        std::cout << "[NHWC] New input shape after PrePostProcessor: ";
+        for (auto d : input_shape_) std::cout << d << " ";
+        std::cout << "(expecting NHWC: N,H,W,C)" << std::endl;
     }
 
     // Build compile properties
