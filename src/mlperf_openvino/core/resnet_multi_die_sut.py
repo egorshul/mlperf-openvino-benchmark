@@ -97,6 +97,9 @@ class ResNetMultiDieCppSUTWrapper:
         """Load and compile the model."""
         self._cpp_sut.load()
 
+        # Enable prediction storage for accuracy mode
+        self._cpp_sut.set_store_predictions(True)
+
         # Get actual input name from C++ SUT
         self.input_name = self._cpp_sut.get_input_name()
 
