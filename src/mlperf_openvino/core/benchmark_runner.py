@@ -122,29 +122,31 @@ class BenchmarkRunner:
         device = self.config.openvino.device
 
         # Log device configuration for debugging
+        device_prefix = self.config.openvino.get_device_prefix()
         logger.info(f"Device configuration: device='{device}', "
-                   f"is_x_device={self.config.openvino.is_x_device()}, "
+                   f"device_prefix='{device_prefix}', "
+                   f"is_accelerator={self.config.openvino.is_accelerator_device()}, "
                    f"is_multi_device={self.config.openvino.is_multi_device()}")
 
         # List available devices
         self._log_available_devices()
 
-        # Check if using multi-device X (all dies)
+        # Check if using multi-device accelerator (all dies)
         if self.config.openvino.is_multi_device():
-            logger.info("Creating multi-device backend for X accelerator (all dies)")
+            logger.info(f"Creating multi-device backend for {device_prefix} accelerator (all dies)")
             backend = MultiDeviceBackend(
                 model_path=self.config.model.model_path,
                 config=self.config.openvino,
-                target_devices=None,  # Auto-discover all X dies
+                target_devices=None,  # Auto-discover all accelerator dies
             )
             backend.load()
             return backend
 
-        # Check if using specific X die (e.g., X.0)
-        if self.config.openvino.is_x_device():
-            from ..backends.device_discovery import is_x_die
-            if is_x_die(device):
-                logger.info(f"Creating single-device backend for X die: {device}")
+        # Check if using specific accelerator die (e.g., NPU.0)
+        if self.config.openvino.is_accelerator_device():
+            from ..backends.device_discovery import is_accelerator_die
+            if is_accelerator_die(device, device_prefix):
+                logger.info(f"Creating single-device backend for {device_prefix} die: {device}")
                 backend = OpenVINOBackend(
                     model_path=self.config.model.model_path,
                     config=self.config.openvino,
@@ -165,21 +167,23 @@ class BenchmarkRunner:
         """Log all available OpenVINO devices."""
         try:
             from openvino import Core
-            from ..backends.device_discovery import discover_x_devices, is_x_die
+            from ..backends.device_discovery import discover_accelerator_devices
 
             core = Core()
             all_devices = core.available_devices
 
             logger.info(f"Available OpenVINO devices: {all_devices}")
 
-            # Show X devices specifically
-            x_devices = [d for d in all_devices if d.startswith("X")]
-            if x_devices:
-                x_dies = discover_x_devices(core)
-                logger.info(f"X accelerator devices found: {x_devices}")
-                logger.info(f"X dies (physical): {x_dies}")
-            else:
-                logger.info("No X accelerator devices found")
+            # Show accelerator devices if configured
+            if self.config.openvino.is_accelerator_device():
+                device_prefix = self.config.openvino.get_device_prefix()
+                prefix_devices = [d for d in all_devices if d.startswith(device_prefix)]
+                if prefix_devices:
+                    dies = discover_accelerator_devices(core, device_prefix)
+                    logger.info(f"{device_prefix} accelerator devices found: {prefix_devices}")
+                    logger.info(f"{device_prefix} dies (physical): {dies}")
+                else:
+                    logger.info(f"No {device_prefix} accelerator devices found")
 
         except Exception as e:
             logger.warning(f"Could not enumerate devices: {e}")
@@ -194,7 +198,7 @@ class BenchmarkRunner:
         from .sut import OpenVINOSUT
 
         if isinstance(self.backend, MultiDeviceBackend):
-            logger.info(f"Creating MultiDeviceSUT for {self.backend.num_dies} X dies")
+            logger.info(f"Creating MultiDeviceSUT for {self.backend.num_dies} accelerator dies")
             return MultiDeviceSUT(
                 config=self.config,
                 backend=self.backend,
@@ -227,8 +231,8 @@ class BenchmarkRunner:
 
         logger.info(f"Creating SUT for scenario: {self.config.scenario}")
 
-        # Use multi-device SUT for X accelerator
-        if self.config.openvino.is_x_device():
+        # Use multi-device SUT for accelerator
+        if self.config.openvino.is_accelerator_device():
             self.sut = self._create_sut_for_backend(self.qsl)
         else:
             # Use create_sut to automatically select C++ or Python SUT for CPU
@@ -255,8 +259,8 @@ class BenchmarkRunner:
 
         logger.info(f"Creating BERT SUT for scenario: {self.config.scenario}")
 
-        # Use multi-device SUT for X accelerator
-        if self.config.openvino.is_x_device():
+        # Use multi-device SUT for accelerator
+        if self.config.openvino.is_accelerator_device():
             self.sut = self._create_sut_for_backend(self.qsl)
         else:
             # Use create_bert_sut to automatically select C++ or Python SUT for CPU
@@ -283,8 +287,8 @@ class BenchmarkRunner:
 
         logger.info(f"Creating RetinaNet SUT for scenario: {self.config.scenario}")
 
-        # Use multi-device SUT for X accelerator
-        if self.config.openvino.is_x_device():
+        # Use multi-device SUT for accelerator
+        if self.config.openvino.is_accelerator_device():
             self.sut = self._create_sut_for_backend(self.qsl)
         else:
             # Use create_retinanet_sut to automatically select C++ or Python SUT for CPU

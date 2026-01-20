@@ -1,7 +1,7 @@
 """
-Multi-device backend for X accelerator with multiple dies.
+Multi-device backend for neural network accelerators with multiple dies.
 
-This backend manages inference across multiple X dies in parallel,
+This backend manages inference across multiple accelerator dies in parallel,
 providing transparent scaling for multi-die and multi-card setups.
 
 Architecture:
@@ -34,10 +34,10 @@ except ImportError:
 
 from .base import BaseBackend
 from .device_discovery import (
-    discover_x_devices,
-    validate_x_device,
+    discover_accelerator_devices,
+    validate_accelerator_device,
     get_card_and_die,
-    is_x_die,
+    is_accelerator_die,
 )
 from ..core.config import OpenVINOConfig
 
@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 
 class DieContext:
-    """Context for a single X die, holding compiled model and requests."""
+    """Context for a single accelerator die, holding compiled model and requests."""
 
     def __init__(
         self,
@@ -79,16 +79,16 @@ class DieContext:
 
 class MultiDeviceBackend(BaseBackend):
     """
-    Backend for parallel inference across multiple X dies.
+    Backend for parallel inference across multiple accelerator dies.
 
-    This backend automatically discovers X dies and distributes
+    This backend automatically discovers accelerator dies and distributes
     inference workload across all available dies for maximum throughput.
 
     Usage:
         backend = MultiDeviceBackend(
             model_path="model.onnx",
             config=config,
-            target_devices=None  # Auto-discover all X dies
+            target_devices=None  # Auto-discover all accelerator dies
         )
         backend.load()
         results = backend.predict(inputs)
@@ -107,8 +107,8 @@ class MultiDeviceBackend(BaseBackend):
         Args:
             model_path: Path to ONNX or OpenVINO IR model
             config: OpenVINO configuration
-            target_devices: List of specific devices to use (e.g., ['X.0', 'X.1'])
-                          If None, auto-discovers all available X dies
+            target_devices: List of specific devices to use (e.g., ['NPU.0', 'NPU.1'])
+                          If None, auto-discovers all available accelerator dies
             **kwargs: Additional options
         """
         if not OPENVINO_AVAILABLE:
@@ -145,7 +145,7 @@ class MultiDeviceBackend(BaseBackend):
         self._request_lock = threading.Lock()
 
     def load(self) -> None:
-        """Load model and compile for all target X dies."""
+        """Load model and compile for all target accelerator dies."""
         if self._loaded:
             logger.warning("Model already loaded, skipping...")
             return
@@ -161,19 +161,23 @@ class MultiDeviceBackend(BaseBackend):
             cache_path.mkdir(parents=True, exist_ok=True)
             self._core.set_property({"CACHE_DIR": str(cache_path)})
 
+        # Get device prefix from config
+        device_prefix = self.config.get_device_prefix()
+        logger.info(f"Device prefix: {device_prefix}")
+
         # Discover or validate target devices
         if self._target_devices:
             self._active_devices = self._validate_devices(self._target_devices)
         else:
-            self._active_devices = discover_x_devices(self._core)
+            self._active_devices = discover_accelerator_devices(self._core, device_prefix)
 
         if not self._active_devices:
             raise RuntimeError(
-                "No X devices available for inference. "
+                f"No {device_prefix} devices available for inference. "
                 f"Available devices: {self._core.available_devices}"
             )
 
-        logger.info(f"Will use X dies: {self._active_devices}")
+        logger.info(f"Will use {device_prefix} dies: {self._active_devices}")
 
         # Load the model
         model_path = Path(self.model_path)
@@ -189,8 +193,8 @@ class MultiDeviceBackend(BaseBackend):
         # Extract model info
         self._extract_model_info()
 
-        # Build compile properties for X device
-        properties = self._build_x_compile_properties()
+        # Build compile properties for accelerator device
+        properties = self._build_compile_properties()
 
         # Compile model for each die
         for device_name in self._active_devices:
@@ -209,15 +213,16 @@ class MultiDeviceBackend(BaseBackend):
     def _validate_devices(self, devices: List[str]) -> List[str]:
         """Validate and filter requested devices."""
         valid_devices = []
+        device_prefix = self.config.get_device_prefix()
 
         for device in devices:
-            is_valid, error = validate_x_device(self._core, device)
+            is_valid, error = validate_accelerator_device(self._core, device)
             if is_valid:
-                if is_x_die(device):
+                if is_accelerator_die(device, device_prefix):
                     valid_devices.append(device)
-                elif device == "X":
-                    # Expand "X" to all available dies
-                    valid_devices.extend(discover_x_devices(self._core))
+                elif device.upper() == device_prefix:
+                    # Expand prefix to all available dies
+                    valid_devices.extend(discover_accelerator_devices(self._core, device_prefix))
             else:
                 logger.warning(f"Skipping invalid device: {error}")
 
@@ -256,8 +261,8 @@ class MultiDeviceBackend(BaseBackend):
             logger.error(f"Failed to compile model for {device_name}: {e}")
             raise
 
-    def _build_x_compile_properties(self) -> Dict[str, Any]:
-        """Build compilation properties for X device."""
+    def _build_compile_properties(self) -> Dict[str, Any]:
+        """Build compilation properties for accelerator device."""
         properties = {}
 
         # Performance hint
@@ -408,7 +413,7 @@ class MultiDeviceBackend(BaseBackend):
 
         Args:
             inputs: Input data
-            die_name: Target die (e.g., 'X.0')
+            die_name: Target die (e.g., 'NPU.0')
 
         Returns:
             Output dictionary

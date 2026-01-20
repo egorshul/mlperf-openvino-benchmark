@@ -493,11 +493,11 @@ def create_sut(
     Returns:
         SUT instance
     """
-    # X devices are not supported by C++ SUT - they require MultiDeviceSUT
-    device = config.openvino.device.upper()
-    if device.startswith("X"):
+    # Accelerator devices are not supported by C++ SUT - they require MultiDeviceSUT
+    if config.openvino.is_accelerator_device():
+        device = config.openvino.device
         raise ValueError(
-            f"C++ SUT does not support X accelerator devices (got: {device}). "
+            f"C++ SUT does not support accelerator devices (got: {device}). "
             "Use MultiDeviceSUT via BenchmarkRunner._create_sut_for_backend() instead."
         )
 
@@ -537,11 +537,11 @@ def create_bert_sut(
     Returns:
         BERT SUT instance
     """
-    # X devices are not supported by C++ SUT - they require MultiDeviceSUT
-    device = config.openvino.device.upper()
-    if device.startswith("X"):
+    # Accelerator devices are not supported by C++ SUT - they require MultiDeviceSUT
+    if config.openvino.is_accelerator_device():
+        device = config.openvino.device
         raise ValueError(
-            f"C++ SUT does not support X accelerator devices (got: {device}). "
+            f"C++ SUT does not support accelerator devices (got: {device}). "
             "Use MultiDeviceSUT via BenchmarkRunner._create_sut_for_backend() instead."
         )
 
@@ -798,11 +798,11 @@ def create_retinanet_sut(
     Returns:
         RetinaNet SUT instance
     """
-    # X devices are not supported by C++ SUT - they require MultiDeviceSUT
-    device = config.openvino.device.upper()
-    if device.startswith("X"):
+    # Accelerator devices are not supported by C++ SUT - they require MultiDeviceSUT
+    if config.openvino.is_accelerator_device():
+        device = config.openvino.device
         raise ValueError(
-            f"C++ SUT does not support X accelerator devices (got: {device}). "
+            f"C++ SUT does not support accelerator devices (got: {device}). "
             "Use MultiDeviceSUT via BenchmarkRunner._create_sut_for_backend() instead."
         )
 

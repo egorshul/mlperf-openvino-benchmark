@@ -87,12 +87,13 @@ class OpenVINOBackend(BaseBackend):
 
         logger.info(f"Loading model from {self.model_path}")
 
-        # Validate device - "X" without die number requires MultiDeviceBackend
-        if self.config.device.upper() == "X":
+        # Validate device - bare accelerator prefix without die number requires MultiDeviceBackend
+        if self.config.is_multi_device():
+            device_prefix = self.config.get_device_prefix()
             raise ValueError(
-                "Device 'X' (all dies) requires MultiDeviceBackend. "
-                "Use a specific die (e.g., 'X.0') for OpenVINOBackend, "
-                "or use '--device X' which automatically uses MultiDeviceBackend."
+                f"Device '{device_prefix}' (all dies) requires MultiDeviceBackend. "
+                f"Use a specific die (e.g., '{device_prefix}.0') for OpenVINOBackend, "
+                f"or use '--device {device_prefix}' which automatically uses MultiDeviceBackend."
             )
 
         # Initialize OpenVINO Core
@@ -152,8 +153,8 @@ class OpenVINOBackend(BaseBackend):
         properties = {}
 
         # Use device-specific property builders from config
-        if self.config.is_x_device():
-            return self._build_x_compile_properties()
+        if self.config.is_accelerator_device():
+            return self._build_accelerator_compile_properties()
         else:
             return self._build_cpu_compile_properties()
 
@@ -189,8 +190,8 @@ class OpenVINOBackend(BaseBackend):
 
         return properties
 
-    def _build_x_compile_properties(self) -> Dict[str, Any]:
-        """Build X accelerator-specific compilation properties."""
+    def _build_accelerator_compile_properties(self) -> Dict[str, Any]:
+        """Build accelerator-specific compilation properties."""
         properties = {}
 
         # Performance hint
@@ -211,7 +212,7 @@ class OpenVINOBackend(BaseBackend):
         if self.config.enable_profiling:
             properties[ov.properties.enable_profiling()] = True
 
-        # Add user-specified device properties for X device
+        # Add user-specified device properties for accelerator
         if hasattr(self.config, 'device_properties') and self.config.device_properties:
             for key, value in self.config.device_properties.items():
                 # Try to convert types

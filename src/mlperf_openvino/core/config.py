@@ -59,16 +59,44 @@ class OpenVINOConfig:
     bind_thread: bool = True
     threads_per_stream: int = 0
     enable_hyper_threading: bool = True
-    # Device-specific properties for X accelerator (passed via -p/--properties CLI)
+    # Device-specific properties for accelerator (passed via -p/--properties CLI)
     device_properties: Dict[str, str] = field(default_factory=dict)
 
+    def get_device_prefix(self) -> str:
+        """Get the device prefix (e.g., 'NPU' from 'NPU.0' or 'NPU')."""
+        device = self.device.upper()
+        if "." in device:
+            return device.split(".")[0]
+        return device
+
+    def is_accelerator_device(self) -> bool:
+        """Check if the configured device is a multi-die accelerator (not CPU/GPU)."""
+        device = self.device.upper()
+        # CPU and GPU are standard devices, others may be accelerators
+        return device not in ("CPU", "GPU", "AUTO", "MULTI", "HETERO")
+
     def is_x_device(self) -> bool:
-        """Check if the configured device is an X accelerator."""
-        return self.device.upper().startswith("X")
+        """Check if the configured device is an accelerator (backward compatible)."""
+        return self.is_accelerator_device()
 
     def is_multi_device(self) -> bool:
-        """Check if using multiple X dies (device == 'X' without specific die number)."""
-        return self.device.upper() == "X"
+        """Check if using multiple dies (device without die number like 'NPU' not 'NPU.0')."""
+        device = self.device.upper()
+        # Multi-device if it's an accelerator and doesn't have a die suffix
+        if not self.is_accelerator_device():
+            return False
+        return "." not in device
+
+    def is_specific_die(self) -> bool:
+        """Check if a specific die is selected (e.g., 'NPU.0')."""
+        device = self.device.upper()
+        if not self.is_accelerator_device():
+            return False
+        if "." not in device:
+            return False
+        # Check if suffix is a number
+        suffix = device.split(".", 1)[1]
+        return suffix.isdigit()
 
     def to_properties(self) -> Dict[str, Any]:
         """Convert to OpenVINO properties dictionary."""

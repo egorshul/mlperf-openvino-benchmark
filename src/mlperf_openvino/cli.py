@@ -150,9 +150,9 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         for warning in warnings:
             logger.warning(warning)
 
-    # Validate X device availability if specified
-    if benchmark_config.openvino.is_x_device():
-        _validate_x_device(benchmark_config.openvino.device)
+    # Validate accelerator device availability if specified
+    if benchmark_config.openvino.is_accelerator_device():
+        _validate_accelerator_device(benchmark_config.openvino.device)
 
     if num_threads > 0:
         benchmark_config.openvino.num_threads = num_threads
@@ -219,10 +219,11 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
     click.echo(f"Scenario: {benchmark_config.scenario.value}")
     click.echo(f"Device: {benchmark_config.openvino.device}")
 
-    # Show X device details if applicable
-    if benchmark_config.openvino.is_x_device():
+    # Show accelerator device details if applicable
+    if benchmark_config.openvino.is_accelerator_device():
+        device_prefix = benchmark_config.openvino.get_device_prefix()
         if benchmark_config.openvino.is_multi_device():
-            click.echo("  Mode: Multi-die (all available X dies)")
+            click.echo(f"  Mode: Multi-die (all available {device_prefix} dies)")
         else:
             click.echo(f"  Mode: Single die ({benchmark_config.openvino.device})")
         if benchmark_config.openvino.device_properties:
@@ -277,14 +278,14 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
     click.echo(f"Results saved to: {results_path}")
 
 
-def _validate_x_device(device: str) -> None:
-    """Validate X device availability and print device info."""
+def _validate_accelerator_device(device: str) -> None:
+    """Validate accelerator device availability and print device info."""
     try:
         from openvino import Core
         from .backends.device_discovery import (
-            discover_x_devices,
-            validate_x_device,
-            is_x_die,
+            discover_accelerator_devices,
+            validate_accelerator_device,
+            is_accelerator_die,
             get_card_and_die,
         )
 
@@ -293,13 +294,20 @@ def _validate_x_device(device: str) -> None:
 
         click.echo(f"\nOpenVINO available devices: {all_devices}")
 
-        # Show all X-related devices
-        x_all = [d for d in all_devices if d.startswith("X")]
-        if x_all:
-            click.echo(f"X-related devices: {x_all}")
+        # Determine device prefix from the device string
+        device_upper = device.upper()
+        if "." in device_upper:
+            device_prefix = device_upper.split(".")[0]
+        else:
+            device_prefix = device_upper
+
+        # Show all devices with this prefix
+        prefix_devices = [d for d in all_devices if d.startswith(device_prefix)]
+        if prefix_devices:
+            click.echo(f"{device_prefix}-related devices: {prefix_devices}")
 
         # Validate device
-        is_valid, error = validate_x_device(core, device)
+        is_valid, error = validate_accelerator_device(core, device)
         if not is_valid:
             click.echo(f"\nError: {error}")
             click.echo("\nAll available devices:")
@@ -307,29 +315,29 @@ def _validate_x_device(device: str) -> None:
                 click.echo(f"  - {d}")
             sys.exit(1)
 
-        # Show discovered X dies (physical only, no simulators)
-        x_dies = discover_x_devices(core)
-        if x_dies:
-            click.echo(f"\nDiscovered X dies (physical): {x_dies}")
-            for die in x_dies:
+        # Show discovered dies (physical only, no simulators)
+        dies = discover_accelerator_devices(core, device_prefix)
+        if dies:
+            click.echo(f"\nDiscovered {device_prefix} dies (physical): {dies}")
+            for die in dies:
                 card_info = get_card_and_die(die)
                 if card_info:
                     card, die_on_card = card_info
                     click.echo(f"  {die}: Card {card}, Die {die_on_card}")
 
             # Show what will be used
-            if device.upper() == "X":
-                click.echo(f"\nWill use ALL {len(x_dies)} dies for inference: {x_dies}")
-            elif is_x_die(device):
+            if device_upper == device_prefix:
+                click.echo(f"\nWill use ALL {len(dies)} dies for inference: {dies}")
+            elif is_accelerator_die(device, device_prefix):
                 click.echo(f"\nWill use single die: {device}")
         else:
-            click.echo("\nWarning: No physical X dies discovered")
+            click.echo(f"\nWarning: No physical {device_prefix} dies discovered")
             click.echo("Only simulators may be available - check device list above")
 
     except ImportError as e:
-        logger.warning(f"Could not validate X device: {e}")
+        logger.warning(f"Could not validate accelerator device: {e}")
     except Exception as e:
-        logger.error(f"Error validating X device: {e}")
+        logger.error(f"Error validating accelerator device: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
