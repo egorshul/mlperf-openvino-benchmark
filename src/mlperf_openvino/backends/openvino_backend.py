@@ -117,7 +117,11 @@ class OpenVINOBackend(BaseBackend):
         else:
             raise ValueError(f"Unsupported model format: {model_path.suffix}")
 
-        # Get model info before compilation
+        # Reshape model for batch size if specified
+        if self.config.batch_size > 1:
+            self._reshape_model_for_batch(self.config.batch_size)
+
+        # Get model info before compilation (after reshape)
         self._extract_model_info()
 
         # Compile the model with optimizations
@@ -226,7 +230,40 @@ class OpenVINOBackend(BaseBackend):
             logger.info("No custom compile properties specified for accelerator")
 
         return properties
-    
+
+    def _reshape_model_for_batch(self, batch_size: int) -> None:
+        """Reshape model inputs to the specified batch size.
+
+        Args:
+            batch_size: Target batch size for the first dimension of all inputs
+        """
+        logger.info(f"Reshaping model for batch_size={batch_size}")
+
+        new_shapes = {}
+        for input_node in self._model.inputs:
+            name = input_node.any_name
+            current_shape = input_node.partial_shape
+
+            # Create new shape with updated batch dimension
+            new_dims = []
+            for i, dim in enumerate(current_shape):
+                if i == 0:
+                    # First dimension is batch
+                    new_dims.append(batch_size)
+                else:
+                    # Keep other dimensions as-is
+                    if dim.is_static:
+                        new_dims.append(dim.get_length())
+                    else:
+                        new_dims.append(-1)  # Dynamic
+
+            new_shapes[name] = new_dims
+            logger.info(f"  {name}: {current_shape} -> {new_dims}")
+
+        # Apply reshape
+        self._model.reshape(new_shapes)
+        logger.info(f"Model reshaped successfully for batch_size={batch_size}")
+
     def _extract_model_info(self) -> None:
         """Extract input/output information from the model."""
         # Get input info
