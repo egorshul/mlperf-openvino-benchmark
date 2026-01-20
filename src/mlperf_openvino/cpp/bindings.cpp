@@ -21,7 +21,7 @@
 #include "resnet_sut_cpp.hpp"
 #include "bert_sut_cpp.hpp"
 #include "retinanet_sut_cpp.hpp"
-#include "multi_die_sut_cpp.hpp"
+#include "resnet_multi_die_sut_cpp.hpp"
 
 namespace py = pybind11;
 

@@ -126,10 +126,8 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
 
     # Load or create configuration based on model
     if config:
-        click.echo(f"Loading configuration from: {config}")
         benchmark_config = BenchmarkConfig.from_yaml(config, model)
     else:
-        click.echo(f"Using default configuration for {model}")
         benchmark_config = get_default_config(model)
 
     # Override with CLI options
