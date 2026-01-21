@@ -444,6 +444,9 @@ class ResNetMultiDieCppSUTWrapper:
         min_duration_ms = getattr(test_settings, 'min_duration_ms', 0)
         min_query_count = getattr(test_settings, 'min_query_count', 0)
 
+        # Reset counters before benchmark
+        self._cpp_sut.reset_counters()
+
         logger.info(f"Starting PURE C++ Server benchmark: {total_count} total, {perf_count} perf samples")
         logger.info(f"Settings: target_qps={target_qps}, target_latency_ns={target_latency_ns}")
         logger.info(">>> NO PYTHON IN HOT PATH - LoadGen calls C++ directly! <<<")
@@ -464,7 +467,12 @@ class ResNetMultiDieCppSUTWrapper:
             min_query_count
         )
 
-        logger.info("Benchmark completed.")
+        # Sync statistics from C++ after benchmark
+        # In native mode, C++ SUT handled all queries directly
+        self._query_count = self._cpp_sut.get_issued_count()
+
+        logger.info(f"Benchmark completed. Issued: {self._cpp_sut.get_issued_count()}, "
+                   f"Completed: {self._cpp_sut.get_completed_count()}")
 
         # Unload samples
         self.qsl.unload_query_samples(sample_indices)
@@ -507,6 +515,9 @@ class ResNetMultiDieCppSUTWrapper:
         total_count = self.qsl.total_sample_count
         perf_count = self.qsl.performance_sample_count
 
+        # Reset counters before benchmark
+        self._cpp_sut.reset_counters()
+
         logger.info(f"Starting PURE C++ Server benchmark: {total_count} total, {perf_count} perf samples")
         logger.info(">>> NO PYTHON IN HOT PATH - LoadGen calls C++ directly! <<<")
 
@@ -519,7 +530,11 @@ class ResNetMultiDieCppSUTWrapper:
             log_output_dir
         )
 
-        logger.info("Benchmark completed.")
+        # Sync statistics from C++
+        self._query_count = self._cpp_sut.get_issued_count()
+
+        logger.info(f"Benchmark completed. Issued: {self._cpp_sut.get_issued_count()}, "
+                   f"Completed: {self._cpp_sut.get_completed_count()}")
 
         # Unload samples
         self.qsl.unload_query_samples(sample_indices)
