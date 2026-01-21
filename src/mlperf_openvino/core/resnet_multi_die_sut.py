@@ -180,7 +180,6 @@ class ResNetMultiDieCppSUTWrapper:
         This registers data pointers directly in C++ to avoid Python overhead
         on the critical path.
         """
-        self._cached_inputs = {}
         self._qsl_data_ready = False
         self._cpp_qsl_registered = False
 
@@ -196,25 +195,44 @@ class ResNetMultiDieCppSUTWrapper:
         first_idx = next(iter(self.qsl._loaded_samples.keys()))
         sample = self.qsl._loaded_samples[first_idx]
 
-        # Check if already correct format
-        if (isinstance(sample, np.ndarray) and
-            sample.dtype == np.float32 and
-            sample.flags['C_CONTIGUOUS'] and
-            sample.ndim == 4):
-            self._qsl_data_ready = True
+        if not isinstance(sample, np.ndarray):
+            logger.debug("QSL data is not numpy array, skipping fast path")
+            return
 
-            # Register all samples in C++ for fast dispatch
-            try:
-                for idx, data in self.qsl._loaded_samples.items():
-                    self._cpp_sut.register_sample_data(idx, data)
-                self._cpp_qsl_registered = True
-                logger.debug(f"Registered {len(self.qsl._loaded_samples)} samples in C++ for fast dispatch")
-            except Exception as e:
-                logger.debug(f"Failed to register samples in C++: {e}")
-                self._cpp_qsl_registered = False
-        else:
+        # Check format and prepare data
+        needs_batch_dim = (sample.ndim == 3)
+        needs_dtype_conv = (sample.dtype != np.float32)
+        needs_contiguous = (not sample.flags['C_CONTIGUOUS'])
+
+        if needs_dtype_conv or needs_contiguous:
             logger.debug(f"QSL data needs conversion: dtype={sample.dtype}, "
-                       f"contiguous={sample.flags['C_CONTIGUOUS']}, ndim={sample.ndim}")
+                       f"contiguous={sample.flags['C_CONTIGUOUS']}")
+            # Don't use fast path if conversion needed
+            return
+
+        # Register all samples in C++ for fast dispatch
+        # If 3D, add batch dimension during registration
+        try:
+            registered_count = 0
+            for idx, data in self.qsl._loaded_samples.items():
+                if needs_batch_dim:
+                    # Add batch dimension - this creates a view, not copy
+                    data = data[np.newaxis, ...]
+                    # Make contiguous if view is not contiguous
+                    if not data.flags['C_CONTIGUOUS']:
+                        data = np.ascontiguousarray(data)
+                    # Store the 4D version back so we don't recreate it
+                    self.qsl._loaded_samples[idx] = data
+
+                self._cpp_sut.register_sample_data(idx, data)
+                registered_count += 1
+
+            self._cpp_qsl_registered = True
+            self._qsl_data_ready = True
+            logger.debug(f"Registered {registered_count} samples in C++ for fast dispatch")
+        except Exception as e:
+            logger.debug(f"Failed to register samples in C++: {e}")
+            self._cpp_qsl_registered = False
 
     def _get_input_data(self, sample_idx: int) -> np.ndarray:
         """Get input data for a sample."""
