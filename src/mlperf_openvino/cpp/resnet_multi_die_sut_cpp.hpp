@@ -1,11 +1,12 @@
 /**
  * High-performance C++ SUT for ResNet50 on multi-die accelerators.
  *
- * Architecture (NVIDIA LWIS-style):
- * - IssueQuery: instant return, just pushes to work queue
- * - Issue Thread: pulls from queue, does memcpy, submits to device
+ * Architecture (NVIDIA LWIS-style with per-die parallelism):
+ * - IssueQuery: instant return, just pushes to shared work queue
+ * - Per-die Issue Threads: each die has dedicated thread that pulls from
+ *   shared queue, does memcpy, and submits to its own device (parallel!)
  * - Completion Thread: batches responses, calls QuerySamplesComplete
- * - Lock-free queues throughout
+ * - Lock-free queues throughout (MPSC work queue, per-die request pools)
  */
 
 #pragma once
@@ -30,11 +31,18 @@ namespace mlperf_ov {
 
 class ResNetMultiDieCppSUT;
 
-// Per-die context
+// Per-die context with its own request pool and issue thread
 struct DieContext {
     std::string device_name;
     ov::CompiledModel compiled_model;
     int optimal_nireq = 1;
+
+    // Per-die request pool indices (into main infer_contexts_ vector)
+    size_t request_start_idx = 0;
+    size_t request_count = 0;
+
+    // Per-die lock-free pool management
+    std::atomic<size_t> pool_search_hint{0};
 };
 
 // Inference request context with pre-allocated buffers
@@ -150,10 +158,14 @@ private:
     std::atomic<size_t> work_head_{0};  // IssueQuery writes here
     std::atomic<size_t> work_tail_{0};  // Issue thread reads here
 
-    // Issue thread (pulls from work queue, submits to device)
-    std::thread issue_thread_;
+    // Per-die issue threads (each pulls from shared queue, uses own die's requests)
+    std::vector<std::thread> issue_threads_;
     std::atomic<bool> issue_running_{false};
-    void issue_thread_func();
+    void issue_thread_func(size_t die_idx);
+
+    // Per-die request acquisition (lock-free within die's pool)
+    size_t acquire_request_for_die(size_t die_idx);
+    void release_request_for_die(size_t die_idx, size_t local_id);
 
     // =========================================================================
     // COMPLETION THREAD WITH RESPONSE BATCHING
