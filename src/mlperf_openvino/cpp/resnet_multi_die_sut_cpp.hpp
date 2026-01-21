@@ -12,6 +12,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstring>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -235,6 +236,118 @@ private:
     // Lock-free request pool operations
     size_t acquire_request();
     void release_request(size_t id);
+
+    // Run pure C++ Server benchmark (no Python in hot path!)
+    void run_server_benchmark(
+        size_t total_sample_count,
+        size_t performance_sample_count,
+        const std::string& mlperf_conf_path,
+        const std::string& user_conf_path,
+        const std::string& log_output_dir);
+
+    // Friend class for pure C++ SUT
+    friend class ResNetServerSUT;
+    friend class ResNetServerQSL;
+};
+
+} // namespace mlperf_ov
+
+// =============================================================================
+// PURE C++ SERVER SUT (eliminates Python from hot path)
+// =============================================================================
+
+namespace mlperf_ov {
+
+/**
+ * Pure C++ SUT for Server mode - registered directly with LoadGen.
+ * Eliminates Python overhead in the hot path.
+ */
+class ResNetServerSUT : public mlperf::SystemUnderTest {
+public:
+    ResNetServerSUT(ResNetMultiDieCppSUT* backend, const std::string& name = "ResNetServerSUT")
+        : backend_(backend), name_(name) {
+        backend_->enable_direct_loadgen(true);
+    }
+
+    ~ResNetServerSUT() override = default;
+
+    const std::string& Name() override { return name_; }
+
+    void IssueQuery(const std::vector<mlperf::QuerySample>& samples) override {
+        // DIRECT C++ processing - NO Python in this path!
+        for (const auto& sample : samples) {
+            process_sample(sample.id, sample.index);
+        }
+    }
+
+    void FlushQueries() override {
+        backend_->wait_all();
+    }
+
+private:
+    void process_sample(uint64_t query_id, int sample_idx) {
+        // Find sample data
+        const float* sample_data = nullptr;
+        size_t sample_size = 0;
+        {
+            std::shared_lock<std::shared_mutex> lock(backend_->sample_cache_mutex_);
+            auto it = backend_->sample_data_cache_.find(sample_idx);
+            if (it != backend_->sample_data_cache_.end()) {
+                sample_data = it->second.data;
+                sample_size = it->second.size;
+            }
+        }
+
+        if (!sample_data) {
+            // Sample not found - send dummy response
+            mlperf::QuerySampleResponse response{query_id, 0, 0};
+            mlperf::QuerySamplesComplete(&response, 1);
+            return;
+        }
+
+        // Acquire request
+        size_t req_id = backend_->acquire_request();
+        ResNetMultiDieInferContext* ctx = backend_->infer_contexts_[req_id].get();
+
+        // Setup context
+        ctx->query_ids[0] = query_id;
+        ctx->sample_indices[0] = sample_idx;
+        ctx->actual_batch_size = 1;
+
+        // Copy input data
+        float* tensor_data = ctx->input_tensor.data<float>();
+        std::memcpy(tensor_data, sample_data, std::min(sample_size, backend_->input_byte_size_));
+
+        // Start async inference
+        backend_->pending_count_.fetch_add(1, std::memory_order_relaxed);
+        ctx->request.start_async();
+        backend_->issued_count_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    ResNetMultiDieCppSUT* backend_;
+    std::string name_;
+};
+
+/**
+ * Pure C++ QSL for Server mode - samples are pre-registered via register_sample_data()
+ */
+class ResNetServerQSL : public mlperf::QuerySampleLibrary {
+public:
+    ResNetServerQSL(size_t total_count, size_t perf_count)
+        : total_count_(total_count), perf_count_(perf_count), name_("ResNetServerQSL") {}
+
+    const std::string& Name() override { return name_; }
+    size_t TotalSampleCount() override { return total_count_; }
+    size_t PerformanceSampleCount() override { return perf_count_; }
+
+    // Samples are already loaded by Python - these are no-ops
+    void LoadSamplesToRam(const std::vector<mlperf::QuerySampleIndex>& samples) override {}
+    void UnloadSamplesFromRam(const std::vector<mlperf::QuerySampleIndex>& samples) override {}
+
+private:
+    size_t total_count_;
+    size_t perf_count_;
+    std::string name_;
 };
 
 } // namespace mlperf_ov

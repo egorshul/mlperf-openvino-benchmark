@@ -514,7 +514,30 @@ PYBIND11_MODULE(_cpp_sut, m) {
 
         .def("enable_direct_loadgen", &mlperf_ov::ResNetMultiDieCppSUT::enable_direct_loadgen,
              py::arg("enable"),
-             "Enable direct LoadGen C++ mode for Server scenario");
+             "Enable direct LoadGen C++ mode for Server scenario")
+
+        .def("run_server_benchmark",
+             [](mlperf_ov::ResNetMultiDieCppSUT& self,
+                size_t total_sample_count,
+                size_t performance_sample_count,
+                const std::string& mlperf_conf_path,
+                const std::string& user_conf_path,
+                const std::string& log_output_dir) {
+                 // Release GIL and run benchmark entirely in C++!
+                 py::gil_scoped_release release;
+                 self.run_server_benchmark(
+                     total_sample_count,
+                     performance_sample_count,
+                     mlperf_conf_path,
+                     user_conf_path,
+                     log_output_dir);
+             },
+             py::arg("total_sample_count"),
+             py::arg("performance_sample_count"),
+             py::arg("mlperf_conf_path") = "",
+             py::arg("user_conf_path") = "",
+             py::arg("log_output_dir") = ".",
+             "Run Server benchmark with pure C++ SUT (NO Python in hot path!)");
 
     // RetinaNetMultiDieCppSUT - multi-die accelerator for RetinaNet
     py::class_<mlperf_ov::RetinaNetMultiDieCppSUT>(m, "RetinaNetMultiDieCppSUT")

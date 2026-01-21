@@ -845,4 +845,41 @@ void ResNetMultiDieCppSUT::issue_queries_server_fast(
     }
 }
 
+void ResNetMultiDieCppSUT::run_server_benchmark(
+    size_t total_sample_count,
+    size_t performance_sample_count,
+    const std::string& mlperf_conf_path,
+    const std::string& user_conf_path,
+    const std::string& log_output_dir) {
+
+    if (!loaded_) {
+        throw std::runtime_error("Model not loaded");
+    }
+
+    // Create pure C++ SUT and QSL
+    ResNetServerSUT server_sut(this);
+    ResNetServerQSL server_qsl(total_sample_count, performance_sample_count);
+
+    // Configure test settings
+    mlperf::TestSettings test_settings;
+    test_settings.scenario = mlperf::TestScenario::Server;
+    test_settings.mode = mlperf::TestMode::PerformanceOnly;
+
+    // Load config files if provided
+    if (!mlperf_conf_path.empty()) {
+        test_settings.FromConfig(mlperf_conf_path, "resnet50", "Server");
+    }
+    if (!user_conf_path.empty()) {
+        test_settings.FromConfig(user_conf_path, "resnet50", "Server");
+    }
+
+    // Configure log settings
+    mlperf::LogSettings log_settings;
+    log_settings.log_output.outdir = log_output_dir;
+    log_settings.log_output.copy_summary_to_stdout = true;
+
+    // Run benchmark - entirely in C++, no Python in hot path!
+    mlperf::StartTestWithLogSettings(&server_sut, &server_qsl, test_settings, log_settings);
+}
+
 } // namespace mlperf_ov
