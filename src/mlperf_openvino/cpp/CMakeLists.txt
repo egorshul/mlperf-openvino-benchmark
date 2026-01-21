@@ -94,15 +94,57 @@ static const char mlperf_conf[] = \"${MLPERF_CONF_CONTENT}\";
 #endif // MLPERF_CONF_H
 ")
 
-    # Generate version_generated.cc
+    # Generate version_generated.cc with all required functions
     message(STATUS "Generating version_generated.cc...")
-    string(TIMESTAMP BUILD_DATE "%Y-%m-%dT%H:%M:%S")
+    string(TIMESTAMP BUILD_DATE_LOCAL "%Y-%m-%dT%H:%M:%S")
+    string(TIMESTAMP BUILD_DATE_UTC "%Y-%m-%dT%H:%M:%SZ" UTC)
     file(WRITE "${LOADGEN_DIR}/version_generated.cc"
-"// Auto-generated version info
+"// Auto-generated version info (replaces version_generator.py output)
+#include <string>
+
 namespace mlperf {
-const char* version_override = nullptr;
-const char* build_info_string = \"Built by cmake on ${BUILD_DATE}\";
+
+const std::string& LoadgenVersion() {
+    static const std::string version = \"v4.1\";
+    return version;
 }
+
+const std::string& LoadgenGitRevision() {
+    static const std::string revision = \"cmake-build\";
+    return revision;
+}
+
+const std::string& LoadgenBuildDateLocal() {
+    static const std::string date = \"${BUILD_DATE_LOCAL}\";
+    return date;
+}
+
+const std::string& LoadgenBuildDateUtc() {
+    static const std::string date = \"${BUILD_DATE_UTC}\";
+    return date;
+}
+
+const std::string& LoadgenGitCommitDate() {
+    static const std::string date = \"NA\";
+    return date;
+}
+
+const std::string& LoadgenGitStatus() {
+    static const std::string status = \"NA\";
+    return status;
+}
+
+const std::string& LoadgenGitLog() {
+    static const std::string log = \"Built from source via CMake\";
+    return log;
+}
+
+const std::string& LoadgenSha1OfFiles() {
+    static const std::string sha1 = \"NA NA\";
+    return sha1;
+}
+
+}  // namespace mlperf
 ")
 
     # Create CMakeLists.txt for loadgen
