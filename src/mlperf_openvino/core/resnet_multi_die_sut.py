@@ -155,10 +155,8 @@ class ResNetMultiDieCppSUTWrapper:
                         self._offline_responses.append((qid, array.array('B', b'\x00')))
             self._cpp_sut.set_batch_response_callback(batch_callback)
         else:
-            # Server mode: use direct LoadGen C++ (like NVIDIA LWIS)
-            # NO Python callback, NO GIL - responses go directly to LoadGen
+            # Server mode: use direct LoadGen C++ - responses go directly to LoadGen
             self._cpp_sut.enable_direct_loadgen(True)
-            print("[Server] Using DIRECT LoadGen C++ mode (NO GIL, like NVIDIA LWIS)")
 
     def _start_progress_thread(self):
         """Start progress monitoring (silent)."""
@@ -340,11 +338,8 @@ class ResNetMultiDieCppSUTWrapper:
         if not getattr(self, '_qsl_validated', False):
             self._prevalidate_qsl_data()
             self._qsl_validated = True
-            # Log which path we're using
             if getattr(self, '_cpp_qsl_registered', False):
-                print(f"[Server] Using FAST path (C++ QSL, {len(self.qsl._loaded_samples)} samples registered)")
-            else:
-                print(f"[Server] Using SLOW path (Python data passing)")
+                logger.info(f"Server mode: {len(self.qsl._loaded_samples)} samples registered in C++")
 
         # Check if we can use the fastest path (data pre-registered in C++)
         cpp_qsl_registered = getattr(self, '_cpp_qsl_registered', False)

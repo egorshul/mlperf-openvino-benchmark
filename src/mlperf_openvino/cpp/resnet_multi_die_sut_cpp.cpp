@@ -85,7 +85,8 @@ size_t ResNetMultiDieCppSUT::acquire_request() {
         }
     }
 
-    // All slots busy - spin wait for any slot
+    // All slots busy - spin wait with pause instruction first
+    int spin_count = 0;
     while (true) {
         for (size_t idx = 0; idx < num_requests; ++idx) {
             int expected = SLOT_FREE;
@@ -97,8 +98,20 @@ size_t ResNetMultiDieCppSUT::acquire_request() {
                 return idx;
             }
         }
-        // Brief pause to reduce contention
-        std::this_thread::yield();
+        // Adaptive backoff: pause -> yield -> brief sleep
+        spin_count++;
+        if (spin_count < 100) {
+            #if defined(__x86_64__) || defined(_M_X64)
+            __builtin_ia32_pause();
+            #elif defined(__aarch64__)
+            asm volatile("yield");
+            #endif
+        } else if (spin_count < 1000) {
+            std::this_thread::yield();
+        } else {
+            std::this_thread::sleep_for(std::chrono::microseconds(1));
+            spin_count = 0;  // Reset after sleep
+        }
     }
 }
 
@@ -125,23 +138,23 @@ void ResNetMultiDieCppSUT::enqueue_completion(ResNetMultiDieInferContext* ctx) {
 }
 
 void ResNetMultiDieCppSUT::completion_thread_func() {
-    // Pre-allocated batch buffer for LoadGen responses
-    static constexpr int MAX_BATCH_RESPONSES = 256;
-    std::vector<mlperf::QuerySampleResponse> batch_responses;
-    batch_responses.reserve(MAX_BATCH_RESPONSES);
+    // Pre-allocated batch buffer for LoadGen responses (fixed size, no reallocation)
+    static constexpr int MAX_BATCH_RESPONSES = 512;
+    mlperf::QuerySampleResponse batch_responses[MAX_BATCH_RESPONSES];
+    uint64_t callback_ids[MAX_BATCH_RESPONSES];
 
-    // For Offline mode callback
-    std::vector<uint64_t> callback_ids;
-    callback_ids.reserve(MAX_BATCH_RESPONSES);
+    int idle_spins = 0;
+    static constexpr int SPINS_BEFORE_YIELD = 1000;
+    static constexpr int SPINS_BEFORE_SLEEP = 10000;
 
     while (completion_running_.load(std::memory_order_acquire)) {
-        batch_responses.clear();
-        callback_ids.clear();
-
+        size_t response_count = 0;
+        size_t callback_count = 0;
         size_t processed = 0;
         size_t tail = completion_tail_.load(std::memory_order_relaxed);
+        int total_samples = 0;
 
-        // Collect batch of completions
+        // Collect batch of completions - no allocation, direct array access
         while (processed < MAX_BATCH_RESPONSES) {
             size_t idx = tail % COMPLETION_QUEUE_SIZE;
 
@@ -152,10 +165,9 @@ void ResNetMultiDieCppSUT::completion_thread_func() {
             ResNetMultiDieInferContext* ctx = completion_queue_[idx].ctx;
             completion_queue_[idx].valid.store(false, std::memory_order_release);
 
-            // Process this completion
             int actual_batch_size = ctx->actual_batch_size;
 
-            // Store predictions if needed (accuracy mode)
+            // Store predictions if needed (accuracy mode only)
             if (store_predictions_) {
                 ov::Tensor output_tensor = ctx->request.get_output_tensor(output_idx_);
                 const float* output_data = nullptr;
@@ -183,49 +195,64 @@ void ResNetMultiDieCppSUT::completion_thread_func() {
                 }
             }
 
-            // Collect responses
+            // Collect responses directly into pre-allocated arrays
             if (use_direct_loadgen_.load(std::memory_order_relaxed)) {
-                // Direct LoadGen mode - use pre-allocated response buffer
-                for (int i = 0; i < actual_batch_size; ++i) {
-                    batch_responses.push_back({ctx->query_ids[i], 0, 0});
+                for (int i = 0; i < actual_batch_size && response_count < MAX_BATCH_RESPONSES; ++i) {
+                    batch_responses[response_count++] = {ctx->query_ids[i], 0, 0};
                 }
             } else {
-                // Python callback mode
-                for (int i = 0; i < actual_batch_size; ++i) {
-                    callback_ids.push_back(ctx->query_ids[i]);
+                for (int i = 0; i < actual_batch_size && callback_count < MAX_BATCH_RESPONSES; ++i) {
+                    callback_ids[callback_count++] = ctx->query_ids[i];
                 }
             }
 
-            completed_count_.fetch_add(actual_batch_size, std::memory_order_relaxed);
-            pending_count_.fetch_sub(1, std::memory_order_relaxed);
+            total_samples += actual_batch_size;
 
-            // Release request back to pool
+            // Release request back to pool immediately
             release_request(ctx->pool_id);
 
             tail++;
             processed++;
         }
 
-        // Update tail
-        if (processed > 0) {
+        // Batch update counters (fewer atomic ops)
+        if (total_samples > 0) {
+            completed_count_.fetch_add(total_samples, std::memory_order_relaxed);
+            pending_count_.fetch_sub(processed, std::memory_order_relaxed);
             completion_tail_.store(tail, std::memory_order_release);
+            idle_spins = 0;  // Reset idle counter
         }
 
-        // Send batched responses
-        if (!batch_responses.empty()) {
-            mlperf::QuerySamplesComplete(batch_responses.data(), batch_responses.size());
+        // Send batched responses to LoadGen
+        if (response_count > 0) {
+            mlperf::QuerySamplesComplete(batch_responses, response_count);
         }
 
-        if (!callback_ids.empty()) {
+        // Python callback (Offline mode)
+        if (callback_count > 0) {
+            std::vector<uint64_t> ids(callback_ids, callback_ids + callback_count);
             std::lock_guard<std::mutex> lock(callback_mutex_);
             if (batch_response_callback_) {
-                batch_response_callback_(callback_ids);
+                batch_response_callback_(ids);
             }
         }
 
-        // If no work, brief pause
+        // Adaptive backoff - spin first, then yield, then sleep
         if (processed == 0) {
-            std::this_thread::sleep_for(std::chrono::microseconds(10));
+            idle_spins++;
+            if (idle_spins < SPINS_BEFORE_YIELD) {
+                // Spin with pause (reduces power and allows other hyperthreads)
+                #if defined(__x86_64__) || defined(_M_X64)
+                __builtin_ia32_pause();
+                #elif defined(__aarch64__)
+                asm volatile("yield");
+                #endif
+            } else if (idle_spins < SPINS_BEFORE_SLEEP) {
+                std::this_thread::yield();
+            } else {
+                // Only sleep after many idle iterations
+                std::this_thread::sleep_for(std::chrono::microseconds(1));
+            }
         }
     }
 
@@ -540,8 +567,11 @@ void ResNetMultiDieCppSUT::issue_queries_server_fast(
         ctx->sample_indices[0] = sample_idx;
         ctx->actual_batch_size = 1;
 
-        float* tensor_data = ctx->input_tensor.data<float>();
-        std::memcpy(tensor_data, sample.data, std::min(sample.size, ctx->input_tensor.get_byte_size()));
+        // ZERO-COPY: wrap QSL buffer directly instead of memcpy
+        // This avoids CPU-side copy - data goes directly from QSL to device
+        ov::Tensor external_tensor(input_type_, input_shape_,
+                                   const_cast<float*>(sample.data));
+        ctx->request.set_input_tensor(external_tensor);
 
         pending_count_.fetch_add(1, std::memory_order_relaxed);
         ctx->request.start_async();
