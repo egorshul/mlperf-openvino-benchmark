@@ -230,8 +230,14 @@ void ResNetMultiDieCppSUT::issue_thread_func(size_t die_idx) {
         // Find sample data
         auto it = sample_data_cache_.find(sample_idx);
         if (it == sample_data_cache_.end()) {
+            // Sample not found - send dummy response to LoadGen (don't hang!)
             queued_count_.fetch_sub(1, std::memory_order_relaxed);
-            continue;  // Skip invalid sample
+            if (use_direct_loadgen_.load(std::memory_order_relaxed)) {
+                mlperf::QuerySampleResponse response{query_id, 0, 0};
+                mlperf::QuerySamplesComplete(&response, 1);
+                completed_count_.fetch_add(1, std::memory_order_relaxed);
+            }
+            continue;
         }
         const SampleData& sample = it->second;
 
@@ -276,6 +282,11 @@ void ResNetMultiDieCppSUT::issue_thread_func(size_t die_idx) {
         auto it = sample_data_cache_.find(sample_idx);
         if (it == sample_data_cache_.end()) {
             queued_count_.fetch_sub(1, std::memory_order_relaxed);
+            if (use_direct_loadgen_.load(std::memory_order_relaxed)) {
+                mlperf::QuerySampleResponse response{query_id, 0, 0};
+                mlperf::QuerySamplesComplete(&response, 1);
+                completed_count_.fetch_add(1, std::memory_order_relaxed);
+            }
             continue;
         }
 
