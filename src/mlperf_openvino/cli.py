@@ -207,14 +207,10 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
     scenario_config.min_duration_ms = duration
     if target_qps > 0:
         scenario_config.target_qps = target_qps
-        click.echo(f"Server mode: target_qps={target_qps}")
     elif scenario == 'Server':
-        # For Server mode, set high target_qps if not specified
-        # This allows LoadGen to send queries as fast as the system can handle
-        scenario_config.target_qps = 50000.0  # Very high to not be the bottleneck
-        click.echo(f"Server mode: target_qps={scenario_config.target_qps} (use --target-qps to set)")
-        click.echo("NOTE: Server mode measures latency-bounded throughput.")
-        click.echo("      For maximum throughput, use --scenario Offline")
+        # For Server mode, use reasonable default target_qps
+        # Too high value causes LoadGen to queue more requests than system can handle
+        scenario_config.target_qps = 1000.0  # Reasonable default for accelerators
 
     # Validate configuration
     if not benchmark_config.model.model_path:

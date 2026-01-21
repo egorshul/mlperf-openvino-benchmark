@@ -89,6 +89,9 @@ class RetinaNetMultiDieCppSUTWrapper:
         self._offline_responses: List[tuple] = []
         self._offline_lock = threading.Lock()
 
+        # Server mode: callback setup flag
+        self._server_callback_set = False
+
         logger.debug(f"RetinaNetMultiDieCppSUTWrapper: device_prefix={device_prefix}")
 
     def load(self) -> None:
@@ -179,7 +182,10 @@ class RetinaNetMultiDieCppSUTWrapper:
 
     def _issue_query_server(self, query_samples: List) -> None:
         """Process queries in Server mode."""
-        self._setup_response_callback(is_offline=False)
+        # Setup callback only once
+        if not self._server_callback_set:
+            self._setup_response_callback(is_offline=False)
+            self._server_callback_set = True
 
         for qs in query_samples:
             input_data = self._get_input_data(qs.index)
@@ -243,6 +249,7 @@ class RetinaNetMultiDieCppSUTWrapper:
         self._cpp_sut.reset_counters()
         self._offline_responses.clear()
         self._query_count = 0
+        self._server_callback_set = False
 
 
 def is_retinanet_multi_die_cpp_available() -> bool:

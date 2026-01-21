@@ -97,6 +97,9 @@ class ResNetMultiDieCppSUTWrapper:
         self._progress_stop = False
         self._progress_thread = None
 
+        # Server mode: callback setup flag
+        self._server_callback_set = False
+
         logger.debug(f"ResNetMultiDieCppSUTWrapper: device_prefix={device_prefix}, batch_size={self.batch_size}")
 
     def load(self) -> None:
@@ -246,7 +249,11 @@ class ResNetMultiDieCppSUTWrapper:
         Server mode optimization: collect incoming queries into micro-batches
         for better throughput while maintaining low latency.
         """
-        self._setup_response_callback(is_offline=False)
+        # Setup callback only once
+        if not self._server_callback_set:
+            self._setup_response_callback(is_offline=False)
+            self._server_callback_set = True
+
         batch_size = self.batch_size
         num_samples = len(query_samples)
 
@@ -350,6 +357,7 @@ class ResNetMultiDieCppSUTWrapper:
         self._cpp_sut.reset_counters()
         self._offline_responses.clear()
         self._query_count = 0
+        self._server_callback_set = False
 
 
 def is_resnet_multi_die_cpp_available() -> bool:
