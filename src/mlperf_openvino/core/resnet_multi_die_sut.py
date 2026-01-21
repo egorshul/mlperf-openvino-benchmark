@@ -395,6 +395,61 @@ class ResNetMultiDieCppSUTWrapper:
         """Get LoadGen SUT object."""
         return lg.ConstructSUT(self.issue_queries, self.flush_queries)
 
+    def run_server_benchmark_cpp(
+        self,
+        mlperf_conf_path: str = "",
+        user_conf_path: str = "",
+        log_output_dir: str = "."
+    ) -> None:
+        """Run Server benchmark with PURE C++ SUT - no Python in hot path!
+
+        This bypasses Python entirely during the benchmark for maximum performance.
+        Uses the same architecture as official OpenVINO MLPerf.
+
+        Args:
+            mlperf_conf_path: Path to mlperf.conf
+            user_conf_path: Path to user.conf
+            log_output_dir: Directory for LoadGen output logs
+        """
+        if self.scenario != Scenario.SERVER:
+            raise ValueError("run_server_benchmark_cpp only works in Server scenario")
+
+        # Ensure model is loaded
+        if not self.is_loaded:
+            raise RuntimeError("Model not loaded. Call load() first.")
+
+        # Load samples to RAM using QSL
+        logger.info("Loading samples to RAM...")
+        sample_indices = list(range(min(self.qsl.performance_sample_count, self.qsl.total_sample_count)))
+        self.qsl.load_query_samples(sample_indices)
+
+        # Register samples in C++
+        logger.info("Registering samples in C++ SUT...")
+        self._prevalidate_qsl_data()
+
+        if not getattr(self, '_cpp_qsl_registered', False):
+            raise RuntimeError("Failed to register samples in C++. Check QSL data format.")
+
+        total_count = self.qsl.total_sample_count
+        perf_count = self.qsl.performance_sample_count
+
+        logger.info(f"Starting PURE C++ Server benchmark: {total_count} total, {perf_count} perf samples")
+        logger.info(">>> NO PYTHON IN HOT PATH - LoadGen calls C++ directly! <<<")
+
+        # Run benchmark entirely in C++!
+        self._cpp_sut.run_server_benchmark(
+            total_count,
+            perf_count,
+            mlperf_conf_path,
+            user_conf_path,
+            log_output_dir
+        )
+
+        logger.info("Benchmark completed.")
+
+        # Unload samples
+        self.qsl.unload_query_samples(sample_indices)
+
     def get_qsl(self):
         """Get LoadGen QSL object."""
         return lg.ConstructQSL(
