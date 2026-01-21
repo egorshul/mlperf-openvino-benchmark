@@ -136,6 +136,27 @@ public:
         int64_t min_duration_ms = 0,
         int64_t min_query_count = 0);
 
+    // NON-BLOCKING enqueue for Server mode (used by ResNetServerSUT)
+    void enqueue_work(uint64_t query_id, int sample_idx) {
+        // Lock-free push to work queue - returns IMMEDIATELY
+        size_t head = work_head_.fetch_add(1, std::memory_order_acq_rel);
+        size_t idx = head % WORK_QUEUE_SIZE;
+
+        // Spin if slot is still in use (very rare under normal load)
+        while (work_queue_[idx].valid.load(std::memory_order_acquire)) {
+            #if defined(__x86_64__) || defined(_M_X64)
+            __builtin_ia32_pause();
+            #elif defined(__aarch64__)
+            asm volatile("yield");
+            #endif
+        }
+
+        work_queue_[idx].query_id = query_id;
+        work_queue_[idx].sample_idx = sample_idx;
+        work_queue_[idx].valid.store(true, std::memory_order_release);
+        queued_count_.fetch_add(1, std::memory_order_relaxed);
+    }
+
 private:
     // Config
     std::string model_path_;
@@ -279,10 +300,12 @@ public:
     const std::string& Name() override { return name_; }
 
     void IssueQuery(const std::vector<mlperf::QuerySample>& samples) override {
-        // DIRECT C++ processing - NO Python in this path!
+        // NON-BLOCKING: Just push to work queue and return IMMEDIATELY!
+        // Worker threads (issue_threads_) will process from the queue.
         for (const auto& sample : samples) {
-            process_sample(sample.id, sample.index);
+            backend_->enqueue_work(sample.id, sample.index);
         }
+        // IssueQuery returns instantly - no blocking!
     }
 
     void FlushQueries() override {
@@ -290,45 +313,6 @@ public:
     }
 
 private:
-    void process_sample(uint64_t query_id, int sample_idx) {
-        // Find sample data
-        const float* sample_data = nullptr;
-        size_t sample_size = 0;
-        {
-            std::shared_lock<std::shared_mutex> lock(backend_->sample_cache_mutex_);
-            auto it = backend_->sample_data_cache_.find(sample_idx);
-            if (it != backend_->sample_data_cache_.end()) {
-                sample_data = it->second.data;
-                sample_size = it->second.size;
-            }
-        }
-
-        if (!sample_data) {
-            // Sample not found - send dummy response
-            mlperf::QuerySampleResponse response{query_id, 0, 0};
-            mlperf::QuerySamplesComplete(&response, 1);
-            return;
-        }
-
-        // Acquire request
-        size_t req_id = backend_->acquire_request();
-        ResNetMultiDieInferContext* ctx = backend_->infer_contexts_[req_id].get();
-
-        // Setup context
-        ctx->query_ids[0] = query_id;
-        ctx->sample_indices[0] = sample_idx;
-        ctx->actual_batch_size = 1;
-
-        // Copy input data
-        float* tensor_data = ctx->input_tensor.data<float>();
-        std::memcpy(tensor_data, sample_data, std::min(sample_size, backend_->input_byte_size_));
-
-        // Start async inference
-        backend_->pending_count_.fetch_add(1, std::memory_order_relaxed);
-        ctx->request.start_async();
-        backend_->issued_count_.fetch_add(1, std::memory_order_relaxed);
-    }
-
     ResNetMultiDieCppSUT* backend_;
     std::string name_;
 };
