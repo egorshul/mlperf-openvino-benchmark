@@ -400,18 +400,30 @@ void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx
             }
         }
 
-        // Call batch response callback (efficient - one Python call per batch)
+        // Queue responses for batched callback (reduces Python GIL overhead)
+        std::vector<uint64_t> to_flush;
         {
-            std::lock_guard<std::mutex> lock(callback_mutex_);
+            std::lock_guard<std::mutex> lock(pending_responses_mutex_);
+            for (int i = 0; i < actual_batch_size; ++i) {
+                pending_responses_.push_back(ctx->query_ids[i]);
+            }
+
+            // Flush if batch is full
+            if (pending_responses_.size() >= RESPONSE_BATCH_SIZE) {
+                to_flush = std::move(pending_responses_);
+                pending_responses_.clear();
+                pending_responses_.reserve(RESPONSE_BATCH_SIZE);
+            }
+        }
+
+        // Call Python callback outside of pending_responses_mutex_
+        if (!to_flush.empty()) {
+            std::lock_guard<std::mutex> cb_lock(callback_mutex_);
             if (batch_response_callback_) {
-                // Extract query_ids for actual batch size
-                std::vector<uint64_t> batch_query_ids(ctx->query_ids.begin(),
-                                                       ctx->query_ids.begin() + actual_batch_size);
-                batch_response_callback_(batch_query_ids);
+                batch_response_callback_(to_flush);
             } else if (response_callback_) {
-                // Fallback to per-sample callback (slower)
-                for (int i = 0; i < actual_batch_size; ++i) {
-                    response_callback_(ctx->query_ids[i], nullptr, 0);
+                for (auto qid : to_flush) {
+                    response_callback_(qid, nullptr, 0);
                 }
             }
         }
@@ -419,16 +431,10 @@ void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx
     } catch (const std::exception& e) {
         std::cerr << "[ResNetMultiDieCppSUT] Callback error on " << ctx->die_name << ": " << e.what() << std::endl;
 
-        // Still notify LoadGen to avoid hang
-        std::lock_guard<std::mutex> lock(callback_mutex_);
-        if (batch_response_callback_) {
-            std::vector<uint64_t> batch_query_ids(ctx->query_ids.begin(),
-                                                   ctx->query_ids.begin() + actual_batch_size);
-            batch_response_callback_(batch_query_ids);
-        } else if (response_callback_) {
-            for (int i = 0; i < actual_batch_size; ++i) {
-                response_callback_(ctx->query_ids[i], nullptr, 0);
-            }
+        // Still queue responses to avoid hang
+        std::lock_guard<std::mutex> lock(pending_responses_mutex_);
+        for (int i = 0; i < actual_batch_size; ++i) {
+            pending_responses_.push_back(ctx->query_ids[i]);
         }
     }
 
@@ -438,10 +444,34 @@ void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx
     callbacks_running_--;
 }
 
+void ResNetMultiDieCppSUT::flush_pending_responses() {
+    std::vector<uint64_t> to_flush;
+    {
+        std::lock_guard<std::mutex> lock(pending_responses_mutex_);
+        if (!pending_responses_.empty()) {
+            to_flush = std::move(pending_responses_);
+            pending_responses_.clear();
+        }
+    }
+
+    if (!to_flush.empty()) {
+        std::lock_guard<std::mutex> cb_lock(callback_mutex_);
+        if (batch_response_callback_) {
+            batch_response_callback_(to_flush);
+        } else if (response_callback_) {
+            for (auto qid : to_flush) {
+                response_callback_(qid, nullptr, 0);
+            }
+        }
+    }
+}
+
 void ResNetMultiDieCppSUT::wait_all() {
     while (pending_count_.load() > 0 || callbacks_running_.load() > 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+    // Flush any remaining responses
+    flush_pending_responses();
 }
 
 void ResNetMultiDieCppSUT::reset_counters() {

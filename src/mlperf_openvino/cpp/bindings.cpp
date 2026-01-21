@@ -525,7 +525,10 @@ PYBIND11_MODULE(_cpp_sut, m) {
              py::arg("input_arrays"),
              py::arg("query_ids"),
              py::arg("sample_indices"),
-             "Process multiple queries efficiently in C++ (GIL released during dispatch)");
+             "Process multiple queries efficiently in C++ (GIL released during dispatch)")
+
+        .def("flush_pending_responses", &mlperf_ov::ResNetMultiDieCppSUT::flush_pending_responses,
+             "Flush any pending batched responses to callback");
 
     // RetinaNetMultiDieCppSUT - multi-die accelerator for RetinaNet
     py::class_<mlperf_ov::RetinaNetMultiDieCppSUT>(m, "RetinaNetMultiDieCppSUT")

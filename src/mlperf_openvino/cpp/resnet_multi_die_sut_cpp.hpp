@@ -208,6 +208,12 @@ public:
     void set_batch_response_callback(BatchResponseCallback callback);
 
     /**
+     * Flush any pending responses to Python callback.
+     * Call this after dispatching all queries in Server mode.
+     */
+    void flush_pending_responses();
+
+    /**
      * Called when inference completes - handles batch response.
      */
     void on_inference_complete(ResNetMultiDieInferContext* ctx);
@@ -262,6 +268,11 @@ private:
     ResponseCallback response_callback_;
     BatchResponseCallback batch_response_callback_;
     std::mutex callback_mutex_;
+
+    // Server mode: batched response queue (reduces Python calls)
+    std::vector<uint64_t> pending_responses_;
+    std::mutex pending_responses_mutex_;
+    static constexpr size_t RESPONSE_BATCH_SIZE = 64;  // Flush every N responses
 
     // Discover accelerator dies
     std::vector<std::string> discover_dies();
