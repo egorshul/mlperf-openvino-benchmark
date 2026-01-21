@@ -24,6 +24,7 @@
 #include <openvino/openvino.hpp>
 
 // Direct LoadGen C++ integration (like NVIDIA LWIS)
+#include <loadgen.h>
 #include <query_sample.h>
 #include <query_sample_library.h>
 #include <system_under_test.h>
