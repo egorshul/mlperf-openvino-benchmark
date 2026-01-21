@@ -787,7 +787,7 @@ void ResNetMultiDieCppSUT::clear_sample_data() {
 }
 
 // ============================================================================
-// SERVER MODE: INSTANT RETURN (NVIDIA LWIS-style)
+// SERVER MODE: DIRECT PATH (like official OpenVINO MLPerf)
 // ============================================================================
 
 void ResNetMultiDieCppSUT::issue_queries_server_fast(
@@ -800,24 +800,49 @@ void ResNetMultiDieCppSUT::issue_queries_server_fast(
 
     size_t num_samples = query_ids.size();
 
-    // Just push to work queue and return immediately!
-    // Issue thread will process asynchronously
+    // DIRECT PATH: Process inline like official OpenVINO MLPerf
+    // No work_queue overhead - get request, set inputs, start async directly
     for (size_t i = 0; i < num_samples; ++i) {
-        size_t head = work_head_.fetch_add(1, std::memory_order_acq_rel);
-        size_t idx = head % WORK_QUEUE_SIZE;
+        uint64_t query_id = query_ids[i];
+        int sample_idx = sample_indices[i];
 
-        // Wait if slot is still being read (rare, only if queue is full)
-        while (work_queue_[idx].valid.load(std::memory_order_acquire)) {
-            std::this_thread::yield();
+        // Find sample data (lock-free read after registration)
+        const float* sample_data = nullptr;
+        size_t sample_size = 0;
+        {
+            std::shared_lock<std::shared_mutex> lock(sample_cache_mutex_);
+            auto it = sample_data_cache_.find(sample_idx);
+            if (it != sample_data_cache_.end()) {
+                sample_data = it->second.data;
+                sample_size = it->second.size;
+            }
         }
 
-        work_queue_[idx].query_id = query_ids[i];
-        work_queue_[idx].sample_idx = sample_indices[i];
-        work_queue_[idx].valid.store(true, std::memory_order_release);
-        queued_count_.fetch_add(1, std::memory_order_relaxed);
-    }
+        if (!sample_data) {
+            // Sample not found - send dummy response
+            mlperf::QuerySampleResponse response{query_id, 0, 0};
+            mlperf::QuerySamplesComplete(&response, 1);
+            continue;
+        }
 
-    // Return immediately - issue thread handles the rest!
+        // Acquire request (round-robin across dies for load balancing)
+        size_t req_id = acquire_request();
+        ResNetMultiDieInferContext* ctx = infer_contexts_[req_id].get();
+
+        // Setup context
+        ctx->query_ids[0] = query_id;
+        ctx->sample_indices[0] = sample_idx;
+        ctx->actual_batch_size = 1;
+
+        // Copy input data
+        float* tensor_data = ctx->input_tensor.data<float>();
+        std::memcpy(tensor_data, sample_data, std::min(sample_size, input_byte_size_));
+
+        // Start async inference
+        pending_count_.fetch_add(1, std::memory_order_relaxed);
+        ctx->request.start_async();
+        issued_count_.fetch_add(1, std::memory_order_relaxed);
+    }
 }
 
 } // namespace mlperf_ov
