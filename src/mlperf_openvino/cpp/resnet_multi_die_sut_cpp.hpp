@@ -136,6 +136,20 @@ public:
                            int actual_batch_size);
 
     /**
+     * Process multiple samples efficiently (for Server mode).
+     * All samples are dispatched in C++ without returning to Python.
+     *
+     * @param all_input_data Vector of pointers to input data for each sample
+     * @param input_sizes Vector of input sizes
+     * @param query_ids Vector of query IDs
+     * @param sample_indices Vector of sample indices
+     */
+    void issue_queries_server(const std::vector<const float*>& all_input_data,
+                              const std::vector<size_t>& input_sizes,
+                              const std::vector<uint64_t>& query_ids,
+                              const std::vector<int>& sample_indices);
+
+    /**
      * Wait for all pending inferences to complete.
      */
     void wait_all();

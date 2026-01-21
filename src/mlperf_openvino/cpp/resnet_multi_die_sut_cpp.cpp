@@ -303,6 +303,47 @@ void ResNetMultiDieCppSUT::start_async_batch(const float* input_data,
     issued_count_ += actual_batch_size;
 }
 
+void ResNetMultiDieCppSUT::issue_queries_server(
+    const std::vector<const float*>& all_input_data,
+    const std::vector<size_t>& input_sizes,
+    const std::vector<uint64_t>& query_ids,
+    const std::vector<int>& sample_indices) {
+
+    if (!loaded_) {
+        throw std::runtime_error("Model not loaded");
+    }
+
+    size_t num_samples = query_ids.size();
+    size_t single_input_size = 0;
+    if (!input_sizes.empty()) {
+        single_input_size = input_sizes[0];
+    }
+
+    // Process all samples - dispatch to available requests
+    for (size_t i = 0; i < num_samples; ++i) {
+        // Get idle request (may block if all busy)
+        size_t id = get_idle_request();
+        ResNetMultiDieInferContext* ctx = infer_contexts_[id].get();
+
+        // Setup for single sample
+        ctx->query_ids.clear();
+        ctx->query_ids.push_back(query_ids[i]);
+        ctx->sample_indices.clear();
+        ctx->sample_indices.push_back(sample_indices[i]);
+        ctx->actual_batch_size = 1;
+
+        // Copy input data
+        float* tensor_data = ctx->input_tensor.data<float>();
+        size_t copy_size = std::min(input_sizes[i], ctx->input_tensor.get_byte_size());
+        std::memcpy(tensor_data, all_input_data[i], copy_size);
+
+        // Start async inference
+        pending_count_++;
+        ctx->request.start_async();
+        issued_count_++;
+    }
+}
+
 void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx) {
     callbacks_running_++;
 

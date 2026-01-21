@@ -489,7 +489,43 @@ PYBIND11_MODULE(_cpp_sut, m) {
                      });
              },
              py::arg("callback"),
-             "Set batch response callback (more efficient - one call per batch)");
+             "Set batch response callback (more efficient - one call per batch)")
+
+        .def("issue_queries_server",
+             [](mlperf_ov::ResNetMultiDieCppSUT& self,
+                py::list input_arrays,
+                py::list query_ids,
+                py::list sample_indices) {
+                 // Convert Python lists to C++ vectors
+                 std::vector<const float*> all_input_data;
+                 std::vector<size_t> input_sizes;
+                 std::vector<uint64_t> qids;
+                 std::vector<int> sidxs;
+
+                 size_t n = py::len(input_arrays);
+                 all_input_data.reserve(n);
+                 input_sizes.reserve(n);
+                 qids.reserve(n);
+                 sidxs.reserve(n);
+
+                 for (size_t i = 0; i < n; ++i) {
+                     py::array_t<float, py::array::c_style | py::array::forcecast> np_arr =
+                         input_arrays[i].cast<py::array_t<float, py::array::c_style | py::array::forcecast>>();
+                     py::buffer_info buf = np_arr.request();
+                     all_input_data.push_back(static_cast<const float*>(buf.ptr));
+                     input_sizes.push_back(buf.size * sizeof(float));
+                     qids.push_back(query_ids[i].cast<uint64_t>());
+                     sidxs.push_back(sample_indices[i].cast<int>());
+                 }
+
+                 // Release GIL and process all queries in C++
+                 py::gil_scoped_release release;
+                 self.issue_queries_server(all_input_data, input_sizes, qids, sidxs);
+             },
+             py::arg("input_arrays"),
+             py::arg("query_ids"),
+             py::arg("sample_indices"),
+             "Process multiple queries efficiently in C++ (GIL released during dispatch)");
 
     // RetinaNetMultiDieCppSUT - multi-die accelerator for RetinaNet
     py::class_<mlperf_ov::RetinaNetMultiDieCppSUT>(m, "RetinaNetMultiDieCppSUT")
