@@ -344,6 +344,11 @@ class ResNetMultiDieCppSUTWrapper:
         if not getattr(self, '_qsl_validated', False):
             self._prevalidate_qsl_data()
             self._qsl_validated = True
+            # Log which path we're using
+            if getattr(self, '_cpp_qsl_registered', False):
+                print(f"[Server] Using FAST path (C++ QSL, {len(self.qsl._loaded_samples)} samples registered)")
+            else:
+                print(f"[Server] Using SLOW path (Python data passing)")
 
         # Check if we can use the fastest path (data pre-registered in C++)
         cpp_qsl_registered = getattr(self, '_cpp_qsl_registered', False)
