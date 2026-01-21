@@ -128,27 +128,19 @@ class ResNetMultiDieCppSUTWrapper:
     def _setup_response_callback(self, is_offline: bool) -> None:
         """Setup response callback for LoadGen."""
         if is_offline:
-            # Offline: accumulate responses
+            # Offline: accumulate responses (per-sample callback)
             def callback(query_id: int, output: np.ndarray):
                 if output is not None:
                     response_array = array.array('B', output.tobytes())
                     with self._offline_lock:
                         self._offline_responses.append((query_id, response_array))
+            self._cpp_sut.set_response_callback(callback)
         else:
-            # Server: immediate response
-            def callback(query_id: int, output: np.ndarray):
-                if output is not None:
-                    response = lg.QuerySampleResponse(
-                        query_id,
-                        output.ctypes.data,
-                        output.nbytes
-                    )
-                    lg.QuerySamplesComplete([response])
-                else:
-                    response = lg.QuerySampleResponse(query_id, 0, 0)
-                    lg.QuerySamplesComplete([response])
-
-        self._cpp_sut.set_response_callback(callback)
+            # Server: use batch callback for efficiency (one Python call per batch)
+            def batch_callback(query_ids: list):
+                responses = [lg.QuerySampleResponse(qid, 0, 0) for qid in query_ids]
+                lg.QuerySamplesComplete(responses)
+            self._cpp_sut.set_batch_response_callback(batch_callback)
 
     def _start_progress_thread(self):
         """Start progress monitoring (silent)."""
@@ -244,10 +236,9 @@ class ResNetMultiDieCppSUTWrapper:
         self._query_count += 1
 
     def _issue_query_server(self, query_samples: List) -> None:
-        """Process queries in Server mode with micro-batching.
+        """Process queries in Server mode.
 
-        Server mode optimization: collect incoming queries into micro-batches
-        for better throughput while maintaining low latency.
+        Optimized for low latency - minimal Python overhead.
         """
         # Setup callback only once
         if not self._server_callback_set:
@@ -257,13 +248,34 @@ class ResNetMultiDieCppSUTWrapper:
         batch_size = self.batch_size
         num_samples = len(query_samples)
 
-        # Process in batches (micro-batching for Server mode)
+        # Fast path for batch_size=1 (most common in Server mode)
+        if batch_size == 1:
+            for qs in query_samples:
+                input_data = self._get_input_data(qs.index)
+
+                # Add batch dim if needed
+                if input_data.ndim == 3:
+                    input_data = input_data[np.newaxis, ...]
+
+                # Ensure contiguous (usually already is)
+                if not input_data.flags['C_CONTIGUOUS']:
+                    input_data = np.ascontiguousarray(input_data)
+
+                self._cpp_sut.start_async_batch(
+                    input_data,
+                    [qs.id],
+                    [qs.index],
+                    1
+                )
+            self._query_count += 1
+            return
+
+        # Batched path for batch_size > 1
         i = 0
         while i < num_samples:
             end_idx = min(i + batch_size, num_samples)
             actual_batch_size = end_idx - i
 
-            # Collect batch
             query_ids = []
             sample_indices = []
             batch_data = []
@@ -274,28 +286,21 @@ class ResNetMultiDieCppSUTWrapper:
                 sample_indices.append(qs.index)
 
                 input_data = self._get_input_data(qs.index)
-
-                # Remove batch dim if present
                 if input_data.ndim == 4 and input_data.shape[0] == 1:
                     input_data = input_data[0]
-
                 batch_data.append(input_data)
 
-            # Stack into batch
             if actual_batch_size == batch_size:
                 batched_input = np.stack(batch_data, axis=0)
             else:
-                # Pad incomplete batch
                 padded = batch_data + [batch_data[-1]] * (batch_size - actual_batch_size)
                 batched_input = np.stack(padded, axis=0)
 
-            # Ensure float32 and contiguous
             if batched_input.dtype != np.float32:
                 batched_input = batched_input.astype(np.float32)
             if not batched_input.flags['C_CONTIGUOUS']:
                 batched_input = np.ascontiguousarray(batched_input)
 
-            # Submit batch to C++ SUT
             self._cpp_sut.start_async_batch(
                 batched_input,
                 query_ids,

@@ -208,9 +208,9 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
     if target_qps > 0:
         scenario_config.target_qps = target_qps
     elif scenario == 'Server':
-        # For Server mode, use reasonable default target_qps
-        # Too high value causes LoadGen to queue more requests than system can handle
-        scenario_config.target_qps = 1000.0  # Reasonable default for accelerators
+        # For Server mode, set high target_qps to not limit throughput
+        # LoadGen will measure actual achieved QPS
+        scenario_config.target_qps = 100000.0
 
     # Validate configuration
     if not benchmark_config.model.model_path:

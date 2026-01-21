@@ -171,15 +171,27 @@ public:
     void clear_predictions();
 
     /**
-     * Callback type for batch responses.
-     * Called with (query_id, output_data, output_size) for each sample in batch.
+     * Callback type for single sample response.
+     * Called with (query_id, output_data, output_size) for each sample.
      */
     using ResponseCallback = std::function<void(uint64_t query_id, const float* data, size_t size)>;
 
     /**
-     * Set the callback function for LoadGen responses.
+     * Callback type for batch responses (more efficient for Server mode).
+     * Called with vector of query_ids for the completed batch.
+     */
+    using BatchResponseCallback = std::function<void(const std::vector<uint64_t>& query_ids)>;
+
+    /**
+     * Set the callback function for LoadGen responses (per-sample).
      */
     void set_response_callback(ResponseCallback callback);
+
+    /**
+     * Set the batch callback function for LoadGen responses (more efficient).
+     * When set, this is called instead of per-sample callback.
+     */
+    void set_batch_response_callback(BatchResponseCallback callback);
 
     /**
      * Called when inference completes - handles batch response.
@@ -232,8 +244,9 @@ private:
     mutable std::mutex predictions_mutex_;
     std::unordered_map<int, std::vector<float>> predictions_;
 
-    // Response callback
+    // Response callbacks
     ResponseCallback response_callback_;
+    BatchResponseCallback batch_response_callback_;
     std::mutex callback_mutex_;
 
     // Discover accelerator dies

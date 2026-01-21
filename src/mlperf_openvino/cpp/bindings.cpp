@@ -478,7 +478,18 @@ PYBIND11_MODULE(_cpp_sut, m) {
                      });
              },
              py::arg("callback"),
-             "Set response callback (called for each sample in batch)");
+             "Set response callback (called for each sample in batch)")
+
+        .def("set_batch_response_callback",
+             [](mlperf_ov::ResNetMultiDieCppSUT& self, py::function callback) {
+                 self.set_batch_response_callback(
+                     [callback](const std::vector<uint64_t>& query_ids) {
+                         py::gil_scoped_acquire acquire;
+                         callback(query_ids);
+                     });
+             },
+             py::arg("callback"),
+             "Set batch response callback (more efficient - one call per batch)");
 
     // RetinaNetMultiDieCppSUT - multi-die accelerator for RetinaNet
     py::class_<mlperf_ov::RetinaNetMultiDieCppSUT>(m, "RetinaNetMultiDieCppSUT")

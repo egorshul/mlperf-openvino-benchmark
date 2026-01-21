@@ -310,66 +310,67 @@ void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx
     int actual_batch_size = ctx->actual_batch_size;
 
     try {
-        // Get batched output
-        ov::Tensor output_tensor = ctx->request.get_output_tensor(output_idx_);
-        size_t output_bytes_per_sample = single_output_size_ * sizeof(float);
+        // Store predictions if needed (for accuracy mode)
+        if (store_predictions_) {
+            ov::Tensor output_tensor = ctx->request.get_output_tensor(output_idx_);
+            size_t output_bytes_per_sample = single_output_size_ * sizeof(float);
 
-        // Handle different output types
-        std::vector<float> converted_output;
-        const float* output_data = nullptr;
+            // Handle different output types
+            std::vector<float> converted_output;
+            const float* output_data = nullptr;
 
-        if (output_type_ == ov::element::f32) {
-            output_data = output_tensor.data<float>();
-        } else if (output_type_ == ov::element::i64) {
-            // Convert int64 to float
-            const int64_t* i64_data = output_tensor.data<int64_t>();
-            size_t total_elements = single_output_size_ * actual_batch_size;
-            converted_output.resize(total_elements);
-            for (size_t j = 0; j < total_elements; ++j) {
-                converted_output[j] = static_cast<float>(i64_data[j]);
+            if (output_type_ == ov::element::f32) {
+                output_data = output_tensor.data<float>();
+            } else if (output_type_ == ov::element::i64) {
+                const int64_t* i64_data = output_tensor.data<int64_t>();
+                size_t total_elements = single_output_size_ * actual_batch_size;
+                converted_output.resize(total_elements);
+                for (size_t j = 0; j < total_elements; ++j) {
+                    converted_output[j] = static_cast<float>(i64_data[j]);
+                }
+                output_data = converted_output.data();
+            } else if (output_type_ == ov::element::i32) {
+                const int32_t* i32_data = output_tensor.data<int32_t>();
+                size_t total_elements = single_output_size_ * actual_batch_size;
+                converted_output.resize(total_elements);
+                for (size_t j = 0; j < total_elements; ++j) {
+                    converted_output[j] = static_cast<float>(i32_data[j]);
+                }
+                output_data = converted_output.data();
+            } else if (output_type_ == ov::element::f16) {
+                converted_output.resize(single_output_size_ * actual_batch_size);
+                const ov::float16* f16_data = output_tensor.data<ov::float16>();
+                for (size_t j = 0; j < converted_output.size(); ++j) {
+                    converted_output[j] = static_cast<float>(f16_data[j]);
+                }
+                output_data = converted_output.data();
             }
-            output_data = converted_output.data();
-        } else if (output_type_ == ov::element::i32) {
-            // Convert int32 to float
-            const int32_t* i32_data = output_tensor.data<int32_t>();
-            size_t total_elements = single_output_size_ * actual_batch_size;
-            converted_output.resize(total_elements);
-            for (size_t j = 0; j < total_elements; ++j) {
-                converted_output[j] = static_cast<float>(i32_data[j]);
-            }
-            output_data = converted_output.data();
-        } else if (output_type_ == ov::element::f16) {
-            // Convert f16 to float using OpenVINO's conversion
-            converted_output.resize(single_output_size_ * actual_batch_size);
-            const ov::float16* f16_data = output_tensor.data<ov::float16>();
-            for (size_t j = 0; j < converted_output.size(); ++j) {
-                converted_output[j] = static_cast<float>(f16_data[j]);
-            }
-            output_data = converted_output.data();
-        } else {
-            throw std::runtime_error("Unsupported output type: " + output_type_.to_string());
-        }
 
-        // Process each sample in batch
-        for (int i = 0; i < actual_batch_size; ++i) {
-            uint64_t query_id = ctx->query_ids[i];
-            int sample_idx = ctx->sample_indices[i];
-            const float* sample_output = output_data + (i * single_output_size_);
-
-            // Store prediction if needed
-            if (store_predictions_) {
-                std::vector<float> prediction(sample_output, sample_output + single_output_size_);
-                {
-                    std::lock_guard<std::mutex> lock(predictions_mutex_);
-                    predictions_[sample_idx] = std::move(prediction);
+            if (output_data) {
+                for (int i = 0; i < actual_batch_size; ++i) {
+                    int sample_idx = ctx->sample_indices[i];
+                    const float* sample_output = output_data + (i * single_output_size_);
+                    std::vector<float> prediction(sample_output, sample_output + single_output_size_);
+                    {
+                        std::lock_guard<std::mutex> lock(predictions_mutex_);
+                        predictions_[sample_idx] = std::move(prediction);
+                    }
                 }
             }
+        }
 
-            // Call response callback
-            {
-                std::lock_guard<std::mutex> lock(callback_mutex_);
-                if (response_callback_) {
-                    response_callback_(query_id, sample_output, output_bytes_per_sample);
+        // Call batch response callback (efficient - one Python call per batch)
+        {
+            std::lock_guard<std::mutex> lock(callback_mutex_);
+            if (batch_response_callback_) {
+                // Extract query_ids for actual batch size
+                std::vector<uint64_t> batch_query_ids(ctx->query_ids.begin(),
+                                                       ctx->query_ids.begin() + actual_batch_size);
+                batch_response_callback_(batch_query_ids);
+            } else if (response_callback_) {
+                // Fallback to per-sample callback (slower)
+                for (int i = 0; i < actual_batch_size; ++i) {
+                    response_callback_(ctx->query_ids[i], nullptr, 0);
                 }
             }
         }
@@ -378,9 +379,13 @@ void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx
         std::cerr << "[ResNetMultiDieCppSUT] Callback error on " << ctx->die_name << ": " << e.what() << std::endl;
 
         // Still notify LoadGen to avoid hang
-        for (int i = 0; i < actual_batch_size; ++i) {
-            std::lock_guard<std::mutex> lock(callback_mutex_);
-            if (response_callback_) {
+        std::lock_guard<std::mutex> lock(callback_mutex_);
+        if (batch_response_callback_) {
+            std::vector<uint64_t> batch_query_ids(ctx->query_ids.begin(),
+                                                   ctx->query_ids.begin() + actual_batch_size);
+            batch_response_callback_(batch_query_ids);
+        } else if (response_callback_) {
+            for (int i = 0; i < actual_batch_size; ++i) {
                 response_callback_(ctx->query_ids[i], nullptr, 0);
             }
         }
@@ -420,6 +425,11 @@ void ResNetMultiDieCppSUT::clear_predictions() {
 void ResNetMultiDieCppSUT::set_response_callback(ResponseCallback callback) {
     std::lock_guard<std::mutex> lock(callback_mutex_);
     response_callback_ = callback;
+}
+
+void ResNetMultiDieCppSUT::set_batch_response_callback(BatchResponseCallback callback) {
+    std::lock_guard<std::mutex> lock(callback_mutex_);
+    batch_response_callback_ = callback;
 }
 
 } // namespace mlperf_ov
