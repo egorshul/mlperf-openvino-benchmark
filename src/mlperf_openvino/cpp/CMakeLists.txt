@@ -21,45 +21,58 @@ if(NOT EXISTS "${LOADGEN_DIR}/CMakeLists.txt")
 
     file(MAKE_DIRECTORY "${LOADGEN_DIR}")
 
-    # Core source files
+    # All loadgen source and header files
     set(LOADGEN_FILES
+        # Headers
         "bindings/c_api.h"
-        "bindings/c_api.cc"
+        "early_stopping.h"
         "issue_query_controller.h"
-        "issue_query_controller.cc"
         "loadgen.h"
-        "loadgen.cc"
         "logging.h"
-        "logging.cc"
         "query_sample.h"
         "query_sample_library.h"
+        "results.h"
         "system_under_test.h"
         "test_settings.h"
         "test_settings_internal.h"
-        "test_settings_internal.cc"
         "utils.h"
-        "utils.cc"
         "version.h"
-        "version.cc"
-        "results.cc"
+        # Sources
+        "bindings/c_api.cc"
         "early_stopping.cc"
+        "issue_query_controller.cc"
+        "loadgen.cc"
+        "logging.cc"
+        "results.cc"
+        "test_settings_internal.cc"
+        "utils.cc"
+        "version.cc"
     )
 
     file(MAKE_DIRECTORY "${LOADGEN_DIR}/bindings")
 
+    # Count files for progress
+    list(LENGTH LOADGEN_FILES TOTAL_FILES)
+    set(CURRENT_FILE 0)
+
     foreach(FILE ${LOADGEN_FILES})
+        math(EXPR CURRENT_FILE "${CURRENT_FILE} + 1")
         if(NOT EXISTS "${LOADGEN_DIR}/${FILE}")
-            message(STATUS "  Downloading ${FILE}...")
+            message(STATUS "  [${CURRENT_FILE}/${TOTAL_FILES}] Downloading ${FILE}...")
             file(DOWNLOAD
                 "${LOADGEN_URL}/${FILE}"
                 "${LOADGEN_DIR}/${FILE}"
                 STATUS DOWNLOAD_STATUS
                 TIMEOUT 30
+                SHOW_PROGRESS
             )
             list(GET DOWNLOAD_STATUS 0 STATUS_CODE)
             if(NOT STATUS_CODE EQUAL 0)
-                message(WARNING "Failed to download ${FILE}")
+                list(GET DOWNLOAD_STATUS 1 ERROR_MSG)
+                message(FATAL_ERROR "Failed to download ${FILE}: ${ERROR_MSG}")
             endif()
+        else()
+            message(STATUS "  [${CURRENT_FILE}/${TOTAL_FILES}] ${FILE} (cached)")
         endif()
     endforeach()
 
