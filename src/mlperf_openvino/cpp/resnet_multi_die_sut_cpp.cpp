@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <iostream>
 #include <regex>
 #include <stdexcept>
 #include <chrono>
@@ -896,8 +897,25 @@ void ResNetMultiDieCppSUT::run_server_benchmark(
     log_settings.log_output.outdir = log_output_dir;
     log_settings.log_output.copy_summary_to_stdout = true;
 
+    // Log settings for verification
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "PURE C++ SERVER BENCHMARK" << std::endl;
+    std::cout << "========================================" << std::endl;
+    std::cout << "Total samples: " << total_sample_count << std::endl;
+    std::cout << "Performance samples: " << performance_sample_count << std::endl;
+    std::cout << "Target QPS: " << test_settings.server_target_qps << std::endl;
+    std::cout << "Target latency (ns): " << test_settings.server_target_latency_ns << std::endl;
+    std::cout << "Min duration (ms): " << test_settings.min_duration_ms << std::endl;
+    std::cout << "Dies active: " << die_contexts_.size() << std::endl;
+    std::cout << "Requests per die: " << (infer_contexts_.size() / die_contexts_.size()) << std::endl;
+    std::cout << ">>> LoadGen -> C++ SUT (NO PYTHON) <<<" << std::endl;
+    std::cout << "========================================\n" << std::endl;
+
     // Run benchmark - entirely in C++, no Python in hot path!
     mlperf::StartTest(&server_sut, &server_qsl, test_settings, log_settings);
+
+    std::cout << "\n[C++] Benchmark completed. Issued: " << issued_count_.load()
+              << ", Completed: " << completed_count_.load() << std::endl;
 }
 
 } // namespace mlperf_ov
