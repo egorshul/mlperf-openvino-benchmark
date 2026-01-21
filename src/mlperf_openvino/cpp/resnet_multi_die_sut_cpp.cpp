@@ -850,7 +850,11 @@ void ResNetMultiDieCppSUT::run_server_benchmark(
     size_t performance_sample_count,
     const std::string& mlperf_conf_path,
     const std::string& user_conf_path,
-    const std::string& log_output_dir) {
+    const std::string& log_output_dir,
+    double target_qps,
+    int64_t target_latency_ns,
+    int64_t min_duration_ms,
+    int64_t min_query_count) {
 
     if (!loaded_) {
         throw std::runtime_error("Model not loaded");
@@ -871,6 +875,20 @@ void ResNetMultiDieCppSUT::run_server_benchmark(
     }
     if (!user_conf_path.empty()) {
         test_settings.FromConfig(user_conf_path, "resnet50", "Server");
+    }
+
+    // Apply direct settings (override config files)
+    if (target_qps > 0) {
+        test_settings.server_target_qps = target_qps;
+    }
+    if (target_latency_ns > 0) {
+        test_settings.server_target_latency_ns = target_latency_ns;
+    }
+    if (min_duration_ms > 0) {
+        test_settings.min_duration_ms = static_cast<uint64_t>(min_duration_ms);
+    }
+    if (min_query_count > 0) {
+        test_settings.min_query_count = static_cast<uint64_t>(min_query_count);
     }
 
     // Configure log settings

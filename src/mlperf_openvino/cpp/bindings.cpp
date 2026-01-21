@@ -522,7 +522,11 @@ PYBIND11_MODULE(_cpp_sut, m) {
                 size_t performance_sample_count,
                 const std::string& mlperf_conf_path,
                 const std::string& user_conf_path,
-                const std::string& log_output_dir) {
+                const std::string& log_output_dir,
+                double target_qps,
+                int64_t target_latency_ns,
+                int64_t min_duration_ms,
+                int64_t min_query_count) {
                  // Release GIL and run benchmark entirely in C++!
                  py::gil_scoped_release release;
                  self.run_server_benchmark(
@@ -530,13 +534,21 @@ PYBIND11_MODULE(_cpp_sut, m) {
                      performance_sample_count,
                      mlperf_conf_path,
                      user_conf_path,
-                     log_output_dir);
+                     log_output_dir,
+                     target_qps,
+                     target_latency_ns,
+                     min_duration_ms,
+                     min_query_count);
              },
              py::arg("total_sample_count"),
              py::arg("performance_sample_count"),
              py::arg("mlperf_conf_path") = "",
              py::arg("user_conf_path") = "",
              py::arg("log_output_dir") = ".",
+             py::arg("target_qps") = 0.0,
+             py::arg("target_latency_ns") = 0,
+             py::arg("min_duration_ms") = 0,
+             py::arg("min_query_count") = 0,
              "Run Server benchmark with pure C++ SUT (NO Python in hot path!)");
 
     // RetinaNetMultiDieCppSUT - multi-die accelerator for RetinaNet

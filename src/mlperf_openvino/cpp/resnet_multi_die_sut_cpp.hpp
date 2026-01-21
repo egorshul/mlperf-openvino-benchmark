@@ -243,7 +243,11 @@ private:
         size_t performance_sample_count,
         const std::string& mlperf_conf_path,
         const std::string& user_conf_path,
-        const std::string& log_output_dir);
+        const std::string& log_output_dir,
+        double target_qps = 0,
+        int64_t target_latency_ns = 0,
+        int64_t min_duration_ms = 0,
+        int64_t min_query_count = 0);
 
     // Friend class for pure C++ SUT
     friend class ResNetServerSUT;

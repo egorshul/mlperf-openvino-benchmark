@@ -625,18 +625,33 @@ class BenchmarkRunner:
             logger.info(f"  server_target_latency_ns: {scenario_config.target_latency_ns}")
         logger.info(f"  qsl_rng_seed: {scenario_config.qsl_rng_seed}")
 
-        sut_handle = self.sut.get_sut()
-        qsl_handle = self.sut.get_qsl()
-
         start_time = time.time()
 
-        logger.info("Starting LoadGen test...")
-        lg.StartTestWithLogSettings(
-            sut_handle,
-            qsl_handle,
-            test_settings,
-            log_settings
+        # Check if SUT supports native C++ benchmark (bypasses Python in hot path)
+        use_native = (
+            hasattr(self.sut, 'supports_native_benchmark') and
+            self.sut.supports_native_benchmark()
         )
+
+        if use_native:
+            # PURE C++ PATH: LoadGen calls C++ SUT directly
+            logger.info("Starting LoadGen test (PURE C++ mode - no Python in hot path)...")
+            self.sut.run_native_benchmark(test_settings, log_settings)
+            # No handles to destroy - C++ manages its own lifecycle
+            sut_handle = None
+            qsl_handle = None
+        else:
+            # Standard Python path
+            sut_handle = self.sut.get_sut()
+            qsl_handle = self.sut.get_qsl()
+
+            logger.info("Starting LoadGen test...")
+            lg.StartTestWithLogSettings(
+                sut_handle,
+                qsl_handle,
+                test_settings,
+                log_settings
+            )
 
         end_time = time.time()
         duration = end_time - start_time
@@ -661,8 +676,11 @@ class BenchmarkRunner:
             self._results["accuracy"] = self._accuracy_results
             self._save_mlperf_accuracy_log()
 
-        lg.DestroySUT(sut_handle)
-        lg.DestroyQSL(qsl_handle)
+        # Clean up handles (only if using standard Python path)
+        if sut_handle is not None:
+            lg.DestroySUT(sut_handle)
+        if qsl_handle is not None:
+            lg.DestroyQSL(qsl_handle)
 
         return self._results
 

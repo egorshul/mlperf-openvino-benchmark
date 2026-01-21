@@ -395,6 +395,80 @@ class ResNetMultiDieCppSUTWrapper:
         """Get LoadGen SUT object."""
         return lg.ConstructSUT(self.issue_queries, self.flush_queries)
 
+    def supports_native_benchmark(self) -> bool:
+        """Check if this SUT supports native C++ benchmark (no Python in hot path).
+
+        Returns True for Server scenario where we can bypass Python entirely.
+        """
+        return self.scenario == Scenario.SERVER
+
+    def run_native_benchmark(
+        self,
+        test_settings: "lg.TestSettings",
+        log_settings: "lg.LogSettings"
+    ) -> None:
+        """Run benchmark with PURE C++ SUT - no Python in hot path!
+
+        This is called by BenchmarkRunner instead of StartTestWithLogSettings
+        for Server scenario to achieve maximum performance.
+
+        Args:
+            test_settings: LoadGen test settings
+            log_settings: LoadGen log settings
+        """
+        if not self.supports_native_benchmark():
+            raise RuntimeError("Native benchmark not supported for this scenario")
+
+        # Ensure model is loaded
+        if not self.is_loaded:
+            raise RuntimeError("Model not loaded. Call load() first.")
+
+        # Load samples to RAM using QSL
+        logger.info("Loading samples to RAM...")
+        sample_indices = list(range(min(self.qsl.performance_sample_count, self.qsl.total_sample_count)))
+        self.qsl.load_query_samples(sample_indices)
+
+        # Register samples in C++
+        logger.info("Registering samples in C++ SUT...")
+        self._prevalidate_qsl_data()
+
+        if not getattr(self, '_cpp_qsl_registered', False):
+            raise RuntimeError("Failed to register samples in C++. Check QSL data format.")
+
+        total_count = self.qsl.total_sample_count
+        perf_count = self.qsl.performance_sample_count
+
+        # Extract settings from test_settings
+        target_qps = getattr(test_settings, 'server_target_qps', 0.0)
+        target_latency_ns = getattr(test_settings, 'server_target_latency_ns', 0)
+        min_duration_ms = getattr(test_settings, 'min_duration_ms', 0)
+        min_query_count = getattr(test_settings, 'min_query_count', 0)
+
+        logger.info(f"Starting PURE C++ Server benchmark: {total_count} total, {perf_count} perf samples")
+        logger.info(f"Settings: target_qps={target_qps}, target_latency_ns={target_latency_ns}")
+        logger.info(">>> NO PYTHON IN HOT PATH - LoadGen calls C++ directly! <<<")
+
+        # Get log output directory from log_settings
+        log_output_dir = getattr(log_settings.log_output, 'outdir', '.')
+
+        # Run benchmark entirely in C++!
+        self._cpp_sut.run_server_benchmark(
+            total_count,
+            perf_count,
+            "",  # mlperf_conf - settings passed directly
+            "",  # user_conf - settings passed directly
+            log_output_dir,
+            target_qps,
+            target_latency_ns,
+            min_duration_ms,
+            min_query_count
+        )
+
+        logger.info("Benchmark completed.")
+
+        # Unload samples
+        self.qsl.unload_query_samples(sample_indices)
+
     def run_server_benchmark_cpp(
         self,
         mlperf_conf_path: str = "",
