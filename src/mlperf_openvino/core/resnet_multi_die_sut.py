@@ -158,7 +158,16 @@ class ResNetMultiDieCppSUTWrapper:
                         self._offline_responses.append((qid, array.array('B', b'\x00')))
             self._cpp_sut.set_batch_response_callback(batch_callback)
         else:
-            # Server: immediate response to LoadGen
+            # Server mode: try direct LoadGen C++ first (fastest, like NVIDIA)
+            if self._cpp_sut.is_direct_loadgen_available():
+                if self._cpp_sut.enable_direct_loadgen(True):
+                    print("[Server] Using DIRECT LoadGen C++ mode (NO GIL, like NVIDIA LWIS)")
+                    return  # No Python callback needed!
+
+            # Fall back to batched responses (reduces GIL overhead ~60x)
+            print("[Server] Using batched response mode (GIL reduced ~60x)")
+            self._cpp_sut.enable_batched_responses(True)
+
             def batch_callback(query_ids: list):
                 responses = [lg.QuerySampleResponse(qid, 0, 0) for qid in query_ids]
                 lg.QuerySamplesComplete(responses)
@@ -446,6 +455,12 @@ class ResNetMultiDieCppSUTWrapper:
         # Clear C++ sample cache
         try:
             self._cpp_sut.clear_sample_data()
+        except Exception:
+            pass
+        # Disable direct/batched modes (will be re-enabled on next run)
+        try:
+            self._cpp_sut.enable_direct_loadgen(False)
+            self._cpp_sut.enable_batched_responses(False)
         except Exception:
             pass
         self._cpp_qsl_registered = False

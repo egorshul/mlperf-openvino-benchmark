@@ -608,7 +608,19 @@ PYBIND11_MODULE(_cpp_sut, m) {
              },
              py::arg("query_ids"),
              py::arg("sample_indices"),
-             "Fast Server mode dispatch using pre-registered data (no data passing)");
+             "Fast Server mode dispatch using pre-registered data (no data passing)")
+
+        .def("enable_batched_responses", &mlperf_ov::ResNetMultiDieCppSUT::enable_batched_responses,
+             py::arg("enable"),
+             "Enable batched response mode to reduce GIL overhead")
+
+        .def("enable_direct_loadgen", &mlperf_ov::ResNetMultiDieCppSUT::enable_direct_loadgen,
+             py::arg("enable"),
+             "Enable direct LoadGen C++ mode (requires -DUSE_LOADGEN_CPP)")
+
+        .def_static("is_direct_loadgen_available",
+             &mlperf_ov::ResNetMultiDieCppSUT::is_direct_loadgen_available,
+             "Check if direct LoadGen mode is available");
 
     // RetinaNetMultiDieCppSUT - multi-die accelerator for RetinaNet
     py::class_<mlperf_ov::RetinaNetMultiDieCppSUT>(m, "RetinaNetMultiDieCppSUT")

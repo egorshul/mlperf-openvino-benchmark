@@ -5,6 +5,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# Option to enable direct LoadGen C++ integration (like NVIDIA)
+option(USE_LOADGEN_CPP "Enable direct LoadGen C++ calls (requires libmlperf_loadgen)" OFF)
+
 # Find OpenVINO from Python package
 execute_process(
     COMMAND python3 -c "import openvino; import os; print(os.path.dirname(openvino.__file__))"
@@ -44,6 +47,37 @@ target_link_libraries(_cpp_sut PRIVATE openvino::runtime)
 target_include_directories(_cpp_sut PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
+
+# Optional: Direct LoadGen C++ integration for maximum performance
+if(USE_LOADGEN_CPP)
+    message(STATUS "Enabling direct LoadGen C++ integration")
+
+    # Find LoadGen library
+    find_library(MLPERF_LOADGEN_LIB
+        NAMES mlperf_loadgen
+        PATHS /usr/local/lib /usr/lib
+    )
+
+    # Find LoadGen headers
+    find_path(MLPERF_LOADGEN_INCLUDE
+        NAMES query_sample.h
+        PATHS /usr/local/include /usr/include
+    )
+
+    if(MLPERF_LOADGEN_LIB AND MLPERF_LOADGEN_INCLUDE)
+        message(STATUS "LoadGen library: ${MLPERF_LOADGEN_LIB}")
+        message(STATUS "LoadGen include: ${MLPERF_LOADGEN_INCLUDE}")
+
+        target_link_libraries(_cpp_sut PRIVATE ${MLPERF_LOADGEN_LIB})
+        target_include_directories(_cpp_sut PRIVATE ${MLPERF_LOADGEN_INCLUDE})
+        target_compile_definitions(_cpp_sut PRIVATE USE_LOADGEN_CPP=1)
+    else()
+        message(WARNING "LoadGen C++ not found! Install from: https://github.com/mlcommons/inference/tree/master/loadgen")
+        message(WARNING "  git clone https://github.com/mlcommons/inference.git")
+        message(WARNING "  cd inference/loadgen && mkdir build && cd build")
+        message(WARNING "  cmake -DCMAKE_INSTALL_PREFIX=/usr/local .. && make && sudo make install")
+    endif()
+endif()
 
 # Optimization flags
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
