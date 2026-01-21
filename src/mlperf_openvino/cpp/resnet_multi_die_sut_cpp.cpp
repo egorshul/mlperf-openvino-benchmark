@@ -897,7 +897,7 @@ void ResNetMultiDieCppSUT::run_server_benchmark(
     log_settings.log_output.copy_summary_to_stdout = true;
 
     // Run benchmark - entirely in C++, no Python in hot path!
-    mlperf::StartTestWithLogSettings(&server_sut, &server_qsl, test_settings, log_settings);
+    mlperf::StartTest(&server_sut, &server_qsl, test_settings, log_settings);
 }
 
 } // namespace mlperf_ov
