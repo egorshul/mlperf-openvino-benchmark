@@ -567,11 +567,10 @@ void ResNetMultiDieCppSUT::issue_queries_server_fast(
         ctx->sample_indices[0] = sample_idx;
         ctx->actual_batch_size = 1;
 
-        // ZERO-COPY: wrap QSL buffer directly instead of memcpy
-        // This avoids CPU-side copy - data goes directly from QSL to device
-        ov::Tensor external_tensor(input_type_, input_shape_,
-                                   const_cast<float*>(sample.data));
-        ctx->request.set_input_tensor(external_tensor);
+        // Use pre-allocated tensor with memcpy (same as Offline mode)
+        // This is FASTER than creating new tensor + set_input_tensor each time
+        float* tensor_data = ctx->input_tensor.data<float>();
+        std::memcpy(tensor_data, sample.data, std::min(sample.size, ctx->input_tensor.get_byte_size()));
 
         pending_count_.fetch_add(1, std::memory_order_relaxed);
         ctx->request.start_async();
