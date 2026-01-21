@@ -15,6 +15,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -221,7 +222,7 @@ private:
         const float* data;
         size_t size;
     };
-    mutable std::mutex sample_cache_mutex_;
+    mutable std::shared_mutex sample_cache_mutex_;  // Shared reads, exclusive writes
     std::unordered_map<int, SampleData> sample_data_cache_;
 
     // Round-robin

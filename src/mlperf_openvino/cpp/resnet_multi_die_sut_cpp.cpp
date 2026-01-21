@@ -227,11 +227,11 @@ void ResNetMultiDieCppSUT::issue_thread_func(size_t die_idx) {
         int sample_idx = work_queue_[idx].sample_idx;
         work_queue_[idx].valid.store(false, std::memory_order_release);
 
-        // Find sample data (thread-safe)
+        // Find sample data (thread-safe, shared read lock for parallelism!)
         const float* sample_data = nullptr;
         size_t sample_size = 0;
         {
-            std::lock_guard<std::mutex> lock(sample_cache_mutex_);
+            std::shared_lock<std::shared_mutex> lock(sample_cache_mutex_);
             auto it = sample_data_cache_.find(sample_idx);
             if (it != sample_data_cache_.end()) {
                 sample_data = it->second.data;
@@ -289,7 +289,7 @@ void ResNetMultiDieCppSUT::issue_thread_func(size_t die_idx) {
         const float* drain_sample_data = nullptr;
         size_t drain_sample_size = 0;
         {
-            std::lock_guard<std::mutex> lock(sample_cache_mutex_);
+            std::shared_lock<std::shared_mutex> lock(sample_cache_mutex_);
             auto it = sample_data_cache_.find(sample_idx);
             if (it != sample_data_cache_.end()) {
                 drain_sample_data = it->second.data;
@@ -767,12 +767,12 @@ void ResNetMultiDieCppSUT::set_batch_response_callback(BatchResponseCallback cal
 }
 
 void ResNetMultiDieCppSUT::register_sample_data(int sample_idx, const float* data, size_t size) {
-    std::lock_guard<std::mutex> lock(sample_cache_mutex_);
+    std::unique_lock<std::shared_mutex> lock(sample_cache_mutex_);
     sample_data_cache_[sample_idx] = {data, size};
 }
 
 void ResNetMultiDieCppSUT::clear_sample_data() {
-    std::lock_guard<std::mutex> lock(sample_cache_mutex_);
+    std::unique_lock<std::shared_mutex> lock(sample_cache_mutex_);
     sample_data_cache_.clear();
 }
 
