@@ -227,19 +227,26 @@ void ResNetMultiDieCppSUT::issue_thread_func(size_t die_idx) {
         int sample_idx = work_queue_[idx].sample_idx;
         work_queue_[idx].valid.store(false, std::memory_order_release);
 
-        // Find sample data
-        auto it = sample_data_cache_.find(sample_idx);
-        if (it == sample_data_cache_.end()) {
-            // Sample not found - send dummy response to LoadGen (don't hang!)
-            queued_count_.fetch_sub(1, std::memory_order_relaxed);
-            if (use_direct_loadgen_.load(std::memory_order_relaxed)) {
-                mlperf::QuerySampleResponse response{query_id, 0, 0};
-                mlperf::QuerySamplesComplete(&response, 1);
-                completed_count_.fetch_add(1, std::memory_order_relaxed);
+        // Find sample data (thread-safe)
+        const float* sample_data = nullptr;
+        size_t sample_size = 0;
+        {
+            std::lock_guard<std::mutex> lock(sample_cache_mutex_);
+            auto it = sample_data_cache_.find(sample_idx);
+            if (it != sample_data_cache_.end()) {
+                sample_data = it->second.data;
+                sample_size = it->second.size;
             }
+        }
+
+        if (!sample_data) {
+            // Sample not found - send response to LoadGen anyway (don't hang!)
+            queued_count_.fetch_sub(1, std::memory_order_relaxed);
+            mlperf::QuerySampleResponse response{query_id, 0, 0};
+            mlperf::QuerySamplesComplete(&response, 1);
+            completed_count_.fetch_add(1, std::memory_order_relaxed);
             continue;
         }
-        const SampleData& sample = it->second;
 
         // Acquire inference request FROM THIS DIE'S POOL (parallel across dies!)
         size_t req_id = acquire_request_for_die(die_idx);
@@ -252,7 +259,7 @@ void ResNetMultiDieCppSUT::issue_thread_func(size_t die_idx) {
 
         // Copy data to pre-allocated tensor (parallel memcpy across dies!)
         float* tensor_data = ctx->input_tensor.data<float>();
-        std::memcpy(tensor_data, sample.data, std::min(sample.size, input_byte_size_));
+        std::memcpy(tensor_data, sample_data, std::min(sample_size, input_byte_size_));
 
         // Submit to THIS DIE's device (parallel submission!)
         pending_count_.fetch_add(1, std::memory_order_relaxed);
@@ -279,14 +286,22 @@ void ResNetMultiDieCppSUT::issue_thread_func(size_t die_idx) {
         int sample_idx = work_queue_[idx].sample_idx;
         work_queue_[idx].valid.store(false, std::memory_order_release);
 
-        auto it = sample_data_cache_.find(sample_idx);
-        if (it == sample_data_cache_.end()) {
-            queued_count_.fetch_sub(1, std::memory_order_relaxed);
-            if (use_direct_loadgen_.load(std::memory_order_relaxed)) {
-                mlperf::QuerySampleResponse response{query_id, 0, 0};
-                mlperf::QuerySamplesComplete(&response, 1);
-                completed_count_.fetch_add(1, std::memory_order_relaxed);
+        const float* drain_sample_data = nullptr;
+        size_t drain_sample_size = 0;
+        {
+            std::lock_guard<std::mutex> lock(sample_cache_mutex_);
+            auto it = sample_data_cache_.find(sample_idx);
+            if (it != sample_data_cache_.end()) {
+                drain_sample_data = it->second.data;
+                drain_sample_size = it->second.size;
             }
+        }
+
+        if (!drain_sample_data) {
+            queued_count_.fetch_sub(1, std::memory_order_relaxed);
+            mlperf::QuerySampleResponse response{query_id, 0, 0};
+            mlperf::QuerySamplesComplete(&response, 1);
+            completed_count_.fetch_add(1, std::memory_order_relaxed);
             continue;
         }
 
@@ -298,7 +313,7 @@ void ResNetMultiDieCppSUT::issue_thread_func(size_t die_idx) {
         ctx->actual_batch_size = 1;
 
         float* tensor_data = ctx->input_tensor.data<float>();
-        std::memcpy(tensor_data, it->second.data, std::min(it->second.size, input_byte_size_));
+        std::memcpy(tensor_data, drain_sample_data, std::min(drain_sample_size, input_byte_size_));
 
         pending_count_.fetch_add(1, std::memory_order_relaxed);
         ctx->request.start_async();
@@ -424,11 +439,12 @@ void ResNetMultiDieCppSUT::completion_thread_func() {
                 }
             }
 
-            if (use_direct_loadgen_.load(std::memory_order_relaxed)) {
-                for (int i = 0; i < actual_batch_size && response_count < MAX_BATCH_RESPONSES; ++i) {
-                    batch_responses[response_count++] = {ctx->query_ids[i], 0, 0};
-                }
-            } else {
+            // Always use direct LoadGen for maximum performance
+            for (int i = 0; i < actual_batch_size && response_count < MAX_BATCH_RESPONSES; ++i) {
+                batch_responses[response_count++] = {ctx->query_ids[i], 0, 0};
+            }
+            // Also collect for Python callback if set (backward compatibility)
+            if (!use_direct_loadgen_.load(std::memory_order_relaxed)) {
                 for (int i = 0; i < actual_batch_size && callback_count < MAX_BATCH_RESPONSES; ++i) {
                     callback_ids[callback_count++] = ctx->query_ids[i];
                 }
@@ -751,10 +767,12 @@ void ResNetMultiDieCppSUT::set_batch_response_callback(BatchResponseCallback cal
 }
 
 void ResNetMultiDieCppSUT::register_sample_data(int sample_idx, const float* data, size_t size) {
+    std::lock_guard<std::mutex> lock(sample_cache_mutex_);
     sample_data_cache_[sample_idx] = {data, size};
 }
 
 void ResNetMultiDieCppSUT::clear_sample_data() {
+    std::lock_guard<std::mutex> lock(sample_cache_mutex_);
     sample_data_cache_.clear();
 }
 

@@ -14,6 +14,7 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -215,11 +216,12 @@ private:
     std::mutex callback_mutex_;
     std::atomic<bool> use_direct_loadgen_{false};
 
-    // Sample data cache (for fast Server mode)
+    // Sample data cache (for fast Server mode) - THREAD SAFE
     struct SampleData {
         const float* data;
         size_t size;
     };
+    mutable std::mutex sample_cache_mutex_;
     std::unordered_map<int, SampleData> sample_data_cache_;
 
     // Round-robin

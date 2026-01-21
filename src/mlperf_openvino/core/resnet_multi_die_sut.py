@@ -253,12 +253,15 @@ class ResNetMultiDieCppSUTWrapper:
         return self._get_input_data(sample_idx)
 
     def _issue_query_offline(self, query_samples: List) -> None:
-        """Process queries in Offline mode with batching."""
+        """Process queries in Offline mode with batching.
+
+        C++ SUT calls QuerySamplesComplete directly - no Python callback needed!
+        """
         self._start_time = time.time()
-        self._offline_responses.clear()
         self._cpp_sut.reset_counters()
 
-        self._setup_response_callback(is_offline=True)
+        # Enable direct LoadGen mode - C++ will call QuerySamplesComplete
+        self._cpp_sut.enable_direct_loadgen(True)
         self._start_progress_thread()
 
         batch_size = self.batch_size
@@ -314,17 +317,9 @@ class ResNetMultiDieCppSUTWrapper:
 
             i = end_idx
 
-        # Wait for completion
+        # Wait for completion - C++ already sent QuerySamplesComplete!
         self._cpp_sut.wait_all()
         self._stop_progress_thread()
-
-        # Send all responses to LoadGen
-        responses = []
-        for query_id, response_array in self._offline_responses:
-            bi = response_array.buffer_info()
-            responses.append(lg.QuerySampleResponse(query_id, bi[0], bi[1]))
-
-        lg.QuerySamplesComplete(responses)
         self._query_count += 1
 
     def _issue_query_server(self, query_samples: List) -> None:
