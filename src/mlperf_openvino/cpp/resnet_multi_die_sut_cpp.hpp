@@ -29,6 +29,7 @@
 #include <query_sample.h>
 #include <query_sample_library.h>
 #include <system_under_test.h>
+#include <test_settings.h>
 
 namespace mlperf_ov {
 
@@ -122,6 +123,18 @@ public:
     // Server mode: INSTANT return - just pushes to work queue
     void issue_queries_server_fast(const std::vector<uint64_t>& query_ids,
                                    const std::vector<int>& sample_indices);
+
+    // Run pure C++ Server benchmark (no Python in hot path!)
+    void run_server_benchmark(
+        size_t total_sample_count,
+        size_t performance_sample_count,
+        const std::string& mlperf_conf_path,
+        const std::string& user_conf_path,
+        const std::string& log_output_dir,
+        double target_qps = 0,
+        int64_t target_latency_ns = 0,
+        int64_t min_duration_ms = 0,
+        int64_t min_query_count = 0);
 
 private:
     // Config
@@ -236,18 +249,6 @@ private:
     // Lock-free request pool operations
     size_t acquire_request();
     void release_request(size_t id);
-
-    // Run pure C++ Server benchmark (no Python in hot path!)
-    void run_server_benchmark(
-        size_t total_sample_count,
-        size_t performance_sample_count,
-        const std::string& mlperf_conf_path,
-        const std::string& user_conf_path,
-        const std::string& log_output_dir,
-        double target_qps = 0,
-        int64_t target_latency_ns = 0,
-        int64_t min_duration_ms = 0,
-        int64_t min_query_count = 0);
 
     // Friend class for pure C++ SUT
     friend class ResNetServerSUT;
