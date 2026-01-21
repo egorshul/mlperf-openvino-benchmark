@@ -255,8 +255,3 @@ install(TARGETS _cpp_sut
     LIBRARY DESTINATION ${CMAKE_INSTALL_PREFIX}
 )
 
-message(STATUS "")
-message(STATUS "=== Build Configuration ===")
-message(STATUS "Direct LoadGen C++: ENABLED (like NVIDIA LWIS)")
-message(STATUS "OpenVINO: ${OpenVINO_DIR}")
-message(STATUS "===========================")

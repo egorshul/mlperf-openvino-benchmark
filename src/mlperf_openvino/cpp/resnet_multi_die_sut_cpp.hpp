@@ -1,12 +1,11 @@
 /**
- * C++ SUT for ResNet50 on multi-die accelerators with maximum throughput.
+ * High-performance C++ SUT for ResNet50 on multi-die accelerators.
  *
- * Key features:
- * - Multiple compiled models (one per die)
- * - Round-robin distribution across dies
- * - Proper batching support
- * - Direct LoadGen C++ calls (like NVIDIA LWIS) - NO Python GIL!
- * - Lock-free counters where possible
+ * Architecture (similar to NVIDIA LWIS):
+ * - Lock-free request pool (atomic operations only)
+ * - Dedicated completion thread with response batching
+ * - Pre-allocated buffers (zero allocations in hot path)
+ * - Direct LoadGen C++ calls (no Python/GIL)
  */
 
 #pragma once
@@ -14,16 +13,14 @@
 #include <atomic>
 #include <functional>
 #include <memory>
-#include <mutex>
-#include <queue>
 #include <string>
-#include <condition_variable>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
 #include <openvino/openvino.hpp>
 
-// Direct LoadGen C++ integration (like NVIDIA LWIS)
+// LoadGen C++ API
 #include <loadgen.h>
 #include <query_sample.h>
 #include <query_sample_library.h>
@@ -31,21 +28,16 @@
 
 namespace mlperf_ov {
 
-// Forward declaration
 class ResNetMultiDieCppSUT;
 
-/**
- * Context for a single die.
- */
+// Per-die context
 struct DieContext {
     std::string device_name;
     ov::CompiledModel compiled_model;
     int optimal_nireq = 1;
 };
 
-/**
- * Context for each inference request.
- */
+// Inference request context with pre-allocated buffers
 struct ResNetMultiDieInferContext {
     ov::InferRequest request;
     ov::Tensor input_tensor;
@@ -53,218 +45,135 @@ struct ResNetMultiDieInferContext {
     size_t pool_id = 0;
     ResNetMultiDieCppSUT* sut = nullptr;
 
-    // Batch info
-    std::vector<uint64_t> query_ids;
-    std::vector<int> sample_indices;
+    // Pre-allocated batch info (no dynamic allocation)
+    static constexpr int MAX_BATCH = 64;
+    uint64_t query_ids[MAX_BATCH];
+    int sample_indices[MAX_BATCH];
     int actual_batch_size = 0;
+
+    // Pre-allocated response buffer
+    mlperf::QuerySampleResponse responses[MAX_BATCH];
 };
 
 /**
- * High-performance SUT for multi-die accelerators.
- *
- * Distributes inference across all available dies using round-robin.
- * Each die has its own compiled model and request pool.
- * Uses direct LoadGen C++ calls for zero GIL overhead (like NVIDIA LWIS).
+ * High-performance SUT with lock-free design.
  */
 class ResNetMultiDieCppSUT {
 public:
-    /**
-     * Constructor.
-     *
-     * @param model_path Path to ONNX or OpenVINO IR model
-     * @param device_prefix Device prefix (e.g., "NPU", "VPU")
-     * @param batch_size Batch size for inference
-     * @param compile_properties Device-specific compile properties
-     * @param use_nhwc_input If true, expect NHWC input and add transpose to model
-     */
     ResNetMultiDieCppSUT(const std::string& model_path,
-                   const std::string& device_prefix,
-                   int batch_size = 1,
-                   const std::unordered_map<std::string, std::string>& compile_properties = {},
-                   bool use_nhwc_input = false);
+                         const std::string& device_prefix,
+                         int batch_size = 1,
+                         const std::unordered_map<std::string, std::string>& compile_properties = {},
+                         bool use_nhwc_input = false);
 
     ~ResNetMultiDieCppSUT();
 
-    /**
-     * Load model and compile for all available dies.
-     */
     void load();
-
-    /**
-     * Check if model is loaded.
-     */
     bool is_loaded() const { return loaded_; }
-
-    /**
-     * Get number of active dies.
-     */
     int get_num_dies() const { return static_cast<int>(die_contexts_.size()); }
-
-    /**
-     * Get list of active device names.
-     */
     std::vector<std::string> get_active_devices() const;
-
-    /**
-     * Get batch size.
-     */
     int get_batch_size() const { return batch_size_; }
-
-    /**
-     * Get total number of inference requests across all dies.
-     */
     int get_total_requests() const;
-
-    /**
-     * Get input tensor name.
-     */
     std::string get_input_name() const { return input_name_; }
-
-    /**
-     * Get output tensor name.
-     */
     std::string get_output_name() const { return output_name_; }
 
-    /**
-     * Start async inference for a batch (Offline mode).
-     *
-     * @param input_data Pointer to batched input data [batch_size, C, H, W]
-     * @param input_size Size of input data in bytes
-     * @param query_ids Vector of query IDs for the batch
-     * @param sample_indices Vector of sample indices for the batch
-     * @param actual_batch_size Actual number of samples (may be < batch_size for last batch)
-     */
+    // Offline mode batch dispatch
     void start_async_batch(const float* input_data,
                            size_t input_size,
                            const std::vector<uint64_t>& query_ids,
                            const std::vector<int>& sample_indices,
                            int actual_batch_size);
 
-    /**
-     * Wait for all pending inferences to complete.
-     */
     void wait_all();
-
-    /**
-     * Get number of completed samples.
-     */
-    uint64_t get_completed_count() const { return completed_count_.load(); }
-
-    /**
-     * Get number of issued samples.
-     */
-    uint64_t get_issued_count() const { return issued_count_.load(); }
-
-    /**
-     * Reset counters and state.
-     */
+    uint64_t get_completed_count() const { return completed_count_.load(std::memory_order_relaxed); }
+    uint64_t get_issued_count() const { return issued_count_.load(std::memory_order_relaxed); }
     void reset_counters();
 
-    /**
-     * Enable/disable storing predictions.
-     */
+    // Predictions for accuracy mode
     void set_store_predictions(bool store) { store_predictions_ = store; }
-
-    /**
-     * Get stored predictions (for accuracy mode).
-     */
     std::unordered_map<int, std::vector<float>> get_predictions() const;
-
-    /**
-     * Clear stored predictions.
-     */
     void clear_predictions();
 
-    /**
-     * Callback type for batch responses (used for Offline mode).
-     */
+    // Callback for Offline mode
     using BatchResponseCallback = std::function<void(const std::vector<uint64_t>& query_ids)>;
-
-    /**
-     * Set the batch callback function for Offline mode responses.
-     * For Server mode, responses go directly to LoadGen C++.
-     */
     void set_batch_response_callback(BatchResponseCallback callback);
 
-    /**
-     * Enable direct LoadGen C++ mode for Server scenario.
-     * Calls mlperf::QuerySamplesComplete directly from C++ without any Python/GIL.
-     */
+    // Direct LoadGen mode (Server)
     void enable_direct_loadgen(bool enable);
 
-    /**
-     * Called when inference completes - handles response.
-     */
+    // Inference complete handler
     void on_inference_complete(ResNetMultiDieInferContext* ctx);
 
-    /**
-     * Register sample data for fast Server mode dispatch.
-     * After calling this, issue_queries_server_fast can be used.
-     *
-     * @param sample_idx Sample index
-     * @param data Pointer to sample data (must remain valid!)
-     * @param size Size of data in bytes
-     */
+    // Server mode: register sample data pointers
     void register_sample_data(int sample_idx, const float* data, size_t size);
-
-    /**
-     * Clear all registered sample data.
-     */
     void clear_sample_data();
 
-    /**
-     * Fast Server mode dispatch using pre-registered sample data.
-     * No Python data passing needed - only query_ids and sample_indices.
-     * Responses go directly to LoadGen C++ (no GIL).
-     *
-     * @param query_ids Vector of query IDs
-     * @param sample_indices Vector of sample indices (must be registered)
-     */
+    // Server mode: fast dispatch with pre-registered data
     void issue_queries_server_fast(const std::vector<uint64_t>& query_ids,
                                    const std::vector<int>& sample_indices);
 
 private:
-    // Model configuration
+    // Config
     std::string model_path_;
     std::string device_prefix_;
     int batch_size_;
     std::unordered_map<std::string, std::string> compile_properties_;
     bool use_nhwc_input_;
 
-    // OpenVINO objects
+    // OpenVINO
     ov::Core core_;
     std::shared_ptr<ov::Model> model_;
-
-    // Per-die contexts
     std::vector<std::unique_ptr<DieContext>> die_contexts_;
     std::vector<std::string> active_devices_;
 
-    // InferRequest pool (shared across all dies)
+    // =========================================================================
+    // LOCK-FREE REQUEST POOL
+    // =========================================================================
+    static constexpr int MAX_REQUESTS = 1024;
     std::vector<std::unique_ptr<ResNetMultiDieInferContext>> infer_contexts_;
-    std::mutex pool_mutex_;
-    std::condition_variable pool_cv_;
-    std::queue<size_t> available_ids_;
 
-    // Round-robin die selection
-    std::atomic<size_t> die_index_{0};
+    // Lock-free pool: each slot is either FREE (-1) or IN_USE (pool_id)
+    std::atomic<int> request_slots_[MAX_REQUESTS];
+    std::atomic<size_t> pool_search_hint_{0};  // Hint for where to start searching
 
-    // Model info
+    // =========================================================================
+    // COMPLETION THREAD WITH RESPONSE BATCHING
+    // =========================================================================
+    static constexpr int COMPLETION_QUEUE_SIZE = 4096;
+
+    // Lock-free completion queue (SPMC - single producer, multiple consumers... actually MPSC here)
+    struct CompletionItem {
+        ResNetMultiDieInferContext* ctx;
+        std::atomic<bool> valid{false};
+    };
+    CompletionItem completion_queue_[COMPLETION_QUEUE_SIZE];
+    std::atomic<size_t> completion_head_{0};  // Producer writes here
+    std::atomic<size_t> completion_tail_{0};  // Consumer reads from here
+
+    std::thread completion_thread_;
+    std::atomic<bool> completion_running_{false};
+
+    void completion_thread_func();
+    void enqueue_completion(ResNetMultiDieInferContext* ctx);
+
+    // =========================================================================
+    // MODEL INFO
+    // =========================================================================
     std::string input_name_;
     std::string output_name_;
     ov::Shape input_shape_;
     ov::element::Type input_type_;
     ov::element::Type output_type_;
     size_t output_idx_ = 0;
-    size_t single_output_size_ = 0;  // Size of one sample's output
+    size_t single_output_size_ = 0;
 
     // State
     bool loaded_ = false;
     std::atomic<uint64_t> issued_count_{0};
     std::atomic<uint64_t> completed_count_{0};
     std::atomic<int> pending_count_{0};
-    std::atomic<int> callbacks_running_{0};
 
-    // Predictions storage
+    // Predictions
     bool store_predictions_ = false;
     mutable std::mutex predictions_mutex_;
     std::unordered_map<int, std::vector<float>> predictions_;
@@ -272,30 +181,25 @@ private:
     // Response handling
     BatchResponseCallback batch_response_callback_;
     std::mutex callback_mutex_;
-    std::atomic<bool> use_direct_loadgen_{false};  // Direct LoadGen C++ calls (Server mode)
+    std::atomic<bool> use_direct_loadgen_{false};
 
-    // QSL data cache for fast Server mode dispatch
+    // Sample data cache
     struct SampleData {
         const float* data;
         size_t size;
     };
     std::unordered_map<int, SampleData> sample_data_cache_;
-    std::mutex sample_data_mutex_;
 
-    // Discover accelerator dies
+    // Round-robin
+    std::atomic<size_t> die_index_{0};
+
+    // Helpers
     std::vector<std::string> discover_dies();
-
-    // Build compile properties
     ov::AnyMap build_compile_properties();
 
-    // Get idle request from pool
-    size_t get_idle_request();
-
-    // Return request to pool
-    void return_request(size_t id);
-
-    // Get next die (round-robin)
-    const std::string& get_next_die();
+    // Lock-free request pool operations
+    size_t acquire_request();  // Returns request id or MAX_REQUESTS if none available
+    void release_request(size_t id);
 };
 
 } // namespace mlperf_ov
