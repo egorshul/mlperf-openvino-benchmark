@@ -188,6 +188,8 @@ void ResNetMultiDieCppSUT::release_request_for_die(size_t /*die_idx*/, size_t gl
 
 void ResNetMultiDieCppSUT::issue_thread_func(size_t die_idx) {
     int idle_spins = 0;
+    uint64_t local_processed = 0;
+    auto last_report = std::chrono::steady_clock::now();
 
     while (issue_running_.load(std::memory_order_acquire)) {
         // Try to claim a work item from shared queue (multiple threads compete)
@@ -267,6 +269,24 @@ void ResNetMultiDieCppSUT::issue_thread_func(size_t die_idx) {
         ctx->request.start_async();
         issued_count_.fetch_add(1, std::memory_order_relaxed);
         queued_count_.fetch_sub(1, std::memory_order_relaxed);
+
+        // Periodic stats (only from die 0 to avoid spam)
+        local_processed++;
+        if (die_idx == 0 && local_processed % 10000 == 0) {
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_report).count();
+            if (elapsed > 5000) {  // Report every 5 seconds
+                uint64_t total_issued = issued_count_.load(std::memory_order_relaxed);
+                uint64_t total_completed = completed_count_.load(std::memory_order_relaxed);
+                uint64_t queued = queued_count_.load(std::memory_order_relaxed);
+                uint64_t pending = pending_count_.load(std::memory_order_relaxed);
+                std::cout << "[STATS] issued=" << total_issued
+                          << " completed=" << total_completed
+                          << " queued=" << queued
+                          << " pending=" << pending << std::endl;
+                last_report = now;
+            }
+        }
     }
 
     // Drain remaining work on shutdown (this thread's share)
@@ -897,7 +917,7 @@ void ResNetMultiDieCppSUT::run_server_benchmark(
     log_settings.log_output.outdir = log_output_dir;
     log_settings.log_output.copy_summary_to_stdout = true;
 
-    // Log settings for verification
+    // Log detailed configuration for debugging
     std::cout << "\n========================================" << std::endl;
     std::cout << "PURE C++ SERVER BENCHMARK" << std::endl;
     std::cout << "========================================" << std::endl;
@@ -906,8 +926,19 @@ void ResNetMultiDieCppSUT::run_server_benchmark(
     std::cout << "Target QPS: " << test_settings.server_target_qps << std::endl;
     std::cout << "Target latency (ns): " << test_settings.server_target_latency_ns << std::endl;
     std::cout << "Min duration (ms): " << test_settings.min_duration_ms << std::endl;
+    std::cout << "----------------------------------------" << std::endl;
     std::cout << "Dies active: " << die_contexts_.size() << std::endl;
+    std::cout << "Total infer requests: " << infer_contexts_.size() << std::endl;
     std::cout << "Requests per die: " << (infer_contexts_.size() / die_contexts_.size()) << std::endl;
+    std::cout << "Work queue size: " << WORK_QUEUE_SIZE << std::endl;
+    std::cout << "Issue threads: " << issue_threads_.size() << std::endl;
+    for (size_t i = 0; i < die_contexts_.size(); ++i) {
+        std::cout << "  Die " << i << " (" << die_contexts_[i]->device_name << "): "
+                  << "optimal_nireq=" << die_contexts_[i]->optimal_nireq
+                  << ", requests=" << die_contexts_[i]->request_count << std::endl;
+    }
+    std::cout << "Sample cache size: " << sample_data_cache_.size() << std::endl;
+    std::cout << "----------------------------------------" << std::endl;
     std::cout << ">>> LoadGen -> C++ SUT (NO PYTHON) <<<" << std::endl;
     std::cout << "========================================\n" << std::endl;
 
