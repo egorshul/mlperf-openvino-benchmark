@@ -5,36 +5,28 @@
  * - Multiple compiled models (one per die)
  * - Round-robin distribution across dies
  * - Proper batching support
- * - All callbacks in C++ without GIL
+ * - Direct LoadGen C++ calls (like NVIDIA LWIS) - NO Python GIL!
  * - Lock-free counters where possible
  */
 
 #pragma once
 
 #include <atomic>
-#include <chrono>
-#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <queue>
 #include <string>
-#include <thread>
+#include <condition_variable>
 #include <unordered_map>
 #include <vector>
 
 #include <openvino/openvino.hpp>
 
-// Optional: Direct LoadGen C++ integration (like NVIDIA LWIS)
-#ifdef USE_LOADGEN_CPP
+// Direct LoadGen C++ integration (like NVIDIA LWIS)
 #include <query_sample.h>
 #include <query_sample_library.h>
 #include <system_under_test.h>
-#include <test_settings.h>
-#define LOADGEN_CPP_AVAILABLE 1
-#else
-#define LOADGEN_CPP_AVAILABLE 0
-#endif
 
 namespace mlperf_ov {
 
@@ -71,6 +63,7 @@ struct ResNetMultiDieInferContext {
  *
  * Distributes inference across all available dies using round-robin.
  * Each die has its own compiled model and request pool.
+ * Uses direct LoadGen C++ calls for zero GIL overhead (like NVIDIA LWIS).
  */
 class ResNetMultiDieCppSUT {
 public:
@@ -132,7 +125,7 @@ public:
     std::string get_output_name() const { return output_name_; }
 
     /**
-     * Start async inference for a batch.
+     * Start async inference for a batch (Offline mode).
      *
      * @param input_data Pointer to batched input data [batch_size, C, H, W]
      * @param input_size Size of input data in bytes
@@ -145,20 +138,6 @@ public:
                            const std::vector<uint64_t>& query_ids,
                            const std::vector<int>& sample_indices,
                            int actual_batch_size);
-
-    /**
-     * Process multiple samples efficiently (for Server mode).
-     * All samples are dispatched in C++ without returning to Python.
-     *
-     * @param all_input_data Vector of pointers to input data for each sample
-     * @param input_sizes Vector of input sizes
-     * @param query_ids Vector of query IDs
-     * @param sample_indices Vector of sample indices
-     */
-    void issue_queries_server(const std::vector<const float*>& all_input_data,
-                              const std::vector<size_t>& input_sizes,
-                              const std::vector<uint64_t>& query_ids,
-                              const std::vector<int>& sample_indices);
 
     /**
      * Wait for all pending inferences to complete.
@@ -196,56 +175,24 @@ public:
     void clear_predictions();
 
     /**
-     * Callback type for single sample response.
-     * Called with (query_id, output_data, output_size) for each sample.
-     */
-    using ResponseCallback = std::function<void(uint64_t query_id, const float* data, size_t size)>;
-
-    /**
-     * Callback type for batch responses (more efficient for Server mode).
-     * Called with vector of query_ids for the completed batch.
+     * Callback type for batch responses (used for Offline mode).
      */
     using BatchResponseCallback = std::function<void(const std::vector<uint64_t>& query_ids)>;
 
     /**
-     * Set the callback function for LoadGen responses (per-sample).
-     */
-    void set_response_callback(ResponseCallback callback);
-
-    /**
-     * Set the batch callback function for LoadGen responses (more efficient).
-     * When set, this is called instead of per-sample callback.
+     * Set the batch callback function for Offline mode responses.
+     * For Server mode, responses go directly to LoadGen C++.
      */
     void set_batch_response_callback(BatchResponseCallback callback);
 
     /**
-     * Flush any pending responses to Python callback.
-     * Call this after dispatching all queries in Server mode.
-     */
-    void flush_pending_responses();
-
-    /**
-     * Enable batched response mode for Server scenario.
-     * This starts a background thread that batches responses to reduce GIL overhead.
-     * Call this before running Server mode benchmark.
-     */
-    void enable_batched_responses(bool enable);
-
-    /**
-     * Enable direct LoadGen C++ mode (like NVIDIA LWIS).
+     * Enable direct LoadGen C++ mode for Server scenario.
      * Calls mlperf::QuerySamplesComplete directly from C++ without any Python/GIL.
-     * Requires building with -DUSE_LOADGEN_CPP=ON.
-     * Returns true if enabled successfully, false if not available.
      */
-    bool enable_direct_loadgen(bool enable);
+    void enable_direct_loadgen(bool enable);
 
     /**
-     * Check if direct LoadGen mode is available (built with USE_LOADGEN_CPP).
-     */
-    static bool is_direct_loadgen_available() { return LOADGEN_CPP_AVAILABLE; }
-
-    /**
-     * Called when inference completes - handles batch response.
+     * Called when inference completes - handles response.
      */
     void on_inference_complete(ResNetMultiDieInferContext* ctx);
 
@@ -267,6 +214,7 @@ public:
     /**
      * Fast Server mode dispatch using pre-registered sample data.
      * No Python data passing needed - only query_ids and sample_indices.
+     * Responses go directly to LoadGen C++ (no GIL).
      *
      * @param query_ids Vector of query IDs
      * @param sample_indices Vector of sample indices (must be registered)
@@ -320,28 +268,10 @@ private:
     mutable std::mutex predictions_mutex_;
     std::unordered_map<int, std::vector<float>> predictions_;
 
-    // Response callbacks
-    ResponseCallback response_callback_;
+    // Response handling
     BatchResponseCallback batch_response_callback_;
     std::mutex callback_mutex_;
-
-    // Server mode: batched response queue (reduces Python/GIL calls)
-    std::vector<uint64_t> pending_responses_;
-    std::mutex pending_responses_mutex_;
-    std::condition_variable pending_responses_cv_;
-    static constexpr size_t RESPONSE_BATCH_SIZE = 128;  // Flush every N responses
-    static constexpr int RESPONSE_FLUSH_TIMEOUT_US = 100;  // Or every 100 microseconds
-
-    // Response flusher thread for Server mode
-    std::thread response_flusher_thread_;
-    std::atomic<bool> flusher_running_{false};
-    std::atomic<bool> use_batched_responses_{false};  // Enable for Server mode
-    std::atomic<bool> use_direct_loadgen_{false};     // Direct LoadGen C++ calls (fastest)
-
-    // Start/stop the response flusher thread
-    void start_response_flusher();
-    void stop_response_flusher();
-    void response_flusher_loop();
+    std::atomic<bool> use_direct_loadgen_{false};  // Direct LoadGen C++ calls (Server mode)
 
     // QSL data cache for fast Server mode dispatch
     struct SampleData {

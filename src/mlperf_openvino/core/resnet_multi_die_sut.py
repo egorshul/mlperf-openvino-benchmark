@@ -148,30 +148,17 @@ class ResNetMultiDieCppSUTWrapper:
     def _setup_response_callback(self, is_offline: bool) -> None:
         """Setup response callback for LoadGen."""
         if is_offline:
-            # Offline: accumulate responses
-            # For Offline mode, we just need to track query_ids - no output data needed
-            # because accuracy is computed from stored predictions
+            # Offline: use Python callback to accumulate responses
             def batch_callback(query_ids: list):
                 with self._offline_lock:
                     for qid in query_ids:
-                        # Store query_id with empty response (data not needed for Offline)
                         self._offline_responses.append((qid, array.array('B', b'\x00')))
             self._cpp_sut.set_batch_response_callback(batch_callback)
         else:
-            # Server mode: try direct LoadGen C++ first (fastest, like NVIDIA)
-            if self._cpp_sut.is_direct_loadgen_available():
-                if self._cpp_sut.enable_direct_loadgen(True):
-                    print("[Server] Using DIRECT LoadGen C++ mode (NO GIL, like NVIDIA LWIS)")
-                    return  # No Python callback needed!
-
-            # Fall back to batched responses (reduces GIL overhead ~60x)
-            print("[Server] Using batched response mode (GIL reduced ~60x)")
-            self._cpp_sut.enable_batched_responses(True)
-
-            def batch_callback(query_ids: list):
-                responses = [lg.QuerySampleResponse(qid, 0, 0) for qid in query_ids]
-                lg.QuerySamplesComplete(responses)
-            self._cpp_sut.set_batch_response_callback(batch_callback)
+            # Server mode: use direct LoadGen C++ (like NVIDIA LWIS)
+            # NO Python callback, NO GIL - responses go directly to LoadGen
+            self._cpp_sut.enable_direct_loadgen(True)
+            print("[Server] Using DIRECT LoadGen C++ mode (NO GIL, like NVIDIA LWIS)")
 
     def _start_progress_thread(self):
         """Start progress monitoring (silent)."""
@@ -457,10 +444,9 @@ class ResNetMultiDieCppSUTWrapper:
             self._cpp_sut.clear_sample_data()
         except Exception:
             pass
-        # Disable direct/batched modes (will be re-enabled on next run)
+        # Disable direct mode (will be re-enabled on next run)
         try:
             self._cpp_sut.enable_direct_loadgen(False)
-            self._cpp_sut.enable_batched_responses(False)
         except Exception:
             pass
         self._cpp_qsl_registered = False

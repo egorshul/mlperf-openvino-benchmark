@@ -5,7 +5,7 @@
  * 1. Compile model once, then for each die
  * 2. Round-robin distribution for load balancing
  * 3. Batch handling with proper output splitting
- * 4. All callbacks in C++ without GIL
+ * 4. Direct LoadGen C++ calls - NO Python GIL (like NVIDIA LWIS)
  */
 
 #include "resnet_multi_die_sut_cpp.hpp"
@@ -15,6 +15,8 @@
 #include <iostream>
 #include <regex>
 #include <stdexcept>
+#include <thread>
+#include <chrono>
 
 #include <openvino/core/preprocess/pre_post_process.hpp>
 
@@ -33,11 +35,9 @@ ResNetMultiDieCppSUT::ResNetMultiDieCppSUT(const std::string& model_path,
 }
 
 ResNetMultiDieCppSUT::~ResNetMultiDieCppSUT() {
-    stop_response_flusher();
     wait_all();
     {
         std::lock_guard<std::mutex> lock(callback_mutex_);
-        response_callback_ = nullptr;
         batch_response_callback_ = nullptr;
     }
 }
@@ -305,47 +305,6 @@ void ResNetMultiDieCppSUT::start_async_batch(const float* input_data,
     issued_count_ += actual_batch_size;
 }
 
-void ResNetMultiDieCppSUT::issue_queries_server(
-    const std::vector<const float*>& all_input_data,
-    const std::vector<size_t>& input_sizes,
-    const std::vector<uint64_t>& query_ids,
-    const std::vector<int>& sample_indices) {
-
-    if (!loaded_) {
-        throw std::runtime_error("Model not loaded");
-    }
-
-    size_t num_samples = query_ids.size();
-    size_t single_input_size = 0;
-    if (!input_sizes.empty()) {
-        single_input_size = input_sizes[0];
-    }
-
-    // Process all samples - dispatch to available requests
-    for (size_t i = 0; i < num_samples; ++i) {
-        // Get idle request (may block if all busy)
-        size_t id = get_idle_request();
-        ResNetMultiDieInferContext* ctx = infer_contexts_[id].get();
-
-        // Setup for single sample
-        ctx->query_ids.clear();
-        ctx->query_ids.push_back(query_ids[i]);
-        ctx->sample_indices.clear();
-        ctx->sample_indices.push_back(sample_indices[i]);
-        ctx->actual_batch_size = 1;
-
-        // Copy input data
-        float* tensor_data = ctx->input_tensor.data<float>();
-        size_t copy_size = std::min(input_sizes[i], ctx->input_tensor.get_byte_size());
-        std::memcpy(tensor_data, all_input_data[i], copy_size);
-
-        // Start async inference
-        pending_count_++;
-        ctx->request.start_async();
-        issued_count_++;
-    }
-}
-
 void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx) {
     callbacks_running_++;
 
@@ -356,7 +315,6 @@ void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx
         // Store predictions if needed (for accuracy mode)
         if (store_predictions_) {
             ov::Tensor output_tensor = ctx->request.get_output_tensor(output_idx_);
-            size_t output_bytes_per_sample = single_output_size_ * sizeof(float);
 
             // Handle different output types
             std::vector<float> converted_output;
@@ -402,39 +360,22 @@ void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx
             }
         }
 
-        // Call response callback - three modes available
-#ifdef USE_LOADGEN_CPP
+        // Send response - two modes:
+        // 1. Direct LoadGen (Server mode): call mlperf::QuerySamplesComplete directly
+        // 2. Python callback (Offline mode): call batch_response_callback_
         if (use_direct_loadgen_) {
-            // FASTEST: Direct LoadGen C++ call - NO Python, NO GIL!
+            // DIRECT LOADGEN: NO Python, NO GIL - maximum performance!
             std::vector<mlperf::QuerySampleResponse> responses;
             responses.reserve(actual_batch_size);
             for (int i = 0; i < actual_batch_size; ++i) {
                 responses.push_back({ctx->query_ids[i], 0, 0});
             }
             mlperf::QuerySamplesComplete(responses.data(), responses.size());
-        } else
-#endif
-        if (use_batched_responses_) {
-            // Batched mode: accumulate responses, flusher thread will send them
-            {
-                std::lock_guard<std::mutex> lock(pending_responses_mutex_);
-                for (int i = 0; i < actual_batch_size; ++i) {
-                    pending_responses_.push_back(ctx->query_ids[i]);
-                }
-            }
-            // Notify flusher if batch is ready
-            if (pending_responses_.size() >= RESPONSE_BATCH_SIZE) {
-                pending_responses_cv_.notify_one();
-            }
         } else {
-            // Immediate mode: send responses via Python callback
+            // Python callback (Offline mode)
             std::lock_guard<std::mutex> cb_lock(callback_mutex_);
             if (batch_response_callback_) {
                 batch_response_callback_(ctx->query_ids);
-            } else if (response_callback_) {
-                for (int i = 0; i < actual_batch_size; ++i) {
-                    response_callback_(ctx->query_ids[i], nullptr, 0);
-                }
             }
         }
 
@@ -443,7 +384,6 @@ void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx
 
         // Still send responses to avoid hang
         try {
-#ifdef USE_LOADGEN_CPP
             if (use_direct_loadgen_) {
                 std::vector<mlperf::QuerySampleResponse> responses;
                 responses.reserve(actual_batch_size);
@@ -451,22 +391,10 @@ void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx
                     responses.push_back({ctx->query_ids[i], 0, 0});
                 }
                 mlperf::QuerySamplesComplete(responses.data(), responses.size());
-            } else
-#endif
-            if (use_batched_responses_) {
-                std::lock_guard<std::mutex> lock(pending_responses_mutex_);
-                for (int i = 0; i < actual_batch_size; ++i) {
-                    pending_responses_.push_back(ctx->query_ids[i]);
-                }
-                pending_responses_cv_.notify_one();
             } else {
                 std::lock_guard<std::mutex> cb_lock(callback_mutex_);
                 if (batch_response_callback_) {
                     batch_response_callback_(ctx->query_ids);
-                } else if (response_callback_) {
-                    for (int i = 0; i < actual_batch_size; ++i) {
-                        response_callback_(ctx->query_ids[i], nullptr, 0);
-                    }
                 }
             }
         } catch (...) {
@@ -480,127 +408,10 @@ void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx
     callbacks_running_--;
 }
 
-void ResNetMultiDieCppSUT::flush_pending_responses() {
-    std::vector<uint64_t> to_flush;
-    {
-        std::lock_guard<std::mutex> lock(pending_responses_mutex_);
-        if (!pending_responses_.empty()) {
-            to_flush = std::move(pending_responses_);
-            pending_responses_.clear();
-        }
-    }
-
-    if (!to_flush.empty()) {
-        std::lock_guard<std::mutex> cb_lock(callback_mutex_);
-        if (batch_response_callback_) {
-            batch_response_callback_(to_flush);
-        } else if (response_callback_) {
-            for (auto qid : to_flush) {
-                response_callback_(qid, nullptr, 0);
-            }
-        }
-    }
-}
-
-void ResNetMultiDieCppSUT::enable_batched_responses(bool enable) {
-    if (enable && !flusher_running_) {
-        start_response_flusher();
-    } else if (!enable && flusher_running_) {
-        stop_response_flusher();
-    }
-    use_batched_responses_ = enable;
-}
-
-bool ResNetMultiDieCppSUT::enable_direct_loadgen(bool enable) {
-#ifdef USE_LOADGEN_CPP
+void ResNetMultiDieCppSUT::enable_direct_loadgen(bool enable) {
     use_direct_loadgen_ = enable;
     if (enable) {
-        // Disable batched responses when using direct mode
-        use_batched_responses_ = false;
-        stop_response_flusher();
         std::cout << "[DirectLoadGen] Enabled - calling mlperf::QuerySamplesComplete directly from C++" << std::endl;
-    }
-    return true;
-#else
-    (void)enable;  // Suppress unused warning
-    std::cerr << "[DirectLoadGen] Not available! Rebuild with -DUSE_LOADGEN_CPP=ON" << std::endl;
-    return false;
-#endif
-}
-
-void ResNetMultiDieCppSUT::start_response_flusher() {
-    if (flusher_running_) {
-        return;
-    }
-
-    flusher_running_ = true;
-
-    // Reserve space to avoid reallocations
-    {
-        std::lock_guard<std::mutex> lock(pending_responses_mutex_);
-        pending_responses_.reserve(RESPONSE_BATCH_SIZE * 2);
-    }
-
-    response_flusher_thread_ = std::thread([this]() {
-        response_flusher_loop();
-    });
-}
-
-void ResNetMultiDieCppSUT::stop_response_flusher() {
-    if (!flusher_running_) {
-        return;
-    }
-
-    flusher_running_ = false;
-    pending_responses_cv_.notify_all();
-
-    if (response_flusher_thread_.joinable()) {
-        response_flusher_thread_.join();
-    }
-
-    // Flush any remaining responses
-    flush_pending_responses();
-}
-
-void ResNetMultiDieCppSUT::response_flusher_loop() {
-    std::vector<uint64_t> batch_to_send;
-    batch_to_send.reserve(RESPONSE_BATCH_SIZE * 2);
-
-    while (flusher_running_) {
-        {
-            std::unique_lock<std::mutex> lock(pending_responses_mutex_);
-
-            // Wait for responses or timeout
-            auto timeout = std::chrono::microseconds(RESPONSE_FLUSH_TIMEOUT_US);
-            pending_responses_cv_.wait_for(lock, timeout, [this]() {
-                return !pending_responses_.empty() ||
-                       pending_responses_.size() >= RESPONSE_BATCH_SIZE ||
-                       !flusher_running_;
-            });
-
-            if (!flusher_running_ && pending_responses_.empty()) {
-                break;
-            }
-
-            // Swap with local vector to minimize lock time
-            if (!pending_responses_.empty()) {
-                batch_to_send.swap(pending_responses_);
-                pending_responses_.clear();
-            }
-        }
-
-        // Send batch outside of lock
-        if (!batch_to_send.empty()) {
-            std::lock_guard<std::mutex> cb_lock(callback_mutex_);
-            if (batch_response_callback_) {
-                batch_response_callback_(batch_to_send);
-            } else if (response_callback_) {
-                for (auto qid : batch_to_send) {
-                    response_callback_(qid, nullptr, 0);
-                }
-            }
-            batch_to_send.clear();
-        }
     }
 }
 
@@ -608,8 +419,6 @@ void ResNetMultiDieCppSUT::wait_all() {
     while (pending_count_.load() > 0 || callbacks_running_.load() > 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    // Flush any remaining responses
-    flush_pending_responses();
 }
 
 void ResNetMultiDieCppSUT::reset_counters() {
@@ -629,11 +438,6 @@ std::unordered_map<int, std::vector<float>> ResNetMultiDieCppSUT::get_prediction
 void ResNetMultiDieCppSUT::clear_predictions() {
     std::lock_guard<std::mutex> lock(predictions_mutex_);
     predictions_.clear();
-}
-
-void ResNetMultiDieCppSUT::set_response_callback(ResponseCallback callback) {
-    std::lock_guard<std::mutex> lock(callback_mutex_);
-    response_callback_ = callback;
 }
 
 void ResNetMultiDieCppSUT::set_batch_response_callback(BatchResponseCallback callback) {

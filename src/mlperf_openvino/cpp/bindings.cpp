@@ -461,25 +461,6 @@ PYBIND11_MODULE(_cpp_sut, m) {
         .def("clear_predictions", &mlperf_ov::ResNetMultiDieCppSUT::clear_predictions,
              "Clear stored predictions")
 
-        .def("set_response_callback",
-             [](mlperf_ov::ResNetMultiDieCppSUT& self, py::function callback) {
-                 self.set_response_callback(
-                     [callback](uint64_t query_id, const float* data, size_t size) {
-                         py::gil_scoped_acquire acquire;
-
-                         if (data != nullptr && size > 0) {
-                             size_t num_elements = size / sizeof(float);
-                             py::array_t<float> arr(num_elements);
-                             std::memcpy(arr.mutable_data(), data, size);
-                             callback(query_id, arr);
-                         } else {
-                             callback(query_id, py::none());
-                         }
-                     });
-             },
-             py::arg("callback"),
-             "Set response callback (called for each sample in batch)")
-
         .def("set_batch_response_callback",
              [](mlperf_ov::ResNetMultiDieCppSUT& self, py::function callback) {
                  self.set_batch_response_callback(
@@ -489,86 +470,7 @@ PYBIND11_MODULE(_cpp_sut, m) {
                      });
              },
              py::arg("callback"),
-             "Set batch response callback (more efficient - one call per batch)")
-
-        .def("set_loadgen_complete",
-             [](mlperf_ov::ResNetMultiDieCppSUT& self,
-                py::object lg_module,
-                py::object response_class) {
-                 // Store LoadGen module and QuerySampleResponse class
-                 // This allows us to call QuerySamplesComplete directly from C++
-                 // with minimal Python overhead
-                 py::function complete_func = lg_module.attr("QuerySamplesComplete");
-
-                 self.set_batch_response_callback(
-                     [complete_func, response_class](const std::vector<uint64_t>& query_ids) {
-                         py::gil_scoped_acquire acquire;
-
-                         // Create responses list directly in C++
-                         py::list responses;
-                         responses.attr("__init__")();
-
-                         for (uint64_t qid : query_ids) {
-                             // QuerySampleResponse(id, data_ptr, size) - no data for classification
-                             py::object resp = response_class(qid, 0, 0);
-                             responses.append(resp);
-                         }
-
-                         // Single call to LoadGen
-                         complete_func(responses);
-                     });
-             },
-             py::arg("lg_module"),
-             py::arg("response_class"),
-             "Set LoadGen module for direct C++ calls (most efficient)")
-
-        .def("issue_queries_server",
-             [](mlperf_ov::ResNetMultiDieCppSUT& self,
-                py::list input_arrays,
-                py::list query_ids,
-                py::list sample_indices) {
-                 // Pre-allocate vectors with known size (fast with GIL)
-                 size_t n = py::len(input_arrays);
-
-                 // Extract all data pointers FIRST while holding GIL
-                 // This is necessary because numpy arrays may be garbage collected
-                 std::vector<py::array_t<float, py::array::c_style | py::array::forcecast>> arrays;
-                 arrays.reserve(n);
-
-                 std::vector<const float*> all_input_data(n);
-                 std::vector<size_t> input_sizes(n);
-                 std::vector<uint64_t> qids(n);
-                 std::vector<int> sidxs(n);
-
-                 // Fast extraction loop - minimize Python API calls
-                 for (size_t i = 0; i < n; ++i) {
-                     arrays.push_back(input_arrays[i].cast<py::array_t<float, py::array::c_style | py::array::forcecast>>());
-                     qids[i] = query_ids[i].cast<uint64_t>();
-                     sidxs[i] = sample_indices[i].cast<int>();
-                 }
-
-                 // Get buffer info (separate loop to avoid cache misses)
-                 for (size_t i = 0; i < n; ++i) {
-                     py::buffer_info buf = arrays[i].request();
-                     all_input_data[i] = static_cast<const float*>(buf.ptr);
-                     input_sizes[i] = buf.size * sizeof(float);
-                 }
-
-                 // Release GIL and process all queries in C++
-                 // Arrays kept alive by 'arrays' vector until scope ends
-                 {
-                     py::gil_scoped_release release;
-                     self.issue_queries_server(all_input_data, input_sizes, qids, sidxs);
-                 }
-                 // Arrays released here, after C++ processing complete
-             },
-             py::arg("input_arrays"),
-             py::arg("query_ids"),
-             py::arg("sample_indices"),
-             "Process multiple queries efficiently in C++ (GIL released during dispatch)")
-
-        .def("flush_pending_responses", &mlperf_ov::ResNetMultiDieCppSUT::flush_pending_responses,
-             "Flush any pending batched responses to callback")
+             "Set batch response callback for Offline mode")
 
         .def("register_sample_data",
              [](mlperf_ov::ResNetMultiDieCppSUT& self,
@@ -608,19 +510,11 @@ PYBIND11_MODULE(_cpp_sut, m) {
              },
              py::arg("query_ids"),
              py::arg("sample_indices"),
-             "Fast Server mode dispatch using pre-registered data (no data passing)")
-
-        .def("enable_batched_responses", &mlperf_ov::ResNetMultiDieCppSUT::enable_batched_responses,
-             py::arg("enable"),
-             "Enable batched response mode to reduce GIL overhead")
+             "Fast Server mode dispatch - responses go directly to LoadGen C++ (NO GIL)")
 
         .def("enable_direct_loadgen", &mlperf_ov::ResNetMultiDieCppSUT::enable_direct_loadgen,
              py::arg("enable"),
-             "Enable direct LoadGen C++ mode (requires -DUSE_LOADGEN_CPP)")
-
-        .def_static("is_direct_loadgen_available",
-             &mlperf_ov::ResNetMultiDieCppSUT::is_direct_loadgen_available,
-             "Check if direct LoadGen mode is available");
+             "Enable direct LoadGen C++ mode for Server scenario");
 
     // RetinaNetMultiDieCppSUT - multi-die accelerator for RetinaNet
     py::class_<mlperf_ov::RetinaNetMultiDieCppSUT>(m, "RetinaNetMultiDieCppSUT")
