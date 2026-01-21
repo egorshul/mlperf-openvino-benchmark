@@ -400,30 +400,15 @@ void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx
             }
         }
 
-        // Queue responses for batched callback (reduces Python GIL overhead)
-        std::vector<uint64_t> to_flush;
+        // Call response callback immediately (Server mode requires low latency!)
         {
-            std::lock_guard<std::mutex> lock(pending_responses_mutex_);
-            for (int i = 0; i < actual_batch_size; ++i) {
-                pending_responses_.push_back(ctx->query_ids[i]);
-            }
-
-            // Flush if batch is full
-            if (pending_responses_.size() >= RESPONSE_BATCH_SIZE) {
-                to_flush = std::move(pending_responses_);
-                pending_responses_.clear();
-                pending_responses_.reserve(RESPONSE_BATCH_SIZE);
-            }
-        }
-
-        // Call Python callback outside of pending_responses_mutex_
-        if (!to_flush.empty()) {
             std::lock_guard<std::mutex> cb_lock(callback_mutex_);
             if (batch_response_callback_) {
-                batch_response_callback_(to_flush);
+                // Send immediately - don't batch for Server mode latency
+                batch_response_callback_(ctx->query_ids);
             } else if (response_callback_) {
-                for (auto qid : to_flush) {
-                    response_callback_(qid, nullptr, 0);
+                for (int i = 0; i < actual_batch_size; ++i) {
+                    response_callback_(ctx->query_ids[i], nullptr, 0);
                 }
             }
         }
@@ -431,10 +416,18 @@ void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx
     } catch (const std::exception& e) {
         std::cerr << "[ResNetMultiDieCppSUT] Callback error on " << ctx->die_name << ": " << e.what() << std::endl;
 
-        // Still queue responses to avoid hang
-        std::lock_guard<std::mutex> lock(pending_responses_mutex_);
-        for (int i = 0; i < actual_batch_size; ++i) {
-            pending_responses_.push_back(ctx->query_ids[i]);
+        // Still send responses immediately to avoid hang
+        try {
+            std::lock_guard<std::mutex> cb_lock(callback_mutex_);
+            if (batch_response_callback_) {
+                batch_response_callback_(ctx->query_ids);
+            } else if (response_callback_) {
+                for (int i = 0; i < actual_batch_size; ++i) {
+                    response_callback_(ctx->query_ids[i], nullptr, 0);
+                }
+            }
+        } catch (...) {
+            // Ignore callback errors in error handler
         }
     }
 
