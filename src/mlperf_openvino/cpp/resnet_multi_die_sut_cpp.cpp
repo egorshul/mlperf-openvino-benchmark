@@ -194,18 +194,22 @@ void ResNetMultiDieCppSUT::issue_thread_func(size_t die_idx) {
         size_t idx = tail % WORK_QUEUE_SIZE;
 
         if (!work_queue_[idx].valid.load(std::memory_order_acquire)) {
-            // No work - adaptive backoff
+            // No work - low-latency backoff (Server mode needs fast wake-up)
             idle_spins++;
-            if (idle_spins < 1000) {
+            if (idle_spins < 64) {
+                // Tight spin with pause - minimal latency
                 #if defined(__x86_64__) || defined(_M_X64)
                 __builtin_ia32_pause();
                 #elif defined(__aarch64__)
                 asm volatile("yield");
                 #endif
-            } else if (idle_spins < 10000) {
+            } else if (idle_spins < 256) {
+                // Brief yield
                 std::this_thread::yield();
             } else {
+                // Short sleep, then reset (keeps thread responsive)
                 std::this_thread::sleep_for(std::chrono::microseconds(1));
+                idle_spins = 0;
             }
             continue;
         }
@@ -297,6 +301,54 @@ void ResNetMultiDieCppSUT::issue_thread_func(size_t die_idx) {
 // ============================================================================
 
 void ResNetMultiDieCppSUT::enqueue_completion(ResNetMultiDieInferContext* ctx) {
+    // Server mode: INLINE completion for minimum latency!
+    // Call QuerySamplesComplete directly in callback thread
+    if (use_direct_loadgen_.load(std::memory_order_relaxed)) {
+        int actual_batch_size = ctx->actual_batch_size;
+
+        // Store predictions if needed (accuracy mode)
+        if (store_predictions_) {
+            ov::Tensor output_tensor = ctx->request.get_output_tensor(output_idx_);
+            const float* output_data = nullptr;
+            std::vector<float> converted;
+
+            if (output_type_ == ov::element::f32) {
+                output_data = output_tensor.data<float>();
+            } else if (output_type_ == ov::element::f16) {
+                const ov::float16* f16_data = output_tensor.data<ov::float16>();
+                converted.resize(single_output_size_ * actual_batch_size);
+                for (size_t j = 0; j < converted.size(); ++j) {
+                    converted[j] = static_cast<float>(f16_data[j]);
+                }
+                output_data = converted.data();
+            }
+
+            if (output_data) {
+                std::lock_guard<std::mutex> lock(predictions_mutex_);
+                for (int i = 0; i < actual_batch_size; ++i) {
+                    int sample_idx = ctx->sample_indices[i];
+                    const float* sample_output = output_data + (i * single_output_size_);
+                    predictions_[sample_idx] = std::vector<float>(
+                        sample_output, sample_output + single_output_size_);
+                }
+            }
+        }
+
+        // Send response to LoadGen IMMEDIATELY (no queue!)
+        mlperf::QuerySampleResponse responses[ResNetMultiDieInferContext::MAX_BATCH];
+        for (int i = 0; i < actual_batch_size; ++i) {
+            responses[i] = {ctx->query_ids[i], 0, 0};
+        }
+        mlperf::QuerySamplesComplete(responses, actual_batch_size);
+
+        // Update counters and release request
+        completed_count_.fetch_add(actual_batch_size, std::memory_order_relaxed);
+        pending_count_.fetch_sub(1, std::memory_order_relaxed);
+        release_request(ctx->pool_id);
+        return;
+    }
+
+    // Offline mode: use completion queue for batching (throughput > latency)
     size_t head = completion_head_.fetch_add(1, std::memory_order_acq_rel);
     size_t idx = head % COMPLETION_QUEUE_SIZE;
 
