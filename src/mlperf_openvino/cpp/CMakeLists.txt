@@ -5,28 +5,94 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# Include FetchContent for downloading dependencies
+# Include for downloading dependencies
 include(FetchContent)
 
 # =============================================================================
-# Download and build MLPerf LoadGen from source
+# Download MLPerf LoadGen source only (not entire inference repo)
 # =============================================================================
-message(STATUS "Fetching MLPerf LoadGen...")
+set(LOADGEN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/loadgen")
 
-FetchContent_Declare(
-    mlperf_loadgen
-    GIT_REPOSITORY https://github.com/mlcommons/inference.git
-    GIT_TAG        master
-    GIT_SHALLOW    TRUE
-    SOURCE_SUBDIR  loadgen
+if(NOT EXISTS "${LOADGEN_DIR}/CMakeLists.txt")
+    message(STATUS "Downloading MLPerf LoadGen source...")
+
+    # Download specific files from GitHub (much faster than cloning)
+    set(LOADGEN_URL "https://raw.githubusercontent.com/mlcommons/inference/master/loadgen")
+
+    file(MAKE_DIRECTORY "${LOADGEN_DIR}")
+
+    # Core source files
+    set(LOADGEN_FILES
+        "bindings/c_api.h"
+        "bindings/c_api.cc"
+        "issue_query_controller.h"
+        "issue_query_controller.cc"
+        "loadgen.h"
+        "loadgen.cc"
+        "logging.h"
+        "logging.cc"
+        "query_sample.h"
+        "query_sample_library.h"
+        "system_under_test.h"
+        "test_settings.h"
+        "test_settings_internal.h"
+        "test_settings_internal.cc"
+        "utils.h"
+        "utils.cc"
+        "version.h"
+        "version.cc"
+        "results.cc"
+        "early_stopping.cc"
+    )
+
+    file(MAKE_DIRECTORY "${LOADGEN_DIR}/bindings")
+
+    foreach(FILE ${LOADGEN_FILES})
+        if(NOT EXISTS "${LOADGEN_DIR}/${FILE}")
+            message(STATUS "  Downloading ${FILE}...")
+            file(DOWNLOAD
+                "${LOADGEN_URL}/${FILE}"
+                "${LOADGEN_DIR}/${FILE}"
+                STATUS DOWNLOAD_STATUS
+                TIMEOUT 30
+            )
+            list(GET DOWNLOAD_STATUS 0 STATUS_CODE)
+            if(NOT STATUS_CODE EQUAL 0)
+                message(WARNING "Failed to download ${FILE}")
+            endif()
+        endif()
+    endforeach()
+
+    # Create minimal CMakeLists.txt for loadgen
+    file(WRITE "${LOADGEN_DIR}/CMakeLists.txt" [=[
+cmake_minimum_required(VERSION 3.14)
+project(mlperf_loadgen LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+add_library(mlperf_loadgen STATIC
+    bindings/c_api.cc
+    issue_query_controller.cc
+    loadgen.cc
+    logging.cc
+    test_settings_internal.cc
+    utils.cc
+    version.cc
+    results.cc
+    early_stopping.cc
 )
 
-# Configure LoadGen build options
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+target_include_directories(mlperf_loadgen PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+]=])
 
-FetchContent_MakeAvailable(mlperf_loadgen)
+    message(STATUS "MLPerf LoadGen downloaded to ${LOADGEN_DIR}")
+endif()
 
-message(STATUS "MLPerf LoadGen configured successfully")
+# Build loadgen
+add_subdirectory("${LOADGEN_DIR}" "${CMAKE_BINARY_DIR}/loadgen_build")
+
+message(STATUS "MLPerf LoadGen configured")
 
 # =============================================================================
 # Find OpenVINO from Python package
@@ -75,7 +141,7 @@ target_link_libraries(_cpp_sut PRIVATE
 # Include directories
 target_include_directories(_cpp_sut PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${mlperf_loadgen_SOURCE_DIR}/loadgen
+    ${LOADGEN_DIR}
 )
 
 # Enable direct LoadGen C++ integration
