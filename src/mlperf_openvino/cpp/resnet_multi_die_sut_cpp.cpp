@@ -1,11 +1,10 @@
 /**
  * High-performance C++ SUT implementation for multi-die accelerators.
  *
- * Key optimizations:
- * 1. Lock-free request pool - atomic CAS instead of mutex
- * 2. Dedicated completion thread - batches responses before QuerySamplesComplete
- * 3. Pre-allocated buffers - zero allocations in hot path
- * 4. Direct LoadGen C++ calls - no Python/GIL overhead
+ * NVIDIA LWIS-style architecture:
+ * - IssueQuery: instant return, pushes to work queue only
+ * - Issue Thread: pulls from queue, copies data, submits to device
+ * - Completion Thread: batches responses, calls QuerySamplesComplete
  */
 
 #include "resnet_multi_die_sut_cpp.hpp"
@@ -20,9 +19,7 @@
 
 namespace mlperf_ov {
 
-// Constants for lock-free pool
 static constexpr int SLOT_FREE = -1;
-static constexpr int SLOT_ACQUIRING = -2;
 
 ResNetMultiDieCppSUT::ResNetMultiDieCppSUT(const std::string& model_path,
                                            const std::string& device_prefix,
@@ -35,12 +32,12 @@ ResNetMultiDieCppSUT::ResNetMultiDieCppSUT(const std::string& model_path,
       compile_properties_(compile_properties),
       use_nhwc_input_(use_nhwc_input) {
 
-    // Initialize all slots as free
     for (int i = 0; i < MAX_REQUESTS; ++i) {
         request_slots_[i].store(SLOT_FREE, std::memory_order_relaxed);
     }
-
-    // Initialize completion queue
+    for (int i = 0; i < WORK_QUEUE_SIZE; ++i) {
+        work_queue_[i].valid.store(false, std::memory_order_relaxed);
+    }
     for (int i = 0; i < COMPLETION_QUEUE_SIZE; ++i) {
         completion_queue_[i].ctx = nullptr;
         completion_queue_[i].valid.store(false, std::memory_order_relaxed);
@@ -48,8 +45,13 @@ ResNetMultiDieCppSUT::ResNetMultiDieCppSUT(const std::string& model_path,
 }
 
 ResNetMultiDieCppSUT::~ResNetMultiDieCppSUT() {
-    // Stop completion thread
+    // Stop threads
+    issue_running_.store(false, std::memory_order_release);
     completion_running_.store(false, std::memory_order_release);
+
+    if (issue_thread_.joinable()) {
+        issue_thread_.join();
+    }
     if (completion_thread_.joinable()) {
         completion_thread_.join();
     }
@@ -70,22 +72,19 @@ size_t ResNetMultiDieCppSUT::acquire_request() {
     size_t num_requests = infer_contexts_.size();
     size_t hint = pool_search_hint_.load(std::memory_order_relaxed);
 
-    // Try from hint position first, then wrap around
     for (size_t attempts = 0; attempts < num_requests * 2; ++attempts) {
         size_t idx = (hint + attempts) % num_requests;
-
         int expected = SLOT_FREE;
         if (request_slots_[idx].compare_exchange_weak(
                 expected, static_cast<int>(idx),
                 std::memory_order_acquire,
                 std::memory_order_relaxed)) {
-            // Successfully acquired
             pool_search_hint_.store((idx + 1) % num_requests, std::memory_order_relaxed);
             return idx;
         }
     }
 
-    // All slots busy - spin wait with pause instruction first
+    // Spin wait
     int spin_count = 0;
     while (true) {
         for (size_t idx = 0; idx < num_requests; ++idx) {
@@ -98,7 +97,6 @@ size_t ResNetMultiDieCppSUT::acquire_request() {
                 return idx;
             }
         }
-        // Adaptive backoff: pause -> yield -> brief sleep
         spin_count++;
         if (spin_count < 100) {
             #if defined(__x86_64__) || defined(_M_X64)
@@ -110,7 +108,7 @@ size_t ResNetMultiDieCppSUT::acquire_request() {
             std::this_thread::yield();
         } else {
             std::this_thread::sleep_for(std::chrono::microseconds(1));
-            spin_count = 0;  // Reset after sleep
+            spin_count = 0;
         }
     }
 }
@@ -120,15 +118,109 @@ void ResNetMultiDieCppSUT::release_request(size_t id) {
 }
 
 // ============================================================================
-// COMPLETION THREAD WITH RESPONSE BATCHING
+// ISSUE THREAD (NVIDIA LWIS-style: pulls from work queue, submits to device)
+// ============================================================================
+
+void ResNetMultiDieCppSUT::issue_thread_func() {
+    int idle_spins = 0;
+
+    while (issue_running_.load(std::memory_order_acquire)) {
+        size_t tail = work_tail_.load(std::memory_order_relaxed);
+        size_t idx = tail % WORK_QUEUE_SIZE;
+
+        if (!work_queue_[idx].valid.load(std::memory_order_acquire)) {
+            // No work - adaptive backoff
+            idle_spins++;
+            if (idle_spins < 1000) {
+                #if defined(__x86_64__) || defined(_M_X64)
+                __builtin_ia32_pause();
+                #elif defined(__aarch64__)
+                asm volatile("yield");
+                #endif
+            } else if (idle_spins < 10000) {
+                std::this_thread::yield();
+            } else {
+                std::this_thread::sleep_for(std::chrono::microseconds(1));
+            }
+            continue;
+        }
+
+        // Got work item
+        idle_spins = 0;
+        uint64_t query_id = work_queue_[idx].query_id;
+        int sample_idx = work_queue_[idx].sample_idx;
+        work_queue_[idx].valid.store(false, std::memory_order_release);
+        work_tail_.fetch_add(1, std::memory_order_release);
+
+        // Find sample data
+        auto it = sample_data_cache_.find(sample_idx);
+        if (it == sample_data_cache_.end()) {
+            continue;  // Skip invalid sample
+        }
+        const SampleData& sample = it->second;
+
+        // Acquire inference request
+        size_t req_id = acquire_request();
+        ResNetMultiDieInferContext* ctx = infer_contexts_[req_id].get();
+
+        // Setup request
+        ctx->query_ids[0] = query_id;
+        ctx->sample_indices[0] = sample_idx;
+        ctx->actual_batch_size = 1;
+
+        // Copy data to pre-allocated tensor
+        float* tensor_data = ctx->input_tensor.data<float>();
+        std::memcpy(tensor_data, sample.data, std::min(sample.size, input_byte_size_));
+
+        // Submit to device
+        pending_count_.fetch_add(1, std::memory_order_relaxed);
+        ctx->request.start_async();
+        issued_count_.fetch_add(1, std::memory_order_relaxed);
+        queued_count_.fetch_sub(1, std::memory_order_relaxed);
+    }
+
+    // Drain remaining work on shutdown
+    while (true) {
+        size_t tail = work_tail_.load(std::memory_order_relaxed);
+        size_t idx = tail % WORK_QUEUE_SIZE;
+
+        if (!work_queue_[idx].valid.load(std::memory_order_acquire)) {
+            break;
+        }
+
+        uint64_t query_id = work_queue_[idx].query_id;
+        int sample_idx = work_queue_[idx].sample_idx;
+        work_queue_[idx].valid.store(false, std::memory_order_release);
+        work_tail_.fetch_add(1, std::memory_order_release);
+
+        auto it = sample_data_cache_.find(sample_idx);
+        if (it == sample_data_cache_.end()) continue;
+
+        size_t req_id = acquire_request();
+        ResNetMultiDieInferContext* ctx = infer_contexts_[req_id].get();
+
+        ctx->query_ids[0] = query_id;
+        ctx->sample_indices[0] = sample_idx;
+        ctx->actual_batch_size = 1;
+
+        float* tensor_data = ctx->input_tensor.data<float>();
+        std::memcpy(tensor_data, it->second.data, std::min(it->second.size, input_byte_size_));
+
+        pending_count_.fetch_add(1, std::memory_order_relaxed);
+        ctx->request.start_async();
+        issued_count_.fetch_add(1, std::memory_order_relaxed);
+        queued_count_.fetch_sub(1, std::memory_order_relaxed);
+    }
+}
+
+// ============================================================================
+// COMPLETION QUEUE
 // ============================================================================
 
 void ResNetMultiDieCppSUT::enqueue_completion(ResNetMultiDieInferContext* ctx) {
-    // Get slot in completion queue (MPSC queue - multiple producers)
     size_t head = completion_head_.fetch_add(1, std::memory_order_acq_rel);
     size_t idx = head % COMPLETION_QUEUE_SIZE;
 
-    // Wait if slot is still being read by consumer (should be rare)
     while (completion_queue_[idx].valid.load(std::memory_order_acquire)) {
         std::this_thread::yield();
     }
@@ -138,14 +230,11 @@ void ResNetMultiDieCppSUT::enqueue_completion(ResNetMultiDieInferContext* ctx) {
 }
 
 void ResNetMultiDieCppSUT::completion_thread_func() {
-    // Pre-allocated batch buffer for LoadGen responses (fixed size, no reallocation)
     static constexpr int MAX_BATCH_RESPONSES = 512;
     mlperf::QuerySampleResponse batch_responses[MAX_BATCH_RESPONSES];
     uint64_t callback_ids[MAX_BATCH_RESPONSES];
 
     int idle_spins = 0;
-    static constexpr int SPINS_BEFORE_YIELD = 1000;
-    static constexpr int SPINS_BEFORE_SLEEP = 10000;
 
     while (completion_running_.load(std::memory_order_acquire)) {
         size_t response_count = 0;
@@ -154,12 +243,11 @@ void ResNetMultiDieCppSUT::completion_thread_func() {
         size_t tail = completion_tail_.load(std::memory_order_relaxed);
         int total_samples = 0;
 
-        // Collect batch of completions - no allocation, direct array access
         while (processed < MAX_BATCH_RESPONSES) {
             size_t idx = tail % COMPLETION_QUEUE_SIZE;
 
             if (!completion_queue_[idx].valid.load(std::memory_order_acquire)) {
-                break;  // No more items
+                break;
             }
 
             ResNetMultiDieInferContext* ctx = completion_queue_[idx].ctx;
@@ -167,7 +255,6 @@ void ResNetMultiDieCppSUT::completion_thread_func() {
 
             int actual_batch_size = ctx->actual_batch_size;
 
-            // Store predictions if needed (accuracy mode only)
             if (store_predictions_) {
                 ov::Tensor output_tensor = ctx->request.get_output_tensor(output_idx_);
                 const float* output_data = nullptr;
@@ -195,7 +282,6 @@ void ResNetMultiDieCppSUT::completion_thread_func() {
                 }
             }
 
-            // Collect responses directly into pre-allocated arrays
             if (use_direct_loadgen_.load(std::memory_order_relaxed)) {
                 for (int i = 0; i < actual_batch_size && response_count < MAX_BATCH_RESPONSES; ++i) {
                     batch_responses[response_count++] = {ctx->query_ids[i], 0, 0};
@@ -207,28 +293,22 @@ void ResNetMultiDieCppSUT::completion_thread_func() {
             }
 
             total_samples += actual_batch_size;
-
-            // Release request back to pool immediately
             release_request(ctx->pool_id);
-
             tail++;
             processed++;
         }
 
-        // Batch update counters (fewer atomic ops)
         if (total_samples > 0) {
             completed_count_.fetch_add(total_samples, std::memory_order_relaxed);
             pending_count_.fetch_sub(processed, std::memory_order_relaxed);
             completion_tail_.store(tail, std::memory_order_release);
-            idle_spins = 0;  // Reset idle counter
+            idle_spins = 0;
         }
 
-        // Send batched responses to LoadGen
         if (response_count > 0) {
             mlperf::QuerySamplesComplete(batch_responses, response_count);
         }
 
-        // Python callback (Offline mode)
         if (callback_count > 0) {
             std::vector<uint64_t> ids(callback_ids, callback_ids + callback_count);
             std::lock_guard<std::mutex> lock(callback_mutex_);
@@ -237,46 +317,38 @@ void ResNetMultiDieCppSUT::completion_thread_func() {
             }
         }
 
-        // Adaptive backoff - spin first, then yield, then sleep
         if (processed == 0) {
             idle_spins++;
-            if (idle_spins < SPINS_BEFORE_YIELD) {
-                // Spin with pause (reduces power and allows other hyperthreads)
+            if (idle_spins < 1000) {
                 #if defined(__x86_64__) || defined(_M_X64)
                 __builtin_ia32_pause();
                 #elif defined(__aarch64__)
                 asm volatile("yield");
                 #endif
-            } else if (idle_spins < SPINS_BEFORE_SLEEP) {
+            } else if (idle_spins < 10000) {
                 std::this_thread::yield();
             } else {
-                // Only sleep after many idle iterations
                 std::this_thread::sleep_for(std::chrono::microseconds(1));
             }
         }
     }
 
-    // Drain remaining completions on shutdown
+    // Drain on shutdown
     size_t tail = completion_tail_.load(std::memory_order_relaxed);
     while (true) {
         size_t idx = tail % COMPLETION_QUEUE_SIZE;
-        if (!completion_queue_[idx].valid.load(std::memory_order_acquire)) {
-            break;
-        }
+        if (!completion_queue_[idx].valid.load(std::memory_order_acquire)) break;
 
         ResNetMultiDieInferContext* ctx = completion_queue_[idx].ctx;
         completion_queue_[idx].valid.store(false, std::memory_order_release);
 
-        int actual_batch_size = ctx->actual_batch_size;
-
         if (use_direct_loadgen_.load(std::memory_order_relaxed)) {
-            mlperf::QuerySamplesComplete(ctx->responses, actual_batch_size);
+            mlperf::QuerySamplesComplete(ctx->responses, ctx->actual_batch_size);
         }
 
-        completed_count_.fetch_add(actual_batch_size, std::memory_order_relaxed);
+        completed_count_.fetch_add(ctx->actual_batch_size, std::memory_order_relaxed);
         pending_count_.fetch_sub(1, std::memory_order_relaxed);
         release_request(ctx->pool_id);
-
         tail++;
     }
     completion_tail_.store(tail, std::memory_order_release);
@@ -289,14 +361,12 @@ void ResNetMultiDieCppSUT::completion_thread_func() {
 std::vector<std::string> ResNetMultiDieCppSUT::discover_dies() {
     std::vector<std::string> dies;
     auto all_devices = core_.get_available_devices();
-
     std::regex die_pattern(device_prefix_ + R"(\.(\d+))");
 
     for (const auto& device : all_devices) {
         if (device.rfind(device_prefix_, 0) != 0) continue;
         if (device.find("Simulator") != std::string::npos) continue;
         if (device.find("FuncSim") != std::string::npos) continue;
-
         if (std::regex_match(device, die_pattern)) {
             dies.push_back(device);
         }
@@ -315,21 +385,14 @@ std::vector<std::string> ResNetMultiDieCppSUT::discover_dies() {
 
 ov::AnyMap ResNetMultiDieCppSUT::build_compile_properties() {
     ov::AnyMap properties;
-
     for (const auto& [key, value] : compile_properties_) {
-        try {
-            properties[key] = std::stoi(value);
-            continue;
-        } catch (...) {}
-
+        try { properties[key] = std::stoi(value); continue; } catch (...) {}
         std::string upper = value;
         std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
         if (upper == "TRUE") { properties[key] = true; continue; }
         if (upper == "FALSE") { properties[key] = false; continue; }
-
         properties[key] = value;
     }
-
     return properties;
 }
 
@@ -370,7 +433,6 @@ void ResNetMultiDieCppSUT::load() {
     output_name_ = outputs[output_idx_].get_any_name();
     output_type_ = outputs[output_idx_].get_element_type();
 
-    // Reshape for batch
     if (batch_size_ > 1 || input_shape_[0] == 0) {
         std::map<std::string, ov::PartialShape> new_shapes;
         for (const auto& input : inputs) {
@@ -382,7 +444,6 @@ void ResNetMultiDieCppSUT::load() {
         input_shape_ = model_->inputs()[0].get_partial_shape().get_min_shape();
     }
 
-    // NHWC support
     if (use_nhwc_input_) {
         ov::preprocess::PrePostProcessor ppp(model_);
         ppp.input().tensor().set_layout("NHWC");
@@ -392,9 +453,13 @@ void ResNetMultiDieCppSUT::load() {
         input_name_ = model_->inputs()[0].get_any_name();
     }
 
+    // Calculate input byte size
+    input_byte_size_ = 1;
+    for (auto d : input_shape_) input_byte_size_ *= d;
+    input_byte_size_ *= input_type_.size();
+
     ov::AnyMap properties = build_compile_properties();
 
-    // Compile for each die
     size_t total_requests = 0;
     for (const auto& device_name : active_devices_) {
         auto die_ctx = std::make_unique<DieContext>();
@@ -407,7 +472,6 @@ void ResNetMultiDieCppSUT::load() {
             die_ctx->optimal_nireq = 4;
         }
 
-        // Create requests - use higher multiplier for better pipelining
         int num_requests = std::max(die_ctx->optimal_nireq * 8, 32);
 
         for (int i = 0; i < num_requests && total_requests < MAX_REQUESTS; ++i) {
@@ -420,7 +484,6 @@ void ResNetMultiDieCppSUT::load() {
             ctx->input_tensor = ov::Tensor(input_type_, input_shape_);
             ctx->request.set_input_tensor(ctx->input_tensor);
 
-            // Set callback - just enqueues to completion queue (minimal work)
             ResNetMultiDieInferContext* ctx_ptr = ctx.get();
             ctx->request.set_callback([ctx_ptr](std::exception_ptr) {
                 ctx_ptr->sut->enqueue_completion(ctx_ptr);
@@ -434,12 +497,15 @@ void ResNetMultiDieCppSUT::load() {
         die_contexts_.push_back(std::move(die_ctx));
     }
 
-    // Calculate output size
     auto output_shape = model_->outputs()[output_idx_].get_partial_shape().get_min_shape();
     single_output_size_ = 1;
     for (size_t i = 1; i < output_shape.size(); ++i) {
         single_output_size_ *= output_shape[i];
     }
+
+    // Start issue thread
+    issue_running_.store(true, std::memory_order_release);
+    issue_thread_ = std::thread(&ResNetMultiDieCppSUT::issue_thread_func, this);
 
     // Start completion thread
     completion_running_.store(true, std::memory_order_release);
@@ -472,7 +538,6 @@ void ResNetMultiDieCppSUT::start_async_batch(const float* input_data,
     size_t id = acquire_request();
     ResNetMultiDieInferContext* ctx = infer_contexts_[id].get();
 
-    // Copy batch info to pre-allocated arrays
     actual_batch_size = std::min(actual_batch_size, ResNetMultiDieInferContext::MAX_BATCH);
     for (int i = 0; i < actual_batch_size; ++i) {
         ctx->query_ids[i] = query_ids[i];
@@ -480,7 +545,6 @@ void ResNetMultiDieCppSUT::start_async_batch(const float* input_data,
     }
     ctx->actual_batch_size = actual_batch_size;
 
-    // Copy input
     float* tensor_data = ctx->input_tensor.data<float>();
     std::memcpy(tensor_data, input_data, std::min(input_size, ctx->input_tensor.get_byte_size()));
 
@@ -490,8 +554,7 @@ void ResNetMultiDieCppSUT::start_async_batch(const float* input_data,
 }
 
 void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx) {
-    // This is now just a passthrough - the real work happens in callback
-    // which calls enqueue_completion
+    // Passthrough - handled in callback
 }
 
 void ResNetMultiDieCppSUT::enable_direct_loadgen(bool enable) {
@@ -499,10 +562,15 @@ void ResNetMultiDieCppSUT::enable_direct_loadgen(bool enable) {
 }
 
 void ResNetMultiDieCppSUT::wait_all() {
+    // Wait for work queue to drain
+    while (queued_count_.load(std::memory_order_acquire) > 0) {
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+    // Wait for pending inferences
     while (pending_count_.load(std::memory_order_acquire) > 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    // Also wait for completion thread to drain
+    // Wait for completion thread
     while (completion_head_.load(std::memory_order_acquire) !=
            completion_tail_.load(std::memory_order_acquire)) {
         std::this_thread::sleep_for(std::chrono::microseconds(100));
@@ -513,6 +581,7 @@ void ResNetMultiDieCppSUT::reset_counters() {
     wait_all();
     issued_count_.store(0, std::memory_order_relaxed);
     completed_count_.store(0, std::memory_order_relaxed);
+    queued_count_.store(0, std::memory_order_relaxed);
     die_index_.store(0, std::memory_order_relaxed);
 }
 
@@ -539,6 +608,10 @@ void ResNetMultiDieCppSUT::clear_sample_data() {
     sample_data_cache_.clear();
 }
 
+// ============================================================================
+// SERVER MODE: INSTANT RETURN (NVIDIA LWIS-style)
+// ============================================================================
+
 void ResNetMultiDieCppSUT::issue_queries_server_fast(
     const std::vector<uint64_t>& query_ids,
     const std::vector<int>& sample_indices) {
@@ -549,33 +622,24 @@ void ResNetMultiDieCppSUT::issue_queries_server_fast(
 
     size_t num_samples = query_ids.size();
 
+    // Just push to work queue and return immediately!
+    // Issue thread will process asynchronously
     for (size_t i = 0; i < num_samples; ++i) {
-        int sample_idx = sample_indices[i];
+        size_t head = work_head_.fetch_add(1, std::memory_order_acq_rel);
+        size_t idx = head % WORK_QUEUE_SIZE;
 
-        auto it = sample_data_cache_.find(sample_idx);
-        if (it == sample_data_cache_.end()) {
-            throw std::runtime_error("Sample " + std::to_string(sample_idx) + " not registered");
+        // Wait if slot is still being read (rare, only if queue is full)
+        while (work_queue_[idx].valid.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
         }
 
-        const SampleData& sample = it->second;
-
-        size_t id = acquire_request();
-        ResNetMultiDieInferContext* ctx = infer_contexts_[id].get();
-
-        // Single sample - use pre-allocated arrays
-        ctx->query_ids[0] = query_ids[i];
-        ctx->sample_indices[0] = sample_idx;
-        ctx->actual_batch_size = 1;
-
-        // Use pre-allocated tensor with memcpy (same as Offline mode)
-        // This is FASTER than creating new tensor + set_input_tensor each time
-        float* tensor_data = ctx->input_tensor.data<float>();
-        std::memcpy(tensor_data, sample.data, std::min(sample.size, ctx->input_tensor.get_byte_size()));
-
-        pending_count_.fetch_add(1, std::memory_order_relaxed);
-        ctx->request.start_async();
-        issued_count_.fetch_add(1, std::memory_order_relaxed);
+        work_queue_[idx].query_id = query_ids[i];
+        work_queue_[idx].sample_idx = sample_indices[i];
+        work_queue_[idx].valid.store(true, std::memory_order_release);
+        queued_count_.fetch_add(1, std::memory_order_relaxed);
     }
+
+    // Return immediately - issue thread handles the rest!
 }
 
 } // namespace mlperf_ov

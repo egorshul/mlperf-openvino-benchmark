@@ -1,11 +1,11 @@
 /**
  * High-performance C++ SUT for ResNet50 on multi-die accelerators.
  *
- * Architecture (similar to NVIDIA LWIS):
- * - Lock-free request pool (atomic operations only)
- * - Dedicated completion thread with response batching
- * - Pre-allocated buffers (zero allocations in hot path)
- * - Direct LoadGen C++ calls (no Python/GIL)
+ * Architecture (NVIDIA LWIS-style):
+ * - IssueQuery: instant return, just pushes to work queue
+ * - Issue Thread: pulls from queue, does memcpy, submits to device
+ * - Completion Thread: batches responses, calls QuerySamplesComplete
+ * - Lock-free queues throughout
  */
 
 #pragma once
@@ -56,7 +56,7 @@ struct ResNetMultiDieInferContext {
 };
 
 /**
- * High-performance SUT with lock-free design.
+ * High-performance SUT with NVIDIA LWIS-style architecture.
  */
 class ResNetMultiDieCppSUT {
 public:
@@ -108,7 +108,7 @@ public:
     void register_sample_data(int sample_idx, const float* data, size_t size);
     void clear_sample_data();
 
-    // Server mode: fast dispatch with pre-registered data
+    // Server mode: INSTANT return - just pushes to work queue
     void issue_queries_server_fast(const std::vector<uint64_t>& query_ids,
                                    const std::vector<int>& sample_indices);
 
@@ -134,21 +134,39 @@ private:
 
     // Lock-free pool: each slot is either FREE (-1) or IN_USE (pool_id)
     std::atomic<int> request_slots_[MAX_REQUESTS];
-    std::atomic<size_t> pool_search_hint_{0};  // Hint for where to start searching
+    std::atomic<size_t> pool_search_hint_{0};
+
+    // =========================================================================
+    // WORK QUEUE (IssueQuery pushes here, Issue Thread pulls)
+    // =========================================================================
+    static constexpr int WORK_QUEUE_SIZE = 8192;
+
+    struct WorkItem {
+        uint64_t query_id;
+        int sample_idx;
+        std::atomic<bool> valid{false};
+    };
+    WorkItem work_queue_[WORK_QUEUE_SIZE];
+    std::atomic<size_t> work_head_{0};  // IssueQuery writes here
+    std::atomic<size_t> work_tail_{0};  // Issue thread reads here
+
+    // Issue thread (pulls from work queue, submits to device)
+    std::thread issue_thread_;
+    std::atomic<bool> issue_running_{false};
+    void issue_thread_func();
 
     // =========================================================================
     // COMPLETION THREAD WITH RESPONSE BATCHING
     // =========================================================================
     static constexpr int COMPLETION_QUEUE_SIZE = 4096;
 
-    // Lock-free completion queue (SPMC - single producer, multiple consumers... actually MPSC here)
     struct CompletionItem {
         ResNetMultiDieInferContext* ctx;
         std::atomic<bool> valid{false};
     };
     CompletionItem completion_queue_[COMPLETION_QUEUE_SIZE];
-    std::atomic<size_t> completion_head_{0};  // Producer writes here
-    std::atomic<size_t> completion_tail_{0};  // Consumer reads from here
+    std::atomic<size_t> completion_head_{0};
+    std::atomic<size_t> completion_tail_{0};
 
     std::thread completion_thread_;
     std::atomic<bool> completion_running_{false};
@@ -166,12 +184,14 @@ private:
     ov::element::Type output_type_;
     size_t output_idx_ = 0;
     size_t single_output_size_ = 0;
+    size_t input_byte_size_ = 0;
 
     // State
     bool loaded_ = false;
     std::atomic<uint64_t> issued_count_{0};
     std::atomic<uint64_t> completed_count_{0};
     std::atomic<int> pending_count_{0};
+    std::atomic<uint64_t> queued_count_{0};  // Samples in work queue
 
     // Predictions
     bool store_predictions_ = false;
@@ -183,7 +203,7 @@ private:
     std::mutex callback_mutex_;
     std::atomic<bool> use_direct_loadgen_{false};
 
-    // Sample data cache
+    // Sample data cache (for fast Server mode)
     struct SampleData {
         const float* data;
         size_t size;
@@ -198,7 +218,7 @@ private:
     ov::AnyMap build_compile_properties();
 
     // Lock-free request pool operations
-    size_t acquire_request();  // Returns request id or MAX_REQUESTS if none available
+    size_t acquire_request();
     void release_request(size_t id);
 };
 
