@@ -234,7 +234,9 @@ class BenchmarkRunner:
                     qsl=qsl,
                     scenario=self.config.scenario,
                 )
-                sut.load()
+                # Pass accuracy mode flag to optimize for performance
+                is_accuracy_mode = self.config.test_mode == TestMode.ACCURACY_ONLY
+                sut.load(is_accuracy_mode=is_accuracy_mode)
                 return sut
         except ImportError as e:
             logger.warning(f"C++ ResNet multi-die SUT not available: {e}")

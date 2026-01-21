@@ -496,4 +496,59 @@ void ResNetMultiDieCppSUT::set_batch_response_callback(BatchResponseCallback cal
     batch_response_callback_ = callback;
 }
 
+void ResNetMultiDieCppSUT::register_sample_data(int sample_idx, const float* data, size_t size) {
+    std::lock_guard<std::mutex> lock(sample_data_mutex_);
+    sample_data_cache_[sample_idx] = {data, size};
+}
+
+void ResNetMultiDieCppSUT::clear_sample_data() {
+    std::lock_guard<std::mutex> lock(sample_data_mutex_);
+    sample_data_cache_.clear();
+}
+
+void ResNetMultiDieCppSUT::issue_queries_server_fast(
+    const std::vector<uint64_t>& query_ids,
+    const std::vector<int>& sample_indices) {
+
+    if (!loaded_) {
+        throw std::runtime_error("Model not loaded");
+    }
+
+    size_t num_samples = query_ids.size();
+
+    // Process all samples using cached data pointers
+    for (size_t i = 0; i < num_samples; ++i) {
+        int sample_idx = sample_indices[i];
+
+        // Get cached data (no lock needed - read only after registration)
+        auto it = sample_data_cache_.find(sample_idx);
+        if (it == sample_data_cache_.end()) {
+            throw std::runtime_error("Sample " + std::to_string(sample_idx) + " not registered");
+        }
+
+        const SampleData& sample = it->second;
+
+        // Get idle request (may block if all busy)
+        size_t id = get_idle_request();
+        ResNetMultiDieInferContext* ctx = infer_contexts_[id].get();
+
+        // Setup for single sample
+        ctx->query_ids.clear();
+        ctx->query_ids.push_back(query_ids[i]);
+        ctx->sample_indices.clear();
+        ctx->sample_indices.push_back(sample_idx);
+        ctx->actual_batch_size = 1;
+
+        // Copy input data
+        float* tensor_data = ctx->input_tensor.data<float>();
+        size_t copy_size = std::min(sample.size, ctx->input_tensor.get_byte_size());
+        std::memcpy(tensor_data, sample.data, copy_size);
+
+        // Start async inference
+        pending_count_++;
+        ctx->request.start_async();
+        issued_count_++;
+    }
+}
+
 } // namespace mlperf_ov

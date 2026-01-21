@@ -218,6 +218,31 @@ public:
      */
     void on_inference_complete(ResNetMultiDieInferContext* ctx);
 
+    /**
+     * Register sample data for fast Server mode dispatch.
+     * After calling this, issue_queries_server_fast can be used.
+     *
+     * @param sample_idx Sample index
+     * @param data Pointer to sample data (must remain valid!)
+     * @param size Size of data in bytes
+     */
+    void register_sample_data(int sample_idx, const float* data, size_t size);
+
+    /**
+     * Clear all registered sample data.
+     */
+    void clear_sample_data();
+
+    /**
+     * Fast Server mode dispatch using pre-registered sample data.
+     * No Python data passing needed - only query_ids and sample_indices.
+     *
+     * @param query_ids Vector of query IDs
+     * @param sample_indices Vector of sample indices (must be registered)
+     */
+    void issue_queries_server_fast(const std::vector<uint64_t>& query_ids,
+                                   const std::vector<int>& sample_indices);
+
 private:
     // Model configuration
     std::string model_path_;
@@ -273,6 +298,14 @@ private:
     std::vector<uint64_t> pending_responses_;
     std::mutex pending_responses_mutex_;
     static constexpr size_t RESPONSE_BATCH_SIZE = 64;  // Flush every N responses
+
+    // QSL data cache for fast Server mode dispatch
+    struct SampleData {
+        const float* data;
+        size_t size;
+    };
+    std::unordered_map<int, SampleData> sample_data_cache_;
+    std::mutex sample_data_mutex_;
 
     // Discover accelerator dies
     std::vector<std::string> discover_dies();

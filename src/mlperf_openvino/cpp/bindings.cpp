@@ -491,36 +491,76 @@ PYBIND11_MODULE(_cpp_sut, m) {
              py::arg("callback"),
              "Set batch response callback (more efficient - one call per batch)")
 
+        .def("set_loadgen_complete",
+             [](mlperf_ov::ResNetMultiDieCppSUT& self,
+                py::object lg_module,
+                py::object response_class) {
+                 // Store LoadGen module and QuerySampleResponse class
+                 // This allows us to call QuerySamplesComplete directly from C++
+                 // with minimal Python overhead
+                 py::function complete_func = lg_module.attr("QuerySamplesComplete");
+
+                 self.set_batch_response_callback(
+                     [complete_func, response_class](const std::vector<uint64_t>& query_ids) {
+                         py::gil_scoped_acquire acquire;
+
+                         // Create responses list directly in C++
+                         py::list responses;
+                         responses.attr("__init__")();
+
+                         for (uint64_t qid : query_ids) {
+                             // QuerySampleResponse(id, data_ptr, size) - no data for classification
+                             py::object resp = response_class(qid, 0, 0);
+                             responses.append(resp);
+                         }
+
+                         // Single call to LoadGen
+                         complete_func(responses);
+                     });
+             },
+             py::arg("lg_module"),
+             py::arg("response_class"),
+             "Set LoadGen module for direct C++ calls (most efficient)")
+
         .def("issue_queries_server",
              [](mlperf_ov::ResNetMultiDieCppSUT& self,
                 py::list input_arrays,
                 py::list query_ids,
                 py::list sample_indices) {
-                 // Convert Python lists to C++ vectors
-                 std::vector<const float*> all_input_data;
-                 std::vector<size_t> input_sizes;
-                 std::vector<uint64_t> qids;
-                 std::vector<int> sidxs;
-
+                 // Pre-allocate vectors with known size (fast with GIL)
                  size_t n = py::len(input_arrays);
-                 all_input_data.reserve(n);
-                 input_sizes.reserve(n);
-                 qids.reserve(n);
-                 sidxs.reserve(n);
 
+                 // Extract all data pointers FIRST while holding GIL
+                 // This is necessary because numpy arrays may be garbage collected
+                 std::vector<py::array_t<float, py::array::c_style | py::array::forcecast>> arrays;
+                 arrays.reserve(n);
+
+                 std::vector<const float*> all_input_data(n);
+                 std::vector<size_t> input_sizes(n);
+                 std::vector<uint64_t> qids(n);
+                 std::vector<int> sidxs(n);
+
+                 // Fast extraction loop - minimize Python API calls
                  for (size_t i = 0; i < n; ++i) {
-                     py::array_t<float, py::array::c_style | py::array::forcecast> np_arr =
-                         input_arrays[i].cast<py::array_t<float, py::array::c_style | py::array::forcecast>>();
-                     py::buffer_info buf = np_arr.request();
-                     all_input_data.push_back(static_cast<const float*>(buf.ptr));
-                     input_sizes.push_back(buf.size * sizeof(float));
-                     qids.push_back(query_ids[i].cast<uint64_t>());
-                     sidxs.push_back(sample_indices[i].cast<int>());
+                     arrays.push_back(input_arrays[i].cast<py::array_t<float, py::array::c_style | py::array::forcecast>>());
+                     qids[i] = query_ids[i].cast<uint64_t>();
+                     sidxs[i] = sample_indices[i].cast<int>();
+                 }
+
+                 // Get buffer info (separate loop to avoid cache misses)
+                 for (size_t i = 0; i < n; ++i) {
+                     py::buffer_info buf = arrays[i].request();
+                     all_input_data[i] = static_cast<const float*>(buf.ptr);
+                     input_sizes[i] = buf.size * sizeof(float);
                  }
 
                  // Release GIL and process all queries in C++
-                 py::gil_scoped_release release;
-                 self.issue_queries_server(all_input_data, input_sizes, qids, sidxs);
+                 // Arrays kept alive by 'arrays' vector until scope ends
+                 {
+                     py::gil_scoped_release release;
+                     self.issue_queries_server(all_input_data, input_sizes, qids, sidxs);
+                 }
+                 // Arrays released here, after C++ processing complete
              },
              py::arg("input_arrays"),
              py::arg("query_ids"),
@@ -528,7 +568,47 @@ PYBIND11_MODULE(_cpp_sut, m) {
              "Process multiple queries efficiently in C++ (GIL released during dispatch)")
 
         .def("flush_pending_responses", &mlperf_ov::ResNetMultiDieCppSUT::flush_pending_responses,
-             "Flush any pending batched responses to callback");
+             "Flush any pending batched responses to callback")
+
+        .def("register_sample_data",
+             [](mlperf_ov::ResNetMultiDieCppSUT& self,
+                int sample_idx,
+                py::array_t<float, py::array::c_style | py::array::forcecast> data) {
+                 py::buffer_info buf = data.request();
+                 // Note: data must remain valid until clear_sample_data is called!
+                 self.register_sample_data(
+                     sample_idx,
+                     static_cast<const float*>(buf.ptr),
+                     buf.size * sizeof(float));
+             },
+             py::arg("sample_idx"),
+             py::arg("data"),
+             "Register sample data for fast dispatch (data must remain valid!)")
+
+        .def("clear_sample_data", &mlperf_ov::ResNetMultiDieCppSUT::clear_sample_data,
+             "Clear all registered sample data")
+
+        .def("issue_queries_server_fast",
+             [](mlperf_ov::ResNetMultiDieCppSUT& self,
+                py::list query_ids,
+                py::list sample_indices) {
+                 // Fast conversion - only integers, no arrays
+                 size_t n = py::len(query_ids);
+                 std::vector<uint64_t> qids(n);
+                 std::vector<int> sidxs(n);
+
+                 for (size_t i = 0; i < n; ++i) {
+                     qids[i] = query_ids[i].cast<uint64_t>();
+                     sidxs[i] = sample_indices[i].cast<int>();
+                 }
+
+                 // Release GIL - all data access is in C++
+                 py::gil_scoped_release release;
+                 self.issue_queries_server_fast(qids, sidxs);
+             },
+             py::arg("query_ids"),
+             py::arg("sample_indices"),
+             "Fast Server mode dispatch using pre-registered data (no data passing)");
 
     // RetinaNetMultiDieCppSUT - multi-die accelerator for RetinaNet
     py::class_<mlperf_ov::RetinaNetMultiDieCppSUT>(m, "RetinaNetMultiDieCppSUT")
