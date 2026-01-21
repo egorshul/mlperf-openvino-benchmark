@@ -76,15 +76,8 @@ class ResNetMultiDieCppSUTWrapper:
         if hasattr(config.openvino, 'device_properties') and config.openvino.device_properties:
             compile_props = dict(config.openvino.device_properties)  # Make a copy
 
-        # Server mode optimizations
-        if scenario == Scenario.SERVER:
-            # Enable auto-batching with minimal timeout for latency
-            # This allows the accelerator to batch requests internally
-            if 'AUTO_BATCH_TIMEOUT' not in compile_props:
-                compile_props['AUTO_BATCH_TIMEOUT'] = '1'  # 1ms timeout
-            # Optimal batch size hint for auto-batching
-            if 'OPTIMAL_NUMBER_OF_INFER_REQUESTS' not in compile_props:
-                compile_props['OPTIMAL_NUMBER_OF_INFER_REQUESTS'] = '0'  # Auto
+        # NOTE: Don't add AUTO_BATCH_TIMEOUT here - it adds latency to Server mode!
+        # The accelerator should handle batching internally without timeout.
 
         # Check if using NHWC input layout
         use_nhwc = False
@@ -134,9 +127,9 @@ class ResNetMultiDieCppSUTWrapper:
         # Get actual input name from C++ SUT
         self.input_name = self._cpp_sut.get_input_name()
 
-        # Pre-validate QSL data format for Server mode optimization
-        if self.scenario == Scenario.SERVER:
-            self._prevalidate_qsl_data()
+        # Note: QSL data validation happens in _issue_query_server on first call
+        # because QSL samples may not be loaded yet at this point
+        self._qsl_validated = False
 
         logger.debug(
             f"C++ SUT loaded: {self._cpp_sut.get_num_dies()} dies, "
@@ -155,26 +148,21 @@ class ResNetMultiDieCppSUTWrapper:
     def _setup_response_callback(self, is_offline: bool) -> None:
         """Setup response callback for LoadGen."""
         if is_offline:
-            # Offline: accumulate responses (per-sample callback)
-            def callback(query_id: int, output: np.ndarray):
-                if output is not None:
-                    response_array = array.array('B', output.tobytes())
-                    with self._offline_lock:
-                        self._offline_responses.append((query_id, response_array))
-            self._cpp_sut.set_response_callback(callback)
+            # Offline: accumulate responses
+            # For Offline mode, we just need to track query_ids - no output data needed
+            # because accuracy is computed from stored predictions
+            def batch_callback(query_ids: list):
+                with self._offline_lock:
+                    for qid in query_ids:
+                        # Store query_id with empty response (data not needed for Offline)
+                        self._offline_responses.append((qid, array.array('B', b'\x00')))
+            self._cpp_sut.set_batch_response_callback(batch_callback)
         else:
-            # Server: use direct LoadGen call from C++ (most efficient)
-            # This passes the LoadGen module to C++ which creates responses directly
-            try:
-                self._cpp_sut.set_loadgen_complete(lg, lg.QuerySampleResponse)
-                logger.debug("Using optimized LoadGen integration (C++ direct call)")
-            except Exception as e:
-                # Fallback to batch callback
-                logger.debug(f"Falling back to batch callback: {e}")
-                def batch_callback(query_ids: list):
-                    responses = [lg.QuerySampleResponse(qid, 0, 0) for qid in query_ids]
-                    lg.QuerySamplesComplete(responses)
-                self._cpp_sut.set_batch_response_callback(batch_callback)
+            # Server: immediate response to LoadGen
+            def batch_callback(query_ids: list):
+                responses = [lg.QuerySampleResponse(qid, 0, 0) for qid in query_ids]
+                lg.QuerySamplesComplete(responses)
+            self._cpp_sut.set_batch_response_callback(batch_callback)
 
     def _start_progress_thread(self):
         """Start progress monitoring (silent)."""
@@ -328,61 +316,52 @@ class ResNetMultiDieCppSUTWrapper:
         self._query_count += 1
 
     def _issue_query_server(self, query_samples: List) -> None:
-        """Process queries in Server mode.
-
-        Optimized:
-        - Data pre-registered in C++ (fastest path)
-        - Or all queries dispatched in single C++ call
-        - Minimal numpy operations
-        - GIL released during C++ dispatch
-        """
+        """Process queries in Server mode."""
         # Setup callback only once
         if not self._server_callback_set:
             self._setup_response_callback(is_offline=False)
             self._server_callback_set = True
+
+        # Validate QSL data format on first call (samples are loaded by now)
+        if not getattr(self, '_qsl_validated', False):
+            self._prevalidate_qsl_data()
+            self._qsl_validated = True
 
         # Check if we can use the fastest path (data pre-registered in C++)
         cpp_qsl_registered = getattr(self, '_cpp_qsl_registered', False)
 
         if cpp_qsl_registered:
             # FASTEST PATH: only pass query_ids and sample_indices
-            # All data access happens in C++ with no Python overhead
             query_ids = [qs.id for qs in query_samples]
             sample_indices = [qs.index for qs in query_samples]
             self._cpp_sut.issue_queries_server_fast(query_ids, sample_indices)
         else:
-            # Slower path: pass data arrays
-            qsl_ready = getattr(self, '_qsl_data_ready', False)
-
+            # Pass data arrays to C++
             input_arrays = []
             query_ids = []
             sample_indices = []
 
-            if qsl_ready:
-                # Fast path: no numpy operations
-                loaded_samples = self.qsl._loaded_samples
-                for qs in query_samples:
-                    input_arrays.append(loaded_samples[qs.index])
-                    query_ids.append(qs.id)
-                    sample_indices.append(qs.index)
-            else:
-                # Slowest path: need format conversion
-                for qs in query_samples:
+            loaded_samples = getattr(self.qsl, '_loaded_samples', {})
+
+            for qs in query_samples:
+                if qs.index in loaded_samples:
+                    input_data = loaded_samples[qs.index]
+                else:
                     input_data = self._get_input_data(qs.index)
 
-                    # Ensure 4D with batch dim
-                    if input_data.ndim == 3:
-                        input_data = input_data[np.newaxis, ...]
+                # Ensure 4D with batch dim
+                if input_data.ndim == 3:
+                    input_data = input_data[np.newaxis, ...]
 
-                    # Ensure contiguous float32
-                    if input_data.dtype != np.float32:
-                        input_data = input_data.astype(np.float32)
-                    if not input_data.flags['C_CONTIGUOUS']:
-                        input_data = np.ascontiguousarray(input_data)
+                # Ensure contiguous float32
+                if input_data.dtype != np.float32:
+                    input_data = input_data.astype(np.float32)
+                if not input_data.flags['C_CONTIGUOUS']:
+                    input_data = np.ascontiguousarray(input_data)
 
-                    input_arrays.append(input_data)
-                    query_ids.append(qs.id)
-                    sample_indices.append(qs.index)
+                input_arrays.append(input_data)
+                query_ids.append(qs.id)
+                sample_indices.append(qs.index)
 
             # Single call to C++ - GIL released during dispatch
             self._cpp_sut.issue_queries_server(input_arrays, query_ids, sample_indices)
@@ -440,12 +419,14 @@ class ResNetMultiDieCppSUTWrapper:
         self._offline_responses.clear()
         self._query_count = 0
         self._server_callback_set = False
+        self._qsl_validated = False
         # Clear C++ sample cache
         try:
             self._cpp_sut.clear_sample_data()
         except Exception:
             pass
         self._cpp_qsl_registered = False
+        self._qsl_data_ready = False
 
 
 def is_resnet_multi_die_cpp_available() -> bool:
