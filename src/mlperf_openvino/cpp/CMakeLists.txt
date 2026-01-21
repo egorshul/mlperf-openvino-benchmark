@@ -21,7 +21,7 @@ if(NOT EXISTS "${LOADGEN_DIR}/CMakeLists.txt")
 
     file(MAKE_DIRECTORY "${LOADGEN_DIR}")
 
-    # All loadgen source and header files
+    # All loadgen source and header files (from mlcommons/inference/loadgen)
     set(LOADGEN_FILES
         # Headers
         "bindings/c_api.h"
@@ -29,6 +29,7 @@ if(NOT EXISTS "${LOADGEN_DIR}/CMakeLists.txt")
         "issue_query_controller.h"
         "loadgen.h"
         "logging.h"
+        "query_dispatch_library.h"
         "query_sample.h"
         "query_sample_library.h"
         "results.h"
@@ -47,6 +48,8 @@ if(NOT EXISTS "${LOADGEN_DIR}/CMakeLists.txt")
         "test_settings_internal.cc"
         "utils.cc"
         "version.cc"
+        # Config file (used to generate mlperf_conf.h)
+        "mlperf.conf"
     )
 
     file(MAKE_DIRECTORY "${LOADGEN_DIR}/bindings")
@@ -76,7 +79,33 @@ if(NOT EXISTS "${LOADGEN_DIR}/CMakeLists.txt")
         endif()
     endforeach()
 
-    # Create minimal CMakeLists.txt for loadgen
+    # Generate mlperf_conf.h from mlperf.conf
+    message(STATUS "Generating mlperf_conf.h...")
+    file(READ "${LOADGEN_DIR}/mlperf.conf" MLPERF_CONF_CONTENT)
+    # Escape special characters for C++ string
+    string(REPLACE "\\" "\\\\" MLPERF_CONF_CONTENT "${MLPERF_CONF_CONTENT}")
+    string(REPLACE "\"" "\\\"" MLPERF_CONF_CONTENT "${MLPERF_CONF_CONTENT}")
+    string(REPLACE "\n" "\\n\"\n\"" MLPERF_CONF_CONTENT "${MLPERF_CONF_CONTENT}")
+    file(WRITE "${LOADGEN_DIR}/mlperf_conf.h"
+"// Auto-generated from mlperf.conf
+#ifndef MLPERF_CONF_H
+#define MLPERF_CONF_H
+static const char mlperf_conf[] = \"${MLPERF_CONF_CONTENT}\";
+#endif // MLPERF_CONF_H
+")
+
+    # Generate version_generated.cc
+    message(STATUS "Generating version_generated.cc...")
+    string(TIMESTAMP BUILD_DATE "%Y-%m-%dT%H:%M:%S")
+    file(WRITE "${LOADGEN_DIR}/version_generated.cc"
+"// Auto-generated version info
+namespace mlperf {
+const char* version_override = nullptr;
+const char* build_info_string = \"Built by cmake on ${BUILD_DATE}\";
+}
+")
+
+    # Create CMakeLists.txt for loadgen
     file(WRITE "${LOADGEN_DIR}/CMakeLists.txt" [=[
 cmake_minimum_required(VERSION 3.14)
 project(mlperf_loadgen LANGUAGES CXX)
@@ -86,14 +115,15 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 add_library(mlperf_loadgen STATIC
     bindings/c_api.cc
+    early_stopping.cc
     issue_query_controller.cc
     loadgen.cc
     logging.cc
+    results.cc
     test_settings_internal.cc
     utils.cc
     version.cc
-    results.cc
-    early_stopping.cc
+    version_generated.cc
 )
 
 target_include_directories(mlperf_loadgen PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
