@@ -674,11 +674,18 @@ class BenchmarkRunner:
     def _compute_resnet50_accuracy(self) -> None:
         """Compute ResNet50 accuracy (Top-1)."""
         predictions = self.sut.get_predictions()
+        total_samples = self.qsl.total_sample_count
 
         if not predictions:
             logger.warning("No predictions found for accuracy computation")
             self._accuracy_results = {"top1_accuracy": 0.0, "correct": 0, "total": 0}
             return
+
+        # Verify we have predictions for all samples
+        if len(predictions) != total_samples:
+            logger.warning(
+                f"Prediction count mismatch: got {len(predictions)}, expected {total_samples}"
+            )
 
         predicted_labels = []
         ground_truth = []
