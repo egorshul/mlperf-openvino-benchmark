@@ -526,7 +526,10 @@ PYBIND11_MODULE(_cpp_sut, m) {
                 double target_qps,
                 int64_t target_latency_ns,
                 int64_t min_duration_ms,
-                int64_t min_query_count) {
+                int64_t min_query_count,
+                bool enable_coalescing,
+                int coalesce_batch_size,
+                int coalesce_window_us) {
                  // Release GIL and run benchmark entirely in C++!
                  py::gil_scoped_release release;
                  self.run_server_benchmark(
@@ -538,7 +541,10 @@ PYBIND11_MODULE(_cpp_sut, m) {
                      target_qps,
                      target_latency_ns,
                      min_duration_ms,
-                     min_query_count);
+                     min_query_count,
+                     enable_coalescing,
+                     coalesce_batch_size,
+                     coalesce_window_us);
              },
              py::arg("total_sample_count"),
              py::arg("performance_sample_count"),
@@ -549,7 +555,11 @@ PYBIND11_MODULE(_cpp_sut, m) {
              py::arg("target_latency_ns") = 0,
              py::arg("min_duration_ms") = 0,
              py::arg("min_query_count") = 0,
-             "Run Server benchmark with pure C++ SUT (NO Python in hot path!)");
+             py::arg("enable_coalescing") = false,
+             py::arg("coalesce_batch_size") = 8,
+             py::arg("coalesce_window_us") = 500,
+             "Run Server benchmark with pure C++ SUT (NO Python in hot path!). "
+             "Use enable_coalescing=true for higher throughput via query batching.");
 
     // RetinaNetMultiDieCppSUT - multi-die accelerator for RetinaNet
     py::class_<mlperf_ov::RetinaNetMultiDieCppSUT>(m, "RetinaNetMultiDieCppSUT")

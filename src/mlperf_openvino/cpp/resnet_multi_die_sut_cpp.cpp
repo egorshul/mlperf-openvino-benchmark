@@ -45,9 +45,15 @@ ResNetMultiDieCppSUT::ResNetMultiDieCppSUT(const std::string& model_path,
         completion_queue_[i].ctx = nullptr;
         completion_queue_[i].valid.store(false, std::memory_order_relaxed);
     }
+    for (int i = 0; i < COALESCE_QUEUE_SIZE; ++i) {
+        coalesce_queue_[i].valid.store(false, std::memory_order_relaxed);
+    }
 }
 
 ResNetMultiDieCppSUT::~ResNetMultiDieCppSUT() {
+    // Stop coalescing thread first
+    stop_coalescing_thread();
+
     // Stop threads
     issue_running_.store(false, std::memory_order_release);
     completion_running_.store(false, std::memory_order_release);
@@ -937,6 +943,243 @@ void ResNetMultiDieCppSUT::process_query_direct(uint64_t query_id, int sample_id
     }
 }
 
+// ============================================================================
+// QUERY COALESCING (batches queries for higher throughput)
+// ============================================================================
+
+void ResNetMultiDieCppSUT::enqueue_for_coalescing(uint64_t query_id, int sample_idx) {
+    // Lock-free push to coalescing queue
+    size_t head = coalesce_head_.fetch_add(1, std::memory_order_acq_rel);
+    size_t idx = head % COALESCE_QUEUE_SIZE;
+
+    // Spin if slot is still in use (very rare under normal load)
+    int spin_count = 0;
+    while (coalesce_queue_[idx].valid.load(std::memory_order_acquire)) {
+        spin_count++;
+        if (spin_count < 100) {
+            #if defined(__x86_64__) || defined(_M_X64)
+            __builtin_ia32_pause();
+            #elif defined(__aarch64__)
+            asm volatile("yield");
+            #endif
+        } else if (spin_count < 1000) {
+            std::this_thread::yield();
+        } else {
+            std::this_thread::sleep_for(std::chrono::microseconds(1));
+            spin_count = 0;
+        }
+    }
+
+    coalesce_queue_[idx].query_id = query_id;
+    coalesce_queue_[idx].sample_idx = sample_idx;
+    coalesce_queue_[idx].arrival_time = std::chrono::steady_clock::now();
+    coalesce_queue_[idx].valid.store(true, std::memory_order_release);
+}
+
+void ResNetMultiDieCppSUT::process_coalesced_batch() {
+    // Process all available queries in the coalescing queue
+    // This is called by the coalescing thread or on FlushQueries
+
+    static thread_local std::vector<uint64_t> batch_query_ids;
+    static thread_local std::vector<int> batch_sample_indices;
+    static thread_local std::vector<const float*> batch_sample_data;
+
+    batch_query_ids.clear();
+    batch_sample_indices.clear();
+    batch_sample_data.clear();
+
+    size_t tail = coalesce_tail_.load(std::memory_order_relaxed);
+    size_t count = 0;
+
+    // Collect up to batch_size queries
+    while (count < static_cast<size_t>(coalesce_batch_size_)) {
+        size_t idx = tail % COALESCE_QUEUE_SIZE;
+
+        if (!coalesce_queue_[idx].valid.load(std::memory_order_acquire)) {
+            break;  // No more queries
+        }
+
+        uint64_t query_id = coalesce_queue_[idx].query_id;
+        int sample_idx = coalesce_queue_[idx].sample_idx;
+        coalesce_queue_[idx].valid.store(false, std::memory_order_release);
+
+        // Find sample data
+        const float* sample_data = nullptr;
+        {
+            std::shared_lock<std::shared_mutex> lock(sample_cache_mutex_);
+            auto it = sample_data_cache_.find(sample_idx);
+            if (it != sample_data_cache_.end()) {
+                sample_data = it->second.data;
+            }
+        }
+
+        if (sample_data) {
+            batch_query_ids.push_back(query_id);
+            batch_sample_indices.push_back(sample_idx);
+            batch_sample_data.push_back(sample_data);
+        } else {
+            // Sample not found - send dummy response immediately
+            std::cerr << "[ERROR] Sample " << sample_idx << " not found in cache!" << std::endl;
+            mlperf::QuerySampleResponse response{query_id, 0, 0};
+            mlperf::QuerySamplesComplete(&response, 1);
+        }
+
+        tail++;
+        count++;
+    }
+
+    // Update tail
+    coalesce_tail_.store(tail, std::memory_order_release);
+
+    if (batch_query_ids.empty()) {
+        return;
+    }
+
+    int actual_batch_size = static_cast<int>(batch_query_ids.size());
+
+    // Acquire inference request
+    size_t req_id = acquire_request();
+    ResNetMultiDieInferContext* ctx = infer_contexts_[req_id].get();
+
+    // Setup context
+    for (int i = 0; i < actual_batch_size; ++i) {
+        ctx->query_ids[i] = batch_query_ids[i];
+        ctx->sample_indices[i] = batch_sample_indices[i];
+    }
+    ctx->actual_batch_size = actual_batch_size;
+
+    // Copy input data for the batch
+    float* tensor_data = ctx->input_tensor.data<float>();
+    size_t single_sample_size = input_byte_size_ / batch_size_;  // Size per sample
+
+    for (int i = 0; i < actual_batch_size; ++i) {
+        std::memcpy(tensor_data + (i * single_sample_size / sizeof(float)),
+                    batch_sample_data[i],
+                    single_sample_size);
+    }
+
+    // Pad remaining batch slots with zeros if needed
+    if (actual_batch_size < batch_size_) {
+        std::memset(tensor_data + (actual_batch_size * single_sample_size / sizeof(float)),
+                    0,
+                    (batch_size_ - actual_batch_size) * single_sample_size);
+    }
+
+    // Start async inference
+    pending_count_.fetch_add(1, std::memory_order_relaxed);
+    ctx->request.start_async();
+    issued_count_.fetch_add(actual_batch_size, std::memory_order_relaxed);
+
+    // Debug logging
+    static std::atomic<uint64_t> batch_count{0};
+    uint64_t bc = batch_count.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (bc % 100 == 0) {
+        uint64_t pending = pending_count_.load(std::memory_order_relaxed);
+        uint64_t completed = completed_count_.load(std::memory_order_relaxed);
+        std::cout << "[COALESCE #" << bc << "] batch_size=" << actual_batch_size
+                  << " pending=" << pending << " completed=" << completed << std::endl;
+    }
+}
+
+void ResNetMultiDieCppSUT::coalescing_thread_func() {
+    std::cout << "[COALESCE] Thread started: batch_size=" << coalesce_batch_size_
+              << ", window=" << coalesce_window_us_ << "us" << std::endl;
+
+    auto last_batch_time = std::chrono::steady_clock::now();
+    int idle_spins = 0;
+
+    while (coalescing_running_.load(std::memory_order_acquire)) {
+        size_t tail = coalesce_tail_.load(std::memory_order_relaxed);
+        size_t idx = tail % COALESCE_QUEUE_SIZE;
+
+        // Check if we have any queries
+        if (!coalesce_queue_[idx].valid.load(std::memory_order_acquire)) {
+            // No queries - brief wait
+            idle_spins++;
+            if (idle_spins < 100) {
+                #if defined(__x86_64__) || defined(_M_X64)
+                __builtin_ia32_pause();
+                #elif defined(__aarch64__)
+                asm volatile("yield");
+                #endif
+            } else if (idle_spins < 500) {
+                std::this_thread::yield();
+            } else {
+                std::this_thread::sleep_for(std::chrono::microseconds(10));
+                idle_spins = 0;
+            }
+            continue;
+        }
+
+        idle_spins = 0;
+
+        // Count available queries
+        size_t available = 0;
+        for (size_t i = 0; i < static_cast<size_t>(coalesce_batch_size_); ++i) {
+            size_t check_idx = (tail + i) % COALESCE_QUEUE_SIZE;
+            if (!coalesce_queue_[check_idx].valid.load(std::memory_order_acquire)) {
+                break;
+            }
+            available++;
+        }
+
+        auto now = std::chrono::steady_clock::now();
+        auto oldest_arrival = coalesce_queue_[idx].arrival_time;
+        auto wait_time = std::chrono::duration_cast<std::chrono::microseconds>(now - oldest_arrival).count();
+
+        // Process batch if:
+        // 1. We have a full batch, OR
+        // 2. Oldest query has been waiting longer than the window
+        bool should_process = (available >= static_cast<size_t>(coalesce_batch_size_)) ||
+                              (wait_time >= coalesce_window_us_ && available > 0);
+
+        if (should_process) {
+            process_coalesced_batch();
+            last_batch_time = now;
+        } else {
+            // Wait a bit for more queries
+            std::this_thread::sleep_for(std::chrono::microseconds(50));
+        }
+    }
+
+    // Drain remaining queries on shutdown
+    std::cout << "[COALESCE] Thread stopping, draining remaining queries..." << std::endl;
+    while (true) {
+        size_t tail = coalesce_tail_.load(std::memory_order_relaxed);
+        size_t idx = tail % COALESCE_QUEUE_SIZE;
+
+        if (!coalesce_queue_[idx].valid.load(std::memory_order_acquire)) {
+            break;
+        }
+
+        process_coalesced_batch();
+    }
+
+    std::cout << "[COALESCE] Thread stopped" << std::endl;
+}
+
+void ResNetMultiDieCppSUT::start_coalescing_thread(int batch_size, int window_us) {
+    if (coalescing_running_.load(std::memory_order_acquire)) {
+        return;  // Already running
+    }
+
+    coalesce_batch_size_ = batch_size;
+    coalesce_window_us_ = window_us;
+    coalescing_running_.store(true, std::memory_order_release);
+    coalescing_thread_ = std::thread(&ResNetMultiDieCppSUT::coalescing_thread_func, this);
+}
+
+void ResNetMultiDieCppSUT::stop_coalescing_thread() {
+    if (!coalescing_running_.load(std::memory_order_acquire)) {
+        return;  // Not running
+    }
+
+    coalescing_running_.store(false, std::memory_order_release);
+    if (coalescing_thread_.joinable()) {
+        coalescing_thread_.join();
+    }
+}
+
 void ResNetMultiDieCppSUT::run_server_benchmark(
     size_t total_sample_count,
     size_t performance_sample_count,
@@ -946,15 +1189,32 @@ void ResNetMultiDieCppSUT::run_server_benchmark(
     double target_qps,
     int64_t target_latency_ns,
     int64_t min_duration_ms,
-    int64_t min_query_count) {
+    int64_t min_query_count,
+    bool enable_coalescing,
+    int coalesce_batch_size,
+    int coalesce_window_us) {
 
     if (!loaded_) {
         throw std::runtime_error("Model not loaded");
     }
 
-    // Create pure C++ SUT and QSL
-    ResNetServerSUT server_sut(this);
+    // Create QSL
     ResNetServerQSL server_qsl(total_sample_count, performance_sample_count);
+
+    // Create SUT - either coalescing or direct
+    std::unique_ptr<mlperf::SystemUnderTest> sut;
+    CoalescingServerSUT* coalescing_sut = nullptr;
+
+    if (enable_coalescing) {
+        std::cout << "\n*** COALESCING MODE ENABLED ***" << std::endl;
+        std::cout << "  Batch size: " << coalesce_batch_size << std::endl;
+        std::cout << "  Window: " << coalesce_window_us << " us" << std::endl;
+        coalescing_sut = new CoalescingServerSUT(this, coalesce_batch_size, coalesce_window_us);
+        sut.reset(coalescing_sut);
+    } else {
+        std::cout << "\n*** DIRECT MODE (no batching) ***" << std::endl;
+        sut.reset(new ResNetServerSUT(this));
+    }
 
     // Configure test settings
     mlperf::TestSettings test_settings;
@@ -992,6 +1252,11 @@ void ResNetMultiDieCppSUT::run_server_benchmark(
     std::cout << "\n========================================" << std::endl;
     std::cout << "PURE C++ SERVER BENCHMARK" << std::endl;
     std::cout << "========================================" << std::endl;
+    std::cout << "Mode: " << (enable_coalescing ? "COALESCING" : "DIRECT") << std::endl;
+    if (enable_coalescing) {
+        std::cout << "Coalesce batch size: " << coalesce_batch_size << std::endl;
+        std::cout << "Coalesce window (us): " << coalesce_window_us << std::endl;
+    }
     std::cout << "Total samples: " << total_sample_count << std::endl;
     std::cout << "Performance samples: " << performance_sample_count << std::endl;
     std::cout << "Target QPS: " << test_settings.server_target_qps << std::endl;
@@ -1013,6 +1278,11 @@ void ResNetMultiDieCppSUT::run_server_benchmark(
     std::cout << ">>> LoadGen -> C++ SUT (NO PYTHON) <<<" << std::endl;
     std::cout << "========================================" << std::endl;
     std::cout << std::flush;
+
+    // Start coalescing thread if enabled
+    if (coalescing_sut) {
+        coalescing_sut->start();
+    }
 
     // Start monitoring thread for periodic stats
     std::atomic<bool> monitor_running{true};
@@ -1045,7 +1315,12 @@ void ResNetMultiDieCppSUT::run_server_benchmark(
 
     // Run benchmark - entirely in C++, no Python in hot path!
     std::cout << "[START] Starting LoadGen test..." << std::endl << std::flush;
-    mlperf::StartTest(&server_sut, &server_qsl, test_settings, log_settings);
+    mlperf::StartTest(sut.get(), &server_qsl, test_settings, log_settings);
+
+    // Stop coalescing thread if it was running
+    if (coalescing_sut) {
+        coalescing_sut->stop();
+    }
 
     // Stop monitor
     monitor_running.store(false, std::memory_order_relaxed);

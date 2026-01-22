@@ -160,6 +160,11 @@ class ScenarioConfig:
     qsl_rng_seed: int = 13281865557512327830
     sample_index_rng_seed: int = 198141574272810017
     schedule_rng_seed: int = 7575108116881280410
+    # Query coalescing for Server mode (batches queries for higher throughput)
+    # NPU is ~3.5x more efficient with batch=8 vs batch=1
+    enable_coalescing: bool = False
+    coalesce_batch_size: int = 8  # Max queries to batch together
+    coalesce_window_us: int = 500  # Max time (us) to wait for more queries
 
 
 @dataclass
@@ -272,6 +277,10 @@ class BenchmarkConfig:
             qsl_rng_seed=server_data.get("qsl_rng_seed", 13281865557512327830),
             sample_index_rng_seed=server_data.get("sample_index_rng_seed", 198141574272810017),
             schedule_rng_seed=server_data.get("schedule_rng_seed", 7575108116881280410),
+            # Query coalescing for higher throughput
+            enable_coalescing=server_data.get("enable_coalescing", False),
+            coalesce_batch_size=server_data.get("coalesce_batch_size", 8),
+            coalesce_window_us=server_data.get("coalesce_window_us", 500),
         )
         
         sources = model_data.get("sources", {})

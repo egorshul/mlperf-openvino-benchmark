@@ -134,11 +134,21 @@ public:
         double target_qps = 0,
         int64_t target_latency_ns = 0,
         int64_t min_duration_ms = 0,
-        int64_t min_query_count = 0);
+        int64_t min_query_count = 0,
+        bool enable_coalescing = false,
+        int coalesce_batch_size = 8,
+        int coalesce_window_us = 500);
 
     // DIRECT query processing for Server mode (minimum latency!)
     // Processes query immediately without queue - critical for latency SLA
     void process_query_direct(uint64_t query_id, int sample_idx);
+
+    // BATCHED query processing for Server mode (higher throughput!)
+    // Collects queries and processes them in batches
+    void enqueue_for_coalescing(uint64_t query_id, int sample_idx);
+    void process_coalesced_batch();
+    void start_coalescing_thread(int batch_size, int window_us);
+    void stop_coalescing_thread();
 
     // NON-BLOCKING enqueue for Server mode (used by ResNetServerSUT)
     void enqueue_work(uint64_t query_id, int sample_idx) {
@@ -267,6 +277,29 @@ private:
     // Round-robin
     std::atomic<size_t> die_index_{0};
 
+    // =========================================================================
+    // QUERY COALESCING (batches queries for higher throughput)
+    // =========================================================================
+    static constexpr int COALESCE_QUEUE_SIZE = 16384;
+
+    struct CoalesceItem {
+        uint64_t query_id;
+        int sample_idx;
+        std::chrono::steady_clock::time_point arrival_time;
+        std::atomic<bool> valid{false};
+    };
+    CoalesceItem coalesce_queue_[COALESCE_QUEUE_SIZE];
+    std::atomic<size_t> coalesce_head_{0};  // Writers push here
+    std::atomic<size_t> coalesce_tail_{0};  // Coalescing thread reads here
+
+    // Coalescing thread
+    std::thread coalescing_thread_;
+    std::atomic<bool> coalescing_running_{false};
+    int coalesce_batch_size_ = 8;
+    int coalesce_window_us_ = 500;  // 0.5ms default window
+
+    void coalescing_thread_func();
+
     // Helpers
     std::vector<std::string> discover_dies();
     ov::AnyMap build_compile_properties();
@@ -291,6 +324,7 @@ namespace mlperf_ov {
 /**
  * Pure C++ SUT for Server mode - registered directly with LoadGen.
  * Eliminates Python overhead in the hot path.
+ * Uses direct processing (no batching) - lowest latency but lower throughput.
  */
 class ResNetServerSUT : public mlperf::SystemUnderTest {
 public:
@@ -319,6 +353,58 @@ public:
 private:
     ResNetMultiDieCppSUT* backend_;
     std::string name_;
+};
+
+/**
+ * Coalescing SUT for Server mode - batches queries for higher throughput.
+ * Collects queries over a short time window and processes them in batches.
+ * Trades small amount of latency for significantly higher throughput.
+ *
+ * Key insight: NPU is ~3.5x more efficient with batch=8 vs batch=1
+ * (6100 QPS vs 1742 QPS with 2 dies)
+ */
+class CoalescingServerSUT : public mlperf::SystemUnderTest {
+public:
+    CoalescingServerSUT(ResNetMultiDieCppSUT* backend,
+                        int batch_size = 8,
+                        int window_us = 500,
+                        const std::string& name = "CoalescingServerSUT")
+        : backend_(backend), name_(name), batch_size_(batch_size), window_us_(window_us) {
+        backend_->enable_direct_loadgen(true);
+    }
+
+    ~CoalescingServerSUT() override {
+        stop();
+    }
+
+    void start() {
+        backend_->start_coalescing_thread(batch_size_, window_us_);
+    }
+
+    void stop() {
+        backend_->stop_coalescing_thread();
+    }
+
+    const std::string& Name() override { return name_; }
+
+    void IssueQuery(const std::vector<mlperf::QuerySample>& samples) override {
+        // Push to coalescing queue - thread will batch and process
+        for (const auto& sample : samples) {
+            backend_->enqueue_for_coalescing(sample.id, sample.index);
+        }
+    }
+
+    void FlushQueries() override {
+        // Process any remaining queries in the coalescing queue
+        backend_->process_coalesced_batch();
+        backend_->wait_all();
+    }
+
+private:
+    ResNetMultiDieCppSUT* backend_;
+    std::string name_;
+    int batch_size_;
+    int window_us_;
 };
 
 /**

@@ -405,7 +405,10 @@ class ResNetMultiDieCppSUTWrapper:
     def run_native_benchmark(
         self,
         test_settings: "lg.TestSettings",
-        log_settings: "lg.LogSettings"
+        log_settings: "lg.LogSettings",
+        enable_coalescing: bool = False,
+        coalesce_batch_size: int = 8,
+        coalesce_window_us: int = 500
     ) -> None:
         """Run benchmark with PURE C++ SUT - no Python in hot path!
 
@@ -415,6 +418,9 @@ class ResNetMultiDieCppSUTWrapper:
         Args:
             test_settings: LoadGen test settings
             log_settings: LoadGen log settings
+            enable_coalescing: If True, batch queries for higher throughput
+            coalesce_batch_size: Max queries to batch together (default 8)
+            coalesce_window_us: Max time (us) to wait for more queries (default 500)
         """
         if not self.supports_native_benchmark():
             raise RuntimeError("Native benchmark not supported for this scenario")
@@ -449,6 +455,8 @@ class ResNetMultiDieCppSUTWrapper:
 
         logger.info(f"Starting PURE C++ Server benchmark: {total_count} total, {perf_count} perf samples")
         logger.info(f"Settings: target_qps={target_qps}, target_latency_ns={target_latency_ns}")
+        if enable_coalescing:
+            logger.info(f"COALESCING ENABLED: batch_size={coalesce_batch_size}, window={coalesce_window_us}us")
         logger.info(">>> NO PYTHON IN HOT PATH - LoadGen calls C++ directly! <<<")
 
         # Get log output directory from log_settings
@@ -464,7 +472,10 @@ class ResNetMultiDieCppSUTWrapper:
             target_qps,
             target_latency_ns,
             min_duration_ms,
-            min_query_count
+            min_query_count,
+            enable_coalescing,
+            coalesce_batch_size,
+            coalesce_window_us
         )
 
         # Sync statistics from C++ after benchmark
@@ -481,7 +492,14 @@ class ResNetMultiDieCppSUTWrapper:
         self,
         mlperf_conf_path: str = "",
         user_conf_path: str = "",
-        log_output_dir: str = "."
+        log_output_dir: str = ".",
+        enable_coalescing: bool = False,
+        coalesce_batch_size: int = 8,
+        coalesce_window_us: int = 500,
+        target_qps: float = 0.0,
+        target_latency_ns: int = 0,
+        min_duration_ms: int = 0,
+        min_query_count: int = 0
     ) -> None:
         """Run Server benchmark with PURE C++ SUT - no Python in hot path!
 
@@ -492,6 +510,13 @@ class ResNetMultiDieCppSUTWrapper:
             mlperf_conf_path: Path to mlperf.conf
             user_conf_path: Path to user.conf
             log_output_dir: Directory for LoadGen output logs
+            enable_coalescing: If True, batch queries for higher throughput
+            coalesce_batch_size: Max queries to batch together (default 8)
+            coalesce_window_us: Max time (us) to wait for more queries (default 500)
+            target_qps: Target QPS (0 to use config file value)
+            target_latency_ns: Target latency in nanoseconds (0 to use config file value)
+            min_duration_ms: Minimum test duration in milliseconds
+            min_query_count: Minimum number of queries
         """
         if self.scenario != Scenario.SERVER:
             raise ValueError("run_server_benchmark_cpp only works in Server scenario")
@@ -519,6 +544,8 @@ class ResNetMultiDieCppSUTWrapper:
         self._cpp_sut.reset_counters()
 
         logger.info(f"Starting PURE C++ Server benchmark: {total_count} total, {perf_count} perf samples")
+        if enable_coalescing:
+            logger.info(f"COALESCING ENABLED: batch_size={coalesce_batch_size}, window={coalesce_window_us}us")
         logger.info(">>> NO PYTHON IN HOT PATH - LoadGen calls C++ directly! <<<")
 
         # Run benchmark entirely in C++!
@@ -527,7 +554,14 @@ class ResNetMultiDieCppSUTWrapper:
             perf_count,
             mlperf_conf_path,
             user_conf_path,
-            log_output_dir
+            log_output_dir,
+            target_qps,
+            target_latency_ns,
+            min_duration_ms,
+            min_query_count,
+            enable_coalescing,
+            coalesce_batch_size,
+            coalesce_window_us
         )
 
         # Sync statistics from C++

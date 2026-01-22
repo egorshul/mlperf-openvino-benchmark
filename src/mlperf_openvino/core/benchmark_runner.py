@@ -623,6 +623,10 @@ class BenchmarkRunner:
         if self.config.scenario == Scenario.SERVER:
             logger.info(f"  server_target_qps: {scenario_config.target_qps}")
             logger.info(f"  server_target_latency_ns: {scenario_config.target_latency_ns}")
+            logger.info(f"  enable_coalescing: {scenario_config.enable_coalescing}")
+            if scenario_config.enable_coalescing:
+                logger.info(f"  coalesce_batch_size: {scenario_config.coalesce_batch_size}")
+                logger.info(f"  coalesce_window_us: {scenario_config.coalesce_window_us}")
         logger.info(f"  qsl_rng_seed: {scenario_config.qsl_rng_seed}")
 
         start_time = time.time()
@@ -636,7 +640,23 @@ class BenchmarkRunner:
         if use_native:
             # PURE C++ PATH: LoadGen calls C++ SUT directly
             logger.info("Starting LoadGen test (PURE C++ mode - no Python in hot path)...")
-            self.sut.run_native_benchmark(test_settings, log_settings)
+
+            # Get coalescing settings from scenario config
+            enable_coalescing = scenario_config.enable_coalescing
+            coalesce_batch_size = scenario_config.coalesce_batch_size
+            coalesce_window_us = scenario_config.coalesce_window_us
+
+            if enable_coalescing:
+                logger.info(f"Query coalescing ENABLED: batch_size={coalesce_batch_size}, "
+                           f"window={coalesce_window_us}us")
+
+            self.sut.run_native_benchmark(
+                test_settings,
+                log_settings,
+                enable_coalescing=enable_coalescing,
+                coalesce_batch_size=coalesce_batch_size,
+                coalesce_window_us=coalesce_window_us
+            )
             # No handles to destroy - C++ manages its own lifecycle
             sut_handle = None
             qsl_handle = None
