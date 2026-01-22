@@ -367,6 +367,7 @@ class ResNetMultiDieCppSUTWrapper:
     def set_store_predictions(self, store: bool) -> None:
         """Enable/disable prediction storage."""
         self._cpp_sut.set_store_predictions(store)
+        self._is_accuracy_mode = store  # Also update for native benchmark
 
     def reset(self) -> None:
         """Reset state."""

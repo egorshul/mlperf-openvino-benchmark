@@ -545,6 +545,13 @@ class BenchmarkRunner:
         test_settings = self._get_test_settings()
         log_settings = self._get_log_settings()
 
+        # Enable prediction storage for accuracy mode (must be set before test runs)
+        is_accuracy_mode = self.config.test_mode == TestMode.ACCURACY_ONLY
+        if hasattr(self.sut, 'set_store_predictions'):
+            self.sut.set_store_predictions(is_accuracy_mode)
+            if is_accuracy_mode:
+                print(f"[Runner] Accuracy mode: enabled prediction storage")
+
         start_time = time.time()
 
         # Check if SUT supports native C++ benchmark (bypasses Python in hot path)
