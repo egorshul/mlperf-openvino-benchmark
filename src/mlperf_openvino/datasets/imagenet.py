@@ -251,6 +251,9 @@ class ImageNetDataset(BaseDataset):
         """
         Postprocess inference results to get predicted classes.
 
+        MLPerf ResNet50 model outputs 1001 classes (index 0 = background, 1-1000 = ImageNet).
+        MLCommons reference uses offset=-1 to convert to 0-999 for val_map.txt comparison.
+
         Args:
             results: Raw inference output - can be:
                 - Pre-computed argmax indices (shape [N] or [N,1], dtype int64/int32/float with single value)
@@ -265,16 +268,14 @@ class ImageNetDataset(BaseDataset):
         # Handle different output formats
         if results.dtype in (np.int64, np.int32):
             # Model already computed argmax (e.g., ArgMax:0 output)
-            # Results contain class indices directly
-            # MLPerf ResNet50 ONNX ArgMax uses 1-based indexing (1-1000 for ImageNet)
+            # MLPerf ResNet50 ONNX uses 1-based indexing (1-1000 for ImageNet)
             results = results.flatten()
             for idx in results:
-                pred = int(idx) - 1  # Convert 1-based to 0-based
+                pred = int(idx) - 1  # MLCommons offset=-1
                 pred = max(0, min(999, pred))
                 predictions.append(pred)
         else:
-            # Float output - check if it's a single value (class index stored as float)
-            # or full logits/probabilities array
+            # Float output
             if len(results.shape) == 1:
                 results = results.reshape(1, -1)
 
@@ -284,18 +285,15 @@ class ImageNetDataset(BaseDataset):
             if num_classes == 1:
                 for i in range(results.shape[0]):
                     # This is the class index stored as float (from int64 ArgMax)
-                    # MLPerf ResNet50 ONNX ArgMax uses 1-based indexing
-                    pred = int(results[i, 0]) - 1
+                    pred = int(results[i, 0]) - 1  # MLCommons offset=-1
                     pred = max(0, min(999, pred))
                     predictions.append(pred)
             else:
-                # Full logits/probabilities, need to compute argmax
-                # For softmax output, indices 0-999 directly correspond to ImageNet classes
-                # NO subtraction needed - this is 0-based indexing
+                # Full logits/probabilities (1001 classes), compute argmax
+                # Then apply MLCommons offset=-1
                 for i in range(results.shape[0]):
-                    pred = int(np.argmax(results[i]))
-                    # Clamp to valid range (0-999)
-                    pred = min(999, pred)
+                    pred = int(np.argmax(results[i])) - 1  # MLCommons offset=-1
+                    pred = max(0, min(999, pred))
                     predictions.append(pred)
 
         return predictions
