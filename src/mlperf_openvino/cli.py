@@ -92,6 +92,8 @@ def get_default_config(model: str) -> BenchmarkConfig:
               help='Minimum test duration in ms')
 @click.option('--target-qps', type=float, default=0,
               help='Target QPS (queries per second)')
+@click.option('--target-latency-ns', type=int, default=0,
+              help='Target latency in nanoseconds (Server mode, 0=use default 15ms)')
 @click.option('--count', type=int, default=0,
               help='Number of samples to use (0 = all)')
 @click.option('--warmup', type=int, default=10,
@@ -107,8 +109,8 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         data_path: Optional[str], output_dir: str, config: Optional[str],
         device: str, properties: str, num_threads: int, num_streams: str,
         batch_size: int, nchw: bool, performance_hint: str, duration: int, target_qps: float,
-        count: int, warmup: int, enable_coalescing: bool, coalesce_batch_size: int,
-        coalesce_window_us: int, verbose: bool):
+        target_latency_ns: int, count: int, warmup: int, enable_coalescing: bool,
+        coalesce_batch_size: int, coalesce_window_us: int, verbose: bool):
     """
     Run MLPerf benchmark.
 
@@ -224,6 +226,10 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         scenario_config.enable_coalescing = enable_coalescing
         scenario_config.coalesce_batch_size = coalesce_batch_size
         scenario_config.coalesce_window_us = coalesce_window_us
+        # Target latency (Open Division allows custom values)
+        if target_latency_ns > 0:
+            scenario_config.target_latency_ns = target_latency_ns
+            click.echo(f"Custom target latency: {target_latency_ns / 1e6:.1f}ms (Open Division)")
 
     # Validate configuration
     if not benchmark_config.model.model_path:
