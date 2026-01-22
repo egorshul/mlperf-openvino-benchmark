@@ -323,7 +323,8 @@ class ResNetMultiDieCppSUTWrapper:
             target_qps,
             target_latency_ns,
             min_duration_ms,
-            min_query_count
+            min_query_count,
+            self._is_accuracy_mode
         )
 
         self._query_count = self._cpp_sut.get_issued_count()

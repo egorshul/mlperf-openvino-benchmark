@@ -128,7 +128,8 @@ public:
         double target_qps = 0,
         int64_t target_latency_ns = 0,
         int64_t min_duration_ms = 0,
-        int64_t min_query_count = 0);
+        int64_t min_query_count = 0,
+        bool is_accuracy_mode = false);
 
 private:
     // Config

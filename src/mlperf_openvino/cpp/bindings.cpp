@@ -539,8 +539,8 @@ PYBIND11_MODULE(_cpp_sut, m) {
                 double target_qps,
                 int64_t target_latency_ns,
                 int64_t min_duration_ms,
-                int64_t min_query_count) {
-                 // Release GIL and run benchmark entirely in C++!
+                int64_t min_query_count,
+                bool is_accuracy_mode) {
                  py::gil_scoped_release release;
                  self.run_server_benchmark(
                      total_sample_count,
@@ -551,7 +551,8 @@ PYBIND11_MODULE(_cpp_sut, m) {
                      target_qps,
                      target_latency_ns,
                      min_duration_ms,
-                     min_query_count);
+                     min_query_count,
+                     is_accuracy_mode);
              },
              py::arg("total_sample_count"),
              py::arg("performance_sample_count"),
@@ -562,7 +563,8 @@ PYBIND11_MODULE(_cpp_sut, m) {
              py::arg("target_latency_ns") = 0,
              py::arg("min_duration_ms") = 0,
              py::arg("min_query_count") = 0,
-             "Run Server benchmark with pure C++ SUT (NO Python in hot path!)");
+             py::arg("is_accuracy_mode") = false,
+             "Run Server benchmark with pure C++ SUT");
 
     // RetinaNetMultiDieCppSUT - multi-die accelerator for RetinaNet
     py::class_<mlperf_ov::RetinaNetMultiDieCppSUT>(m, "RetinaNetMultiDieCppSUT")

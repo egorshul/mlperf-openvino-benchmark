@@ -981,7 +981,8 @@ void ResNetMultiDieCppSUT::run_server_benchmark(
     double target_qps,
     int64_t target_latency_ns,
     int64_t min_duration_ms,
-    int64_t min_query_count) {
+    int64_t min_query_count,
+    bool is_accuracy_mode) {
 
     if (!loaded_) {
         throw std::runtime_error("Model not loaded");
@@ -992,7 +993,7 @@ void ResNetMultiDieCppSUT::run_server_benchmark(
 
     mlperf::TestSettings test_settings;
     test_settings.scenario = mlperf::TestScenario::Server;
-    test_settings.mode = mlperf::TestMode::PerformanceOnly;
+    test_settings.mode = is_accuracy_mode ? mlperf::TestMode::AccuracyOnly : mlperf::TestMode::PerformanceOnly;
 
     if (!mlperf_conf_path.empty()) {
         test_settings.FromConfig(mlperf_conf_path, "resnet50", "Server");

@@ -376,7 +376,7 @@ class BenchmarkConfig:
                     nireq_multiplier=6,
                     explicit_batching=True,
                     explicit_batch_size=8,
-                    batch_timeout_us=2000,
+                    batch_timeout_us=1800,
                 ),
             ),
             dataset=DatasetConfig(
