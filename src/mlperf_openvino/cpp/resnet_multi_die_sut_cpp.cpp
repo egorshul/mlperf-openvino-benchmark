@@ -44,8 +44,12 @@ ResNetMultiDieCppSUT::ResNetMultiDieCppSUT(const std::string& model_path,
     for (int i = 0; i < WORK_QUEUE_SIZE; ++i) {
         work_queue_[i].valid.store(false, std::memory_order_relaxed);
     }
-    for (int i = 0; i < BATCH_QUEUE_SIZE; ++i) {
-        batch_queue_[i].valid.store(false, std::memory_order_relaxed);
+    for (int d = 0; d < MAX_DIES; ++d) {
+        batch_heads_[d].store(0, std::memory_order_relaxed);
+        batch_tails_[d].store(0, std::memory_order_relaxed);
+        for (int i = 0; i < BATCH_QUEUE_SIZE; ++i) {
+            batch_queues_[d][i].valid.store(false, std::memory_order_relaxed);
+        }
     }
 }
 
@@ -243,12 +247,16 @@ void ResNetMultiDieCppSUT::batcher_thread_func() {
         }
 
         if (should_flush && batch_count > 0) {
-            // Enqueue batch
-            size_t head = batch_head_.fetch_add(1, std::memory_order_acq_rel);
+            // Round-robin dispatch to dies
+            size_t num_dies = die_contexts_.size();
+            size_t die_idx = next_die_.fetch_add(1, std::memory_order_relaxed) % num_dies;
+
+            // Enqueue batch to specific die's queue
+            size_t head = batch_heads_[die_idx].fetch_add(1, std::memory_order_acq_rel);
             size_t batch_idx = head % BATCH_QUEUE_SIZE;
 
             // Wait for slot
-            while (batch_queue_[batch_idx].valid.load(std::memory_order_acquire)) {
+            while (batch_queues_[die_idx][batch_idx].valid.load(std::memory_order_acquire)) {
                 #if defined(__x86_64__) || defined(_M_X64)
                 __builtin_ia32_pause();
                 #endif
@@ -256,12 +264,12 @@ void ResNetMultiDieCppSUT::batcher_thread_func() {
 
             // Copy batch data
             for (int i = 0; i < batch_count; ++i) {
-                batch_queue_[batch_idx].query_ids[i] = batch_query_ids[i];
-                batch_queue_[batch_idx].sample_indices[i] = batch_sample_indices[i];
+                batch_queues_[die_idx][batch_idx].query_ids[i] = batch_query_ids[i];
+                batch_queues_[die_idx][batch_idx].sample_indices[i] = batch_sample_indices[i];
             }
-            batch_queue_[batch_idx].actual_size = batch_count;
-            batch_queue_[batch_idx].num_dummies = num_dummies;
-            batch_queue_[batch_idx].valid.store(true, std::memory_order_release);
+            batch_queues_[die_idx][batch_idx].actual_size = batch_count;
+            batch_queues_[die_idx][batch_idx].num_dummies = num_dummies;
+            batch_queues_[die_idx][batch_idx].valid.store(true, std::memory_order_release);
 
             batch_count = 0;
         }
@@ -276,20 +284,23 @@ void ResNetMultiDieCppSUT::batcher_thread_func() {
 
     // Flush remaining batch on shutdown
     if (batch_count > 0) {
-        size_t head = batch_head_.fetch_add(1, std::memory_order_acq_rel);
+        size_t num_dies = die_contexts_.size();
+        size_t die_idx = next_die_.fetch_add(1, std::memory_order_relaxed) % num_dies;
+
+        size_t head = batch_heads_[die_idx].fetch_add(1, std::memory_order_acq_rel);
         size_t batch_idx = head % BATCH_QUEUE_SIZE;
 
-        while (batch_queue_[batch_idx].valid.load(std::memory_order_acquire)) {
+        while (batch_queues_[die_idx][batch_idx].valid.load(std::memory_order_acquire)) {
             std::this_thread::yield();
         }
 
         for (int i = 0; i < batch_count; ++i) {
-            batch_queue_[batch_idx].query_ids[i] = batch_query_ids[i];
-            batch_queue_[batch_idx].sample_indices[i] = batch_sample_indices[i];
+            batch_queues_[die_idx][batch_idx].query_ids[i] = batch_query_ids[i];
+            batch_queues_[die_idx][batch_idx].sample_indices[i] = batch_sample_indices[i];
         }
-        batch_queue_[batch_idx].actual_size = batch_count;
-        batch_queue_[batch_idx].num_dummies = 0;
-        batch_queue_[batch_idx].valid.store(true, std::memory_order_release);
+        batch_queues_[die_idx][batch_idx].actual_size = batch_count;
+        batch_queues_[die_idx][batch_idx].num_dummies = 0;
+        batch_queues_[die_idx][batch_idx].valid.store(true, std::memory_order_release);
     }
 }
 
@@ -301,10 +312,11 @@ void ResNetMultiDieCppSUT::issue_thread_batched_func(size_t die_idx) {
     int idle_spins = 0;
 
     while (issue_running_.load(std::memory_order_acquire)) {
-        size_t tail = batch_tail_.load(std::memory_order_relaxed);
+        // Each die has its own queue - no contention!
+        size_t tail = batch_tails_[die_idx].load(std::memory_order_relaxed);
         size_t idx = tail % BATCH_QUEUE_SIZE;
 
-        if (!batch_queue_[idx].valid.load(std::memory_order_acquire)) {
+        if (!batch_queues_[die_idx][idx].valid.load(std::memory_order_acquire)) {
             idle_spins++;
             if (idle_spins < 64) {
                 #if defined(__x86_64__) || defined(_M_X64)
@@ -319,15 +331,12 @@ void ResNetMultiDieCppSUT::issue_thread_batched_func(size_t die_idx) {
             continue;
         }
 
-        // Try to claim this batch
-        if (!batch_tail_.compare_exchange_weak(tail, tail + 1,
-                std::memory_order_acq_rel, std::memory_order_relaxed)) {
-            continue;
-        }
+        // Claim this batch (no contention - single consumer per queue)
+        batch_tails_[die_idx].store(tail + 1, std::memory_order_relaxed);
 
         idle_spins = 0;
-        int actual_size = batch_queue_[idx].actual_size;
-        int num_dummies = batch_queue_[idx].num_dummies;
+        int actual_size = batch_queues_[die_idx][idx].actual_size;
+        int num_dummies = batch_queues_[die_idx][idx].num_dummies;
         int real_samples = actual_size - num_dummies;
 
         // Acquire request for this die
@@ -336,12 +345,13 @@ void ResNetMultiDieCppSUT::issue_thread_batched_func(size_t die_idx) {
 
         // Copy batch data
         for (int i = 0; i < actual_size; ++i) {
-            ctx->query_ids[i] = batch_queue_[idx].query_ids[i];
-            ctx->sample_indices[i] = batch_queue_[idx].sample_indices[i];
+            ctx->query_ids[i] = batch_queues_[die_idx][idx].query_ids[i];
+            ctx->sample_indices[i] = batch_queues_[die_idx][idx].sample_indices[i];
         }
         ctx->actual_batch_size = actual_size;
+        ctx->num_dummies = num_dummies;
 
-        batch_queue_[idx].valid.store(false, std::memory_order_release);
+        batch_queues_[die_idx][idx].valid.store(false, std::memory_order_release);
 
         // Copy sample data for entire batch
         float* tensor_data = ctx->input_tensor.data<float>();
@@ -379,32 +389,30 @@ void ResNetMultiDieCppSUT::issue_thread_batched_func(size_t die_idx) {
 
     // Drain remaining batches on shutdown
     while (true) {
-        size_t tail = batch_tail_.load(std::memory_order_relaxed);
+        size_t tail = batch_tails_[die_idx].load(std::memory_order_relaxed);
         size_t idx = tail % BATCH_QUEUE_SIZE;
 
-        if (!batch_queue_[idx].valid.load(std::memory_order_acquire)) {
+        if (!batch_queues_[die_idx][idx].valid.load(std::memory_order_acquire)) {
             break;
         }
 
-        if (!batch_tail_.compare_exchange_weak(tail, tail + 1,
-                std::memory_order_acq_rel, std::memory_order_relaxed)) {
-            continue;
-        }
+        batch_tails_[die_idx].store(tail + 1, std::memory_order_relaxed);
 
-        int actual_size = batch_queue_[idx].actual_size;
-        int num_dummies = batch_queue_[idx].num_dummies;
+        int actual_size = batch_queues_[die_idx][idx].actual_size;
+        int num_dummies = batch_queues_[die_idx][idx].num_dummies;
         int real_samples = actual_size - num_dummies;
 
         size_t req_id = acquire_request_for_die(die_idx);
         ResNetMultiDieInferContext* ctx = infer_contexts_[req_id].get();
 
         for (int i = 0; i < actual_size; ++i) {
-            ctx->query_ids[i] = batch_queue_[idx].query_ids[i];
-            ctx->sample_indices[i] = batch_queue_[idx].sample_indices[i];
+            ctx->query_ids[i] = batch_queues_[die_idx][idx].query_ids[i];
+            ctx->sample_indices[i] = batch_queues_[die_idx][idx].sample_indices[i];
         }
         ctx->actual_batch_size = actual_size;
+        ctx->num_dummies = num_dummies;
 
-        batch_queue_[idx].valid.store(false, std::memory_order_release);
+        batch_queues_[die_idx][idx].valid.store(false, std::memory_order_release);
 
         float* tensor_data = ctx->input_tensor.data<float>();
         size_t sample_byte_size = input_byte_size_ / batch_size_;
@@ -501,6 +509,7 @@ void ResNetMultiDieCppSUT::issue_thread_func(size_t die_idx) {
         ctx->query_ids[0] = query_id;
         ctx->sample_indices[0] = sample_idx;
         ctx->actual_batch_size = 1;
+        ctx->num_dummies = 0;
 
         // Copy data
         float* tensor_data = ctx->input_tensor.data<float>();
@@ -556,6 +565,7 @@ void ResNetMultiDieCppSUT::issue_thread_func(size_t die_idx) {
         ctx->query_ids[0] = query_id;
         ctx->sample_indices[0] = sample_idx;
         ctx->actual_batch_size = 1;
+        ctx->num_dummies = 0;
 
         float* tensor_data = ctx->input_tensor.data<float>();
         std::memcpy(tensor_data, sample_data, std::min(sample_size, input_byte_size_));
@@ -573,9 +583,11 @@ void ResNetMultiDieCppSUT::issue_thread_func(size_t die_idx) {
 
 void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx) {
     int actual_batch_size = ctx->actual_batch_size;
+    int num_dummies = ctx->num_dummies;
+    int real_samples = actual_batch_size - num_dummies;
 
-    // Store predictions if needed
-    if (store_predictions_) {
+    // Store predictions if needed (only for real samples)
+    if (store_predictions_ && real_samples > 0) {
         ov::Tensor output_tensor = ctx->request.get_output_tensor(output_idx_);
         const float* output_data = nullptr;
         std::vector<float> converted;
@@ -593,7 +605,8 @@ void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx
 
         if (output_data) {
             std::lock_guard<std::mutex> lock(predictions_mutex_);
-            for (int i = 0; i < actual_batch_size; ++i) {
+            // Only store predictions for real samples (not dummies)
+            for (int i = 0; i < real_samples; ++i) {
                 int sample_idx = ctx->sample_indices[i];
                 const float* sample_output = output_data + (i * single_output_size_);
                 predictions_[sample_idx] = std::vector<float>(
@@ -602,26 +615,28 @@ void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx
         }
     }
 
-    // Prepare responses
+    // Prepare responses only for real samples (not dummies)
     mlperf::QuerySampleResponse responses[ResNetMultiDieInferContext::MAX_BATCH];
-    for (int i = 0; i < actual_batch_size; ++i) {
+    for (int i = 0; i < real_samples; ++i) {
         responses[i] = {ctx->query_ids[i], 0, 0};
     }
 
     // Release request before calling LoadGen
     size_t pool_id = ctx->pool_id;
-    completed_count_.fetch_add(actual_batch_size, std::memory_order_relaxed);
+    completed_count_.fetch_add(real_samples, std::memory_order_relaxed);
     pending_count_.fetch_sub(1, std::memory_order_relaxed);
     release_request(pool_id);
 
-    // Call LoadGen
+    // Call LoadGen (only for real samples, not dummies)
     if (use_direct_loadgen_.load(std::memory_order_relaxed)) {
-        mlperf::QuerySamplesComplete(responses, actual_batch_size);
+        if (real_samples > 0) {
+            mlperf::QuerySamplesComplete(responses, real_samples);
+        }
     } else {
         // Offline mode callback
         std::vector<uint64_t> ids;
-        ids.reserve(actual_batch_size);
-        for (int i = 0; i < actual_batch_size; ++i) {
+        ids.reserve(real_samples);
+        for (int i = 0; i < real_samples; ++i) {
             ids.push_back(ctx->query_ids[i]);
         }
         std::lock_guard<std::mutex> lock(callback_mutex_);
@@ -734,15 +749,27 @@ void ResNetMultiDieCppSUT::load() {
     output_name_ = outputs[output_idx_].get_any_name();
     output_type_ = outputs[output_idx_].get_element_type();
 
-    if (batch_size_ > 1 || input_shape_[0] == 0) {
+    // Determine actual batch size for model compilation
+    int compile_batch_size = batch_size_;
+    if (use_explicit_batching_ && explicit_batch_size_ > 1) {
+        compile_batch_size = explicit_batch_size_;
+        std::cout << "[LOAD] Explicit batching: using batch_size=" << compile_batch_size << " for model" << std::endl;
+    }
+
+    if (compile_batch_size > 1 || input_shape_[0] == 0) {
         std::map<std::string, ov::PartialShape> new_shapes;
         for (const auto& input : inputs) {
             ov::PartialShape new_shape = input.get_partial_shape();
-            new_shape[0] = batch_size_;
+            new_shape[0] = compile_batch_size;
             new_shapes[input.get_any_name()] = new_shape;
         }
         model_->reshape(new_shapes);
         input_shape_ = model_->inputs()[0].get_partial_shape().get_min_shape();
+    }
+
+    // Update batch_size_ for explicit batching
+    if (use_explicit_batching_ && explicit_batch_size_ > 1) {
+        batch_size_ = explicit_batch_size_;
     }
 
     if (use_nhwc_input_) {

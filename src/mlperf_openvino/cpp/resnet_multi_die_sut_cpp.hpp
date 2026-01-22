@@ -55,6 +55,7 @@ struct ResNetMultiDieInferContext {
     uint64_t query_ids[MAX_BATCH];
     int sample_indices[MAX_BATCH];
     int actual_batch_size = 0;
+    int num_dummies = 0;  // Number of dummy samples (for explicit batching)
     mlperf::QuerySampleResponse responses[MAX_BATCH];
 };
 
@@ -173,8 +174,9 @@ private:
     std::thread batcher_thread_;
     std::atomic<bool> batcher_running_{false};
 
-    // Batch queue (batcher pushes, issue threads pull)
+    // Per-die batch queues (batcher dispatches round-robin, each die has own queue)
     static constexpr int BATCH_QUEUE_SIZE = 256;
+    static constexpr int MAX_DIES = 8;
     struct BatchItem {
         uint64_t query_ids[64];
         int sample_indices[64];
@@ -182,9 +184,11 @@ private:
         int num_dummies = 0;
         std::atomic<bool> valid{false};
     };
-    BatchItem batch_queue_[BATCH_QUEUE_SIZE];
-    std::atomic<size_t> batch_head_{0};
-    std::atomic<size_t> batch_tail_{0};
+    // Separate queue for each die - no contention!
+    BatchItem batch_queues_[MAX_DIES][BATCH_QUEUE_SIZE];
+    std::atomic<size_t> batch_heads_[MAX_DIES];
+    std::atomic<size_t> batch_tails_[MAX_DIES];
+    std::atomic<size_t> next_die_{0};  // Round-robin counter
 
     void batcher_thread_func();
     void issue_thread_batched_func(size_t die_idx);
