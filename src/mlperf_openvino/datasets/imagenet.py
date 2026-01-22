@@ -266,12 +266,10 @@ class ImageNetDataset(BaseDataset):
         if results.dtype in (np.int64, np.int32):
             # Model already computed argmax (e.g., ArgMax:0 output)
             # Results contain class indices directly
+            # MLPerf ResNet50 ONNX ArgMax uses 1-based indexing (1-1000 for ImageNet)
             results = results.flatten()
             for idx in results:
-                # MLPerf ResNet50 ONNX model uses 1001 classes (0=background, 1-1000=ImageNet)
-                # Subtract 1 to convert to 0-999 range for val_map.txt labels
-                pred = int(idx) - 1
-                # Clamp to valid range (in case of background prediction)
+                pred = int(idx) - 1  # Convert 1-based to 0-based
                 pred = max(0, min(999, pred))
                 predictions.append(pred)
         else:
@@ -285,22 +283,19 @@ class ImageNetDataset(BaseDataset):
             # Single value per sample = already argmax'd class index (stored as float)
             if num_classes == 1:
                 for i in range(results.shape[0]):
-                    # This is the class index stored as float
-                    pred = int(results[i, 0])
-                    # MLPerf ResNet50 ONNX model uses 1001 classes (0=background, 1-1000=ImageNet)
-                    pred = pred - 1
+                    # This is the class index stored as float (from int64 ArgMax)
+                    # MLPerf ResNet50 ONNX ArgMax uses 1-based indexing
+                    pred = int(results[i, 0]) - 1
                     pred = max(0, min(999, pred))
                     predictions.append(pred)
             else:
                 # Full logits/probabilities, need to compute argmax
+                # For softmax output, indices 0-999 directly correspond to ImageNet classes
+                # NO subtraction needed - this is 0-based indexing
                 for i in range(results.shape[0]):
                     pred = int(np.argmax(results[i]))
-
-                    # If model has 1001 classes (with background), subtract 1
-                    if num_classes == 1001:
-                        pred = pred - 1
-                        pred = max(0, min(999, pred))
-
+                    # Clamp to valid range (0-999)
+                    pred = min(999, pred)
                     predictions.append(pred)
 
         return predictions
