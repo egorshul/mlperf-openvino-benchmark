@@ -136,6 +136,10 @@ public:
         int64_t min_duration_ms = 0,
         int64_t min_query_count = 0);
 
+    // DIRECT query processing for Server mode (minimum latency!)
+    // Processes query immediately without queue - critical for latency SLA
+    void process_query_direct(uint64_t query_id, int sample_idx);
+
     // NON-BLOCKING enqueue for Server mode (used by ResNetServerSUT)
     void enqueue_work(uint64_t query_id, int sample_idx) {
         // Lock-free push to work queue - returns IMMEDIATELY
@@ -300,12 +304,12 @@ public:
     const std::string& Name() override { return name_; }
 
     void IssueQuery(const std::vector<mlperf::QuerySample>& samples) override {
-        // NON-BLOCKING: Just push to work queue and return IMMEDIATELY!
-        // Worker threads (issue_threads_) will process from the queue.
+        // DIRECT PROCESSING for minimum latency (Server mode requires low latency!)
+        // Queue adds latency → queries fail latency SLA → low QPS
+        // Process each sample immediately instead.
         for (const auto& sample : samples) {
-            backend_->enqueue_work(sample.id, sample.index);
+            backend_->process_query_direct(sample.id, sample.index);
         }
-        // IssueQuery returns instantly - no blocking!
     }
 
     void FlushQueries() override {

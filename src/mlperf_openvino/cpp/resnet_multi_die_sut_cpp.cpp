@@ -866,6 +866,46 @@ void ResNetMultiDieCppSUT::issue_queries_server_fast(
     }
 }
 
+// DIRECT query processing - NO QUEUE for minimum latency
+void ResNetMultiDieCppSUT::process_query_direct(uint64_t query_id, int sample_idx) {
+    // Find sample data
+    const float* sample_data = nullptr;
+    size_t sample_size = 0;
+    {
+        std::shared_lock<std::shared_mutex> lock(sample_cache_mutex_);
+        auto it = sample_data_cache_.find(sample_idx);
+        if (it != sample_data_cache_.end()) {
+            sample_data = it->second.data;
+            sample_size = it->second.size;
+        }
+    }
+
+    if (!sample_data) {
+        // Sample not found - send dummy response immediately
+        mlperf::QuerySampleResponse response{query_id, 0, 0};
+        mlperf::QuerySamplesComplete(&response, 1);
+        return;
+    }
+
+    // Acquire request - may block briefly if all requests busy
+    size_t req_id = acquire_request();
+    ResNetMultiDieInferContext* ctx = infer_contexts_[req_id].get();
+
+    // Setup context
+    ctx->query_ids[0] = query_id;
+    ctx->sample_indices[0] = sample_idx;
+    ctx->actual_batch_size = 1;
+
+    // Copy input data
+    float* tensor_data = ctx->input_tensor.data<float>();
+    std::memcpy(tensor_data, sample_data, std::min(sample_size, input_byte_size_));
+
+    // Start async inference - callback will call QuerySamplesComplete
+    pending_count_.fetch_add(1, std::memory_order_relaxed);
+    ctx->request.start_async();
+    issued_count_.fetch_add(1, std::memory_order_relaxed);
+}
+
 void ResNetMultiDieCppSUT::run_server_benchmark(
     size_t total_sample_count,
     size_t performance_sample_count,
