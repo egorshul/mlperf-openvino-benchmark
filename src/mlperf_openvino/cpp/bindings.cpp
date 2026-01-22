@@ -386,13 +386,15 @@ PYBIND11_MODULE(_cpp_sut, m) {
     // ResNetMultiDieCppSUT - optimized for multi-die accelerators with batching
     py::class_<mlperf_ov::ResNetMultiDieCppSUT>(m, "ResNetMultiDieCppSUT")
         .def(py::init<const std::string&, const std::string&, int,
-                      const std::unordered_map<std::string, std::string>&, bool>(),
+                      const std::unordered_map<std::string, std::string>&, bool, int>(),
              py::arg("model_path"),
              py::arg("device_prefix"),
              py::arg("batch_size") = 1,
              py::arg("compile_properties") = std::unordered_map<std::string, std::string>{},
              py::arg("use_nhwc_input") = false,
-             "Create multi-die accelerator SUT")
+             py::arg("nireq_multiplier") = 4,
+             "Create multi-die accelerator SUT. nireq_multiplier controls queue depth "
+             "(lower = less latency for Server mode, higher = more throughput for Offline)")
 
         .def("load", &mlperf_ov::ResNetMultiDieCppSUT::load,
              py::call_guard<py::gil_scoped_release>(),

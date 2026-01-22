@@ -164,7 +164,11 @@ class ScenarioConfig:
     # NPU is ~3.5x more efficient with batch=8 vs batch=1
     enable_coalescing: bool = False
     coalesce_batch_size: int = 8  # Max queries to batch together
-    coalesce_window_us: int = 500  # Max time (us) to wait for more queries
+    coalesce_window_us: int = 100  # Max time (us) to wait for more queries (lower = less latency)
+    # In-flight request multiplier: controls queue depth
+    # Lower = less latency (for Server mode), Higher = more throughput (for Offline mode)
+    # Actual requests = optimal_nireq * nireq_multiplier
+    nireq_multiplier: int = 2  # Default 2 for low latency in Server mode
 
 
 @dataclass
@@ -280,7 +284,9 @@ class BenchmarkConfig:
             # Query coalescing for higher throughput
             enable_coalescing=server_data.get("enable_coalescing", False),
             coalesce_batch_size=server_data.get("coalesce_batch_size", 8),
-            coalesce_window_us=server_data.get("coalesce_window_us", 500),
+            coalesce_window_us=server_data.get("coalesce_window_us", 100),  # Lower default for latency
+            # In-flight request multiplier (lower = less latency)
+            nireq_multiplier=server_data.get("nireq_multiplier", 2),
         )
         
         sources = model_data.get("sources", {})

@@ -76,7 +76,8 @@ public:
                          const std::string& device_prefix,
                          int batch_size = 1,
                          const std::unordered_map<std::string, std::string>& compile_properties = {},
-                         bool use_nhwc_input = false);
+                         bool use_nhwc_input = false,
+                         int nireq_multiplier = 4);  // Multiplier for optimal_nireq (lower = less latency)
 
     ~ResNetMultiDieCppSUT();
 
@@ -178,6 +179,7 @@ private:
     int batch_size_;
     std::unordered_map<std::string, std::string> compile_properties_;
     bool use_nhwc_input_;
+    int nireq_multiplier_;  // Multiplier for optimal_nireq (controls queue depth)
 
     // OpenVINO
     ov::Core core_;

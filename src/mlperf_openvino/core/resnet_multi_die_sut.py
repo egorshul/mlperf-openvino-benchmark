@@ -95,6 +95,17 @@ class ResNetMultiDieCppSUTWrapper:
         if hasattr(config.model, 'preprocessing') and config.model.preprocessing:
             use_nhwc = getattr(config.model.preprocessing, 'output_layout', 'NCHW') == 'NHWC'
 
+        # Get nireq_multiplier for Server mode latency optimization
+        # Lower value = fewer in-flight requests = shorter queue = lower latency
+        # Default: 4 for Offline (throughput), 2 for Server (latency)
+        if scenario == Scenario.SERVER:
+            # For Server mode, default to 2 for lower latency
+            nireq_multiplier = getattr(server_config, 'nireq_multiplier', 2) if server_config else 2
+            logger.info(f"Server mode: nireq_multiplier={nireq_multiplier} (lower=less latency)")
+        else:
+            # For Offline mode, use higher value for throughput
+            nireq_multiplier = 4
+
         # Create C++ SUT
         device_prefix = config.openvino.get_device_prefix()
         self._cpp_sut = ResNetMultiDieCppSUT(
@@ -102,7 +113,8 @@ class ResNetMultiDieCppSUTWrapper:
             device_prefix,
             self.batch_size,
             compile_props,
-            use_nhwc
+            use_nhwc,
+            nireq_multiplier
         )
 
         # Statistics

@@ -28,12 +28,14 @@ ResNetMultiDieCppSUT::ResNetMultiDieCppSUT(const std::string& model_path,
                                            const std::string& device_prefix,
                                            int batch_size,
                                            const std::unordered_map<std::string, std::string>& compile_properties,
-                                           bool use_nhwc_input)
+                                           bool use_nhwc_input,
+                                           int nireq_multiplier)
     : model_path_(model_path),
       device_prefix_(device_prefix),
       batch_size_(batch_size),
       compile_properties_(compile_properties),
-      use_nhwc_input_(use_nhwc_input) {
+      use_nhwc_input_(use_nhwc_input),
+      nireq_multiplier_(nireq_multiplier) {
 
     for (int i = 0; i < MAX_REQUESTS; ++i) {
         request_slots_[i].store(SLOT_FREE, std::memory_order_relaxed);
@@ -668,7 +670,10 @@ void ResNetMultiDieCppSUT::load() {
             die_ctx->optimal_nireq = 4;
         }
 
-        int num_requests = std::max(die_ctx->optimal_nireq * 8, 32);
+        // For Server mode latency, fewer in-flight requests = shorter queue = lower latency
+        // For Offline mode throughput, more requests = better utilization
+        // nireq_multiplier_ controls this tradeoff (default 4, use 2 for lowest latency)
+        int num_requests = std::max(die_ctx->optimal_nireq * nireq_multiplier_, nireq_multiplier_ * 4);
 
         // Track per-die request pool
         die_ctx->request_start_idx = total_requests;
@@ -1105,7 +1110,8 @@ void ResNetMultiDieCppSUT::coalescing_thread_func() {
             } else if (idle_spins < 500) {
                 std::this_thread::yield();
             } else {
-                std::this_thread::sleep_for(std::chrono::microseconds(10));
+                // Keep idle sleep very short for fast response
+                std::this_thread::sleep_for(std::chrono::microseconds(5));
                 idle_spins = 0;
             }
             continue;
@@ -1137,8 +1143,8 @@ void ResNetMultiDieCppSUT::coalescing_thread_func() {
             process_coalesced_batch();
             last_batch_time = now;
         } else {
-            // Wait a bit for more queries
-            std::this_thread::sleep_for(std::chrono::microseconds(50));
+            // Wait a bit for more queries - keep short for low latency!
+            std::this_thread::sleep_for(std::chrono::microseconds(10));
         }
     }
 
