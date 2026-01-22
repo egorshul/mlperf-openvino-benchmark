@@ -1163,6 +1163,23 @@ void ResNetMultiDieCppSUT::start_coalescing_thread(int batch_size, int window_us
         return;  // Already running
     }
 
+    // CRITICAL: Coalesce batch size cannot exceed model's compiled batch size!
+    // If model is compiled with batch_size=1, coalescing won't help.
+    if (batch_size > batch_size_) {
+        std::cout << "[COALESCE] WARNING: Requested batch_size=" << batch_size
+                  << " exceeds model batch_size=" << batch_size_
+                  << ". Limiting to " << batch_size_ << std::endl;
+        std::cout << "[COALESCE] For effective coalescing, recompile model with --batch-size "
+                  << batch_size << std::endl;
+        batch_size = batch_size_;
+    }
+
+    if (batch_size_ == 1) {
+        std::cout << "[COALESCE] WARNING: Model compiled with batch_size=1. "
+                  << "Coalescing disabled (no throughput benefit)." << std::endl;
+        std::cout << "[COALESCE] To enable coalescing, recompile model with --batch-size 8" << std::endl;
+    }
+
     coalesce_batch_size_ = batch_size;
     coalesce_window_us_ = window_us;
     coalescing_running_.store(true, std::memory_order_release);
@@ -1207,8 +1224,16 @@ void ResNetMultiDieCppSUT::run_server_benchmark(
 
     if (enable_coalescing) {
         std::cout << "\n*** COALESCING MODE ENABLED ***" << std::endl;
-        std::cout << "  Batch size: " << coalesce_batch_size << std::endl;
+        std::cout << "  Requested batch size: " << coalesce_batch_size << std::endl;
+        std::cout << "  Model compiled batch size: " << batch_size_ << std::endl;
         std::cout << "  Window: " << coalesce_window_us << " us" << std::endl;
+
+        if (batch_size_ == 1) {
+            std::cout << "\n  !!! WARNING: Model compiled with batch_size=1 !!!" << std::endl;
+            std::cout << "  !!! Coalescing will NOT improve throughput !!!" << std::endl;
+            std::cout << "  !!! Re-run with --batch-size 8 for coalescing benefit !!!\n" << std::endl;
+        }
+
         coalescing_sut = new CoalescingServerSUT(this, coalesce_batch_size, coalesce_window_us);
         sut.reset(coalescing_sut);
     } else {
