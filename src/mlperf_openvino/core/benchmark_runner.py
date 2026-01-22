@@ -69,35 +69,25 @@ class BenchmarkRunner:
 
     def setup(self) -> None:
         """Set up benchmark components based on model type."""
-        logger.info("Setting up benchmark...")
-
-        # Create output directories
         Path(self.config.results_dir).mkdir(parents=True, exist_ok=True)
         Path(self.config.logs_dir).mkdir(parents=True, exist_ok=True)
 
-        # Initialize model-specific components
         model_type = self.config.model.model_type
 
-        # Check model type (handle both enum and string comparison for robustness)
         is_sdxl = (model_type == ModelType.SDXL or
                    (hasattr(model_type, 'value') and model_type.value == 'sdxl'))
         is_whisper = (model_type == ModelType.WHISPER or
                       (hasattr(model_type, 'value') and model_type.value == 'whisper'))
 
-        # Initialize backend (skip for Whisper/SDXL - they use their own pipelines)
         if is_sdxl:
-            logger.info(f"SDXL model directory: {self.config.model.model_path}")
-            self.backend = None  # SDXL uses its own pipeline (OVStableDiffusionXLPipeline)
+            self.backend = None
         elif is_whisper:
             model_path = Path(self.config.model.model_path) if self.config.model.model_path else None
             if model_path and model_path.is_dir():
-                logger.info(f"Whisper model directory: {self.config.model.model_path}")
-                self.backend = None  # Will be set up in _setup_whisper
+                self.backend = None
             else:
-                logger.info(f"Loading Whisper model from {self.config.model.model_path}")
                 self.backend = self._create_backend()
         else:
-            logger.info(f"Loading model from {self.config.model.model_path}")
             self.backend = self._create_backend()
 
         if is_sdxl:
@@ -113,31 +103,24 @@ class BenchmarkRunner:
         else:
             raise ValueError(f"Unsupported model type: {model_type}")
 
-        logger.info("Setup complete")
-
     def _create_backend(self) -> Union["OpenVINOBackend", "MultiDeviceBackend"]:
         """Create the appropriate backend based on device configuration."""
         from ..backends.multi_device_backend import MultiDeviceBackend
 
         device = self.config.openvino.device
-
-        # Log device configuration for debugging
         device_prefix = self.config.openvino.get_device_prefix()
-        logger.info(f"Device configuration: device='{device}', "
-                   f"device_prefix='{device_prefix}', "
-                   f"is_accelerator={self.config.openvino.is_accelerator_device()}, "
-                   f"is_multi_device={self.config.openvino.is_multi_device()}")
 
-        # List available devices
-        self._log_available_devices()
+        # Determine if NHWC input is needed
+        use_nhwc = False
+        if hasattr(self.config.model, 'preprocessing') and self.config.model.preprocessing:
+            use_nhwc = getattr(self.config.model.preprocessing, 'output_layout', 'NCHW') == 'NHWC'
 
         # Check if using multi-device accelerator (all dies)
         if self.config.openvino.is_multi_device():
-            logger.info(f"Creating multi-device backend for {device_prefix} accelerator (all dies)")
             backend = MultiDeviceBackend(
                 model_path=self.config.model.model_path,
                 config=self.config.openvino,
-                target_devices=None,  # Auto-discover all accelerator dies
+                target_devices=None,
             )
             backend.load()
             return backend
@@ -146,47 +129,31 @@ class BenchmarkRunner:
         if self.config.openvino.is_accelerator_device():
             from ..backends.device_discovery import is_accelerator_die
             if is_accelerator_die(device, device_prefix):
-                logger.info(f"Creating single-device backend for {device_prefix} die: {device}")
                 backend = OpenVINOBackend(
                     model_path=self.config.model.model_path,
                     config=self.config.openvino,
+                    use_nhwc_input=use_nhwc,
                 )
                 backend.load()
                 return backend
 
         # Default: CPU or other device
-        logger.info(f"Creating backend for device: {device}")
         backend = OpenVINOBackend(
             model_path=self.config.model.model_path,
             config=self.config.openvino,
+            use_nhwc_input=use_nhwc,
         )
         backend.load()
         return backend
 
     def _log_available_devices(self) -> None:
-        """Log all available OpenVINO devices."""
+        """Log available OpenVINO devices (debug level only)."""
         try:
             from openvino import Core
-            from ..backends.device_discovery import discover_accelerator_devices
-
             core = Core()
-            all_devices = core.available_devices
-
-            logger.info(f"Available OpenVINO devices: {all_devices}")
-
-            # Show accelerator devices if configured
-            if self.config.openvino.is_accelerator_device():
-                device_prefix = self.config.openvino.get_device_prefix()
-                prefix_devices = [d for d in all_devices if d.startswith(device_prefix)]
-                if prefix_devices:
-                    dies = discover_accelerator_devices(core, device_prefix)
-                    logger.info(f"{device_prefix} accelerator devices found: {prefix_devices}")
-                    logger.info(f"{device_prefix} dies (physical): {dies}")
-                else:
-                    logger.info(f"No {device_prefix} accelerator devices found")
-
-        except Exception as e:
-            logger.warning(f"Could not enumerate devices: {e}")
+            logger.debug(f"Available devices: {core.available_devices}")
+        except Exception:
+            pass
 
     def _create_sut_for_backend(
         self,
@@ -290,7 +257,6 @@ class BenchmarkRunner:
         from ..datasets.imagenet import ImageNetQSL
         from .cpp_sut_wrapper import create_sut
 
-        logger.info(f"Loading ImageNet dataset from {self.config.dataset.path}")
         self.qsl = ImageNetQSL(
             data_path=self.config.dataset.path,
             val_map_path=self.config.dataset.val_map,
@@ -299,8 +265,6 @@ class BenchmarkRunner:
             performance_sample_count=1024,
         )
         self.qsl.load()
-
-        logger.info(f"Creating SUT for scenario: {self.config.scenario}")
 
         # Use multi-device SUT for accelerator
         if self.config.openvino.is_accelerator_device():
@@ -319,16 +283,13 @@ class BenchmarkRunner:
         from ..datasets.squad import SQuADQSL
         from .cpp_sut_wrapper import create_bert_sut
 
-        logger.info(f"Loading SQuAD dataset from {self.config.dataset.path}")
         self.qsl = SQuADQSL(
             data_path=self.config.dataset.path,
-            vocab_file=self.config.dataset.val_map,  # vocab file
+            vocab_file=self.config.dataset.val_map,
             count=self.config.dataset.num_samples if self.config.dataset.num_samples > 0 else None,
-            performance_sample_count=10833,  # MLPerf default
+            performance_sample_count=10833,
         )
         self.qsl.load()
-
-        logger.info(f"Creating BERT SUT for scenario: {self.config.scenario}")
 
         # Use multi-device SUT for accelerator
         if self.config.openvino.is_accelerator_device():
@@ -347,22 +308,18 @@ class BenchmarkRunner:
         from ..datasets.openimages import OpenImagesQSL
         from .cpp_sut_wrapper import create_retinanet_sut
 
-        # Get output layout from preprocessing config
         output_layout = "NCHW"
         if hasattr(self.config.model, 'preprocessing') and self.config.model.preprocessing:
             output_layout = getattr(self.config.model.preprocessing, 'output_layout', 'NCHW')
 
-        logger.info(f"Loading OpenImages dataset from {self.config.dataset.path}")
         self.qsl = OpenImagesQSL(
             data_path=self.config.dataset.path,
             annotations_file=self.config.dataset.val_map,
             count=self.config.dataset.num_samples if self.config.dataset.num_samples > 0 else None,
-            performance_sample_count=24576,  # MLPerf default
+            performance_sample_count=24576,
             output_layout=output_layout,
         )
         self.qsl.load()
-
-        logger.info(f"Creating RetinaNet SUT for scenario: {self.config.scenario}")
 
         # Use multi-device SUT for accelerator
         if self.config.openvino.is_accelerator_device():
@@ -380,12 +337,11 @@ class BenchmarkRunner:
         """Set up Whisper benchmark."""
         from ..datasets.librispeech import LibriSpeechQSL
 
-        logger.info(f"Loading LibriSpeech dataset from {self.config.dataset.path}")
         self.qsl = LibriSpeechQSL(
             data_path=self.config.dataset.path,
             transcript_path=self.config.dataset.val_map,
             count=self.config.dataset.num_samples if self.config.dataset.num_samples > 0 else None,
-            performance_sample_count=2513,  # MLPerf default
+            performance_sample_count=2513,
         )
         self.qsl.load()
 
@@ -421,15 +377,12 @@ class BenchmarkRunner:
                     decoder_path = dp
                     break
 
-        # Use Optimum-Intel WhisperOptimumSUT (Python) - C++ SUT disabled due to KV-cache issues
         try:
             from .whisper_sut import WhisperOptimumSUT, OPTIMUM_AVAILABLE
 
             if OPTIMUM_AVAILABLE and model_path.is_dir():
-                # Check if this looks like an optimum-exported model
                 config_file = model_path / "config.json"
                 if config_file.exists():
-                    logger.info("Using Optimum-Intel for Whisper inference")
                     self.sut = WhisperOptimumSUT(
                         config=self.config,
                         model_path=model_path,
@@ -437,18 +390,12 @@ class BenchmarkRunner:
                         scenario=self.config.scenario,
                     )
                     return
-        except Exception as e:
-            logger.warning(f"Could not use Optimum-Intel: {e}")
-            logger.info("Falling back to manual encoder-decoder inference")
+        except Exception:
+            pass
 
-        # Fallback: Manual encoder-decoder inference
         from .whisper_sut import WhisperSUT, WhisperEncoderOnlySUT
 
         if encoder_path and decoder_path:
-            logger.info(f"Setting up Whisper with separate encoder/decoder (Python)")
-            logger.info(f"  Encoder: {encoder_path}")
-            logger.info(f"  Decoder: {decoder_path}")
-
             encoder_backend = OpenVINOBackend(
                 model_path=str(encoder_path),
                 config=self.config.openvino,
@@ -471,20 +418,15 @@ class BenchmarkRunner:
             return
 
         if model_path.is_dir():
-            # List available files in directory
             xml_files = list(model_path.glob("*.xml"))
-            logger.error(f"Could not find encoder/decoder models in {model_path}")
-            logger.error(f"Available .xml files: {[f.name for f in xml_files]}")
             raise ValueError(
-                f"Whisper model directory {model_path} does not contain "
-                f"expected encoder/decoder files. Found: {[f.name for f in xml_files]}"
+                f"Whisper model directory {model_path} missing encoder/decoder. "
+                f"Found: {[f.name for f in xml_files]}"
             )
 
-        # Single model file - use encoder-only SUT
         if self.backend is None:
             raise ValueError(f"Cannot load Whisper model from {model_path}")
 
-        logger.info(f"Creating Whisper encoder-only SUT for scenario: {self.config.scenario}")
         self.sut = WhisperEncoderOnlySUT(
             config=self.config,
             backend=self.backend,
@@ -496,28 +438,24 @@ class BenchmarkRunner:
         """Set up Stable Diffusion XL benchmark."""
         from ..datasets.coco_prompts import COCOPromptsQSL
 
-        logger.info(f"Loading COCO prompts dataset from {self.config.dataset.path}")
         self.qsl = COCOPromptsQSL(
             data_path=self.config.dataset.path,
             count=self.config.dataset.num_samples if self.config.dataset.num_samples > 0 else None,
-            performance_sample_count=5000,  # MLPerf default
+            performance_sample_count=5000,
         )
         self.qsl.load()
 
         model_path = Path(self.config.model.model_path)
 
-        # Try Optimum-Intel pipeline first
         try:
             from .sdxl_sut import SDXLOptimumSUT, OPTIMUM_SDXL_AVAILABLE
 
             if OPTIMUM_SDXL_AVAILABLE and model_path.is_dir():
-                # Check if this looks like an optimum-exported model
                 config_file = model_path / "model_index.json"
                 if not config_file.exists():
                     config_file = model_path / "config.json"
 
                 if config_file.exists():
-                    logger.info("Using Optimum-Intel for SDXL inference")
                     self.sut = SDXLOptimumSUT(
                         config=self.config,
                         model_path=model_path,
@@ -525,14 +463,10 @@ class BenchmarkRunner:
                         scenario=self.config.scenario,
                     )
                     return
-        except Exception as e:
-            logger.warning(f"Could not use Optimum-Intel for SDXL: {e}")
-            logger.info("Falling back to manual component loading")
+        except Exception:
+            pass
 
-        # Fallback: Manual component loading
         from .sdxl_sut import SDXLManualSUT
-
-        logger.info(f"Setting up SDXL with manual component loading")
         self.sut = SDXLManualSUT(
             config=self.config,
             model_path=model_path,
@@ -608,22 +542,8 @@ class BenchmarkRunner:
         if self.sut is None:
             self.setup()
 
-        logger.info(f"Running benchmark: {self.config.model.name}")
-        logger.info(f"Scenario: {self.config.scenario}")
-        logger.info(f"Mode: {self.config.test_mode}")
-
         test_settings = self._get_test_settings()
         log_settings = self._get_log_settings()
-
-        # Log LoadGen settings for debugging
-        scenario_config = self.config.get_scenario_config()
-        logger.info(f"LoadGen settings:")
-        logger.info(f"  min_duration_ms: {scenario_config.min_duration_ms}")
-        logger.info(f"  min_query_count: {scenario_config.min_query_count}")
-        if self.config.scenario == Scenario.SERVER:
-            logger.info(f"  server_target_qps: {scenario_config.target_qps}")
-            logger.info(f"  server_target_latency_ns: {scenario_config.target_latency_ns}")
-        logger.info(f"  qsl_rng_seed: {scenario_config.qsl_rng_seed}")
 
         start_time = time.time()
 
@@ -634,18 +554,12 @@ class BenchmarkRunner:
         )
 
         if use_native:
-            # PURE C++ PATH: LoadGen calls C++ SUT directly
-            logger.info("Starting LoadGen test (PURE C++ mode - no Python in hot path)...")
             self.sut.run_native_benchmark(test_settings, log_settings)
-            # No handles to destroy - C++ manages its own lifecycle
             sut_handle = None
             qsl_handle = None
         else:
-            # Standard Python path
             sut_handle = self.sut.get_sut()
             qsl_handle = self.sut.get_qsl()
-
-            logger.info("Starting LoadGen test...")
             lg.StartTestWithLogSettings(
                 sut_handle,
                 qsl_handle,
@@ -655,8 +569,6 @@ class BenchmarkRunner:
 
         end_time = time.time()
         duration = end_time - start_time
-
-        logger.info(f"Test completed in {duration:.2f} seconds")
 
         self._results = {
             "model": self.config.model.name,

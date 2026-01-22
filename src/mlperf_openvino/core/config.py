@@ -160,20 +160,13 @@ class ScenarioConfig:
     qsl_rng_seed: int = 13281865557512327830
     sample_index_rng_seed: int = 198141574272810017
     schedule_rng_seed: int = 7575108116881280410
-    # Query coalescing for Server mode (batches queries for higher throughput)
-    # NPU is ~3.5x more efficient with batch=8 vs batch=1
-    enable_coalescing: bool = False
-    coalesce_batch_size: int = 8  # Max queries to batch together
-    coalesce_window_us: int = 100  # Max time (us) to wait for more queries (lower = less latency)
     # In-flight request multiplier: controls queue depth
     # Lower = less latency (for Server mode), Higher = more throughput (for Offline mode)
-    # Actual requests = optimal_nireq * nireq_multiplier
-    nireq_multiplier: int = 2  # Default 2 for low latency in Server mode
+    nireq_multiplier: int = 2
     # Explicit batching (Intel-style) for Server mode
-    # Collects samples into batches with timeout, pads with dummies if needed
     explicit_batching: bool = False
-    explicit_batch_size: int = 4  # Target batch size
-    batch_timeout_us: int = 500  # Max wait time for batch fill (microseconds)
+    explicit_batch_size: int = 8
+    batch_timeout_us: int = 2000
 
 
 @dataclass
@@ -281,17 +274,14 @@ class BenchmarkConfig:
             min_duration_ms=server_data.get("min_duration_ms", 60000),
             min_query_count=server_data.get("min_query_count", 24576),
             target_latency_ns=server_data.get("target_latency_ns", 15000000),
-            target_qps=server_data.get("target_qps", 10000.0),  # High default for max throughput
-            # MLPerf seeds for reproducibility
+            target_qps=server_data.get("target_qps", 10000.0),
             qsl_rng_seed=server_data.get("qsl_rng_seed", 13281865557512327830),
             sample_index_rng_seed=server_data.get("sample_index_rng_seed", 198141574272810017),
             schedule_rng_seed=server_data.get("schedule_rng_seed", 7575108116881280410),
-            # Query coalescing for higher throughput
-            enable_coalescing=server_data.get("enable_coalescing", False),
-            coalesce_batch_size=server_data.get("coalesce_batch_size", 8),
-            coalesce_window_us=server_data.get("coalesce_window_us", 100),  # Lower default for latency
-            # In-flight request multiplier (lower = less latency)
-            nireq_multiplier=server_data.get("nireq_multiplier", 2),
+            nireq_multiplier=server_data.get("nireq_multiplier", 6),
+            explicit_batching=server_data.get("explicit_batching", True),
+            explicit_batch_size=server_data.get("explicit_batch_size", 8),
+            batch_timeout_us=server_data.get("batch_timeout_us", 2000),
         )
         
         sources = model_data.get("sources", {})
@@ -359,7 +349,7 @@ class BenchmarkConfig:
     
     @classmethod
     def default_resnet50(cls) -> "BenchmarkConfig":
-        """Create default ResNet50 configuration."""
+        """Create default ResNet50 configuration with NPU-optimized Server mode."""
         return cls(
             model=ModelConfig(
                 name="ResNet50-v1.5",
@@ -375,14 +365,18 @@ class BenchmarkConfig:
                 onnx_url="https://zenodo.org/record/4735647/files/resnet50_v1.onnx",
                 offline=ScenarioConfig(
                     min_duration_ms=60000,
-                    min_query_count=24576,  # MLPerf official
+                    min_query_count=24576,
                     samples_per_query=1,
                 ),
                 server=ScenarioConfig(
                     min_duration_ms=60000,
-                    min_query_count=24576,  # Server uses min_duration primarily
-                    target_latency_ns=15000000,  # 15ms
-                    target_qps=10000.0,
+                    min_query_count=24576,
+                    target_latency_ns=15000000,  # 15ms (Closed Division)
+                    target_qps=5750.0,  # Optimized for NPU
+                    nireq_multiplier=6,
+                    explicit_batching=True,
+                    explicit_batch_size=8,
+                    batch_timeout_us=2000,
                 ),
             ),
             dataset=DatasetConfig(
