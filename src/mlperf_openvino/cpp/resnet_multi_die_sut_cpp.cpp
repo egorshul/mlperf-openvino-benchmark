@@ -586,17 +586,6 @@ void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx
         ov::Tensor output_tensor = ctx->request.get_output_tensor(output_idx_);
         auto actual_type = output_tensor.get_element_type();
         std::vector<float> converted;
-
-        // Debug: print first few predictions
-        static int debug_count = 0;
-        if (debug_count < 3) {
-            std::cout << "[DEBUG] Storing pred: samples=" << real_samples
-                      << ", output_type=" << actual_type.get_type_name()
-                      << ", single_size=" << single_output_size_ << std::endl;
-            debug_count++;
-        }
-
-        // Use actual tensor type, not stored type (they should match but let's be safe)
         if (actual_type == ov::element::f32) {
             const float* output_data = output_tensor.data<float>();
             std::lock_guard<std::mutex> lock(predictions_mutex_);
@@ -873,9 +862,6 @@ void ResNetMultiDieCppSUT::load() {
         single_output_size_ *= output_shape[i];
     }
 
-    std::cout << "[SUT] Output: idx=" << output_idx_ << ", type=" << output_type_.get_type_name()
-              << ", single_size=" << single_output_size_ << std::endl;
-
     // Start threads based on batching mode
     issue_running_.store(true, std::memory_order_release);
 
@@ -968,9 +954,6 @@ void ResNetMultiDieCppSUT::reset_counters() {
 
 std::unordered_map<int, std::vector<float>> ResNetMultiDieCppSUT::get_predictions() const {
     std::lock_guard<std::mutex> lock(predictions_mutex_);
-    std::cout << "[SUT] get_predictions: store_predictions_=" << store_predictions_
-              << ", count=" << predictions_.size()
-              << ", completed=" << completed_count_.load() << std::endl;
     return predictions_;
 }
 

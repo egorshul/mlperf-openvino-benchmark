@@ -549,8 +549,6 @@ class BenchmarkRunner:
         is_accuracy_mode = self.config.test_mode == TestMode.ACCURACY_ONLY
         if hasattr(self.sut, 'set_store_predictions'):
             self.sut.set_store_predictions(is_accuracy_mode)
-            if is_accuracy_mode:
-                print(f"[Runner] Accuracy mode: enabled prediction storage")
 
         start_time = time.time()
 
