@@ -79,7 +79,6 @@ class ResNetMultiDieCppSUTWrapper:
         server_config = config.model.server if hasattr(config.model, 'server') else None
         if scenario == Scenario.SERVER:
             nireq_multiplier = getattr(server_config, 'nireq_multiplier', 2) if server_config else 2
-            logger.info(f"Server mode: nireq_multiplier={nireq_multiplier}")
         else:
             nireq_multiplier = 4
 
@@ -111,7 +110,6 @@ class ResNetMultiDieCppSUTWrapper:
                 batch_size = getattr(server_config, 'explicit_batch_size', 4)
                 timeout_us = getattr(server_config, 'batch_timeout_us', 500)
                 self._cpp_sut.enable_explicit_batching(True, batch_size, timeout_us)
-                logger.info(f"Explicit batching enabled: batch_size={batch_size}, timeout={timeout_us}us")
 
         self._cpp_sut.load()
         self._cpp_sut.set_store_predictions(is_accuracy_mode)
@@ -239,15 +237,13 @@ class ResNetMultiDieCppSUTWrapper:
         if not self._qsl_validated:
             self._prevalidate_qsl_data()
             self._qsl_validated = True
-            if self._cpp_qsl_registered:
-                logger.info(f"Server mode: {len(self.qsl._loaded_samples)} samples registered")
 
         if self._cpp_qsl_registered:
             query_ids = [qs.id for qs in query_samples]
             sample_indices = [qs.index for qs in query_samples]
             self._cpp_sut.issue_queries_server_fast(query_ids, sample_indices)
         else:
-            # Fallback - slower path with data arrays
+            # Fallback path
             for qs in query_samples:
                 input_data = self._get_input_data(qs.index)
                 if input_data.ndim == 3:
@@ -297,12 +293,10 @@ class ResNetMultiDieCppSUTWrapper:
             raise RuntimeError("Model not loaded")
 
         # Load samples
-        logger.info("Loading samples to RAM...")
         sample_indices = list(range(min(self.qsl.performance_sample_count, self.qsl.total_sample_count)))
         self.qsl.load_query_samples(sample_indices)
 
         # Register samples in C++
-        logger.info("Registering samples in C++ SUT...")
         self._prevalidate_qsl_data()
 
         if not self._cpp_qsl_registered:
@@ -317,9 +311,6 @@ class ResNetMultiDieCppSUTWrapper:
         min_query_count = getattr(test_settings, 'min_query_count', 0)
 
         self._cpp_sut.reset_counters()
-
-        logger.info(f"Starting C++ Server benchmark: {total_count} total, {perf_count} perf samples")
-        logger.info(f"Target QPS: {target_qps}, Target latency: {target_latency_ns / 1e6:.1f}ms")
 
         log_output_dir = getattr(log_settings.log_output, 'outdir', '.')
 
@@ -336,7 +327,6 @@ class ResNetMultiDieCppSUTWrapper:
         )
 
         self._query_count = self._cpp_sut.get_issued_count()
-        logger.info(f"Completed: {self._cpp_sut.get_completed_count()}")
 
         self.qsl.unload_query_samples(sample_indices)
 

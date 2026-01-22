@@ -84,11 +84,6 @@ void ResNetMultiDieCppSUT::enable_explicit_batching(bool enable, int batch_size,
     use_explicit_batching_ = enable;
     explicit_batch_size_ = batch_size;
     batch_timeout_us_ = timeout_us;
-
-    if (enable) {
-        std::cout << "[CONFIG] Explicit batching: batch_size=" << batch_size
-                  << ", timeout=" << timeout_us << "us" << std::endl;
-    }
 }
 
 // =============================================================================
@@ -683,10 +678,9 @@ ov::AnyMap ResNetMultiDieCppSUT::build_compile_properties() {
             try {
                 unsigned int timeout_ms = static_cast<unsigned int>(std::stoul(value));
                 properties[ov::auto_batch_timeout.name()] = timeout_ms;
-                std::cout << "[CONFIG] AUTO_BATCH_TIMEOUT = " << timeout_ms << "ms" << std::endl;
                 continue;
             } catch (...) {
-                std::cerr << "[WARNING] Invalid AUTO_BATCH_TIMEOUT: " << value << std::endl;
+                std::cerr << "[WARN] Invalid AUTO_BATCH_TIMEOUT: " << value << std::endl;
             }
         }
         // Handle OPTIMAL_BATCH_SIZE for AUTO_BATCH
@@ -694,10 +688,9 @@ ov::AnyMap ResNetMultiDieCppSUT::build_compile_properties() {
             try {
                 unsigned int batch_size = static_cast<unsigned int>(std::stoul(value));
                 properties[ov::optimal_batch_size.name()] = batch_size;
-                std::cout << "[CONFIG] OPTIMAL_BATCH_SIZE = " << batch_size << std::endl;
                 continue;
             } catch (...) {
-                std::cerr << "[WARNING] Invalid OPTIMAL_BATCH_SIZE: " << value << std::endl;
+                std::cerr << "[WARN] Invalid OPTIMAL_BATCH_SIZE: " << value << std::endl;
             }
         }
         try { properties[key] = std::stoi(value); continue; } catch (...) {}
@@ -724,11 +717,9 @@ void ResNetMultiDieCppSUT::load() {
 
     // Limit to MAX_DIES for per-die batch queues
     if (active_devices_.size() > MAX_DIES) {
-        std::cout << "[WARNING] Found " << active_devices_.size() << " dies, limiting to " << MAX_DIES << std::endl;
+        std::cerr << "[WARN] Found " << active_devices_.size() << " dies, limiting to " << MAX_DIES << std::endl;
         active_devices_.resize(MAX_DIES);
     }
-
-    std::cout << "[LOAD] Found " << active_devices_.size() << " dies" << std::endl;
 
     model_ = core_.read_model(model_path_);
 
@@ -759,7 +750,6 @@ void ResNetMultiDieCppSUT::load() {
     int compile_batch_size = batch_size_;
     if (use_explicit_batching_ && explicit_batch_size_ > 1) {
         compile_batch_size = explicit_batch_size_;
-        std::cout << "[LOAD] Explicit batching: using batch_size=" << compile_batch_size << " for model" << std::endl;
     }
 
     if (compile_batch_size > 1 || input_shape_[0] == 0) {
@@ -808,9 +798,6 @@ void ResNetMultiDieCppSUT::load() {
         // Fewer requests = lower latency (for Server mode)
         int num_requests = std::max(die_ctx->optimal_nireq * nireq_multiplier_, nireq_multiplier_ * 2);
 
-        std::cout << "[LOAD] " << device_name << ": optimal_nireq=" << die_ctx->optimal_nireq
-                  << ", creating " << num_requests << " requests" << std::endl;
-
         die_ctx->request_start_idx = total_requests;
 
         int actual_requests = 0;
@@ -857,9 +844,6 @@ void ResNetMultiDieCppSUT::load() {
         for (size_t die_idx = 0; die_idx < die_contexts_.size(); ++die_idx) {
             issue_threads_.emplace_back(&ResNetMultiDieCppSUT::issue_thread_batched_func, this, die_idx);
         }
-
-        std::cout << "[LOAD] Explicit batching enabled: batch_size=" << explicit_batch_size_
-                  << ", timeout=" << batch_timeout_us_ << "us" << std::endl;
     } else {
         // Start single-sample issue threads
         for (size_t die_idx = 0; die_idx < die_contexts_.size(); ++die_idx) {
@@ -867,8 +851,13 @@ void ResNetMultiDieCppSUT::load() {
         }
     }
 
-    std::cout << "[LOAD] Total requests: " << total_requests
-              << ", Issue threads: " << issue_threads_.size() << std::endl;
+    // Single consolidated load summary
+    std::cout << "[SUT] " << die_contexts_.size() << " dies, "
+              << total_requests << " requests, batch=" << batch_size_;
+    if (use_explicit_batching_) {
+        std::cout << " (explicit, timeout=" << batch_timeout_us_ << "us)";
+    }
+    std::cout << std::endl;
 
     loaded_ = true;
 }
@@ -1029,46 +1018,13 @@ void ResNetMultiDieCppSUT::run_server_benchmark(
     log_settings.log_output.outdir = log_output_dir;
     log_settings.log_output.copy_summary_to_stdout = true;
 
-    std::cout << "\n========================================" << std::endl;
-    std::cout << "SERVER BENCHMARK (Clean Implementation)" << std::endl;
-    std::cout << "========================================" << std::endl;
-    std::cout << "Dies: " << die_contexts_.size() << std::endl;
-    std::cout << "Requests: " << infer_contexts_.size() << std::endl;
-    std::cout << "Samples: " << total_sample_count << " total, " << performance_sample_count << " perf" << std::endl;
-    std::cout << "Target QPS: " << test_settings.server_target_qps << std::endl;
-    std::cout << "Target latency: " << test_settings.server_target_latency_ns / 1e6 << "ms" << std::endl;
-    std::cout << "========================================\n" << std::endl;
-
-    // Monitor thread
-    std::atomic<bool> monitor_running{true};
-    std::thread monitor_thread([this, &monitor_running]() {
-        auto start = std::chrono::steady_clock::now();
-        uint64_t last_completed = 0;
-
-        while (monitor_running.load(std::memory_order_relaxed)) {
-            std::this_thread::sleep_for(std::chrono::seconds(2));
-
-            auto now = std::chrono::steady_clock::now();
-            auto elapsed_s = std::chrono::duration_cast<std::chrono::seconds>(now - start).count();
-
-            uint64_t completed = completed_count_.load(std::memory_order_relaxed);
-            uint64_t pending = pending_count_.load(std::memory_order_relaxed);
-
-            double qps = (completed - last_completed) / 2.0;
-            last_completed = completed;
-
-            std::cout << "[t=" << elapsed_s << "s] completed=" << completed
-                      << " pending=" << pending
-                      << " QPS=" << std::fixed << std::setprecision(1) << qps << std::endl;
-        }
-    });
+    std::cout << "[Server] target_qps=" << test_settings.server_target_qps
+              << ", latency=" << test_settings.server_target_latency_ns / 1e6 << "ms"
+              << ", samples=" << performance_sample_count << std::endl;
 
     mlperf::StartTest(&server_sut, &server_qsl, test_settings, log_settings);
 
-    monitor_running.store(false, std::memory_order_relaxed);
-    monitor_thread.join();
-
-    std::cout << "\n[DONE] Completed: " << completed_count_.load() << std::endl;
+    std::cout << "[Server] completed=" << completed_count_.load() << std::endl;
 }
 
 } // namespace mlperf_ov

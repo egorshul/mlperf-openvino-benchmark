@@ -98,6 +98,7 @@ mlperf-ov info                 # System information
 --model, -m          Model: resnet50, bert, retinanet, whisper, sdxl
 --mode               Mode: accuracy, performance
 --scenario, -s       Scenario: Offline, Server
+--device, -d         Device: CPU, NPU, NPU.0, NPU.1, etc.
 --model-path         Path to model
 --data-path          Path to dataset
 --count              Number of samples (0 = all)
@@ -105,3 +106,54 @@ mlperf-ov info                 # System information
 --num-threads        CPU threads (0 = auto)
 --num-streams        Inference streams
 ```
+
+### Server Mode Options
+
+```
+--target-qps              Target queries per second
+--target-latency-ns       Target latency in nanoseconds (default: 15ms for ResNet50)
+--nireq-multiplier        In-flight requests multiplier (default: 2)
+--explicit-batching       Enable Intel-style explicit batching (recommended for NPU)
+--batch-timeout-us        Batch timeout in microseconds (default: 500)
+```
+
+## NPU/Accelerator Support
+
+For multi-die NPU accelerators (e.g., Intel NPU with multiple tiles):
+
+### Offline Mode
+
+```bash
+mlperf-ov run --model resnet50 --scenario Offline \
+  --device NPU \
+  --batch-size 8
+```
+
+### Server Mode (Optimized)
+
+For maximum throughput with latency constraints:
+
+```bash
+mlperf-ov run --model resnet50 --scenario Server \
+  --device NPU \
+  --target-qps 5750 \
+  --explicit-batching \
+  --batch-size 8 \
+  --batch-timeout-us 2000 \
+  --nireq-multiplier 6
+```
+
+### Performance Tuning
+
+| Parameter | Description | Tuning |
+|-----------|-------------|--------|
+| `--batch-size` | Samples per inference | Higher = better throughput |
+| `--batch-timeout-us` | Max wait before flush | Lower = lower latency |
+| `--nireq-multiplier` | In-flight requests | Higher = better utilization |
+| `--target-qps` | Target throughput | Start low, increase until INVALID |
+
+**Tuning strategy:**
+1. Start with `--explicit-batching -b 8 --batch-timeout-us 1000 --nireq-multiplier 2`
+2. Run with low `--target-qps`, verify VALID
+3. Increase `--target-qps` until test becomes INVALID
+4. Tune `--nireq-multiplier` (2-6) and `--batch-timeout-us` (500-2000)
