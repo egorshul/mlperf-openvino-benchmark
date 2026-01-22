@@ -19,6 +19,7 @@
 #include <chrono>
 
 #include <openvino/core/preprocess/pre_post_process.hpp>
+#include <openvino/runtime/properties.hpp>
 
 namespace mlperf_ov {
 
@@ -584,6 +585,17 @@ std::vector<std::string> ResNetMultiDieCppSUT::discover_dies() {
 ov::AnyMap ResNetMultiDieCppSUT::build_compile_properties() {
     ov::AnyMap properties;
     for (const auto& [key, value] : compile_properties_) {
+        // Handle AUTO_BATCH_TIMEOUT specially - it needs ov::auto_batch_timeout
+        if (key == "AUTO_BATCH_TIMEOUT") {
+            try {
+                unsigned int timeout_ms = static_cast<unsigned int>(std::stoul(value));
+                properties[ov::auto_batch_timeout.name()] = timeout_ms;
+                std::cout << "[CONFIG] AUTO_BATCH_TIMEOUT set to " << timeout_ms << "ms" << std::endl;
+                continue;
+            } catch (...) {
+                std::cerr << "[WARNING] Invalid AUTO_BATCH_TIMEOUT value: " << value << std::endl;
+            }
+        }
         try { properties[key] = std::stoi(value); continue; } catch (...) {}
         std::string upper = value;
         std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);

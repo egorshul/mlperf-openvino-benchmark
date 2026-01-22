@@ -106,6 +106,8 @@ def get_default_config(model: str) -> BenchmarkConfig:
               help='Max time (microseconds) to wait for more queries (default: 100, lower = less latency)')
 @click.option('--nireq-multiplier', type=int, default=2,
               help='In-flight request multiplier (default: 2 for Server, lower = less latency)')
+@click.option('--auto-batch-timeout-ms', type=int, default=0,
+              help='AUTO_BATCH timeout in ms (0=disabled, 1=1ms). Enables OpenVINO auto-batching.')
 @click.option('--verbose', '-v', is_flag=True, help='Enable verbose output')
 def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         data_path: Optional[str], output_dir: str, config: Optional[str],
@@ -113,7 +115,7 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         batch_size: int, nchw: bool, performance_hint: str, duration: int, target_qps: float,
         target_latency_ns: int, count: int, warmup: int, enable_coalescing: bool,
         coalesce_batch_size: int, coalesce_window_us: int, nireq_multiplier: int,
-        verbose: bool):
+        auto_batch_timeout_ms: int, verbose: bool):
     """
     Run MLPerf benchmark.
 
@@ -161,6 +163,14 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         is_valid, warnings = validate_device_properties(parsed_props, device)
         for warning in warnings:
             logger.debug(warning)
+
+    # Add AUTO_BATCH_TIMEOUT if specified
+    if auto_batch_timeout_ms > 0:
+        if not benchmark_config.openvino.device_properties:
+            benchmark_config.openvino.device_properties = {}
+        # OpenVINO expects AUTO_BATCH_TIMEOUT in milliseconds
+        benchmark_config.openvino.device_properties['AUTO_BATCH_TIMEOUT'] = str(auto_batch_timeout_ms)
+        click.echo(f"AUTO_BATCH enabled: timeout={auto_batch_timeout_ms}ms")
 
     # Validate accelerator device availability if specified
     if benchmark_config.openvino.is_accelerator_device():
