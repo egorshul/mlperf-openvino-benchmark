@@ -119,41 +119,36 @@ mlperf-ov info                 # System information
 
 ## NPU/Accelerator Support
 
-For multi-die NPU accelerators (e.g., Intel NPU with multiple tiles):
-
-### Offline Mode
+Optimized defaults are built-in for NPU Server mode. Just run:
 
 ```bash
-mlperf-ov run --model resnet50 --scenario Offline \
-  --device NPU \
-  --batch-size 8
+# Offline mode
+mlperf-ov run --model resnet50 --scenario Offline --device NPU -b 8
+
+# Server mode (uses optimized defaults: batch=8, timeout=2000us, nireq=6)
+mlperf-ov run --model resnet50 --scenario Server --device NPU --target-qps 5750
 ```
 
-### Server Mode (Optimized)
+### Custom Tuning
 
-For maximum throughput with latency constraints:
+Override defaults if needed:
 
 ```bash
-mlperf-ov run --model resnet50 --scenario Server \
-  --device NPU \
+mlperf-ov run --model resnet50 --scenario Server --device NPU \
   --target-qps 5750 \
-  --explicit-batching \
   --batch-size 8 \
   --batch-timeout-us 2000 \
   --nireq-multiplier 6
 ```
 
-### Performance Tuning
-
-| Parameter | Description | Tuning |
-|-----------|-------------|--------|
-| `--batch-size` | Samples per inference | Higher = better throughput |
-| `--batch-timeout-us` | Max wait before flush | Lower = lower latency |
-| `--nireq-multiplier` | In-flight requests | Higher = better utilization |
-| `--target-qps` | Target throughput | Start low, increase until INVALID |
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--batch-size` | 8 | Samples per inference |
+| `--batch-timeout-us` | 2000 | Max wait before batch flush |
+| `--nireq-multiplier` | 6 | In-flight requests multiplier |
+| `--explicit-batching` | on | Intel-style explicit batching |
 
 **Tuning strategy:**
-1. Start with `--explicit-batching -b 8 --batch-timeout-us 1000 --nireq-multiplier 2`
-2. Run with low `--target-qps`, verify VALID
-3. Increase `--target-qps` until test becomes INVALID
-4. Tune `--nireq-multiplier` (2-6) and `--batch-timeout-us` (500-2000)
+1. Start with default settings and low `--target-qps`
+2. Increase `--target-qps` until test becomes INVALID
+3. Fine-tune timeout (500-2000us) and nireq (2-8) if needed
