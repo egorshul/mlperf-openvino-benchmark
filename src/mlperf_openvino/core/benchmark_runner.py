@@ -177,7 +177,7 @@ class BenchmarkRunner:
                 # ResNet50 and other models
                 return self._create_resnet_multi_die_sut(qsl)
         else:
-            print(f"SUT: OpenVINOSUT (device: {self.config.openvino.device})")
+            print(f"[SUT] OpenVINOSUT on {self.config.openvino.device}")
             return OpenVINOSUT(
                 config=self.config,
                 backend=self.backend,
@@ -195,7 +195,7 @@ class BenchmarkRunner:
             )
 
             if is_resnet_multi_die_cpp_available():
-                print(f"SUT: C++ ResNetMultiDieSUT ({self.backend.num_dies} dies)")
+                print(f"[SUT] ResNet C++ multi-die ({self.backend.num_dies} dies)")
                 sut = ResNetMultiDieCppSUTWrapper(
                     config=self.config,
                     qsl=qsl,
@@ -212,7 +212,7 @@ class BenchmarkRunner:
 
         # Fall back to Python multi-device SUT
         from .resnet_multi_device_sut import ResNetMultiDeviceSUT
-        print(f"SUT: Python ResNetMultiDeviceSUT ({self.backend.num_dies} dies)")
+        print(f"[SUT] ResNet Python multi-die ({self.backend.num_dies} dies)")
         return ResNetMultiDeviceSUT(
             config=self.config,
             backend=self.backend,
@@ -230,7 +230,7 @@ class BenchmarkRunner:
             )
 
             if is_retinanet_multi_die_cpp_available():
-                print(f"SUT: C++ RetinaNetMultiDieSUT ({self.backend.num_dies} dies)")
+                print(f"[SUT] RetinaNet C++ multi-die ({self.backend.num_dies} dies)")
                 sut = RetinaNetMultiDieCppSUTWrapper(
                     config=self.config,
                     qsl=qsl,
@@ -245,7 +245,7 @@ class BenchmarkRunner:
 
         # Fall back to Python SUT
         from .retinanet_sut import RetinaNetSUT
-        print(f"SUT: Python RetinaNetSUT")
+        print(f"[SUT] RetinaNet Python")
         return RetinaNetSUT(
             config=self.config,
             qsl=qsl,
@@ -675,6 +675,11 @@ class BenchmarkRunner:
         """Compute ResNet50 accuracy (Top-1)."""
         predictions = self.sut.get_predictions()
 
+        if not predictions:
+            logger.warning("No predictions found for accuracy computation")
+            self._accuracy_results = {"top1_accuracy": 0.0, "correct": 0, "total": 0}
+            return
+
         predicted_labels = []
         ground_truth = []
 
@@ -691,7 +696,11 @@ class BenchmarkRunner:
             ground_truth
         )
 
-        logger.info(f"Top-1 Accuracy: {self._accuracy_results.get('top1_accuracy', 0):.4f}")
+        # Log accuracy result
+        acc = self._accuracy_results.get('top1_accuracy', 0)
+        correct = self._accuracy_results.get('correct', 0)
+        total = self._accuracy_results.get('total', 0)
+        logger.info(f"Top-1 Accuracy: {acc:.4f} ({correct}/{total})")
 
     def _compute_bert_accuracy(self) -> None:
         """Compute BERT accuracy (F1 and Exact Match)."""
@@ -825,37 +834,36 @@ class BenchmarkRunner:
         return info
 
     def print_summary(self) -> None:
-        """Print accuracy summary to console.
-
-        Note: Performance results are shown in MLPerf LoadGen's "MLPerf Results Summary"
-        which is the authoritative source for performance metrics.
-        """
+        """Print accuracy summary to console."""
         # Only print accuracy summary if accuracy results are available
         if "accuracy" not in self._results:
             return
 
-        print("\n" + "="*60)
-        print("ACCURACY SUMMARY")
-        print("="*60)
-        print(f"Model: {self._results.get('model', 'N/A')}")
-
         acc = self._results["accuracy"]
         model_type = self._results.get('model_type', '')
+        scenario = self._results.get('scenario', 'N/A')
+
+        print("\n" + "="*50)
+        print(f"[Accuracy] {self._results.get('model', 'N/A')} / {scenario}")
+        print("="*50)
 
         if model_type == 'resnet50':
-            print(f"Top-1 Accuracy: {acc.get('top1_accuracy', 0):.4f} "
-                  f"({acc.get('correct', 0)}/{acc.get('total', 0)})")
+            accuracy = acc.get('top1_accuracy', 0)
+            correct = acc.get('correct', 0)
+            total = acc.get('total', 0)
+            # MLPerf ResNet50 threshold: 75.69% (99% of 76.46%)
+            status = "PASS" if accuracy >= 0.7569 else "FAIL"
+            print(f"Top-1: {accuracy:.4f} ({correct}/{total}) [{status}]")
         elif model_type == 'bert':
-            print(f"F1 Score: {acc.get('f1', 0):.2f}")
-            print(f"Exact Match: {acc.get('exact_match', 0):.2f}")
+            print(f"F1: {acc.get('f1', 0):.2f}")
+            print(f"EM: {acc.get('exact_match', 0):.2f}")
         elif model_type == 'retinanet':
-            print(f"mAP@0.5: {acc.get('mAP', 0):.4f}")
+            print(f"mAP: {acc.get('mAP', 0):.4f}")
         elif model_type == 'whisper':
             print(f"Word Accuracy: {acc.get('word_accuracy', 0):.4f}")
             print(f"WER: {acc.get('wer', 0):.4f}")
         elif model_type == 'sdxl':
-            print(f"CLIP Score: {acc.get('clip_score', 0):.4f}")
-            print(f"FID Score: {acc.get('fid_score', 0):.4f}")
+            print(f"CLIP: {acc.get('clip_score', 0):.4f}")
+            print(f"FID: {acc.get('fid_score', 0):.4f}")
 
-        print("="*60)
-        print("(Performance results: see 'MLPerf Results Summary' above)\n")
+        print("="*50 + "\n")

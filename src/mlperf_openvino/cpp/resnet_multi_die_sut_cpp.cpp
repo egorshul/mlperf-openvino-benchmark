@@ -881,11 +881,11 @@ void ResNetMultiDieCppSUT::load() {
         }
     }
 
-    // Single consolidated load summary
-    std::cout << "[SUT] " << die_contexts_.size() << " dies, "
-              << total_requests << " requests, batch=" << batch_size_;
+    // Load summary
+    std::cout << "[SUT] Loaded: " << die_contexts_.size() << " dies, "
+              << total_requests << " requests";
     if (use_explicit_batching_) {
-        std::cout << " (explicit, timeout=" << batch_timeout_us_ << "us)";
+        std::cout << ", batch=" << batch_size_ << ", timeout=" << batch_timeout_us_ << "us";
     }
     std::cout << std::endl;
 
@@ -1050,13 +1050,16 @@ void ResNetMultiDieCppSUT::run_server_benchmark(
     log_settings.log_output.outdir = log_output_dir;
     log_settings.log_output.copy_summary_to_stdout = true;
 
-    std::cout << "[Server] target_qps=" << test_settings.server_target_qps
+    std::string mode_str = is_accuracy_mode ? "accuracy" : "performance";
+    std::cout << "[Server] Starting " << mode_str << " run: "
+              << "qps=" << test_settings.server_target_qps
               << ", latency=" << test_settings.server_target_latency_ns / 1e6 << "ms"
-              << ", samples=" << performance_sample_count << std::endl;
+              << ", samples=" << (is_accuracy_mode ? total_sample_count : performance_sample_count)
+              << std::endl;
 
     mlperf::StartTest(&server_sut, &server_qsl, test_settings, log_settings);
 
-    std::cout << "[Server] completed=" << completed_count_.load() << std::endl;
+    std::cout << "[Server] Completed: " << completed_count_.load() << " samples" << std::endl;
 }
 
 } // namespace mlperf_ov
