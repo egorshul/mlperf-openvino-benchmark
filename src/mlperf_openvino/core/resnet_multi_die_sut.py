@@ -104,6 +104,15 @@ class ResNetMultiDieCppSUTWrapper:
 
     def load(self, is_accuracy_mode: bool = False) -> None:
         """Load and compile the model."""
+        # Configure explicit batching if enabled (before load)
+        if self.scenario == Scenario.SERVER:
+            server_config = self.config.model.server if hasattr(self.config.model, 'server') else None
+            if server_config and getattr(server_config, 'explicit_batching', False):
+                batch_size = getattr(server_config, 'explicit_batch_size', 4)
+                timeout_us = getattr(server_config, 'batch_timeout_us', 500)
+                self._cpp_sut.enable_explicit_batching(True, batch_size, timeout_us)
+                logger.info(f"Explicit batching enabled: batch_size={batch_size}, timeout={timeout_us}us")
+
         self._cpp_sut.load()
         self._cpp_sut.set_store_predictions(is_accuracy_mode)
         self._is_accuracy_mode = is_accuracy_mode

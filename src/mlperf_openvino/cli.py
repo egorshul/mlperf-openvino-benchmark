@@ -104,13 +104,18 @@ def get_default_config(model: str) -> BenchmarkConfig:
               help='AUTO_BATCH timeout in ms (0=disabled, 1=1ms). Enables OpenVINO auto-batching.')
 @click.option('--optimal-batch-size', type=int, default=0,
               help='Optimal batch size for AUTO_BATCH (0=auto, 4=recommended for NPU)')
+@click.option('--explicit-batching', is_flag=True, default=False,
+              help='Enable Intel-style explicit batching for Server mode (recommended for NPU)')
+@click.option('--batch-timeout-us', type=int, default=500,
+              help='Explicit batching timeout in microseconds (default 500us)')
 @click.option('--verbose', '-v', is_flag=True, help='Enable verbose output')
 def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         data_path: Optional[str], output_dir: str, config: Optional[str],
         device: str, properties: str, num_threads: int, num_streams: str,
         batch_size: int, nchw: bool, performance_hint: str, duration: int, target_qps: float,
         target_latency_ns: int, count: int, warmup: int, nireq_multiplier: int,
-        auto_batch_timeout_ms: int, optimal_batch_size: int, verbose: bool):
+        auto_batch_timeout_ms: int, optimal_batch_size: int,
+        explicit_batching: bool, batch_timeout_us: int, verbose: bool):
     """
     Run MLPerf benchmark.
 
@@ -238,6 +243,15 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         if target_latency_ns > 0:
             scenario_config.target_latency_ns = target_latency_ns
             click.echo(f"Custom target latency: {target_latency_ns / 1e6:.1f}ms (Open Division)")
+
+        # Explicit batching (Intel-style) for Server mode
+        if explicit_batching:
+            scenario_config.explicit_batching = True
+            scenario_config.batch_timeout_us = batch_timeout_us
+            # Use batch_size from CLI for explicit batching
+            explicit_batch = batch_size if batch_size > 1 else 4
+            scenario_config.explicit_batch_size = explicit_batch
+            click.echo(f"Explicit batching: batch_size={explicit_batch}, timeout={batch_timeout_us}us")
 
     # Validate configuration
     if not benchmark_config.model.model_path:

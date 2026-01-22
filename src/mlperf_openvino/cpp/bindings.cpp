@@ -518,6 +518,17 @@ PYBIND11_MODULE(_cpp_sut, m) {
              py::arg("enable"),
              "Enable direct LoadGen C++ mode for Server scenario")
 
+        .def("enable_explicit_batching", &mlperf_ov::ResNetMultiDieCppSUT::enable_explicit_batching,
+             py::arg("enable"),
+             py::arg("batch_size") = 4,
+             py::arg("timeout_us") = 500,
+             "Enable Intel-style explicit batching for Server mode. "
+             "batch_size: target batch size (default 4). "
+             "timeout_us: max time to wait for batch fill (default 500us)")
+
+        .def("is_explicit_batching_enabled", &mlperf_ov::ResNetMultiDieCppSUT::is_explicit_batching_enabled,
+             "Check if explicit batching is enabled")
+
         .def("run_server_benchmark",
              [](mlperf_ov::ResNetMultiDieCppSUT& self,
                 size_t total_sample_count,

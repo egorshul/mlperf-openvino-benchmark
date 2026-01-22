@@ -169,6 +169,11 @@ class ScenarioConfig:
     # Lower = less latency (for Server mode), Higher = more throughput (for Offline mode)
     # Actual requests = optimal_nireq * nireq_multiplier
     nireq_multiplier: int = 2  # Default 2 for low latency in Server mode
+    # Explicit batching (Intel-style) for Server mode
+    # Collects samples into batches with timeout, pads with dummies if needed
+    explicit_batching: bool = False
+    explicit_batch_size: int = 4  # Target batch size
+    batch_timeout_us: int = 500  # Max wait time for batch fill (microseconds)
 
 
 @dataclass

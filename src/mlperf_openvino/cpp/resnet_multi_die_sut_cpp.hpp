@@ -113,6 +113,10 @@ public:
     void issue_queries_server_fast(const std::vector<uint64_t>& query_ids,
                                    const std::vector<int>& sample_indices);
 
+    // Explicit batching configuration (Intel-style)
+    void enable_explicit_batching(bool enable, int batch_size = 4, int timeout_us = 500);
+    bool is_explicit_batching_enabled() const { return use_explicit_batching_; }
+
     // Run pure C++ Server benchmark
     void run_server_benchmark(
         size_t total_sample_count,
@@ -161,6 +165,29 @@ private:
     std::vector<std::thread> issue_threads_;
     std::atomic<bool> issue_running_{false};
     void issue_thread_func(size_t die_idx);
+
+    // Explicit batching (Intel-style)
+    bool use_explicit_batching_ = false;
+    int explicit_batch_size_ = 4;
+    int batch_timeout_us_ = 500;  // 500 microseconds default
+    std::thread batcher_thread_;
+    std::atomic<bool> batcher_running_{false};
+
+    // Batch queue (batcher pushes, issue threads pull)
+    static constexpr int BATCH_QUEUE_SIZE = 256;
+    struct BatchItem {
+        uint64_t query_ids[64];
+        int sample_indices[64];
+        int actual_size = 0;
+        int num_dummies = 0;
+        std::atomic<bool> valid{false};
+    };
+    BatchItem batch_queue_[BATCH_QUEUE_SIZE];
+    std::atomic<size_t> batch_head_{0};
+    std::atomic<size_t> batch_tail_{0};
+
+    void batcher_thread_func();
+    void issue_thread_batched_func(size_t die_idx);
 
     // Model info
     std::string input_name_;
