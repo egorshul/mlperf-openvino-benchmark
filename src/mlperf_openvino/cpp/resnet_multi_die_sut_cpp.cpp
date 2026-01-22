@@ -722,6 +722,12 @@ void ResNetMultiDieCppSUT::load() {
         throw std::runtime_error("No " + device_prefix_ + " dies found");
     }
 
+    // Limit to MAX_DIES for per-die batch queues
+    if (active_devices_.size() > MAX_DIES) {
+        std::cout << "[WARNING] Found " << active_devices_.size() << " dies, limiting to " << MAX_DIES << std::endl;
+        active_devices_.resize(MAX_DIES);
+    }
+
     std::cout << "[LOAD] Found " << active_devices_.size() << " dies" << std::endl;
 
     model_ = core_.read_model(model_path_);
