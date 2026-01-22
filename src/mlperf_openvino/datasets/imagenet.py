@@ -156,8 +156,9 @@ class ImageNetDataset(BaseDataset):
             new_h = new_height
             new_w = int(new_width * w / h)
 
-        # Resize preserving aspect ratio (use LANCZOS for quality, similar to INTER_AREA)
-        img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        # Resize preserving aspect ratio
+        # Use BOX for downscaling - closest to cv2.INTER_AREA used by MLCommons
+        img = img.resize((new_w, new_h), Image.Resampling.BOX)
 
         # Center crop
         w, h = img.size
