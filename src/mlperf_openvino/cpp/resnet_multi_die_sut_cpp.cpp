@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
 #include <regex>
 #include <stdexcept>
@@ -868,6 +869,8 @@ void ResNetMultiDieCppSUT::issue_queries_server_fast(
 
 // DIRECT query processing - NO QUEUE for minimum latency
 void ResNetMultiDieCppSUT::process_query_direct(uint64_t query_id, int sample_idx) {
+    auto start_time = std::chrono::steady_clock::now();
+
     // Find sample data
     const float* sample_data = nullptr;
     size_t sample_size = 0;
@@ -880,15 +883,21 @@ void ResNetMultiDieCppSUT::process_query_direct(uint64_t query_id, int sample_id
         }
     }
 
+    auto after_lookup = std::chrono::steady_clock::now();
+
     if (!sample_data) {
         // Sample not found - send dummy response immediately
+        std::cerr << "[ERROR] Sample " << sample_idx << " not found in cache!" << std::endl;
         mlperf::QuerySampleResponse response{query_id, 0, 0};
         mlperf::QuerySamplesComplete(&response, 1);
         return;
     }
 
     // Acquire request - may block briefly if all requests busy
+    auto before_acquire = std::chrono::steady_clock::now();
     size_t req_id = acquire_request();
+    auto after_acquire = std::chrono::steady_clock::now();
+
     ResNetMultiDieInferContext* ctx = infer_contexts_[req_id].get();
 
     // Setup context
@@ -900,10 +909,32 @@ void ResNetMultiDieCppSUT::process_query_direct(uint64_t query_id, int sample_id
     float* tensor_data = ctx->input_tensor.data<float>();
     std::memcpy(tensor_data, sample_data, std::min(sample_size, input_byte_size_));
 
+    auto after_memcpy = std::chrono::steady_clock::now();
+
     // Start async inference - callback will call QuerySamplesComplete
     pending_count_.fetch_add(1, std::memory_order_relaxed);
     ctx->request.start_async();
-    issued_count_.fetch_add(1, std::memory_order_relaxed);
+    uint64_t issued = issued_count_.fetch_add(1, std::memory_order_relaxed) + 1;
+
+    auto end_time = std::chrono::steady_clock::now();
+
+    // Periodic debug output (every 1000 queries)
+    if (issued % 1000 == 0) {
+        auto lookup_us = std::chrono::duration_cast<std::chrono::microseconds>(after_lookup - start_time).count();
+        auto acquire_us = std::chrono::duration_cast<std::chrono::microseconds>(after_acquire - before_acquire).count();
+        auto memcpy_us = std::chrono::duration_cast<std::chrono::microseconds>(after_memcpy - after_acquire).count();
+        auto total_us = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count();
+        uint64_t pending = pending_count_.load(std::memory_order_relaxed);
+        uint64_t completed = completed_count_.load(std::memory_order_relaxed);
+
+        std::cout << "[DEBUG #" << issued << "] "
+                  << "lookup=" << lookup_us << "us "
+                  << "acquire=" << acquire_us << "us "
+                  << "memcpy=" << memcpy_us << "us "
+                  << "total=" << total_us << "us | "
+                  << "pending=" << pending << " "
+                  << "completed=" << completed << std::endl;
+    }
 }
 
 void ResNetMultiDieCppSUT::run_server_benchmark(
@@ -980,13 +1011,48 @@ void ResNetMultiDieCppSUT::run_server_benchmark(
     std::cout << "Sample cache size: " << sample_data_cache_.size() << std::endl;
     std::cout << "----------------------------------------" << std::endl;
     std::cout << ">>> LoadGen -> C++ SUT (NO PYTHON) <<<" << std::endl;
-    std::cout << "========================================\n" << std::endl;
+    std::cout << "========================================" << std::endl;
+    std::cout << std::flush;
+
+    // Start monitoring thread for periodic stats
+    std::atomic<bool> monitor_running{true};
+    std::thread monitor_thread([this, &monitor_running]() {
+        auto start = std::chrono::steady_clock::now();
+        uint64_t last_completed = 0;
+
+        while (monitor_running.load(std::memory_order_relaxed)) {
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed_s = std::chrono::duration_cast<std::chrono::seconds>(now - start).count();
+
+            uint64_t issued = issued_count_.load(std::memory_order_relaxed);
+            uint64_t completed = completed_count_.load(std::memory_order_relaxed);
+            uint64_t pending = pending_count_.load(std::memory_order_relaxed);
+
+            uint64_t delta = completed - last_completed;
+            double qps = delta / 2.0;  // 2 second intervals
+            last_completed = completed;
+
+            std::cout << "[MONITOR t=" << elapsed_s << "s] "
+                      << "issued=" << issued
+                      << " completed=" << completed
+                      << " pending=" << pending
+                      << " QPS(2s)=" << std::fixed << std::setprecision(1) << qps
+                      << std::endl << std::flush;
+        }
+    });
 
     // Run benchmark - entirely in C++, no Python in hot path!
+    std::cout << "[START] Starting LoadGen test..." << std::endl << std::flush;
     mlperf::StartTest(&server_sut, &server_qsl, test_settings, log_settings);
 
-    std::cout << "\n[C++] Benchmark completed. Issued: " << issued_count_.load()
-              << ", Completed: " << completed_count_.load() << std::endl;
+    // Stop monitor
+    monitor_running.store(false, std::memory_order_relaxed);
+    monitor_thread.join();
+
+    std::cout << "\n[END] Benchmark completed. Issued: " << issued_count_.load()
+              << ", Completed: " << completed_count_.load() << std::endl << std::flush;
 }
 
 } // namespace mlperf_ov
