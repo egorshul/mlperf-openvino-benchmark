@@ -102,13 +102,15 @@ def get_default_config(model: str) -> BenchmarkConfig:
               help='In-flight request multiplier (default: 2 for Server, lower = less latency)')
 @click.option('--auto-batch-timeout-ms', type=int, default=0,
               help='AUTO_BATCH timeout in ms (0=disabled, 1=1ms). Enables OpenVINO auto-batching.')
+@click.option('--optimal-batch-size', type=int, default=0,
+              help='Optimal batch size for AUTO_BATCH (0=auto, 4=recommended for NPU)')
 @click.option('--verbose', '-v', is_flag=True, help='Enable verbose output')
 def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         data_path: Optional[str], output_dir: str, config: Optional[str],
         device: str, properties: str, num_threads: int, num_streams: str,
         batch_size: int, nchw: bool, performance_hint: str, duration: int, target_qps: float,
         target_latency_ns: int, count: int, warmup: int, nireq_multiplier: int,
-        auto_batch_timeout_ms: int, verbose: bool):
+        auto_batch_timeout_ms: int, optimal_batch_size: int, verbose: bool):
     """
     Run MLPerf benchmark.
 
@@ -157,13 +159,15 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         for warning in warnings:
             logger.debug(warning)
 
-    # Add AUTO_BATCH_TIMEOUT if specified
-    if auto_batch_timeout_ms > 0:
+    # Add AUTO_BATCH settings if specified
+    if auto_batch_timeout_ms > 0 or optimal_batch_size > 0:
         if not benchmark_config.openvino.device_properties:
             benchmark_config.openvino.device_properties = {}
-        # OpenVINO expects AUTO_BATCH_TIMEOUT in milliseconds
-        benchmark_config.openvino.device_properties['AUTO_BATCH_TIMEOUT'] = str(auto_batch_timeout_ms)
-        click.echo(f"AUTO_BATCH enabled: timeout={auto_batch_timeout_ms}ms")
+        if auto_batch_timeout_ms > 0:
+            benchmark_config.openvino.device_properties['AUTO_BATCH_TIMEOUT'] = str(auto_batch_timeout_ms)
+        if optimal_batch_size > 0:
+            benchmark_config.openvino.device_properties['OPTIMAL_BATCH_SIZE'] = str(optimal_batch_size)
+        click.echo(f"AUTO_BATCH: timeout={auto_batch_timeout_ms}ms, optimal_batch={optimal_batch_size}")
 
     # Validate accelerator device availability if specified
     if benchmark_config.openvino.is_accelerator_device():

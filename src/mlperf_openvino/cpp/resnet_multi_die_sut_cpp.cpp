@@ -399,6 +399,17 @@ ov::AnyMap ResNetMultiDieCppSUT::build_compile_properties() {
                 std::cerr << "[WARNING] Invalid AUTO_BATCH_TIMEOUT: " << value << std::endl;
             }
         }
+        // Handle OPTIMAL_BATCH_SIZE for AUTO_BATCH
+        if (key == "OPTIMAL_BATCH_SIZE") {
+            try {
+                unsigned int batch_size = static_cast<unsigned int>(std::stoul(value));
+                properties[ov::optimal_batch_size.name()] = batch_size;
+                std::cout << "[CONFIG] OPTIMAL_BATCH_SIZE = " << batch_size << std::endl;
+                continue;
+            } catch (...) {
+                std::cerr << "[WARNING] Invalid OPTIMAL_BATCH_SIZE: " << value << std::endl;
+            }
+        }
         try { properties[key] = std::stoi(value); continue; } catch (...) {}
         std::string upper = value;
         std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
