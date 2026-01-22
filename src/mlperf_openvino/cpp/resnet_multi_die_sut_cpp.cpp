@@ -584,28 +584,55 @@ void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx
     // Store predictions if needed (only for real samples)
     if (store_predictions_ && real_samples > 0) {
         ov::Tensor output_tensor = ctx->request.get_output_tensor(output_idx_);
-        const float* output_data = nullptr;
         std::vector<float> converted;
 
         if (output_type_ == ov::element::f32) {
-            output_data = output_tensor.data<float>();
+            const float* output_data = output_tensor.data<float>();
+            std::lock_guard<std::mutex> lock(predictions_mutex_);
+            for (int i = 0; i < real_samples; ++i) {
+                int sample_idx = ctx->sample_indices[i];
+                const float* sample_output = output_data + (i * single_output_size_);
+                predictions_[sample_idx] = std::vector<float>(
+                    sample_output, sample_output + single_output_size_);
+            }
         } else if (output_type_ == ov::element::f16) {
             const ov::float16* f16_data = output_tensor.data<ov::float16>();
             converted.resize(single_output_size_ * actual_batch_size);
             for (size_t j = 0; j < converted.size(); ++j) {
                 converted[j] = static_cast<float>(f16_data[j]);
             }
-            output_data = converted.data();
-        }
-
-        if (output_data) {
             std::lock_guard<std::mutex> lock(predictions_mutex_);
-            // Only store predictions for real samples (not dummies)
             for (int i = 0; i < real_samples; ++i) {
                 int sample_idx = ctx->sample_indices[i];
-                const float* sample_output = output_data + (i * single_output_size_);
+                const float* sample_output = converted.data() + (i * single_output_size_);
                 predictions_[sample_idx] = std::vector<float>(
                     sample_output, sample_output + single_output_size_);
+            }
+        } else if (output_type_ == ov::element::i64) {
+            // Handle int64 output (e.g., argmax class indices)
+            const int64_t* i64_data = output_tensor.data<int64_t>();
+            std::lock_guard<std::mutex> lock(predictions_mutex_);
+            for (int i = 0; i < real_samples; ++i) {
+                int sample_idx = ctx->sample_indices[i];
+                const int64_t* sample_output = i64_data + (i * single_output_size_);
+                std::vector<float> pred(single_output_size_);
+                for (size_t j = 0; j < single_output_size_; ++j) {
+                    pred[j] = static_cast<float>(sample_output[j]);
+                }
+                predictions_[sample_idx] = std::move(pred);
+            }
+        } else if (output_type_ == ov::element::i32) {
+            // Handle int32 output
+            const int32_t* i32_data = output_tensor.data<int32_t>();
+            std::lock_guard<std::mutex> lock(predictions_mutex_);
+            for (int i = 0; i < real_samples; ++i) {
+                int sample_idx = ctx->sample_indices[i];
+                const int32_t* sample_output = i32_data + (i * single_output_size_);
+                std::vector<float> pred(single_output_size_);
+                for (size_t j = 0; j < single_output_size_; ++j) {
+                    pred[j] = static_cast<float>(sample_output[j]);
+                }
+                predictions_[sample_idx] = std::move(pred);
             }
         }
     }
@@ -892,6 +919,7 @@ void ResNetMultiDieCppSUT::start_async_batch(const float* input_data,
         ctx->sample_indices[i] = sample_indices[i];
     }
     ctx->actual_batch_size = actual_batch_size;
+    ctx->num_dummies = 0;  // No dummies in direct batch mode
 
     float* tensor_data = ctx->input_tensor.data<float>();
     std::memcpy(tensor_data, input_data, std::min(input_size, ctx->input_tensor.get_byte_size()));

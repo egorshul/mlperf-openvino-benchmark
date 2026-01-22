@@ -116,6 +116,9 @@ class ResNetMultiDieCppSUTWrapper:
         self._is_accuracy_mode = is_accuracy_mode
         self.input_name = self._cpp_sut.get_input_name()
 
+        if is_accuracy_mode:
+            print(f"[SUT] Accuracy mode enabled, storing predictions")
+
         logger.debug(
             f"C++ SUT loaded: {self._cpp_sut.get_num_dies()} dies, "
             f"{self._cpp_sut.get_total_requests()} total requests"
@@ -292,8 +295,14 @@ class ResNetMultiDieCppSUTWrapper:
         if not self.is_loaded:
             raise RuntimeError("Model not loaded")
 
-        # Load samples
-        sample_indices = list(range(min(self.qsl.performance_sample_count, self.qsl.total_sample_count)))
+        # For accuracy mode, load ALL samples (LoadGen queries all of them)
+        # For performance mode, only load performance_sample_count
+        if self._is_accuracy_mode:
+            num_samples = self.qsl.total_sample_count
+        else:
+            num_samples = min(self.qsl.performance_sample_count, self.qsl.total_sample_count)
+
+        sample_indices = list(range(num_samples))
         self.qsl.load_query_samples(sample_indices)
 
         # Register samples in C++
@@ -351,7 +360,9 @@ class ResNetMultiDieCppSUTWrapper:
     def get_predictions(self) -> Dict[int, Any]:
         """Get stored predictions."""
         cpp_preds = self._cpp_sut.get_predictions()
-        return {idx: np.array(pred) for idx, pred in cpp_preds.items()}
+        result = {idx: np.array(pred) for idx, pred in cpp_preds.items()}
+        print(f"[SUT] get_predictions: {len(result)} predictions, completed={self._cpp_sut.get_completed_count()}")
+        return result
 
     def set_store_predictions(self, store: bool) -> None:
         """Enable/disable prediction storage."""
