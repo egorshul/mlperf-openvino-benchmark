@@ -61,10 +61,21 @@ class ResNetMultiDieCppSUTWrapper:
         self.qsl = qsl
         self.scenario = scenario
 
-        # For Server mode, always use batch_size=1 for optimal latency
+        # For Server mode with coalescing, use larger batch size
+        # For Server mode without coalescing, use batch_size=1 for latency
         # For Offline mode, use configured batch_size for throughput
         if scenario == Scenario.SERVER:
-            self.batch_size = 1
+            # Check if coalescing is enabled in config
+            server_config = config.model.server if hasattr(config.model, 'server') else None
+            enable_coalescing = getattr(server_config, 'enable_coalescing', False) if server_config else False
+            coalesce_batch_size = getattr(server_config, 'coalesce_batch_size', 8) if server_config else 8
+
+            if enable_coalescing:
+                # Use coalesce batch size for model compilation
+                self.batch_size = coalesce_batch_size
+                logger.info(f"Server mode with coalescing: batch_size={self.batch_size}")
+            else:
+                self.batch_size = 1
         else:
             self.batch_size = config.openvino.batch_size
 
