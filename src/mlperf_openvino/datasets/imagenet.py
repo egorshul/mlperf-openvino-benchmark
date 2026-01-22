@@ -253,7 +253,7 @@ class ImageNetDataset(BaseDataset):
 
         Args:
             results: Raw inference output - can be:
-                - Pre-computed argmax indices (shape [N] or [N,1], dtype int64)
+                - Pre-computed argmax indices (shape [N] or [N,1], dtype int64/int32/float with single value)
                 - Logits/probabilities (shape [N, num_classes], dtype float32)
             indices: Sample indices (unused here)
 
@@ -275,21 +275,33 @@ class ImageNetDataset(BaseDataset):
                 pred = max(0, min(999, pred))
                 predictions.append(pred)
         else:
-            # Model outputs logits/probabilities, need to compute argmax
+            # Float output - check if it's a single value (class index stored as float)
+            # or full logits/probabilities array
             if len(results.shape) == 1:
                 results = results.reshape(1, -1)
 
             num_classes = results.shape[1]
 
-            for i in range(results.shape[0]):
-                pred = int(np.argmax(results[i]))
-
-                # If model has 1001 classes (with background), subtract 1
-                if num_classes == 1001:
+            # Single value per sample = already argmax'd class index (stored as float)
+            if num_classes == 1:
+                for i in range(results.shape[0]):
+                    # This is the class index stored as float
+                    pred = int(results[i, 0])
+                    # MLPerf ResNet50 ONNX model uses 1001 classes (0=background, 1-1000=ImageNet)
                     pred = pred - 1
                     pred = max(0, min(999, pred))
+                    predictions.append(pred)
+            else:
+                # Full logits/probabilities, need to compute argmax
+                for i in range(results.shape[0]):
+                    pred = int(np.argmax(results[i]))
 
-                predictions.append(pred)
+                    # If model has 1001 classes (with background), subtract 1
+                    if num_classes == 1001:
+                        pred = pred - 1
+                        pred = max(0, min(999, pred))
+
+                    predictions.append(pred)
 
         return predictions
     

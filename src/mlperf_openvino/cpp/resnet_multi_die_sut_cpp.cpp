@@ -584,9 +584,20 @@ void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx
     // Store predictions if needed (only for real samples)
     if (store_predictions_ && real_samples > 0) {
         ov::Tensor output_tensor = ctx->request.get_output_tensor(output_idx_);
+        auto actual_type = output_tensor.get_element_type();
         std::vector<float> converted;
 
-        if (output_type_ == ov::element::f32) {
+        // Debug: print first few predictions
+        static int debug_count = 0;
+        if (debug_count < 3) {
+            std::cout << "[DEBUG] Storing pred: samples=" << real_samples
+                      << ", output_type=" << actual_type.get_type_name()
+                      << ", single_size=" << single_output_size_ << std::endl;
+            debug_count++;
+        }
+
+        // Use actual tensor type, not stored type (they should match but let's be safe)
+        if (actual_type == ov::element::f32) {
             const float* output_data = output_tensor.data<float>();
             std::lock_guard<std::mutex> lock(predictions_mutex_);
             for (int i = 0; i < real_samples; ++i) {
@@ -595,7 +606,7 @@ void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx
                 predictions_[sample_idx] = std::vector<float>(
                     sample_output, sample_output + single_output_size_);
             }
-        } else if (output_type_ == ov::element::f16) {
+        } else if (actual_type == ov::element::f16) {
             const ov::float16* f16_data = output_tensor.data<ov::float16>();
             converted.resize(single_output_size_ * actual_batch_size);
             for (size_t j = 0; j < converted.size(); ++j) {
@@ -608,7 +619,7 @@ void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx
                 predictions_[sample_idx] = std::vector<float>(
                     sample_output, sample_output + single_output_size_);
             }
-        } else if (output_type_ == ov::element::i64) {
+        } else if (actual_type == ov::element::i64) {
             // Handle int64 output (e.g., argmax class indices)
             const int64_t* i64_data = output_tensor.data<int64_t>();
             std::lock_guard<std::mutex> lock(predictions_mutex_);
@@ -621,7 +632,7 @@ void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx
                 }
                 predictions_[sample_idx] = std::move(pred);
             }
-        } else if (output_type_ == ov::element::i32) {
+        } else if (actual_type == ov::element::i32) {
             // Handle int32 output
             const int32_t* i32_data = output_tensor.data<int32_t>();
             std::lock_guard<std::mutex> lock(predictions_mutex_);
@@ -634,6 +645,9 @@ void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx
                 }
                 predictions_[sample_idx] = std::move(pred);
             }
+        } else {
+            // Fallback: try to read as bytes and convert
+            std::cerr << "[WARN] Unsupported output type: " << actual_type.get_type_name() << std::endl;
         }
     }
 
@@ -859,6 +873,9 @@ void ResNetMultiDieCppSUT::load() {
         single_output_size_ *= output_shape[i];
     }
 
+    std::cout << "[SUT] Output: idx=" << output_idx_ << ", type=" << output_type_.get_type_name()
+              << ", single_size=" << single_output_size_ << std::endl;
+
     // Start threads based on batching mode
     issue_running_.store(true, std::memory_order_release);
 
@@ -951,6 +968,9 @@ void ResNetMultiDieCppSUT::reset_counters() {
 
 std::unordered_map<int, std::vector<float>> ResNetMultiDieCppSUT::get_predictions() const {
     std::lock_guard<std::mutex> lock(predictions_mutex_);
+    std::cout << "[SUT] get_predictions: store_predictions_=" << store_predictions_
+              << ", count=" << predictions_.size()
+              << ", completed=" << completed_count_.load() << std::endl;
     return predictions_;
 }
 
