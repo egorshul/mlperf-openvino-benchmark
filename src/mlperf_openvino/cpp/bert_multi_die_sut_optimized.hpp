@@ -44,11 +44,11 @@ namespace mlperf_ov {
 constexpr int SEQ_BUCKETS[] = {128, 165, 256, 384};
 constexpr int NUM_SEQ_BUCKETS = 4;
 
-// Optimal batch sizes per bucket (smaller batch for longer sequences to save memory)
-constexpr int BATCH_SIZES[] = {4, 4, 2, 1};
+// Optimal batch sizes per bucket
+constexpr int BATCH_SIZES[] = {4, 4, 2, 2};
 
-// Per-bucket nireq multipliers (more requests for busier buckets 1 and 2)
-constexpr int NIREQ_MULTIPLIERS[] = {1, 2, 2, 1};
+// Per-bucket nireq multipliers (equal)
+constexpr int NIREQ_MULTIPLIERS[] = {1, 1, 1, 1};
 
 // Model configuration key
 struct BertModelConfig {
