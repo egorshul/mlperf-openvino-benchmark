@@ -35,9 +35,9 @@ logger = logging.getLogger(__name__)
 
 # Sequence length buckets - must match C++ constants
 SEQ_BUCKETS = [128, 165, 256, 384]
-# More aggressive default batch sizes for better throughput
-DEFAULT_BATCH_SIZES = [8, 8, 4, 4]  # Was [4, 4, 2, 2]
-DEFAULT_NIREQ_PER_CONFIG = 8  # Was 4
+# Batch sizes per bucket - batch=8 was too large, batch=4 is optimal
+DEFAULT_BATCH_SIZES = [4, 4, 2, 2]
+DEFAULT_NIREQ_PER_CONFIG = 8  # Keep higher nireq for better parallelism
 
 
 class BertOptimizedSUTWrapper:

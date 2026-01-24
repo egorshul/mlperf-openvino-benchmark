@@ -402,38 +402,39 @@ void BertOptimizedSUT::release_request(size_t die_idx, const BertModelConfig& co
 }
 
 // =============================================================================
-// DATA COPY
+// DATA COPY - OPTIMIZED (no lock per sample, cache-friendly)
 // =============================================================================
 
 void BertOptimizedSUT::copy_sample_to_tensor(int sample_idx, int bucket_seq_len,
                                               int64_t* ids_ptr, int64_t* mask_ptr, int64_t* type_ptr,
                                               int offset) {
-    const BertOptSampleInfo* info = nullptr;
-    {
-        std::shared_lock<std::shared_mutex> lock(sample_mutex_);
-        auto it = samples_.find(sample_idx);
-        if (it != samples_.end()) {
-            info = &it->second;
-        }
-    }
+    // NOTE: This function assumes samples_ is not modified during inference (Offline mode)
+    // The lock is taken once in submit_batch before copying all samples
 
-    size_t dst_offset = offset * bucket_seq_len;
+    size_t dst_offset = static_cast<size_t>(offset) * bucket_seq_len;
 
-    if (info) {
-        // Copy actual data (up to actual_seq_len)
-        int copy_len = std::min(info->actual_seq_len, bucket_seq_len);
-        std::memcpy(ids_ptr + dst_offset, info->input_ids, copy_len * sizeof(int64_t));
-        std::memcpy(mask_ptr + dst_offset, info->attention_mask, copy_len * sizeof(int64_t));
-        std::memcpy(type_ptr + dst_offset, info->token_type_ids, copy_len * sizeof(int64_t));
+    // Direct lookup without lock - samples are registered before inference starts
+    auto it = samples_.find(sample_idx);
+    if (it != samples_.end()) {
+        const BertOptSampleInfo& info = it->second;
 
-        // Zero-pad if needed
+        // Copy actual data (up to actual_seq_len or bucket_seq_len, whichever is smaller)
+        int copy_len = std::min(info.actual_seq_len, bucket_seq_len);
+
+        // Optimized: copy all three arrays in sequence for better cache utilization
+        std::memcpy(ids_ptr + dst_offset, info.input_ids, copy_len * sizeof(int64_t));
+        std::memcpy(mask_ptr + dst_offset, info.attention_mask, copy_len * sizeof(int64_t));
+        std::memcpy(type_ptr + dst_offset, info.token_type_ids, copy_len * sizeof(int64_t));
+
+        // Zero-pad if needed (often not needed if actual_seq_len >= bucket_seq_len)
         if (copy_len < bucket_seq_len) {
-            std::memset(ids_ptr + dst_offset + copy_len, 0, (bucket_seq_len - copy_len) * sizeof(int64_t));
-            std::memset(mask_ptr + dst_offset + copy_len, 0, (bucket_seq_len - copy_len) * sizeof(int64_t));
-            std::memset(type_ptr + dst_offset + copy_len, 0, (bucket_seq_len - copy_len) * sizeof(int64_t));
+            int pad_len = bucket_seq_len - copy_len;
+            std::memset(ids_ptr + dst_offset + copy_len, 0, pad_len * sizeof(int64_t));
+            std::memset(mask_ptr + dst_offset + copy_len, 0, pad_len * sizeof(int64_t));
+            std::memset(type_ptr + dst_offset + copy_len, 0, pad_len * sizeof(int64_t));
         }
     } else {
-        // Sample not found - zero fill
+        // Sample not found - zero fill entire slot
         std::memset(ids_ptr + dst_offset, 0, bucket_seq_len * sizeof(int64_t));
         std::memset(mask_ptr + dst_offset, 0, bucket_seq_len * sizeof(int64_t));
         std::memset(type_ptr + dst_offset, 0, bucket_seq_len * sizeof(int64_t));
@@ -520,6 +521,9 @@ void BertOptimizedSUT::submit_batch(int bucket_idx,
 
     int n = static_cast<int>(query_ids.size());
 
+    // Take shared lock ONCE for entire bucket submission (samples don't change during inference)
+    std::shared_lock<std::shared_mutex> samples_lock(sample_mutex_);
+
     // Process in batches
     for (int i = 0; i < n; i += batch_size) {
         int actual = std::min(batch_size, n - i);
@@ -540,7 +544,7 @@ void BertOptimizedSUT::submit_batch(int bucket_idx,
         ctx->actual_batch_size = batch_size;
         ctx->num_dummies = dummies;
 
-        // Copy data
+        // Copy data (no lock needed - we hold samples_lock)
         int64_t* ids = ctx->input_ids_tensor.data<int64_t>();
         int64_t* mask = ctx->attention_mask_tensor.data<int64_t>();
         int64_t* type = ctx->token_type_ids_tensor.data<int64_t>();

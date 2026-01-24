@@ -43,8 +43,8 @@ constexpr int NUM_SEQ_BUCKETS = 4;
 
 // Optimal batch sizes per bucket (shorter sequences can use larger batches)
 // These can be tuned based on NPU memory and latency requirements
-// Higher values = better throughput but more memory usage
-constexpr int BATCH_SIZES[] = {8, 8, 4, 4};  // For buckets [128, 165, 256, 384]
+// Note: batch=8 was too large, batch=4 gives better throughput
+constexpr int BATCH_SIZES[] = {4, 4, 2, 2};  // For buckets [128, 165, 256, 384]
 
 // Model configuration key
 struct BertModelConfig {
