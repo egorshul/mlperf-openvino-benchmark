@@ -34,7 +34,7 @@ from .config import BenchmarkConfig, Scenario
 logger = logging.getLogger(__name__)
 
 # Sequence length buckets - must match C++ constants
-SEQ_BUCKETS = [128, 165, 256, 384]
+SEQ_BUCKETS = [128, 192, 256, 384]
 # Batch sizes per bucket - batch=8 was too large, batch=4 is optimal
 DEFAULT_BATCH_SIZES = [4, 4, 2, 2]
 DEFAULT_NIREQ_PER_CONFIG = 8  # Keep higher nireq for better parallelism
@@ -168,13 +168,6 @@ class BertOptimizedSUTWrapper:
             bucket_idx = self.qsl.get_sample_bucket(qs.index)
             buckets[bucket_idx].append((qs.id, qs.index))
 
-        # Log bucket distribution
-        total_samples = sum(len(b) for b in buckets.values())
-        print(f"\n[BERT Optimized] Bucket distribution ({total_samples} samples):")
-        for bucket_idx, samples in buckets.items():
-            pct = 100 * len(samples) / total_samples if total_samples > 0 else 0
-            print(f"  Bucket {bucket_idx} (seq<={SEQ_BUCKETS[bucket_idx]}): {len(samples):5d} samples ({pct:5.1f}%)")
-
         # Submit each bucket
         for bucket_idx, samples in buckets.items():
             if not samples:
@@ -187,13 +180,6 @@ class BertOptimizedSUTWrapper:
 
         self._cpp_sut.wait_all()
         self._query_count += 1
-
-        elapsed = time.time() - self._start_time
-        completed = self._cpp_sut.get_completed_count()
-        throughput = completed / elapsed if elapsed > 0 else 0
-        print(f"\n[BERT Optimized] Offline: {completed} samples in {elapsed:.2f}s")
-        print(f"[BERT Optimized] Throughput: {throughput:.1f} samples/sec")
-        print(f"[BERT Optimized] Dies: {self.num_dies}, Configs: {self._cpp_sut.get_model_configs()}")
 
     def _issue_query_server(self, query_samples: List) -> None:
         """Process queries in Server mode."""

@@ -2,10 +2,11 @@
  * Optimized BERT SUT for multi-die accelerators with dynamic sequence length buckets.
  *
  * Key optimizations:
- * - Sequence length buckets: [128, 165, 256, 384] to minimize padding
+ * - Sequence length buckets: [128, 192, 256, 384] to minimize padding
  * - Optimal batch sizes per bucket: short sequences -> larger batches
  * - Multiple pre-compiled models for each (batch_size, seq_length) combination
- * - Smart batching: group samples by sequence length bucket
+ * - Pre-staged buffers: samples pre-organized by bucket for fast batch copy
+ * - Per-bucket nireq: more inference requests for busier buckets
  * - Per-die request pools for load balancing
  */
 
@@ -37,14 +38,16 @@ namespace mlperf_ov {
 // CONFIGURATION
 // =============================================================================
 
-// Sequence length buckets - samples are padded to the smallest bucket >= actual length
-constexpr int SEQ_BUCKETS[] = {128, 165, 256, 384};
+// Sequence length buckets - optimized boundaries based on distribution analysis
+// Changed from [128, 165, 256, 384] to [128, 192, 256, 384] for better coverage
+constexpr int SEQ_BUCKETS[] = {128, 192, 256, 384};
 constexpr int NUM_SEQ_BUCKETS = 4;
 
-// Optimal batch sizes per bucket (shorter sequences can use larger batches)
-// These can be tuned based on NPU memory and latency requirements
-// Note: batch=8 was too large, batch=4 gives better throughput
-constexpr int BATCH_SIZES[] = {4, 4, 2, 2};  // For buckets [128, 165, 256, 384]
+// Optimal batch sizes per bucket
+constexpr int BATCH_SIZES[] = {4, 4, 2, 2};
+
+// Per-bucket nireq multipliers (bucket 2 is busiest with 37%, give it more requests)
+constexpr int NIREQ_MULTIPLIERS[] = {1, 1, 2, 1};  // More requests for bucket 2
 
 // Model configuration key
 struct BertModelConfig {
@@ -71,7 +74,7 @@ struct BertModelConfigHash {
 class BertOptimizedSUT;
 
 // =============================================================================
-// PER-MODEL CONTEXT (renamed to avoid conflict with bert_sut_cpp.hpp)
+// PER-MODEL CONTEXT
 // =============================================================================
 
 struct BertOptInferContext {
@@ -85,7 +88,7 @@ struct BertOptInferContext {
     size_t pool_id = 0;
     BertOptimizedSUT* sut = nullptr;
 
-    static constexpr int MAX_BATCH = 16;  // Support larger batches for throughput
+    static constexpr int MAX_BATCH = 16;
     uint64_t query_ids[MAX_BATCH];
     int sample_indices[MAX_BATCH];
     int actual_batch_size = 0;
@@ -97,18 +100,36 @@ struct BertOptModelContext {
     BertModelConfig config;
     ov::CompiledModel compiled_model;
     std::vector<std::unique_ptr<BertOptInferContext>> requests;
-    std::atomic<int>* slot_states = nullptr;  // Points to array
+    std::atomic<int>* slot_states = nullptr;
     size_t num_requests = 0;
     std::atomic<size_t> pool_hint{0};
 };
 
-// Per-die context (renamed to avoid conflict with resnet_multi_die_sut_cpp.hpp)
+// Per-die context
 struct BertOptDieContext {
     std::string device_name;
     size_t die_idx;
-
-    // Model configs -> compiled models
     std::unordered_map<BertModelConfig, std::unique_ptr<BertOptModelContext>, BertModelConfigHash> models;
+};
+
+// =============================================================================
+// PRE-STAGED BUFFER FOR FAST BATCH COPY
+// =============================================================================
+
+struct BertStagedSample {
+    int sample_idx;
+    int actual_seq_len;
+    size_t buffer_offset;  // Offset into bucket's staged buffer
+};
+
+struct BertStagedBucket {
+    std::vector<int64_t> input_ids;      // Contiguous buffer for all samples in bucket
+    std::vector<int64_t> attention_mask;
+    std::vector<int64_t> token_type_ids;
+    std::vector<BertStagedSample> samples;  // Metadata for each sample
+    std::unordered_map<int, size_t> sample_to_index;  // sample_idx -> index in samples
+    int seq_length;  // Bucket sequence length
+    bool staged = false;
 };
 
 // =============================================================================
@@ -118,11 +139,10 @@ struct BertOptDieContext {
 struct BertOptWorkItem {
     uint64_t query_id;
     int sample_idx;
-    int bucket_idx;  // Which seq_length bucket
-    int actual_seq_len;  // Actual sequence length (for potential further optimization)
+    int bucket_idx;
+    int actual_seq_len;
 };
 
-// Batch ready for dispatch
 struct BertOptBatch {
     std::vector<uint64_t> query_ids;
     std::vector<int> sample_indices;
@@ -139,12 +159,12 @@ struct BertOptSampleInfo {
     const int64_t* input_ids;
     const int64_t* attention_mask;
     const int64_t* token_type_ids;
-    int actual_seq_len;  // Number of non-padding tokens
-    int bucket_idx;      // Pre-computed bucket index
+    int actual_seq_len;
+    int bucket_idx;
 };
 
 // =============================================================================
-// PREDICTION RESULT (renamed to avoid conflict with bert_sut_cpp.hpp)
+// PREDICTION RESULT
 // =============================================================================
 
 struct BertOptPrediction {
@@ -168,7 +188,8 @@ public:
 
     // Configuration (call before load())
     void set_target_devices(const std::vector<std::string>& devices);
-    void set_bucket_batch_sizes(const std::vector<int>& batch_sizes);  // Override defaults
+    void set_bucket_batch_sizes(const std::vector<int>& batch_sizes);
+    void set_bucket_nireq_multipliers(const std::vector<int>& multipliers);
 
     // Load and compile all model variants
     void load();
@@ -178,7 +199,7 @@ public:
     int get_num_dies() const { return static_cast<int>(die_contexts_.size()); }
     std::vector<std::string> get_active_devices() const;
     int get_num_model_configs() const;
-    std::vector<std::pair<int, int>> get_model_configs() const;  // [(batch, seq_len), ...]
+    std::vector<std::pair<int, int>> get_model_configs() const;
 
     // Sample registration with sequence length info
     void register_sample(int sample_idx,
@@ -187,6 +208,9 @@ public:
                          const int64_t* token_type_ids,
                          int actual_seq_len);
     void clear_samples();
+
+    // Stage samples into contiguous buffers per bucket (call after all samples registered)
+    void stage_samples();
 
     // Compute bucket for a sequence length
     static int get_bucket_index(int seq_len);
@@ -227,13 +251,14 @@ private:
     int nireq_per_config_;
     std::vector<std::string> target_devices_;
     std::vector<int> bucket_batch_sizes_;
+    std::vector<int> bucket_nireq_multipliers_;
 
     // OpenVINO
     ov::Core core_;
     std::shared_ptr<ov::Model> base_model_;
     std::vector<std::unique_ptr<BertOptDieContext>> die_contexts_;
 
-    // Input/output names (discovered from model)
+    // Input/output names
     std::string input_ids_name_;
     std::string attention_mask_name_;
     std::string token_type_ids_name_;
@@ -243,14 +268,18 @@ private:
     size_t start_output_idx_ = 0;
     size_t end_output_idx_ = 1;
 
-    // Request slot management - use unique_ptr to array (atomics are not copyable)
+    // Request slot management
     static constexpr int SLOT_FREE = -1;
     std::unique_ptr<std::atomic<int>[]> all_slot_states_;
     size_t total_slots_ = 0;
 
-    // Sample cache
+    // Sample cache (used before staging)
     mutable std::shared_mutex sample_mutex_;
     std::unordered_map<int, BertOptSampleInfo> samples_;
+
+    // Pre-staged buffers per bucket (used after stage_samples() called)
+    BertStagedBucket staged_buckets_[NUM_SEQ_BUCKETS];
+    bool samples_staged_ = false;
 
     // Batching for Server mode
     int batch_timeout_us_ = 500;
@@ -274,7 +303,7 @@ private:
     std::vector<std::thread> dispatch_threads_;
     std::atomic<bool> dispatch_running_{false};
 
-    // Per-bucket batch queues (filled by batcher, consumed by dispatch)
+    // Per-bucket batch queues
     static constexpr int BATCH_QUEUE_SIZE = 128;
     struct BatchQueue {
         BertOptBatch batches[BATCH_QUEUE_SIZE];
@@ -313,9 +342,14 @@ private:
     void release_request(size_t die_idx, const BertModelConfig& config, size_t pool_id);
 
     void on_inference_complete(BertOptInferContext* ctx);
+
+    // Optimized copy using staged buffers
     void copy_sample_to_tensor(int sample_idx, int bucket_seq_len,
                                int64_t* ids_ptr, int64_t* mask_ptr, int64_t* type_ptr,
                                int offset_in_batch);
+    void copy_staged_sample_to_tensor(int bucket_idx, size_t staged_idx, int bucket_seq_len,
+                                      int64_t* ids_ptr, int64_t* mask_ptr, int64_t* type_ptr,
+                                      int offset_in_batch);
 
     friend class BertOptimizedServerSUT;
 };

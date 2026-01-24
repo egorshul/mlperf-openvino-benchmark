@@ -642,7 +642,7 @@ class SQuADQSL(QuerySampleLibrary):
     """
 
     # Sequence length buckets for optimized inference
-    SEQ_BUCKETS = [128, 165, 256, 384]
+    SEQ_BUCKETS = [128, 192, 256, 384]
 
     def __init__(
         self,
