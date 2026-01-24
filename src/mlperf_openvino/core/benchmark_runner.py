@@ -853,8 +853,12 @@ class BenchmarkRunner:
             status = "PASS" if accuracy >= 0.7569 else "FAIL"
             print(f"Top-1: {accuracy:.4f} ({correct}/{total}) [{status}]")
         elif model_type == 'bert':
-            print(f"F1: {acc.get('f1', 0):.2f}")
-            print(f"EM: {acc.get('exact_match', 0):.2f}")
+            f1 = acc.get('f1', 0)
+            em = acc.get('exact_match', 0)
+            # MLPerf BERT threshold: F1 >= 89.965 (99% of 90.874)
+            status = "PASS" if f1 >= 89.965 else "FAIL"
+            print(f"F1: {f1:.2f} [{status}]")
+            print(f"EM: {em:.2f}")
         elif model_type == 'retinanet':
             print(f"mAP: {acc.get('mAP', 0):.4f}")
         elif model_type == 'whisper':
