@@ -54,10 +54,9 @@ Server mode performance comparison (ResNet50, 60000 QPS target):
 
 ## Files
 
-- `resnet_multi_die_sut_cpp.hpp/cpp` - Multi-die SUT for ResNet50/classification
-- `retinanet_multi_die_sut_cpp.hpp/cpp` - Multi-die SUT for RetinaNet/detection
+- `resnet_multi_die_sut_cpp.hpp/cpp` - Multi-die SUT for ResNet50
 - `bindings.cpp` - pybind11 Python bindings
-- `CMakeLists.txt` - Build configuration with automatic LoadGen download
+- `CMakeLists.txt` - Build configuration
 
 ## Usage
 

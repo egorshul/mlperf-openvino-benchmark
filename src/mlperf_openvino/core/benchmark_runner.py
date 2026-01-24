@@ -170,12 +170,7 @@ class BenchmarkRunner:
         model_type = self.config.model.model_type
 
         if isinstance(self.backend, MultiDeviceBackend):
-            # Check model type and use appropriate multi-die SUT
-            if model_type == ModelType.RETINANET:
-                return self._create_retinanet_multi_die_sut(qsl)
-            else:
-                # ResNet50 and other models
-                return self._create_resnet_multi_die_sut(qsl)
+            return self._create_resnet_multi_die_sut(qsl)
         else:
             print(f"[SUT] OpenVINOSUT on {self.config.openvino.device}")
             return OpenVINOSUT(
@@ -216,38 +211,6 @@ class BenchmarkRunner:
         return ResNetMultiDeviceSUT(
             config=self.config,
             backend=self.backend,
-            qsl=qsl,
-            scenario=self.config.scenario,
-        )
-
-    def _create_retinanet_multi_die_sut(self, qsl: QuerySampleLibrary) -> Any:
-        """Create RetinaNet multi-die SUT."""
-        # Try C++ multi-die SUT first (much faster)
-        try:
-            from .retinanet_multi_die_sut import (
-                RetinaNetMultiDieCppSUTWrapper,
-                is_retinanet_multi_die_cpp_available
-            )
-
-            if is_retinanet_multi_die_cpp_available():
-                print(f"[SUT] RetinaNet C++ multi-die ({self.backend.num_dies} dies)")
-                sut = RetinaNetMultiDieCppSUTWrapper(
-                    config=self.config,
-                    qsl=qsl,
-                    scenario=self.config.scenario,
-                )
-                sut.load()
-                return sut
-        except ImportError as e:
-            logger.warning(f"C++ RetinaNet multi-die SUT not available: {e}")
-        except Exception as e:
-            logger.warning(f"Failed to create C++ RetinaNet multi-die SUT: {e}, falling back to Python")
-
-        # Fall back to Python SUT
-        from .retinanet_sut import RetinaNetSUT
-        print(f"[SUT] RetinaNet Python")
-        return RetinaNetSUT(
-            config=self.config,
             qsl=qsl,
             scenario=self.config.scenario,
         )
