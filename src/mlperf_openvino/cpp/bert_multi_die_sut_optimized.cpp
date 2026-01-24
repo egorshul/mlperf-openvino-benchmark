@@ -234,18 +234,18 @@ void BertOptimizedSUT::load() {
 
     auto props = build_compile_properties();
 
-    // Calculate total slots needed
-    size_t total_slots = devices.size() * NUM_SEQ_BUCKETS * nireq_per_config_;
-    all_slot_states_.resize(total_slots);
-    for (auto& s : all_slot_states_) {
-        s.store(SLOT_FREE);
+    // Calculate total slots needed and allocate atomic array
+    total_slots_ = devices.size() * NUM_SEQ_BUCKETS * nireq_per_config_;
+    all_slot_states_ = std::make_unique<std::atomic<int>[]>(total_slots_);
+    for (size_t i = 0; i < total_slots_; ++i) {
+        all_slot_states_[i].store(SLOT_FREE);
     }
 
     size_t slot_offset = 0;
 
     // Create die contexts
     for (size_t die_idx = 0; die_idx < devices.size(); ++die_idx) {
-        auto die = std::make_unique<DieContext>();
+        auto die = std::make_unique<BertOptDieContext>();
         die->device_name = devices[die_idx];
         die->die_idx = die_idx;
 
@@ -259,7 +259,7 @@ void BertOptimizedSUT::load() {
             auto reshaped = reshape_model(batch_size, seq_length);
             auto compiled = core_.compile_model(reshaped, die->device_name, props);
 
-            auto model_ctx = std::make_unique<ModelContext>();
+            auto model_ctx = std::make_unique<BertOptModelContext>();
             model_ctx->config = config;
             model_ctx->compiled_model = compiled;
             model_ctx->slot_states = &all_slot_states_[slot_offset];
@@ -267,7 +267,7 @@ void BertOptimizedSUT::load() {
 
             // Create inference requests
             for (int r = 0; r < nireq_per_config_; ++r) {
-                auto ctx = std::make_unique<BertInferContext>();
+                auto ctx = std::make_unique<BertOptInferContext>();
                 ctx->request = compiled.create_infer_request();
                 ctx->config = config;
                 ctx->die_idx = die_idx;
@@ -285,7 +285,7 @@ void BertOptimizedSUT::load() {
                 ctx->request.set_tensor(token_type_ids_name_, ctx->token_type_ids_tensor);
 
                 // Set callback
-                BertInferContext* ctx_ptr = ctx.get();
+                BertOptInferContext* ctx_ptr = ctx.get();
                 ctx->request.set_callback([ctx_ptr](std::exception_ptr) {
                     ctx_ptr->sut->on_inference_complete(ctx_ptr);
                 });
@@ -312,7 +312,7 @@ void BertOptimizedSUT::load() {
 
     std::cout << "[BertOptimizedSUT] Loaded: " << devices.size() << " dies, "
               << NUM_SEQ_BUCKETS << " bucket configs, "
-              << total_slots << " total requests" << std::endl;
+              << total_slots_ << " total requests" << std::endl;
 
     for (int i = 0; i < NUM_SEQ_BUCKETS; ++i) {
         std::cout << "  Bucket " << i << ": seq=" << SEQ_BUCKETS[i]
@@ -353,7 +353,7 @@ size_t BertOptimizedSUT::acquire_request(size_t die_idx, const BertModelConfig& 
         throw std::runtime_error("Model config not found");
     }
 
-    ModelContext* model_ctx = it->second.get();
+    BertOptModelContext* model_ctx = it->second.get();
     size_t n = model_ctx->num_requests;
     size_t hint = model_ctx->pool_hint.load(std::memory_order_relaxed);
 
@@ -408,7 +408,7 @@ void BertOptimizedSUT::release_request(size_t die_idx, const BertModelConfig& co
 void BertOptimizedSUT::copy_sample_to_tensor(int sample_idx, int bucket_seq_len,
                                               int64_t* ids_ptr, int64_t* mask_ptr, int64_t* type_ptr,
                                               int offset) {
-    const BertSampleInfo* info = nullptr;
+    const BertOptSampleInfo* info = nullptr;
     {
         std::shared_lock<std::shared_mutex> lock(sample_mutex_);
         auto it = samples_.find(sample_idx);
@@ -444,7 +444,7 @@ void BertOptimizedSUT::copy_sample_to_tensor(int sample_idx, int bucket_seq_len,
 // INFERENCE COMPLETE
 // =============================================================================
 
-void BertOptimizedSUT::on_inference_complete(BertInferContext* ctx) {
+void BertOptimizedSUT::on_inference_complete(BertOptInferContext* ctx) {
     int actual = ctx->actual_batch_size;
     int dummies = ctx->num_dummies;
     int real = actual - dummies;
@@ -462,7 +462,7 @@ void BertOptimizedSUT::on_inference_complete(BertInferContext* ctx) {
         std::lock_guard<std::mutex> lock(predictions_mutex_);
         for (int i = 0; i < real; ++i) {
             int sample_idx = ctx->sample_indices[i];
-            BertPrediction pred;
+            BertOptPrediction pred;
 
             if (single_output_ && start_tensor.get_shape().back() == 2) {
                 // Interleaved format [batch, seq, 2]
@@ -492,7 +492,7 @@ void BertOptimizedSUT::on_inference_complete(BertInferContext* ctx) {
 
     // Send responses
     if (use_direct_loadgen_.load(std::memory_order_relaxed) && real > 0) {
-        mlperf::QuerySampleResponse responses[BertInferContext::MAX_BATCH];
+        mlperf::QuerySampleResponse responses[BertOptInferContext::MAX_BATCH];
         for (int i = 0; i < real; ++i) {
             responses[i] = {ctx->query_ids[i], 0, 0};
         }
@@ -530,7 +530,7 @@ void BertOptimizedSUT::submit_batch(int bucket_idx,
 
         size_t req_id = acquire_request(die_idx, config);
         auto& model_ctx = die_contexts_[die_idx]->models[config];
-        BertInferContext* ctx = model_ctx->requests[req_id].get();
+        BertOptInferContext* ctx = model_ctx->requests[req_id].get();
 
         // Fill context
         for (int j = 0; j < actual; ++j) {
@@ -603,7 +603,7 @@ void BertOptimizedSUT::issue_queries(const std::vector<uint64_t>& query_ids,
 void BertOptimizedSUT::batcher_thread_func() {
     using namespace std::chrono;
 
-    std::vector<BertWorkItem> pending[NUM_SEQ_BUCKETS];
+    std::vector<BertOptWorkItem> pending[NUM_SEQ_BUCKETS];
     auto last_flush = steady_clock::now();
 
     while (batcher_running_.load(std::memory_order_acquire)) {
@@ -634,7 +634,7 @@ void BertOptimizedSUT::batcher_thread_func() {
 
             while (static_cast<int>(pending[b].size()) >= target) {
                 // Create full batch
-                BertBatch batch;
+                BertOptBatch batch;
                 batch.bucket_idx = b;
                 batch.target_batch_size = target;
                 batch.num_dummies = 0;
@@ -662,7 +662,7 @@ void BertOptimizedSUT::batcher_thread_func() {
 
             // Flush partial batch on timeout
             if (timeout && !pending[b].empty() && static_cast<int>(pending[b].size()) >= min_batch_size_) {
-                BertBatch batch;
+                BertOptBatch batch;
                 batch.bucket_idx = b;
                 batch.target_batch_size = target;
 
@@ -701,7 +701,7 @@ void BertOptimizedSUT::batcher_thread_func() {
             int target = bucket_batch_sizes_[b];
             int actual = std::min(target, static_cast<int>(pending[b].size()));
 
-            BertBatch batch;
+            BertOptBatch batch;
             batch.bucket_idx = b;
             batch.target_batch_size = target;
             batch.num_dummies = target - actual;
@@ -743,7 +743,7 @@ void BertOptimizedSUT::dispatch_thread_func(int bucket_idx) {
 
         bq.tail.store(tail + 1, std::memory_order_relaxed);
 
-        BertBatch& batch = bq.batches[slot];
+        BertOptBatch& batch = bq.batches[slot];
         int seq_len = SEQ_BUCKETS[bucket_idx];
         int batch_size = bucket_batch_sizes_[bucket_idx];
         BertModelConfig config{batch_size, seq_len};
@@ -753,7 +753,7 @@ void BertOptimizedSUT::dispatch_thread_func(int bucket_idx) {
 
         size_t req_id = acquire_request(die_idx, config);
         auto& model_ctx = die_contexts_[die_idx]->models[config];
-        BertInferContext* ctx = model_ctx->requests[req_id].get();
+        BertOptInferContext* ctx = model_ctx->requests[req_id].get();
 
         int actual = static_cast<int>(batch.query_ids.size());
         for (int i = 0; i < actual; ++i) {
@@ -798,7 +798,7 @@ void BertOptimizedSUT::reset_counters() {
     completed_count_.store(0);
 }
 
-std::unordered_map<int, BertPrediction> BertOptimizedSUT::get_predictions() const {
+std::unordered_map<int, BertOptPrediction> BertOptimizedSUT::get_predictions() const {
     std::lock_guard<std::mutex> lock(predictions_mutex_);
     return predictions_;
 }

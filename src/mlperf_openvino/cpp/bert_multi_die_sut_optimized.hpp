@@ -70,10 +70,10 @@ struct BertModelConfigHash {
 class BertOptimizedSUT;
 
 // =============================================================================
-// PER-MODEL CONTEXT
+// PER-MODEL CONTEXT (renamed to avoid conflict with bert_sut_cpp.hpp)
 // =============================================================================
 
-struct BertInferContext {
+struct BertOptInferContext {
     ov::InferRequest request;
     ov::Tensor input_ids_tensor;
     ov::Tensor attention_mask_tensor;
@@ -92,29 +92,29 @@ struct BertInferContext {
 };
 
 // Per-die, per-config compiled model and request pool
-struct ModelContext {
+struct BertOptModelContext {
     BertModelConfig config;
     ov::CompiledModel compiled_model;
-    std::vector<std::unique_ptr<BertInferContext>> requests;
+    std::vector<std::unique_ptr<BertOptInferContext>> requests;
     std::atomic<int>* slot_states = nullptr;  // Points to array
     size_t num_requests = 0;
     std::atomic<size_t> pool_hint{0};
 };
 
-// Per-die context
-struct DieContext {
+// Per-die context (renamed to avoid conflict with resnet_multi_die_sut_cpp.hpp)
+struct BertOptDieContext {
     std::string device_name;
     size_t die_idx;
 
     // Model configs -> compiled models
-    std::unordered_map<BertModelConfig, std::unique_ptr<ModelContext>, BertModelConfigHash> models;
+    std::unordered_map<BertModelConfig, std::unique_ptr<BertOptModelContext>, BertModelConfigHash> models;
 };
 
 // =============================================================================
 // WORK ITEM FOR BATCHING
 // =============================================================================
 
-struct BertWorkItem {
+struct BertOptWorkItem {
     uint64_t query_id;
     int sample_idx;
     int bucket_idx;  // Which seq_length bucket
@@ -122,7 +122,7 @@ struct BertWorkItem {
 };
 
 // Batch ready for dispatch
-struct BertBatch {
+struct BertOptBatch {
     std::vector<uint64_t> query_ids;
     std::vector<int> sample_indices;
     int bucket_idx;
@@ -134,7 +134,7 @@ struct BertBatch {
 // SAMPLE DATA CACHE
 // =============================================================================
 
-struct BertSampleInfo {
+struct BertOptSampleInfo {
     const int64_t* input_ids;
     const int64_t* attention_mask;
     const int64_t* token_type_ids;
@@ -143,10 +143,10 @@ struct BertSampleInfo {
 };
 
 // =============================================================================
-// PREDICTION RESULT
+// PREDICTION RESULT (renamed to avoid conflict with bert_sut_cpp.hpp)
 // =============================================================================
 
-struct BertPrediction {
+struct BertOptPrediction {
     std::vector<float> start_logits;
     std::vector<float> end_logits;
 };
@@ -208,7 +208,7 @@ public:
 
     // Predictions
     void set_store_predictions(bool store) { store_predictions_ = store; }
-    std::unordered_map<int, BertPrediction> get_predictions() const;
+    std::unordered_map<int, BertOptPrediction> get_predictions() const;
     void clear_predictions();
 
     // Direct LoadGen mode
@@ -230,7 +230,7 @@ private:
     // OpenVINO
     ov::Core core_;
     std::shared_ptr<ov::Model> base_model_;
-    std::vector<std::unique_ptr<DieContext>> die_contexts_;
+    std::vector<std::unique_ptr<BertOptDieContext>> die_contexts_;
 
     // Input/output names (discovered from model)
     std::string input_ids_name_;
@@ -242,13 +242,14 @@ private:
     size_t start_output_idx_ = 0;
     size_t end_output_idx_ = 1;
 
-    // Request slot management
+    // Request slot management - use unique_ptr to array (atomics are not copyable)
     static constexpr int SLOT_FREE = -1;
-    std::vector<std::atomic<int>> all_slot_states_;  // Flat array
+    std::unique_ptr<std::atomic<int>[]> all_slot_states_;
+    size_t total_slots_ = 0;
 
     // Sample cache
     mutable std::shared_mutex sample_mutex_;
-    std::unordered_map<int, BertSampleInfo> samples_;
+    std::unordered_map<int, BertOptSampleInfo> samples_;
 
     // Batching for Server mode
     int batch_timeout_us_ = 500;
@@ -257,7 +258,7 @@ private:
     // Per-bucket work queues for Server mode
     static constexpr int QUEUE_SIZE = 1024;
     struct BucketQueue {
-        BertWorkItem items[QUEUE_SIZE];
+        BertOptWorkItem items[QUEUE_SIZE];
         std::atomic<size_t> head{0};
         std::atomic<size_t> tail{0};
     };
@@ -275,7 +276,7 @@ private:
     // Per-bucket batch queues (filled by batcher, consumed by dispatch)
     static constexpr int BATCH_QUEUE_SIZE = 128;
     struct BatchQueue {
-        BertBatch batches[BATCH_QUEUE_SIZE];
+        BertOptBatch batches[BATCH_QUEUE_SIZE];
         std::atomic<size_t> head{0};
         std::atomic<size_t> tail{0};
         std::atomic<bool> valid[BATCH_QUEUE_SIZE];
@@ -296,7 +297,7 @@ private:
     // Predictions
     bool store_predictions_ = false;
     mutable std::mutex predictions_mutex_;
-    std::unordered_map<int, BertPrediction> predictions_;
+    std::unordered_map<int, BertOptPrediction> predictions_;
 
     // LoadGen mode
     std::atomic<bool> use_direct_loadgen_{false};
@@ -310,7 +311,7 @@ private:
     size_t acquire_request(size_t die_idx, const BertModelConfig& config);
     void release_request(size_t die_idx, const BertModelConfig& config, size_t pool_id);
 
-    void on_inference_complete(BertInferContext* ctx);
+    void on_inference_complete(BertOptInferContext* ctx);
     void copy_sample_to_tensor(int sample_idx, int bucket_seq_len,
                                int64_t* ids_ptr, int64_t* mask_ptr, int64_t* type_ptr,
                                int offset_in_batch);
