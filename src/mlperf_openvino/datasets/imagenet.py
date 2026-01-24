@@ -122,53 +122,76 @@ class ImageNetDataset(BaseDataset):
     
     def _preprocess_image(self, image_path: str) -> np.ndarray:
         """
-        Preprocess a single image.
-        
+        Preprocess a single image following MLCommons reference (pre_process_vgg).
+
         Args:
             image_path: Path to the image
-            
+
         Returns:
             Preprocessed image as numpy array (NCHW format)
         """
         # Load image
         img = Image.open(image_path).convert("RGB")
-        
-        # Resize
-        if self.preprocessing.resize:
-            img = img.resize(
-                self.preprocessing.resize,
-                Image.Resampling.BILINEAR
-            )
-        
-        # Center crop
+
+        # Get target dimensions from center_crop (default 224x224)
         if self.preprocessing.center_crop:
             crop_h, crop_w = self.preprocessing.center_crop
-            w, h = img.size
-            left = (w - crop_w) // 2
-            top = (h - crop_h) // 2
-            img = img.crop((left, top, left + crop_w, top + crop_h))
-        
+        else:
+            crop_h, crop_w = 224, 224
+
+        # Resize with aspect ratio preservation (MLCommons reference)
+        # Scale so that after center crop we get the target size
+        # MLCommons uses scale=87.5%, so target_size / 0.875 ≈ 256 for 224
+        w, h = img.size
+        scale = 87.5
+        new_height = int(100.0 * crop_h / scale)  # 256 for crop_h=224
+        new_width = int(100.0 * crop_w / scale)   # 256 for crop_w=224
+
+        if h > w:
+            # Width is smaller, scale based on width
+            new_w = new_width
+            new_h = int(new_height * h / w)
+        else:
+            # Height is smaller, scale based on height
+            new_h = new_height
+            new_w = int(new_width * w / h)
+
+        # Resize preserving aspect ratio
+        # Use BOX for downscaling - closest to cv2.INTER_AREA used by MLCommons
+        img = img.resize((new_w, new_h), Image.Resampling.BOX)
+
+        # Center crop
+        w, h = img.size
+        left = (w - crop_w) // 2
+        top = (h - crop_h) // 2
+        img = img.crop((left, top, left + crop_w, top + crop_h))
+
         # Convert to numpy
         img_array = np.array(img, dtype=np.float32)
-        
+
         # Channel order (already RGB from PIL)
         if self.preprocessing.channel_order == "BGR":
             img_array = img_array[:, :, ::-1]
-        
+
         # Apply mean subtraction
         mean = np.array(self.preprocessing.mean, dtype=np.float32)
         img_array = img_array - mean
-        
+
         # Apply std normalization
         std = np.array(self.preprocessing.std, dtype=np.float32)
         img_array = img_array / std
-        
-        # Convert to NCHW format
-        img_array = np.transpose(img_array, (2, 0, 1))
-        
-        # Add batch dimension
-        img_array = np.expand_dims(img_array, axis=0)
-        
+
+        # Convert to target layout
+        output_layout = getattr(self.preprocessing, 'output_layout', 'NCHW')
+        if output_layout == "NCHW":
+            # HWC -> CHW
+            img_array = np.transpose(img_array, (2, 0, 1))
+            # Add batch dimension -> NCHW
+            img_array = np.expand_dims(img_array, axis=0)
+        else:
+            # Keep HWC, add batch dimension -> NHWC
+            img_array = np.expand_dims(img_array, axis=0)
+
         return img_array
     
     def get_sample(self, index: int) -> Tuple[np.ndarray, int]:
@@ -229,9 +252,12 @@ class ImageNetDataset(BaseDataset):
         """
         Postprocess inference results to get predicted classes.
 
+        MLPerf ResNet50 model outputs 1001 classes (index 0 = background, 1-1000 = ImageNet).
+        MLCommons reference uses offset=-1 to convert to 0-999 for val_map.txt comparison.
+
         Args:
             results: Raw inference output - can be:
-                - Pre-computed argmax indices (shape [N] or [N,1], dtype int64)
+                - Pre-computed argmax indices (shape [N] or [N,1], dtype int64/int32/float with single value)
                 - Logits/probabilities (shape [N, num_classes], dtype float32)
             indices: Sample indices (unused here)
 
@@ -243,31 +269,33 @@ class ImageNetDataset(BaseDataset):
         # Handle different output formats
         if results.dtype in (np.int64, np.int32):
             # Model already computed argmax (e.g., ArgMax:0 output)
-            # Results contain class indices directly
+            # MLPerf ResNet50 ONNX uses 1-based indexing (1-1000 for ImageNet)
             results = results.flatten()
             for idx in results:
-                # MLPerf ResNet50 ONNX model uses 1001 classes (0=background, 1-1000=ImageNet)
-                # Subtract 1 to convert to 0-999 range for val_map.txt labels
-                pred = int(idx) - 1
-                # Clamp to valid range (in case of background prediction)
+                pred = int(idx) - 1  # MLCommons offset=-1
                 pred = max(0, min(999, pred))
                 predictions.append(pred)
         else:
-            # Model outputs logits/probabilities, need to compute argmax
+            # Float output
             if len(results.shape) == 1:
                 results = results.reshape(1, -1)
 
             num_classes = results.shape[1]
 
-            for i in range(results.shape[0]):
-                pred = int(np.argmax(results[i]))
-
-                # If model has 1001 classes (with background), subtract 1
-                if num_classes == 1001:
-                    pred = pred - 1
+            # Single value per sample = already argmax'd class index (stored as float)
+            if num_classes == 1:
+                for i in range(results.shape[0]):
+                    # This is the class index stored as float (from int64 ArgMax)
+                    pred = int(results[i, 0]) - 1  # MLCommons offset=-1
                     pred = max(0, min(999, pred))
-
-                predictions.append(pred)
+                    predictions.append(pred)
+            else:
+                # Full logits/probabilities (1001 classes), compute argmax
+                # Then apply MLCommons offset=-1
+                for i in range(results.shape[0]):
+                    pred = int(np.argmax(results[i])) - 1  # MLCommons offset=-1
+                    pred = max(0, min(999, pred))
+                    predictions.append(pred)
 
         return predictions
     
@@ -351,7 +379,7 @@ class ImageNetQSL(QuerySampleLibrary):
         if not self._dataset.is_loaded:
             self._dataset.load()
         
-        logger.info(f"Loading {len(sample_list)} query samples...")
+        logger.debug(f"Loading {len(sample_list)} query samples...")
         
         for sample_id in sample_list:
             if sample_id not in self._loaded_samples:

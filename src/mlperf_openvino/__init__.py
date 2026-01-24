@@ -2,14 +2,19 @@
 MLPerf v5.1 OpenVINO Benchmark
 ==============================
 
-A benchmark tool for measuring CPU inference performance using OpenVINO backend,
+A benchmark tool for measuring inference performance using OpenVINO backend,
 compatible with MLPerf Inference v5.1 specifications.
+
+Supported Devices:
+- CPU: Intel processors with optimized threading
+- X: Neural network accelerator with multi-die support
 
 Supported Models:
 - ResNet50 (Image Classification)
 - BERT-Large (Question Answering)
 - RetinaNet (Object Detection)
 - Whisper Large v3 (Speech Recognition)
+- SDXL (Text-to-Image Generation)
 
 Supported Scenarios:
 - Offline: Maximum throughput

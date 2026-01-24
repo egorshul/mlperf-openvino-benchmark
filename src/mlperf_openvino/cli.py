@@ -74,27 +74,48 @@ def get_default_config(model: str) -> BenchmarkConfig:
               default='./results', help='Output directory for results')
 @click.option('--config', '-c', type=click.Path(exists=True),
               help='Path to configuration file')
+@click.option('--device', '-d', type=str, default='CPU',
+              help='Device: CPU (default), NPU (all dies), NPU.0 (specific die)')
+@click.option('--properties', '-p', type=str, default='',
+              help='Device-specific properties (KEY=VALUE,KEY2=VALUE2,...)')
 @click.option('--num-threads', type=int, default=0,
               help='Number of threads (0 = auto)')
 @click.option('--num-streams', type=str, default='AUTO',
               help='Number of inference streams')
 @click.option('--batch-size', '-b', type=int, default=1,
               help='Inference batch size')
+@click.option('--nchw', is_flag=True,
+              help='Use NCHW input layout (default is NHWC for ResNet50)')
 @click.option('--performance-hint', type=click.Choice(['THROUGHPUT', 'LATENCY', 'AUTO']),
               default='AUTO', help='Performance hint (AUTO selects based on scenario)')
 @click.option('--duration', type=int, default=60000,
               help='Minimum test duration in ms')
 @click.option('--target-qps', type=float, default=0,
               help='Target QPS (queries per second)')
+@click.option('--target-latency-ns', type=int, default=0,
+              help='Target latency in nanoseconds (Server mode, 0=use default 15ms)')
 @click.option('--count', type=int, default=0,
               help='Number of samples to use (0 = all)')
 @click.option('--warmup', type=int, default=10,
               help='Number of warmup iterations')
+@click.option('--nireq-multiplier', type=int, default=2,
+              help='In-flight request multiplier (default: 2 for Server, lower = less latency)')
+@click.option('--auto-batch-timeout-ms', type=int, default=0,
+              help='AUTO_BATCH timeout in ms (0=disabled, 1=1ms). Enables OpenVINO auto-batching.')
+@click.option('--optimal-batch-size', type=int, default=0,
+              help='Optimal batch size for AUTO_BATCH (0=auto, 4=recommended for NPU)')
+@click.option('--explicit-batching', is_flag=True, default=False,
+              help='Enable Intel-style explicit batching for Server mode (recommended for NPU)')
+@click.option('--batch-timeout-us', type=int, default=500,
+              help='Explicit batching timeout in microseconds (default 500us)')
 @click.option('--verbose', '-v', is_flag=True, help='Enable verbose output')
 def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         data_path: Optional[str], output_dir: str, config: Optional[str],
-        num_threads: int, num_streams: str, batch_size: int, performance_hint: str,
-        duration: int, target_qps: float, count: int, warmup: int, verbose: bool):
+        device: str, properties: str, num_threads: int, num_streams: str,
+        batch_size: int, nchw: bool, performance_hint: str, duration: int, target_qps: float,
+        target_latency_ns: int, count: int, warmup: int, nireq_multiplier: int,
+        auto_batch_timeout_ms: int, optimal_batch_size: int,
+        explicit_batching: bool, batch_timeout_us: int, verbose: bool):
     """
     Run MLPerf benchmark.
 
@@ -121,40 +142,80 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
 
     # Load or create configuration based on model
     if config:
-        click.echo(f"Loading configuration from: {config}")
         benchmark_config = BenchmarkConfig.from_yaml(config, model)
     else:
-        click.echo(f"Using default configuration for {model}")
         benchmark_config = get_default_config(model)
 
     # Override with CLI options
     benchmark_config.scenario = Scenario(scenario)
     benchmark_config.results_dir = output_dir
 
+    # Set device
+    benchmark_config.openvino.device = device.upper() if device else "CPU"
+
+    # Parse and set device properties
+    if properties:
+        from .backends.device_discovery import parse_device_properties, validate_device_properties
+        parsed_props = parse_device_properties(properties)
+        benchmark_config.openvino.device_properties = parsed_props
+
+        # Validate properties (silently log warnings)
+        is_valid, warnings = validate_device_properties(parsed_props, device)
+        for warning in warnings:
+            logger.debug(warning)
+
+    # Add AUTO_BATCH settings if specified
+    if auto_batch_timeout_ms > 0 or optimal_batch_size > 0:
+        if not benchmark_config.openvino.device_properties:
+            benchmark_config.openvino.device_properties = {}
+        if auto_batch_timeout_ms > 0:
+            benchmark_config.openvino.device_properties['AUTO_BATCH_TIMEOUT'] = str(auto_batch_timeout_ms)
+        if optimal_batch_size > 0:
+            benchmark_config.openvino.device_properties['OPTIMAL_BATCH_SIZE'] = str(optimal_batch_size)
+        click.echo(f"AUTO_BATCH: timeout={auto_batch_timeout_ms}ms, optimal_batch={optimal_batch_size}")
+
+    # Validate accelerator device availability if specified
+    if benchmark_config.openvino.is_accelerator_device():
+        _validate_accelerator_device(benchmark_config.openvino.device)
+
     if num_threads > 0:
         benchmark_config.openvino.num_threads = num_threads
 
     # Auto-select optimal settings based on scenario
+    # NOTE: AUTO hints are for CPU only, skip for accelerators
+    is_accelerator = benchmark_config.openvino.is_accelerator_device()
+
     if performance_hint == 'AUTO':
-        if scenario == 'Offline':
-            # Offline: optimize for maximum THROUGHPUT with batching
+        if is_accelerator:
+            # Accelerators: don't set performance hint, don't auto-batch
+            actual_hint = None  # Will not be applied
+            # Keep batch_size as user specified (default=1)
+        elif scenario == 'Offline':
+            # CPU Offline: optimize for maximum THROUGHPUT with batching
             actual_hint = 'THROUGHPUT'
             if batch_size == 1:  # User didn't specify batch size
-                click.echo("AUTO: Using optimized settings for Offline (THROUGHPUT, batch=32)")
                 batch_size = 32  # Larger batch for throughput
         else:
-            # Server: THROUGHPUT hint for parallelism, batch=1 for low latency
-            # LATENCY hint uses only 1 stream which kills throughput
-            # THROUGHPUT with batch=1 gives good balance of latency and throughput
+            # CPU Server: THROUGHPUT hint for parallelism, batch=1 for low latency
             actual_hint = 'THROUGHPUT'
-            click.echo("AUTO: Using optimized settings for Server (THROUGHPUT, batch=1)")
             # Keep batch_size=1 for Server (each query = 1 sample)
     else:
         actual_hint = performance_hint
 
     benchmark_config.openvino.num_streams = num_streams
     benchmark_config.openvino.batch_size = batch_size
-    benchmark_config.openvino.performance_hint = actual_hint
+
+    # Set input layout (NHWC is default for ResNet50, --nchw overrides)
+    if hasattr(benchmark_config.model, 'preprocessing') and benchmark_config.model.preprocessing:
+        if nchw:
+            benchmark_config.model.preprocessing.output_layout = 'NCHW'
+        else:
+            # Default to NHWC for ResNet50 (optimized preprocessing)
+            benchmark_config.model.preprocessing.output_layout = 'NHWC'
+
+    # Only set performance_hint for CPU devices
+    if not is_accelerator and actual_hint:
+        benchmark_config.openvino.performance_hint = actual_hint
 
     if model_path:
         benchmark_config.model.model_path = model_path
@@ -170,14 +231,27 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
     scenario_config.min_duration_ms = duration
     if target_qps > 0:
         scenario_config.target_qps = target_qps
-        click.echo(f"Server mode: target_qps={target_qps}")
     elif scenario == 'Server':
-        # For Server mode, set high target_qps if not specified
-        # This allows LoadGen to send queries as fast as the system can handle
-        scenario_config.target_qps = 50000.0  # Very high to not be the bottleneck
-        click.echo(f"Server mode: target_qps={scenario_config.target_qps} (use --target-qps to set)")
-        click.echo("NOTE: Server mode measures latency-bounded throughput.")
-        click.echo("      For maximum throughput, use --scenario Offline")
+        # For Server mode, set high target_qps to not limit throughput
+        # LoadGen will measure actual achieved QPS
+        scenario_config.target_qps = 100000.0
+
+    # Server mode settings
+    if scenario == 'Server':
+        scenario_config.nireq_multiplier = nireq_multiplier
+        # Target latency (Open Division allows custom values)
+        if target_latency_ns > 0:
+            scenario_config.target_latency_ns = target_latency_ns
+            click.echo(f"Custom target latency: {target_latency_ns / 1e6:.1f}ms (Open Division)")
+
+        # Explicit batching (Intel-style) for Server mode
+        if explicit_batching:
+            scenario_config.explicit_batching = True
+            scenario_config.batch_timeout_us = batch_timeout_us
+            # Use batch_size from CLI for explicit batching
+            explicit_batch = batch_size if batch_size > 1 else 4
+            scenario_config.explicit_batch_size = explicit_batch
+            click.echo(f"Explicit batching: batch_size={explicit_batch}, timeout={batch_timeout_us}us")
 
     # Validate configuration
     if not benchmark_config.model.model_path:
@@ -193,12 +267,14 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
     # Print configuration summary
     click.echo(f"Model: {benchmark_config.model.name}")
     click.echo(f"Task: {benchmark_config.model.task}")
-    click.echo(f"Scenario: {benchmark_config.scenario.value}")
+    click.echo(f"Mode: {mode}")
+    if mode == 'performance':
+        click.echo(f"Scenario: {benchmark_config.scenario.value}")
     click.echo(f"Device: {benchmark_config.openvino.device}")
-    click.echo(f"Threads: {benchmark_config.openvino.num_threads or 'auto'}")
-    click.echo(f"Streams: {benchmark_config.openvino.num_streams}")
     click.echo(f"Batch size: {benchmark_config.openvino.batch_size}")
-    click.echo(f"Performance hint: {benchmark_config.openvino.performance_hint}")
+    if hasattr(benchmark_config.model, 'preprocessing') and benchmark_config.model.preprocessing:
+        input_layout = getattr(benchmark_config.model.preprocessing, 'output_layout', 'NCHW')
+        click.echo(f"Input layout: {input_layout}")
     click.echo("")
 
     # Create runner
@@ -241,6 +317,30 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
     # Save results
     results_path = runner.save_results()
     click.echo(f"Results saved to: {results_path}")
+
+
+def _validate_accelerator_device(device: str) -> None:
+    """Validate accelerator device availability (silent unless error)."""
+    try:
+        from openvino import Core
+        from .backends.device_discovery import validate_accelerator_device
+
+        core = Core()
+
+        # Validate device
+        is_valid, error = validate_accelerator_device(core, device)
+        if not is_valid:
+            click.echo(f"Error: {error}")
+            click.echo(f"Available devices: {core.available_devices}")
+            sys.exit(1)
+
+    except ImportError as e:
+        logger.warning(f"Could not validate accelerator device: {e}")
+    except Exception as e:
+        logger.error(f"Error validating accelerator device: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
 
 def _print_dataset_help(model: str) -> None:

@@ -42,6 +42,7 @@ class OpenVINOBackend(BaseBackend):
         self,
         model_path: str,
         config: Optional[OpenVINOConfig] = None,
+        use_nhwc_input: bool = False,
         **kwargs
     ):
         """
@@ -50,6 +51,7 @@ class OpenVINOBackend(BaseBackend):
         Args:
             model_path: Path to ONNX or OpenVINO IR model
             config: OpenVINO configuration
+            use_nhwc_input: If True, expects NHWC input (converted to NCHW internally)
             **kwargs: Additional options
         """
         if not OPENVINO_AVAILABLE:
@@ -61,6 +63,7 @@ class OpenVINOBackend(BaseBackend):
         super().__init__(model_path, **kwargs)
 
         self.config = config or OpenVINOConfig()
+        self.use_nhwc_input = use_nhwc_input
         self._core: Optional[Core] = None
         self._model: Optional[ov.Model] = None
         self._compiled_model: Optional[CompiledModel] = None
@@ -68,9 +71,9 @@ class OpenVINOBackend(BaseBackend):
 
         # For async inference
         self._infer_requests: List[InferRequest] = []
-        self._optimal_nireq: int = 1  # Optimal number of inference requests
+        self._optimal_nireq: int = 1
 
-        # For thread-safe inference - queue of available requests
+        # For thread-safe inference
         self._request_queue: Optional[queue.Queue] = None
 
         # Cache input/output info
@@ -87,6 +90,15 @@ class OpenVINOBackend(BaseBackend):
 
         logger.info(f"Loading model from {self.model_path}")
 
+        # Validate device - bare accelerator prefix without die number requires MultiDeviceBackend
+        if self.config.is_multi_device():
+            device_prefix = self.config.get_device_prefix()
+            raise ValueError(
+                f"Device '{device_prefix}' (all dies) requires MultiDeviceBackend. "
+                f"Use a specific die (e.g., '{device_prefix}.0') for OpenVINOBackend, "
+                f"or use '--device {device_prefix}' which automatically uses MultiDeviceBackend."
+            )
+
         # Initialize OpenVINO Core
         self._core = Core()
 
@@ -99,20 +111,23 @@ class OpenVINOBackend(BaseBackend):
         # Load the model
         model_path = Path(self.model_path)
 
-        if model_path.suffix.lower() == ".onnx":
-            logger.info("Loading ONNX model and converting to OpenVINO IR...")
-            self._model = self._core.read_model(str(model_path))
-        elif model_path.suffix.lower() == ".xml":
-            logger.info("Loading OpenVINO IR model...")
+        if model_path.suffix.lower() in (".onnx", ".xml"):
             self._model = self._core.read_model(str(model_path))
         else:
             raise ValueError(f"Unsupported model format: {model_path.suffix}")
 
-        # Get model info before compilation
+        # Reshape model for the configured batch size
+        self._reshape_model_for_batch(self.config.batch_size)
+
+        # Apply NHWC input layout if requested
+        if self.use_nhwc_input:
+            self._apply_nhwc_input_layout()
+
+        # Get model info before compilation (after reshape)
         self._extract_model_info()
 
         # Compile the model with optimizations
-        logger.info(f"Compiling model for device: {self.config.device}")
+        logger.debug(f"Compiling model for device: {self.config.device}")
 
         # Build properties
         properties = self._build_compile_properties()
@@ -123,55 +138,130 @@ class OpenVINOBackend(BaseBackend):
             properties
         )
 
-        # Get optimal number of inference requests - KEY for performance!
+        # Get optimal number of inference requests
         try:
             self._optimal_nireq = self._compiled_model.get_property(
                 ov.properties.optimal_number_of_infer_requests()
             )
-            logger.info(f"Optimal number of inference requests: {self._optimal_nireq}")
         except Exception:
-            self._optimal_nireq = 4  # Fallback
-            logger.warning(f"Could not get optimal nireq, using {self._optimal_nireq}")
+            self._optimal_nireq = 4
 
         # Create inference requests
         self._create_infer_requests()
 
         self._loaded = True
-        logger.info("Model loaded and compiled successfully")
     
     def _build_compile_properties(self) -> Dict[str, Any]:
         """Build compilation properties from config."""
         properties = {}
-        
+
+        # Use device-specific property builders from config
+        if self.config.is_accelerator_device():
+            return self._build_accelerator_compile_properties()
+        else:
+            return self._build_cpu_compile_properties()
+
+    def _build_cpu_compile_properties(self) -> Dict[str, Any]:
+        """Build CPU-specific compilation properties."""
+        properties = {}
+
         # Performance hint
         if self.config.performance_hint:
-            hint_enum = getattr(ov.properties.hint.PerformanceMode, 
+            hint_enum = getattr(ov.properties.hint.PerformanceMode,
                               self.config.performance_hint, None)
             if hint_enum:
                 properties[ov.properties.hint.performance_mode()] = hint_enum
-        
+
         # Number of streams
         if self.config.num_streams != "AUTO":
             try:
                 properties[ov.properties.hint.num_requests()] = int(self.config.num_streams)
             except ValueError:
                 pass  # Use AUTO
-        
+
         # Number of threads
         if self.config.num_threads > 0:
             properties[ov.properties.inference_num_threads()] = self.config.num_threads
-        
+
         # CPU-specific options
-        if self.config.device.upper() == "CPU":
-            if self.config.bind_thread:
-                properties[ov.properties.hint.enable_cpu_pinning()] = True
-        
+        if self.config.bind_thread:
+            properties[ov.properties.hint.enable_cpu_pinning()] = True
+
         # Enable profiling if requested
         if self.config.enable_profiling:
             properties[ov.properties.enable_profiling()] = True
-        
+
         return properties
-    
+
+    def _build_accelerator_compile_properties(self) -> Dict[str, Any]:
+        """Build accelerator-specific compilation properties.
+
+        For accelerators, only use properties explicitly passed via -p/--properties.
+        Default CPU hints like PERFORMANCE_HINT are not applied automatically.
+        """
+        properties = {}
+
+        # Enable profiling if requested
+        if self.config.enable_profiling:
+            properties[ov.properties.enable_profiling()] = True
+
+        # Add ONLY user-specified device properties from -p/--properties
+        # Don't add default hints - accelerators may not support them
+        if hasattr(self.config, 'device_properties') and self.config.device_properties:
+            for key, value in self.config.device_properties.items():
+                # Try to convert types
+                try:
+                    if isinstance(value, str):
+                        if value.isdigit():
+                            properties[key] = int(value)
+                        elif value.upper() in ('TRUE', 'FALSE'):
+                            properties[key] = value.upper() == 'TRUE'
+                        else:
+                            properties[key] = value
+                    else:
+                        properties[key] = value
+                except (AttributeError, ValueError):
+                    properties[key] = value
+
+        return properties
+
+    def _reshape_model_for_batch(self, batch_size: int) -> None:
+        """Reshape model inputs to the specified batch size."""
+        new_shapes = {}
+        for input_node in self._model.inputs:
+            name = input_node.any_name
+            current_shape = input_node.partial_shape
+
+            new_dims = []
+            for i, dim in enumerate(current_shape):
+                if i == 0:
+                    new_dims.append(batch_size)
+                else:
+                    if dim.is_static:
+                        new_dims.append(dim.get_length())
+                    else:
+                        new_dims.append(-1)
+
+            new_shapes[name] = new_dims
+
+        # Apply reshape
+        self._model.reshape(new_shapes)
+        logger.debug(f"Model reshaped for batch_size={batch_size}")
+
+    def _apply_nhwc_input_layout(self) -> None:
+        """Apply NHWC input layout using PrePostProcessor.
+
+        This allows the model to accept NHWC (height, width, channels) input
+        while the internal model uses NCHW layout.
+        """
+        from openvino.preprocess import PrePostProcessor
+
+        ppp = PrePostProcessor(self._model)
+        ppp.input().tensor().set_layout("NHWC")
+        ppp.input().model().set_layout("NCHW")
+        self._model = ppp.build()
+        logger.debug("Applied NHWC input layout via PrePostProcessor")
+
     def _extract_model_info(self) -> None:
         """Extract input/output information from the model."""
         # Get input info
@@ -207,10 +297,6 @@ class OpenVINOBackend(BaseBackend):
                 shape = tuple(d if d > 0 else 1 for d in shape)
 
             self._output_shapes[name] = shape
-
-        logger.info(f"Model inputs: {self._input_names}")
-        logger.info(f"Model input dtypes: {self._input_dtypes}")
-        logger.info(f"Model outputs: {self._output_names}")
     
     def _create_infer_requests(self) -> None:
         """Create inference requests for async execution."""
@@ -222,15 +308,11 @@ class OpenVINOBackend(BaseBackend):
             request = self._compiled_model.create_infer_request()
             self._infer_requests.append(request)
 
-        # Set default request for sync inference
         self._infer_request = self._infer_requests[0]
 
-        # Create queue for thread-safe inference
         self._request_queue = queue.Queue()
         for req in self._infer_requests:
             self._request_queue.put(req)
-
-        logger.info(f"Created {nireq} inference requests")
 
     def add_infer_requests(self, count: int) -> None:
         """Add more inference requests for higher parallelism (e.g., Server mode)."""
@@ -241,8 +323,6 @@ class OpenVINOBackend(BaseBackend):
             request = self._compiled_model.create_infer_request()
             self._infer_requests.append(request)
             self._request_queue.put(request)
-
-        logger.info(f"Added {count} inference requests, total: {len(self._infer_requests)}")
     
     def _convert_to_model_dtype(self, name: str, data: np.ndarray) -> np.ndarray:
         """Convert input data to the dtype expected by the model."""
@@ -457,7 +537,6 @@ class OpenVINOBackend(BaseBackend):
         if callback:
             async_queue.set_callback(callback)
 
-        logger.info(f"Created AsyncInferQueue with {num_jobs} parallel jobs (optimal_nireq={self._optimal_nireq})")
         return async_queue
 
     def start_async_queue(

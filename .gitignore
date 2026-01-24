@@ -110,6 +110,10 @@ cache/
 mlperf_log_*
 audit.config
 
+# C++ build artifacts (auto-downloaded)
+src/mlperf_openvino/cpp/thirdparty/
+src/mlperf_openvino/cpp/build/
+
 # Temporary files
 *.tmp
 *.temp

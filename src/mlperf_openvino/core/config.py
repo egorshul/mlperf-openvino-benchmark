@@ -43,6 +43,7 @@ class PreprocessingConfig:
     mean: Tuple[float, float, float] = (123.68, 116.78, 103.94)
     std: Tuple[float, float, float] = (1.0, 1.0, 1.0)
     channel_order: str = "RGB"
+    output_layout: str = "NCHW"  # "NCHW" or "NHWC"
 
 
 @dataclass
@@ -59,22 +60,87 @@ class OpenVINOConfig:
     bind_thread: bool = True
     threads_per_stream: int = 0
     enable_hyper_threading: bool = True
-    
+    # Device-specific properties for accelerator (passed via -p/--properties CLI)
+    device_properties: Dict[str, str] = field(default_factory=dict)
+
+    def get_device_prefix(self) -> str:
+        """Get the device prefix (e.g., 'NPU' from 'NPU.0' or 'NPU')."""
+        device = self.device.upper()
+        if "." in device:
+            return device.split(".")[0]
+        return device
+
+    def is_accelerator_device(self) -> bool:
+        """Check if the configured device is a multi-die accelerator (not CPU/GPU)."""
+        device = self.device.upper()
+        # CPU and GPU are standard devices, others may be accelerators
+        return device not in ("CPU", "GPU", "AUTO", "MULTI", "HETERO")
+
+
+    def is_multi_device(self) -> bool:
+        """Check if using multiple dies (device without die number like 'NPU' not 'NPU.0')."""
+        device = self.device.upper()
+        # Multi-device if it's an accelerator and doesn't have a die suffix
+        if not self.is_accelerator_device():
+            return False
+        return "." not in device
+
+    def is_specific_die(self) -> bool:
+        """Check if a specific die is selected (e.g., 'NPU.0')."""
+        device = self.device.upper()
+        if not self.is_accelerator_device():
+            return False
+        if "." not in device:
+            return False
+        # Check if suffix is a number
+        suffix = device.split(".", 1)[1]
+        return suffix.isdigit()
+
     def to_properties(self) -> Dict[str, Any]:
         """Convert to OpenVINO properties dictionary."""
+        if self.is_accelerator_device():
+            return self.to_accelerator_properties()
+        else:
+            return self.to_cpu_properties()
+
+    def to_cpu_properties(self) -> Dict[str, Any]:
+        """Get CPU-specific compilation properties."""
         properties = {
             "NUM_STREAMS": self.num_streams if self.num_streams != "AUTO" else "AUTO",
             "INFERENCE_NUM_THREADS": self.num_threads if self.num_threads > 0 else None,
             "CACHE_DIR": self.cache_dir,
             "PERFORMANCE_HINT": self.performance_hint,
         }
-        
+
         # CPU-specific properties
-        if self.device.upper() == "CPU":
-            properties["AFFINITY"] = "CORE" if self.bind_thread else "NONE"
-            if self.threads_per_stream > 0:
-                properties["INFERENCE_THREADS_PER_STREAM"] = self.threads_per_stream
-        
+        properties["AFFINITY"] = "CORE" if self.bind_thread else "NONE"
+        if self.threads_per_stream > 0:
+            properties["INFERENCE_THREADS_PER_STREAM"] = self.threads_per_stream
+
+        # Remove None values
+        return {k: v for k, v in properties.items() if v is not None}
+
+    def to_accelerator_properties(self) -> Dict[str, Any]:
+        """Get accelerator-specific compilation properties."""
+        properties = {
+            "NUM_STREAMS": self.num_streams if self.num_streams != "AUTO" else "AUTO",
+            "CACHE_DIR": self.cache_dir,
+            "PERFORMANCE_HINT": self.performance_hint,
+        }
+
+        # Add user-specified device properties
+        for key, value in self.device_properties.items():
+            # Try to convert types
+            try:
+                if value.isdigit():
+                    properties[key] = int(value)
+                elif value.upper() in ('TRUE', 'FALSE'):
+                    properties[key] = value.upper() == 'TRUE'
+                else:
+                    properties[key] = value
+            except (AttributeError, ValueError):
+                properties[key] = value
+
         # Remove None values
         return {k: v for k, v in properties.items() if v is not None}
 
@@ -91,6 +157,13 @@ class ScenarioConfig:
     qsl_rng_seed: int = 13281865557512327830
     sample_index_rng_seed: int = 198141574272810017
     schedule_rng_seed: int = 7575108116881280410
+    # In-flight request multiplier: controls queue depth
+    # Lower = less latency (for Server mode), Higher = more throughput (for Offline mode)
+    nireq_multiplier: int = 2
+    # Explicit batching (Intel-style) for Server mode
+    explicit_batching: bool = False
+    explicit_batch_size: int = 8
+    batch_timeout_us: int = 2000
 
 
 @dataclass
@@ -198,11 +271,14 @@ class BenchmarkConfig:
             min_duration_ms=server_data.get("min_duration_ms", 60000),
             min_query_count=server_data.get("min_query_count", 24576),
             target_latency_ns=server_data.get("target_latency_ns", 15000000),
-            target_qps=server_data.get("target_qps", 10000.0),  # High default for max throughput
-            # MLPerf seeds for reproducibility
+            target_qps=server_data.get("target_qps", 10000.0),
             qsl_rng_seed=server_data.get("qsl_rng_seed", 13281865557512327830),
             sample_index_rng_seed=server_data.get("sample_index_rng_seed", 198141574272810017),
             schedule_rng_seed=server_data.get("schedule_rng_seed", 7575108116881280410),
+            nireq_multiplier=server_data.get("nireq_multiplier", 6),
+            explicit_batching=server_data.get("explicit_batching", True),
+            explicit_batch_size=server_data.get("explicit_batch_size", 8),
+            batch_timeout_us=server_data.get("batch_timeout_us", 2000),
         )
         
         sources = model_data.get("sources", {})
@@ -270,7 +346,7 @@ class BenchmarkConfig:
     
     @classmethod
     def default_resnet50(cls) -> "BenchmarkConfig":
-        """Create default ResNet50 configuration."""
+        """Create default ResNet50 configuration with NPU-optimized Server mode."""
         return cls(
             model=ModelConfig(
                 name="ResNet50-v1.5",
@@ -286,14 +362,18 @@ class BenchmarkConfig:
                 onnx_url="https://zenodo.org/record/4735647/files/resnet50_v1.onnx",
                 offline=ScenarioConfig(
                     min_duration_ms=60000,
-                    min_query_count=24576,  # MLPerf official
+                    min_query_count=24576,
                     samples_per_query=1,
                 ),
                 server=ScenarioConfig(
                     min_duration_ms=60000,
-                    min_query_count=24576,  # Server uses min_duration primarily
-                    target_latency_ns=15000000,  # 15ms
-                    target_qps=10000.0,
+                    min_query_count=24576,
+                    target_latency_ns=15000000,  # 15ms (Closed Division)
+                    target_qps=5750.0,  # Optimized for NPU
+                    nireq_multiplier=6,
+                    explicit_batching=True,
+                    explicit_batch_size=8,
+                    batch_timeout_us=1800,
                 ),
             ),
             dataset=DatasetConfig(

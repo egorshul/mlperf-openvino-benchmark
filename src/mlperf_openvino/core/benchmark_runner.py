@@ -69,44 +69,26 @@ class BenchmarkRunner:
 
     def setup(self) -> None:
         """Set up benchmark components based on model type."""
-        logger.info("Setting up benchmark...")
-
-        # Create output directories
         Path(self.config.results_dir).mkdir(parents=True, exist_ok=True)
         Path(self.config.logs_dir).mkdir(parents=True, exist_ok=True)
 
-        # Initialize model-specific components
         model_type = self.config.model.model_type
 
-        # Check model type (handle both enum and string comparison for robustness)
         is_sdxl = (model_type == ModelType.SDXL or
                    (hasattr(model_type, 'value') and model_type.value == 'sdxl'))
         is_whisper = (model_type == ModelType.WHISPER or
                       (hasattr(model_type, 'value') and model_type.value == 'whisper'))
 
-        # Initialize backend (skip for Whisper/SDXL - they use their own pipelines)
         if is_sdxl:
-            logger.info(f"SDXL model directory: {self.config.model.model_path}")
-            self.backend = None  # SDXL uses its own pipeline (OVStableDiffusionXLPipeline)
+            self.backend = None
         elif is_whisper:
             model_path = Path(self.config.model.model_path) if self.config.model.model_path else None
             if model_path and model_path.is_dir():
-                logger.info(f"Whisper model directory: {self.config.model.model_path}")
-                self.backend = None  # Will be set up in _setup_whisper
+                self.backend = None
             else:
-                logger.info(f"Loading Whisper model from {self.config.model.model_path}")
-                self.backend = OpenVINOBackend(
-                    model_path=self.config.model.model_path,
-                    config=self.config.openvino,
-                )
-                self.backend.load()
+                self.backend = self._create_backend()
         else:
-            logger.info(f"Loading model from {self.config.model.model_path}")
-            self.backend = OpenVINOBackend(
-                model_path=self.config.model.model_path,
-                config=self.config.openvino,
-            )
-            self.backend.load()
+            self.backend = self._create_backend()
 
         if is_sdxl:
             self._setup_sdxl()
@@ -121,14 +103,116 @@ class BenchmarkRunner:
         else:
             raise ValueError(f"Unsupported model type: {model_type}")
 
-        logger.info("Setup complete")
+    def _create_backend(self) -> Union["OpenVINOBackend", "MultiDeviceBackend"]:
+        """Create the appropriate backend based on device configuration."""
+        from ..backends.multi_device_backend import MultiDeviceBackend
+
+        device = self.config.openvino.device
+
+        # Determine if NHWC input is needed
+        use_nhwc = False
+        if hasattr(self.config.model, 'preprocessing') and self.config.model.preprocessing:
+            use_nhwc = getattr(self.config.model.preprocessing, 'output_layout', 'NCHW') == 'NHWC'
+
+        # For accelerator devices, always use MultiDeviceBackend
+        # - "NPU" -> all dies (target_devices=None)
+        # - "NPU.0" -> specific die (target_devices=[device])
+        if self.config.openvino.is_accelerator_device():
+            if self.config.openvino.is_specific_die():
+                target_devices = [device]
+            else:
+                target_devices = None
+            backend = MultiDeviceBackend(
+                model_path=self.config.model.model_path,
+                config=self.config.openvino,
+                target_devices=target_devices,
+            )
+            backend.load()
+            return backend
+
+        # Default: CPU or other device
+        backend = OpenVINOBackend(
+            model_path=self.config.model.model_path,
+            config=self.config.openvino,
+            use_nhwc_input=use_nhwc,
+        )
+        backend.load()
+        return backend
+
+    def _log_available_devices(self) -> None:
+        """Log available OpenVINO devices (debug level only)."""
+        try:
+            from openvino import Core
+            core = Core()
+            logger.debug(f"Available devices: {core.available_devices}")
+        except Exception:
+            pass
+
+    def _create_sut_for_backend(
+        self,
+        qsl: QuerySampleLibrary,
+    ) -> Any:
+        """Create appropriate SUT based on backend type.
+
+        For multi-die accelerators, prefer C++ SUT for maximum performance.
+        Falls back to Python SUT if C++ is not available.
+        """
+        from ..backends.multi_device_backend import MultiDeviceBackend
+        from .sut import OpenVINOSUT
+
+        model_type = self.config.model.model_type
+
+        if isinstance(self.backend, MultiDeviceBackend):
+            return self._create_resnet_multi_die_sut(qsl)
+        else:
+            logger.info(f"Using OpenVINOSUT on {self.config.openvino.device}")
+            return OpenVINOSUT(
+                config=self.config,
+                backend=self.backend,
+                qsl=qsl,
+                scenario=self.config.scenario,
+            )
+
+    def _create_resnet_multi_die_sut(self, qsl: QuerySampleLibrary) -> Any:
+        """Create ResNet multi-die SUT."""
+        # Try C++ multi-die SUT first (much faster)
+        try:
+            from .resnet_multi_die_sut import (
+                ResNetMultiDieCppSUTWrapper,
+                is_resnet_multi_die_cpp_available
+            )
+
+            if is_resnet_multi_die_cpp_available():
+                logger.info(f"Using ResNet C++ multi-die SUT ({self.backend.num_dies} dies)")
+                sut = ResNetMultiDieCppSUTWrapper(
+                    config=self.config,
+                    qsl=qsl,
+                    scenario=self.config.scenario,
+                )
+                # Pass accuracy mode flag to optimize for performance
+                is_accuracy_mode = self.config.test_mode == TestMode.ACCURACY_ONLY
+                sut.load(is_accuracy_mode=is_accuracy_mode)
+                return sut
+        except ImportError as e:
+            logger.warning(f"C++ ResNet multi-die SUT not available: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to create C++ ResNet multi-die SUT: {e}, falling back to Python")
+
+        # Fall back to Python multi-device SUT
+        from .resnet_multi_device_sut import ResNetMultiDeviceSUT
+        logger.info(f"Using ResNet Python multi-die SUT ({self.backend.num_dies} dies)")
+        return ResNetMultiDeviceSUT(
+            config=self.config,
+            backend=self.backend,
+            qsl=qsl,
+            scenario=self.config.scenario,
+        )
 
     def _setup_resnet50(self) -> None:
         """Set up ResNet50 benchmark."""
         from ..datasets.imagenet import ImageNetQSL
         from .cpp_sut_wrapper import create_sut
 
-        logger.info(f"Loading ImageNet dataset from {self.config.dataset.path}")
         self.qsl = ImageNetQSL(
             data_path=self.config.dataset.path,
             val_map_path=self.config.dataset.val_map,
@@ -138,71 +222,82 @@ class BenchmarkRunner:
         )
         self.qsl.load()
 
-        logger.info(f"Creating SUT for scenario: {self.config.scenario}")
-        # Use create_sut to automatically select C++ or Python SUT
-        self.sut = create_sut(
-            config=self.config,
-            model_path=self.config.model.model_path,
-            qsl=self.qsl,
-            scenario=self.config.scenario,
-        )
+        # Use multi-device SUT for accelerator
+        if self.config.openvino.is_accelerator_device():
+            self.sut = self._create_sut_for_backend(self.qsl)
+        else:
+            # Use create_sut to automatically select C++ or Python SUT for CPU
+            self.sut = create_sut(
+                config=self.config,
+                model_path=self.config.model.model_path,
+                qsl=self.qsl,
+                scenario=self.config.scenario,
+            )
 
     def _setup_bert(self) -> None:
         """Set up BERT benchmark."""
         from ..datasets.squad import SQuADQSL
         from .cpp_sut_wrapper import create_bert_sut
 
-        logger.info(f"Loading SQuAD dataset from {self.config.dataset.path}")
         self.qsl = SQuADQSL(
             data_path=self.config.dataset.path,
-            vocab_file=self.config.dataset.val_map,  # vocab file
+            vocab_file=self.config.dataset.val_map,
             count=self.config.dataset.num_samples if self.config.dataset.num_samples > 0 else None,
-            performance_sample_count=10833,  # MLPerf default
+            performance_sample_count=10833,
         )
         self.qsl.load()
 
-        logger.info(f"Creating BERT SUT for scenario: {self.config.scenario}")
-        # Use create_bert_sut to automatically select C++ or Python SUT
-        self.sut = create_bert_sut(
-            config=self.config,
-            model_path=self.config.model.model_path,
-            qsl=self.qsl,
-            scenario=self.config.scenario,
-        )
+        # Use multi-device SUT for accelerator
+        if self.config.openvino.is_accelerator_device():
+            self.sut = self._create_sut_for_backend(self.qsl)
+        else:
+            # Use create_bert_sut to automatically select C++ or Python SUT for CPU
+            self.sut = create_bert_sut(
+                config=self.config,
+                model_path=self.config.model.model_path,
+                qsl=self.qsl,
+                scenario=self.config.scenario,
+            )
 
     def _setup_retinanet(self) -> None:
         """Set up RetinaNet benchmark."""
         from ..datasets.openimages import OpenImagesQSL
         from .cpp_sut_wrapper import create_retinanet_sut
 
-        logger.info(f"Loading OpenImages dataset from {self.config.dataset.path}")
+        output_layout = "NCHW"
+        if hasattr(self.config.model, 'preprocessing') and self.config.model.preprocessing:
+            output_layout = getattr(self.config.model.preprocessing, 'output_layout', 'NCHW')
+
         self.qsl = OpenImagesQSL(
             data_path=self.config.dataset.path,
             annotations_file=self.config.dataset.val_map,
             count=self.config.dataset.num_samples if self.config.dataset.num_samples > 0 else None,
-            performance_sample_count=24576,  # MLPerf default
+            performance_sample_count=24576,
+            output_layout=output_layout,
         )
         self.qsl.load()
 
-        logger.info(f"Creating RetinaNet SUT for scenario: {self.config.scenario}")
-        # Use create_retinanet_sut to automatically select C++ or Python SUT
-        self.sut = create_retinanet_sut(
-            config=self.config,
-            model_path=self.config.model.model_path,
-            qsl=self.qsl,
-            scenario=self.config.scenario,
-        )
+        # Use multi-device SUT for accelerator
+        if self.config.openvino.is_accelerator_device():
+            self.sut = self._create_sut_for_backend(self.qsl)
+        else:
+            # Use create_retinanet_sut to automatically select C++ or Python SUT for CPU
+            self.sut = create_retinanet_sut(
+                config=self.config,
+                model_path=self.config.model.model_path,
+                qsl=self.qsl,
+                scenario=self.config.scenario,
+            )
 
     def _setup_whisper(self) -> None:
         """Set up Whisper benchmark."""
         from ..datasets.librispeech import LibriSpeechQSL
 
-        logger.info(f"Loading LibriSpeech dataset from {self.config.dataset.path}")
         self.qsl = LibriSpeechQSL(
             data_path=self.config.dataset.path,
             transcript_path=self.config.dataset.val_map,
             count=self.config.dataset.num_samples if self.config.dataset.num_samples > 0 else None,
-            performance_sample_count=2513,  # MLPerf default
+            performance_sample_count=2513,
         )
         self.qsl.load()
 
@@ -238,15 +333,12 @@ class BenchmarkRunner:
                     decoder_path = dp
                     break
 
-        # Use Optimum-Intel WhisperOptimumSUT (Python) - C++ SUT disabled due to KV-cache issues
         try:
             from .whisper_sut import WhisperOptimumSUT, OPTIMUM_AVAILABLE
 
             if OPTIMUM_AVAILABLE and model_path.is_dir():
-                # Check if this looks like an optimum-exported model
                 config_file = model_path / "config.json"
                 if config_file.exists():
-                    logger.info("Using Optimum-Intel for Whisper inference")
                     self.sut = WhisperOptimumSUT(
                         config=self.config,
                         model_path=model_path,
@@ -254,18 +346,12 @@ class BenchmarkRunner:
                         scenario=self.config.scenario,
                     )
                     return
-        except Exception as e:
-            logger.warning(f"Could not use Optimum-Intel: {e}")
-            logger.info("Falling back to manual encoder-decoder inference")
+        except Exception:
+            pass
 
-        # Fallback: Manual encoder-decoder inference
         from .whisper_sut import WhisperSUT, WhisperEncoderOnlySUT
 
         if encoder_path and decoder_path:
-            logger.info(f"Setting up Whisper with separate encoder/decoder (Python)")
-            logger.info(f"  Encoder: {encoder_path}")
-            logger.info(f"  Decoder: {decoder_path}")
-
             encoder_backend = OpenVINOBackend(
                 model_path=str(encoder_path),
                 config=self.config.openvino,
@@ -288,20 +374,15 @@ class BenchmarkRunner:
             return
 
         if model_path.is_dir():
-            # List available files in directory
             xml_files = list(model_path.glob("*.xml"))
-            logger.error(f"Could not find encoder/decoder models in {model_path}")
-            logger.error(f"Available .xml files: {[f.name for f in xml_files]}")
             raise ValueError(
-                f"Whisper model directory {model_path} does not contain "
-                f"expected encoder/decoder files. Found: {[f.name for f in xml_files]}"
+                f"Whisper model directory {model_path} missing encoder/decoder. "
+                f"Found: {[f.name for f in xml_files]}"
             )
 
-        # Single model file - use encoder-only SUT
         if self.backend is None:
             raise ValueError(f"Cannot load Whisper model from {model_path}")
 
-        logger.info(f"Creating Whisper encoder-only SUT for scenario: {self.config.scenario}")
         self.sut = WhisperEncoderOnlySUT(
             config=self.config,
             backend=self.backend,
@@ -313,28 +394,24 @@ class BenchmarkRunner:
         """Set up Stable Diffusion XL benchmark."""
         from ..datasets.coco_prompts import COCOPromptsQSL
 
-        logger.info(f"Loading COCO prompts dataset from {self.config.dataset.path}")
         self.qsl = COCOPromptsQSL(
             data_path=self.config.dataset.path,
             count=self.config.dataset.num_samples if self.config.dataset.num_samples > 0 else None,
-            performance_sample_count=5000,  # MLPerf default
+            performance_sample_count=5000,
         )
         self.qsl.load()
 
         model_path = Path(self.config.model.model_path)
 
-        # Try Optimum-Intel pipeline first
         try:
             from .sdxl_sut import SDXLOptimumSUT, OPTIMUM_SDXL_AVAILABLE
 
             if OPTIMUM_SDXL_AVAILABLE and model_path.is_dir():
-                # Check if this looks like an optimum-exported model
                 config_file = model_path / "model_index.json"
                 if not config_file.exists():
                     config_file = model_path / "config.json"
 
                 if config_file.exists():
-                    logger.info("Using Optimum-Intel for SDXL inference")
                     self.sut = SDXLOptimumSUT(
                         config=self.config,
                         model_path=model_path,
@@ -342,14 +419,10 @@ class BenchmarkRunner:
                         scenario=self.config.scenario,
                     )
                     return
-        except Exception as e:
-            logger.warning(f"Could not use Optimum-Intel for SDXL: {e}")
-            logger.info("Falling back to manual component loading")
+        except Exception:
+            pass
 
-        # Fallback: Manual component loading
         from .sdxl_sut import SDXLManualSUT
-
-        logger.info(f"Setting up SDXL with manual component loading")
         self.sut = SDXLManualSUT(
             config=self.config,
             model_path=model_path,
@@ -425,40 +498,38 @@ class BenchmarkRunner:
         if self.sut is None:
             self.setup()
 
-        logger.info(f"Running benchmark: {self.config.model.name}")
-        logger.info(f"Scenario: {self.config.scenario}")
-        logger.info(f"Mode: {self.config.test_mode}")
-
         test_settings = self._get_test_settings()
         log_settings = self._get_log_settings()
 
-        # Log LoadGen settings for debugging
-        scenario_config = self.config.get_scenario_config()
-        logger.info(f"LoadGen settings:")
-        logger.info(f"  min_duration_ms: {scenario_config.min_duration_ms}")
-        logger.info(f"  min_query_count: {scenario_config.min_query_count}")
-        if self.config.scenario == Scenario.SERVER:
-            logger.info(f"  server_target_qps: {scenario_config.target_qps}")
-            logger.info(f"  server_target_latency_ns: {scenario_config.target_latency_ns}")
-        logger.info(f"  qsl_rng_seed: {scenario_config.qsl_rng_seed}")
-
-        sut_handle = self.sut.get_sut()
-        qsl_handle = self.sut.get_qsl()
+        # Enable prediction storage for accuracy mode (must be set before test runs)
+        is_accuracy_mode = self.config.test_mode == TestMode.ACCURACY_ONLY
+        if hasattr(self.sut, 'set_store_predictions'):
+            self.sut.set_store_predictions(is_accuracy_mode)
 
         start_time = time.time()
 
-        logger.info("Starting LoadGen test...")
-        lg.StartTestWithLogSettings(
-            sut_handle,
-            qsl_handle,
-            test_settings,
-            log_settings
+        # Check if SUT supports native C++ benchmark (bypasses Python in hot path)
+        use_native = (
+            hasattr(self.sut, 'supports_native_benchmark') and
+            self.sut.supports_native_benchmark()
         )
+
+        if use_native:
+            self.sut.run_native_benchmark(test_settings, log_settings)
+            sut_handle = None
+            qsl_handle = None
+        else:
+            sut_handle = self.sut.get_sut()
+            qsl_handle = self.sut.get_qsl()
+            lg.StartTestWithLogSettings(
+                sut_handle,
+                qsl_handle,
+                test_settings,
+                log_settings
+            )
 
         end_time = time.time()
         duration = end_time - start_time
-
-        logger.info(f"Test completed in {duration:.2f} seconds")
 
         self._results = {
             "model": self.config.model.name,
@@ -478,8 +549,11 @@ class BenchmarkRunner:
             self._results["accuracy"] = self._accuracy_results
             self._save_mlperf_accuracy_log()
 
-        lg.DestroySUT(sut_handle)
-        lg.DestroyQSL(qsl_handle)
+        # Clean up handles (only if using standard Python path)
+        if sut_handle is not None:
+            lg.DestroySUT(sut_handle)
+        if qsl_handle is not None:
+            lg.DestroyQSL(qsl_handle)
 
         return self._results
 
@@ -556,6 +630,18 @@ class BenchmarkRunner:
     def _compute_resnet50_accuracy(self) -> None:
         """Compute ResNet50 accuracy (Top-1)."""
         predictions = self.sut.get_predictions()
+        total_samples = self.qsl.total_sample_count
+
+        if not predictions:
+            logger.warning("No predictions found for accuracy computation")
+            self._accuracy_results = {"top1_accuracy": 0.0, "correct": 0, "total": 0}
+            return
+
+        # Verify we have predictions for all samples
+        if len(predictions) != total_samples:
+            logger.warning(
+                f"Prediction count mismatch: got {len(predictions)}, expected {total_samples}"
+            )
 
         predicted_labels = []
         ground_truth = []
@@ -573,7 +659,11 @@ class BenchmarkRunner:
             ground_truth
         )
 
-        logger.info(f"Top-1 Accuracy: {self._accuracy_results.get('top1_accuracy', 0):.4f}")
+        # Log accuracy result
+        acc = self._accuracy_results.get('top1_accuracy', 0)
+        correct = self._accuracy_results.get('correct', 0)
+        total = self._accuracy_results.get('total', 0)
+        logger.info(f"Top-1 Accuracy: {acc:.4f} ({correct}/{total})")
 
     def _compute_bert_accuracy(self) -> None:
         """Compute BERT accuracy (F1 and Exact Match)."""
@@ -707,37 +797,36 @@ class BenchmarkRunner:
         return info
 
     def print_summary(self) -> None:
-        """Print benchmark summary to console."""
-        print("\n" + "="*60)
-        print("BENCHMARK SUMMARY")
-        print("="*60)
-        print(f"Model:     {self._results.get('model', 'N/A')}")
-        print(f"Type:      {self._results.get('model_type', 'N/A')}")
-        print(f"Scenario:  {self._results.get('scenario', 'N/A')}")
-        print(f"Device:    {self._results.get('device', 'N/A')}")
-        print("-"*60)
-        print(f"Duration:  {self._results.get('duration_seconds', 0):.2f} seconds")
-        print(f"Samples:   {self._results.get('samples_processed', 0)}")
-        print(f"Throughput: {self._results.get('throughput_samples_per_sec', 0):.2f} samples/sec")
+        """Print accuracy summary to console."""
+        # Only print accuracy summary if accuracy results are available
+        if "accuracy" not in self._results:
+            return
 
-        if "accuracy" in self._results:
-            print("-"*60)
-            acc = self._results["accuracy"]
-            model_type = self._results.get('model_type', '')
+        acc = self._results["accuracy"]
+        model_type = self._results.get('model_type', '')
+        scenario = self._results.get('scenario', 'N/A')
 
-            if model_type == 'resnet50':
-                print(f"Top-1 Accuracy: {acc.get('top1_accuracy', 0):.4f} "
-                      f"({acc.get('correct', 0)}/{acc.get('total', 0)})")
-            elif model_type == 'bert':
-                print(f"F1 Score: {acc.get('f1', 0):.2f}")
-                print(f"Exact Match: {acc.get('exact_match', 0):.2f}")
-            elif model_type == 'retinanet':
-                print(f"mAP@0.5: {acc.get('mAP', 0):.4f}")
-            elif model_type == 'whisper':
-                print(f"Word Accuracy: {acc.get('word_accuracy', 0):.4f}")
-                print(f"WER: {acc.get('wer', 0):.4f}")
-            elif model_type == 'sdxl':
-                print(f"CLIP Score: {acc.get('clip_score', 0):.4f}")
-                print(f"FID Score: {acc.get('fid_score', 0):.4f}")
+        print("\n" + "="*50)
+        print(f"[Accuracy] {self._results.get('model', 'N/A')} / {scenario}")
+        print("="*50)
 
-        print("="*60 + "\n")
+        if model_type == 'resnet50':
+            accuracy = acc.get('top1_accuracy', 0)
+            correct = acc.get('correct', 0)
+            total = acc.get('total', 0)
+            # MLPerf ResNet50 threshold: 75.69% (99% of 76.46%)
+            status = "PASS" if accuracy >= 0.7569 else "FAIL"
+            print(f"Top-1: {accuracy:.4f} ({correct}/{total}) [{status}]")
+        elif model_type == 'bert':
+            print(f"F1: {acc.get('f1', 0):.2f}")
+            print(f"EM: {acc.get('exact_match', 0):.2f}")
+        elif model_type == 'retinanet':
+            print(f"mAP: {acc.get('mAP', 0):.4f}")
+        elif model_type == 'whisper':
+            print(f"Word Accuracy: {acc.get('word_accuracy', 0):.4f}")
+            print(f"WER: {acc.get('wer', 0):.4f}")
+        elif model_type == 'sdxl':
+            print(f"CLIP: {acc.get('clip_score', 0):.4f}")
+            print(f"FID: {acc.get('fid_score', 0):.4f}")
+
+        print("="*50 + "\n")

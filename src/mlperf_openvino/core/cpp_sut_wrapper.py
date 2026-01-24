@@ -481,6 +481,7 @@ def create_sut(
     Factory function to create the best available SUT.
 
     Uses async C++ SUT with InferRequest pool for maximum throughput.
+    Note: X accelerator devices should use MultiDeviceSUT, not this function.
 
     Args:
         config: Benchmark configuration
@@ -492,12 +493,20 @@ def create_sut(
     Returns:
         SUT instance
     """
+    # Accelerator devices are not supported by C++ SUT - they require MultiDeviceSUT
+    if config.openvino.is_accelerator_device():
+        device = config.openvino.device
+        raise ValueError(
+            f"C++ SUT does not support accelerator devices (got: {device}). "
+            "Use MultiDeviceSUT via BenchmarkRunner._create_sut_for_backend() instead."
+        )
+
     if CPP_AVAILABLE and not force_python:
-        logger.info(f"Using ResNet C++ SUT for {scenario.value} mode")
+        logger.info(f"Using ResNet C++ SUT on {config.openvino.device}")
         return ResNetCppSUTWrapper(config, model_path, qsl, scenario)
 
     # Fall back to Python SUT
-    logger.info(f"Using Python SUT for {scenario.value} mode")
+    logger.info(f"Using ResNet Python SUT on {config.openvino.device}")
     from .sut import OpenVINOSUT
     from ..backends.openvino_backend import OpenVINOBackend
 
@@ -516,6 +525,7 @@ def create_bert_sut(
     Factory function to create BERT SUT.
 
     Uses C++ SUT if available for maximum performance.
+    Note: X accelerator devices should use MultiDeviceSUT, not this function.
 
     Args:
         config: Benchmark configuration
@@ -527,12 +537,20 @@ def create_bert_sut(
     Returns:
         BERT SUT instance
     """
+    # Accelerator devices are not supported by C++ SUT - they require MultiDeviceSUT
+    if config.openvino.is_accelerator_device():
+        device = config.openvino.device
+        raise ValueError(
+            f"C++ SUT does not support accelerator devices (got: {device}). "
+            "Use MultiDeviceSUT via BenchmarkRunner._create_sut_for_backend() instead."
+        )
+
     if CPP_AVAILABLE and BertCppSUT is not None and not force_python:
-        logger.info(f"Using BERT C++ SUT for {scenario.value} mode")
+        logger.info(f"Using BERT C++ SUT on {config.openvino.device}")
         return BertCppSUTWrapper(config, model_path, qsl, scenario)
 
     # Fall back to Python BertSUT
-    logger.info(f"Using Python BERT SUT for {scenario.value} mode")
+    logger.info(f"Using BERT Python SUT on {config.openvino.device}")
     from .bert_sut import BertSUT
     from ..backends.openvino_backend import OpenVINOBackend
 
@@ -768,6 +786,7 @@ def create_retinanet_sut(
     Factory function to create RetinaNet SUT.
 
     Uses C++ SUT if available for maximum performance.
+    Note: X accelerator devices should use MultiDeviceSUT, not this function.
 
     Args:
         config: Benchmark configuration
@@ -779,12 +798,20 @@ def create_retinanet_sut(
     Returns:
         RetinaNet SUT instance
     """
+    # Accelerator devices are not supported by C++ SUT - they require MultiDeviceSUT
+    if config.openvino.is_accelerator_device():
+        device = config.openvino.device
+        raise ValueError(
+            f"C++ SUT does not support accelerator devices (got: {device}). "
+            "Use MultiDeviceSUT via BenchmarkRunner._create_sut_for_backend() instead."
+        )
+
     if CPP_AVAILABLE and RetinaNetCppSUT is not None and not force_python:
-        logger.info(f"Using RetinaNet C++ SUT for {scenario.value} mode")
+        logger.info(f"Using RetinaNet C++ SUT on {config.openvino.device}")
         return RetinaNetCppSUTWrapper(config, model_path, qsl, scenario)
 
     # Fall back to Python RetinaNetSUT
-    logger.info(f"Using Python RetinaNet SUT for {scenario.value} mode")
+    logger.info(f"Using RetinaNet Python SUT on {config.openvino.device}")
     from .retinanet_sut import RetinaNetSUT
     from ..backends.openvino_backend import OpenVINOBackend
 
