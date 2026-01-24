@@ -208,6 +208,41 @@ class BenchmarkRunner:
             scenario=self.config.scenario,
         )
 
+    def _create_bert_multi_die_sut(self, qsl: QuerySampleLibrary) -> Any:
+        """Create BERT multi-die SUT for accelerators."""
+        # Try C++ multi-die SUT first (much faster)
+        try:
+            from .bert_multi_die_sut import (
+                BertMultiDieCppSUTWrapper,
+                is_bert_multi_die_cpp_available
+            )
+
+            if is_bert_multi_die_cpp_available():
+                logger.info(f"Using BERT C++ multi-die SUT on {self.config.openvino.device}")
+                sut = BertMultiDieCppSUTWrapper(
+                    config=self.config,
+                    qsl=qsl,
+                    scenario=self.config.scenario,
+                )
+                # Pass accuracy mode flag
+                is_accuracy_mode = self.config.test_mode == TestMode.ACCURACY_ONLY
+                sut.load(is_accuracy_mode=is_accuracy_mode)
+                return sut
+        except ImportError as e:
+            logger.warning(f"C++ BERT multi-die SUT not available: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to create C++ BERT multi-die SUT: {e}, falling back to Python")
+
+        # Fall back to Python BERT SUT with multi-device backend
+        from .bert_sut import BertSUT
+        logger.info(f"Using BERT Python SUT on {self.config.openvino.device}")
+        return BertSUT(
+            config=self.config,
+            backend=self.backend,
+            qsl=qsl,
+            scenario=self.config.scenario,
+        )
+
     def _setup_resnet50(self) -> None:
         """Set up ResNet50 benchmark."""
         from ..datasets.imagenet import ImageNetQSL
@@ -247,9 +282,9 @@ class BenchmarkRunner:
         )
         self.qsl.load()
 
-        # Use multi-device SUT for accelerator
+        # Use BERT multi-die SUT for accelerator
         if self.config.openvino.is_accelerator_device():
-            self.sut = self._create_sut_for_backend(self.qsl)
+            self.sut = self._create_bert_multi_die_sut(self.qsl)
         else:
             # Use create_bert_sut to automatically select C++ or Python SUT for CPU
             self.sut = create_bert_sut(

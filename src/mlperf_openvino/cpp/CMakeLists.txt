@@ -213,6 +213,7 @@ pybind11_add_module(_cpp_sut
     bert_sut_cpp.cpp
     retinanet_sut_cpp.cpp
     resnet_multi_die_sut_cpp.cpp
+    bert_multi_die_sut_cpp.cpp
     bindings.cpp
 )
 
