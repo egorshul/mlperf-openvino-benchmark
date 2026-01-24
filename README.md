@@ -4,151 +4,69 @@ MLPerf Inference v5.1 benchmark implementation using OpenVINO backend.
 
 ## Supported Models
 
-| Model | Task | Dataset | Metric | Reference | Required (99%) |
-|-------|------|---------|--------|-----------|----------------|
-| ResNet50 | Image Classification | ImageNet 2012 | Top-1 Accuracy | 76.46% | ≥ 75.70% |
-| BERT-Large | Question Answering | SQuAD v1.1 | F1 Score | 90.87% | ≥ 89.97% |
-| RetinaNet | Object Detection | OpenImages | mAP | 37.57% | ≥ 37.19% |
-| Whisper Large v3 | Speech Recognition | LibriSpeech | Word Accuracy | 97.93% | ≥ 96.95% |
-| SDXL | Text-to-Image | COCO 2014 | CLIP / FID | 31.69 / 23.01 | 31.68-31.81 / 23.01-23.95 |
+| Model | Task | Dataset | Metric | Target (99%) |
+|-------|------|---------|--------|--------------|
+| ResNet50 | Image Classification | ImageNet | Top-1 | ≥ 75.70% |
+| BERT-Large | Question Answering | SQuAD v1.1 | F1 | ≥ 89.97% |
+| RetinaNet | Object Detection | OpenImages | mAP | ≥ 37.19% |
+| Whisper Large v3 | Speech Recognition | LibriSpeech | Word Acc | ≥ 96.95% |
+| SDXL | Text-to-Image | COCO 2014 | CLIP/FID | 31.68-31.81 |
 
 ## Installation
 
 ```bash
-git clone https://github.com/egorshul/mlperf-openvino-benchmark.git
-cd mlperf-openvino-benchmark
-
-# Basic installation
-pip install -e .
-
-# With specific model dependencies
-pip install -e ".[resnet]"     # ResNet50
-pip install -e ".[bert]"       # BERT
-pip install -e ".[retinanet]"  # RetinaNet
-pip install -e ".[whisper]"    # Whisper
-pip install -e ".[sdxl]"       # Stable Diffusion XL
-
-# All dependencies
 pip install -e ".[all]"
-```
 
-### C++ SUT (Optional, for better performance)
-
-```bash
-# Requirements: CMake 3.14+, C++17 compiler, pybind11
+# Optional: C++ SUT for better performance
 ./build_cpp.sh
-
-# Verify installation
-python -c "from mlperf_openvino.cpp import CPP_AVAILABLE; print(f'C++ SUT: {CPP_AVAILABLE}')"
 ```
 
 ## Quick Start
 
-### 1. Download Model and Dataset
-
 ```bash
-# ResNet50
-mlperf-ov download-model --model resnet50
-mlperf-ov download-dataset --dataset imagenet
+# Setup (download model + dataset)
+mlperf-ov setup --model resnet50
 
-# BERT
-mlperf-ov download-model --model bert
-mlperf-ov download-dataset --dataset squad
-
-# RetinaNet
-mlperf-ov download-model --model retinanet
-mlperf-ov download-dataset --dataset openimages
-
-# Whisper
-mlperf-ov download-model --model whisper --format openvino
-mlperf-ov download-dataset --dataset librispeech
-
-# SDXL
-mlperf-ov download-model --model sdxl --format openvino
-mlperf-ov download-dataset --dataset coco2014
+# Run benchmark
+mlperf-ov run --model resnet50 --mode accuracy
+mlperf-ov run --model resnet50 --mode performance --scenario Offline
 ```
 
-### 2. Run Benchmark
+## Device Selection
 
 ```bash
-# Accuracy test
-mlperf-ov run --model resnet50 --mode accuracy
+# CPU (default)
+mlperf-ov run --model resnet50 --device CPU
 
-# Performance test (Offline scenario)
-mlperf-ov run --model resnet50 --mode performance --scenario Offline
+# All accelerator dies
+mlperf-ov run --model resnet50 --device NPU
 
-# Performance test (Server scenario)
-mlperf-ov run --model resnet50 --mode performance --scenario Server
+# Specific die
+mlperf-ov run --model resnet50 --device NPU.0
 ```
 
 ## CLI Reference
 
-```bash
+```
 mlperf-ov run                  # Run benchmark
-mlperf-ov download-model       # Download model
-mlperf-ov download-dataset     # Download dataset
-mlperf-ov setup                # Download model + dataset
+mlperf-ov setup --model X      # Download model + dataset
+mlperf-ov download-model       # Download model only
+mlperf-ov download-dataset     # Download dataset only
 mlperf-ov list-models          # List supported models
 mlperf-ov info                 # System information
 ```
 
-### Run Options
+### Common Options
 
 ```
---model, -m          Model: resnet50, bert, retinanet, whisper, sdxl
---mode               Mode: accuracy, performance
---scenario, -s       Scenario: Offline, Server
---device, -d         Device: CPU, NPU, NPU.0, NPU.1, etc.
---model-path         Path to model
---data-path          Path to dataset
---count              Number of samples (0 = all)
---batch-size, -b     Batch size
---num-threads        CPU threads (0 = auto)
---num-streams        Inference streams
+--model, -m      Model: resnet50, bert, retinanet, whisper, sdxl
+--mode           Mode: accuracy, performance
+--scenario, -s   Scenario: Offline, Server
+--device, -d     Device: CPU, NPU, NPU.0, etc.
+--batch-size, -b Batch size
+--count          Number of samples (0 = all)
 ```
 
-### Server Mode Options
+## License
 
-```
---target-qps              Target queries per second
---target-latency-ns       Target latency in nanoseconds (default: 15ms for ResNet50)
---nireq-multiplier        In-flight requests multiplier (default: 2)
---explicit-batching       Enable Intel-style explicit batching (recommended for NPU)
---batch-timeout-us        Batch timeout in microseconds (default: 500)
-```
-
-## NPU/Accelerator Support
-
-Optimized defaults are built-in for NPU Server mode. Just run:
-
-```bash
-# Offline mode
-mlperf-ov run --model resnet50 --scenario Offline --device NPU -b 8
-
-# Server mode (uses optimized defaults: batch=8, timeout=2000us, nireq=6)
-mlperf-ov run --model resnet50 --scenario Server --device NPU --target-qps 5750
-```
-
-### Custom Tuning
-
-Override defaults if needed:
-
-```bash
-mlperf-ov run --model resnet50 --scenario Server --device NPU \
-  --target-qps 5750 \
-  --batch-size 8 \
-  --batch-timeout-us 2000 \
-  --nireq-multiplier 6
-```
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--batch-size` | 8 | Samples per inference |
-| `--batch-timeout-us` | 2000 | Max wait before batch flush |
-| `--nireq-multiplier` | 6 | In-flight requests multiplier |
-| `--explicit-batching` | on | Intel-style explicit batching |
-
-**Tuning strategy:**
-1. Start with default settings and low `--target-qps`
-2. Increase `--target-qps` until test becomes INVALID
-3. Fine-tune timeout (500-2000us) and nireq (2-8) if needed
+Apache 2.0

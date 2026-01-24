@@ -108,34 +108,27 @@ class BenchmarkRunner:
         from ..backends.multi_device_backend import MultiDeviceBackend
 
         device = self.config.openvino.device
-        device_prefix = self.config.openvino.get_device_prefix()
 
         # Determine if NHWC input is needed
         use_nhwc = False
         if hasattr(self.config.model, 'preprocessing') and self.config.model.preprocessing:
             use_nhwc = getattr(self.config.model.preprocessing, 'output_layout', 'NCHW') == 'NHWC'
 
-        # Check if using multi-device accelerator (all dies)
-        if self.config.openvino.is_multi_device():
+        # For accelerator devices, always use MultiDeviceBackend
+        # - "NPU" -> all dies (target_devices=None)
+        # - "NPU.0" -> specific die (target_devices=[device])
+        if self.config.openvino.is_accelerator_device():
+            if self.config.openvino.is_specific_die():
+                target_devices = [device]
+            else:
+                target_devices = None
             backend = MultiDeviceBackend(
                 model_path=self.config.model.model_path,
                 config=self.config.openvino,
-                target_devices=None,
+                target_devices=target_devices,
             )
             backend.load()
             return backend
-
-        # Check if using specific accelerator die (e.g., NPU.0)
-        if self.config.openvino.is_accelerator_device():
-            from ..backends.device_discovery import is_accelerator_die
-            if is_accelerator_die(device, device_prefix):
-                backend = OpenVINOBackend(
-                    model_path=self.config.model.model_path,
-                    config=self.config.openvino,
-                    use_nhwc_input=use_nhwc,
-                )
-                backend.load()
-                return backend
 
         # Default: CPU or other device
         backend = OpenVINOBackend(
@@ -172,7 +165,7 @@ class BenchmarkRunner:
         if isinstance(self.backend, MultiDeviceBackend):
             return self._create_resnet_multi_die_sut(qsl)
         else:
-            print(f"[SUT] OpenVINOSUT on {self.config.openvino.device}")
+            logger.info(f"Using OpenVINOSUT on {self.config.openvino.device}")
             return OpenVINOSUT(
                 config=self.config,
                 backend=self.backend,
@@ -190,7 +183,7 @@ class BenchmarkRunner:
             )
 
             if is_resnet_multi_die_cpp_available():
-                print(f"[SUT] ResNet C++ multi-die ({self.backend.num_dies} dies)")
+                logger.info(f"Using ResNet C++ multi-die SUT ({self.backend.num_dies} dies)")
                 sut = ResNetMultiDieCppSUTWrapper(
                     config=self.config,
                     qsl=qsl,
@@ -207,7 +200,7 @@ class BenchmarkRunner:
 
         # Fall back to Python multi-device SUT
         from .resnet_multi_device_sut import ResNetMultiDeviceSUT
-        print(f"[SUT] ResNet Python multi-die ({self.backend.num_dies} dies)")
+        logger.info(f"Using ResNet Python multi-die SUT ({self.backend.num_dies} dies)")
         return ResNetMultiDeviceSUT(
             config=self.config,
             backend=self.backend,
