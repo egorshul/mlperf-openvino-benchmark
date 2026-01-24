@@ -93,6 +93,12 @@ class ResNetMultiDieCppSUTWrapper:
             nireq_multiplier
         )
 
+        # Set specific target devices if a specific die is selected (e.g., NPU.0)
+        if config.openvino.is_specific_die():
+            target_devices = [config.openvino.device]
+            self._cpp_sut.set_target_devices(target_devices)
+            logger.debug(f"Set target devices: {target_devices}")
+
         # Statistics
         self._start_time = 0.0
         self._query_count = 0

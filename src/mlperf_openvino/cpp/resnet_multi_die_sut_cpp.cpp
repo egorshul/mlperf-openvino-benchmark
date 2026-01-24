@@ -676,6 +676,11 @@ void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx
 // =============================================================================
 
 std::vector<std::string> ResNetMultiDieCppSUT::discover_dies() {
+    // If target devices are explicitly set, use them instead of discovering
+    if (!target_devices_.empty()) {
+        return target_devices_;
+    }
+
     std::vector<std::string> dies;
     auto all_devices = core_.get_available_devices();
     std::regex die_pattern(device_prefix_ + R"(\.(\d+))");

@@ -118,6 +118,9 @@ public:
     void enable_explicit_batching(bool enable, int batch_size = 4, int timeout_us = 500);
     bool is_explicit_batching_enabled() const { return use_explicit_batching_; }
 
+    // Set specific target devices (call before load())
+    void set_target_devices(const std::vector<std::string>& devices) { target_devices_ = devices; }
+
     // Run pure C++ Server benchmark
     void run_server_benchmark(
         size_t total_sample_count,
@@ -139,6 +142,7 @@ private:
     std::unordered_map<std::string, std::string> compile_properties_;
     bool use_nhwc_input_;
     int nireq_multiplier_;
+    std::vector<std::string> target_devices_;  // If set, use these instead of discovering
 
     // OpenVINO
     ov::Core core_;

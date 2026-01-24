@@ -395,6 +395,10 @@ PYBIND11_MODULE(_cpp_sut, m) {
              py::call_guard<py::gil_scoped_release>(),
              "Load model and compile for all available dies")
 
+        .def("set_target_devices", &mlperf_ov::ResNetMultiDieCppSUT::set_target_devices,
+             py::arg("devices"),
+             "Set specific target devices (call before load())")
+
         .def("is_loaded", &mlperf_ov::ResNetMultiDieCppSUT::is_loaded,
              "Check if model is loaded")
 
