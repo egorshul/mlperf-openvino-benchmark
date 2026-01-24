@@ -279,7 +279,7 @@ class ResNetMultiDeviceSUT:
 
                 batch_data.append(input_data)
 
-            # Stack into batch tensor [batch_size, C, H, W]
+            # Stack into batch tensor (format depends on preprocessing: NCHW or NHWC)
             if actual_batch_size == batch_size:
                 batched_input = np.stack(batch_data, axis=0)
             else:
