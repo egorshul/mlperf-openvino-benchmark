@@ -210,7 +210,31 @@ class BenchmarkRunner:
 
     def _create_bert_multi_die_sut(self, qsl: QuerySampleLibrary) -> Any:
         """Create BERT multi-die SUT for accelerators."""
-        # Try C++ multi-die SUT first (much faster)
+        is_accuracy_mode = self.config.test_mode == TestMode.ACCURACY_ONLY
+
+        # For performance mode, try optimized SUT with sequence length buckets
+        if not is_accuracy_mode:
+            try:
+                from .bert_optimized_sut import (
+                    BertOptimizedSUTWrapper,
+                    is_bert_optimized_cpp_available
+                )
+
+                if is_bert_optimized_cpp_available():
+                    logger.info(f"Using BERT Optimized C++ SUT with sequence buckets on {self.config.openvino.device}")
+                    sut = BertOptimizedSUTWrapper(
+                        config=self.config,
+                        qsl=qsl,
+                        scenario=self.config.scenario,
+                    )
+                    sut.load(is_accuracy_mode=False)
+                    return sut
+            except ImportError as e:
+                logger.warning(f"Optimized BERT SUT not available: {e}, falling back to basic")
+            except Exception as e:
+                logger.warning(f"Failed to create optimized BERT SUT: {e}, falling back to basic")
+
+        # For accuracy mode or if optimized SUT failed, use basic multi-die SUT
         try:
             from .bert_multi_die_sut import (
                 BertMultiDieCppSUTWrapper,
@@ -224,8 +248,6 @@ class BenchmarkRunner:
                     qsl=qsl,
                     scenario=self.config.scenario,
                 )
-                # Pass accuracy mode flag
-                is_accuracy_mode = self.config.test_mode == TestMode.ACCURACY_ONLY
                 sut.load(is_accuracy_mode=is_accuracy_mode)
                 return sut
         except ImportError as e:

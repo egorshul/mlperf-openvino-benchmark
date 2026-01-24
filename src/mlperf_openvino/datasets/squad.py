@@ -641,6 +641,9 @@ class SQuADQSL(QuerySampleLibrary):
     Implements the MLPerf LoadGen QSL interface for BERT benchmark.
     """
 
+    # Sequence length buckets for optimized inference
+    SEQ_BUCKETS = [128, 165, 256, 384]
+
     def __init__(
         self,
         data_path: str,
@@ -670,6 +673,42 @@ class SQuADQSL(QuerySampleLibrary):
 
         self._performance_sample_count = performance_sample_count
         self._loaded_samples: Dict[int, Dict[str, np.ndarray]] = {}
+        self._sample_seq_lengths: Dict[int, int] = {}  # sample_idx -> actual_seq_len
+        self._sample_buckets: Dict[int, int] = {}  # sample_idx -> bucket_idx
+
+    @staticmethod
+    def get_bucket_index(seq_len: int) -> int:
+        """Get bucket index for a sequence length."""
+        for i, bucket in enumerate(SQuADQSL.SEQ_BUCKETS):
+            if seq_len <= bucket:
+                return i
+        return len(SQuADQSL.SEQ_BUCKETS) - 1
+
+    @staticmethod
+    def get_bucket_seq_len(bucket_idx: int) -> int:
+        """Get sequence length for a bucket index."""
+        if 0 <= bucket_idx < len(SQuADQSL.SEQ_BUCKETS):
+            return SQuADQSL.SEQ_BUCKETS[bucket_idx]
+        return SQuADQSL.SEQ_BUCKETS[-1]
+
+    def get_actual_seq_len(self, sample_idx: int) -> int:
+        """Get actual (non-padded) sequence length for a sample."""
+        if sample_idx in self._sample_seq_lengths:
+            return self._sample_seq_lengths[sample_idx]
+
+        # Compute from attention_mask
+        features = self.get_features(sample_idx)
+        attention_mask = features['attention_mask']
+        actual_len = int(np.sum(attention_mask))
+        self._sample_seq_lengths[sample_idx] = actual_len
+        self._sample_buckets[sample_idx] = self.get_bucket_index(actual_len)
+        return actual_len
+
+    def get_sample_bucket(self, sample_idx: int) -> int:
+        """Get bucket index for a sample."""
+        if sample_idx not in self._sample_buckets:
+            self.get_actual_seq_len(sample_idx)
+        return self._sample_buckets.get(sample_idx, len(self.SEQ_BUCKETS) - 1)
 
     def load(self) -> None:
         """Load the dataset."""
@@ -695,18 +734,24 @@ class SQuADQSL(QuerySampleLibrary):
                 features, _ = self.dataset.get_sample(idx)
                 # Pre-convert to int64 and make contiguous for C++ SUT
                 # This avoids conversion overhead during inference
+                attention_mask = np.ascontiguousarray(
+                    features['attention_mask'].flatten(), dtype=np.int64
+                )
                 optimized = {
                     'input_ids': np.ascontiguousarray(
                         features['input_ids'].flatten(), dtype=np.int64
                     ),
-                    'attention_mask': np.ascontiguousarray(
-                        features['attention_mask'].flatten(), dtype=np.int64
-                    ),
+                    'attention_mask': attention_mask,
                     'token_type_ids': np.ascontiguousarray(
                         features['token_type_ids'].flatten(), dtype=np.int64
                     ),
                 }
                 self._loaded_samples[idx] = optimized
+
+                # Pre-compute sequence length and bucket
+                actual_len = int(np.sum(attention_mask))
+                self._sample_seq_lengths[idx] = actual_len
+                self._sample_buckets[idx] = self.get_bucket_index(actual_len)
 
     def unload_query_samples(self, sample_indices: List[int]) -> None:
         """Unload samples from memory."""
