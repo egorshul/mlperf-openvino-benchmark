@@ -1,15 +1,4 @@
-"""
-Multi-device backend for neural network accelerators with multiple dies.
-
-This backend manages inference across multiple accelerator dies in parallel,
-providing transparent scaling for multi-die and multi-card setups.
-
-Architecture:
-- Each die gets its own compiled model
-- InferRequests are created for each compiled model
-- Inference is distributed across all dies in parallel
-- Results are aggregated from all dies
-"""
+"""Multi-device backend for accelerators with multiple dies."""
 
 import logging
 import queue
@@ -78,21 +67,7 @@ class DieContext:
 
 
 class MultiDeviceBackend(BaseBackend):
-    """
-    Backend for parallel inference across multiple accelerator dies.
-
-    This backend automatically discovers accelerator dies and distributes
-    inference workload across all available dies for maximum throughput.
-
-    Usage:
-        backend = MultiDeviceBackend(
-            model_path="model.onnx",
-            config=config,
-            target_devices=None  # Auto-discover all accelerator dies
-        )
-        backend.load()
-        results = backend.predict(inputs)
-    """
+    """Backend for parallel inference across multiple accelerator dies."""
 
     def __init__(
         self,
@@ -101,16 +76,6 @@ class MultiDeviceBackend(BaseBackend):
         target_devices: Optional[List[str]] = None,
         **kwargs
     ):
-        """
-        Initialize multi-device backend.
-
-        Args:
-            model_path: Path to ONNX or OpenVINO IR model
-            config: OpenVINO configuration
-            target_devices: List of specific devices to use (e.g., ['NPU.0', 'NPU.1'])
-                          If None, auto-discovers all available accelerator dies
-            **kwargs: Additional options
-        """
         if not OPENVINO_AVAILABLE:
             raise ImportError(
                 "OpenVINO is not installed. Please install it with: "
@@ -627,7 +592,7 @@ class MultiDeviceBackend(BaseBackend):
         """Get backend information."""
         info = super().get_info()
         info.update({
-            "backend_type": "multi_device_x",
+            "backend_type": "multi_device_accelerator",
             "active_devices": self._active_devices,
             "num_dies": self.num_dies,
             "total_infer_requests": self.total_infer_requests,

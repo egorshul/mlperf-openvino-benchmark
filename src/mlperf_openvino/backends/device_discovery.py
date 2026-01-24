@@ -1,19 +1,7 @@
 """
 Device discovery utilities for accelerator devices.
 
-This module provides functions to discover and manage neural network
-accelerator devices in an OpenVINO-based inference system.
-
-Accelerator Device Topology:
-- 1 card = 2 dies (compute units)
-- Devices appear as: DEVICE.0, DEVICE.1, DEVICE.2, DEVICE.3, ...
-- Simulators appear as: DEVICE.FuncSimulator, DEVICE.Simulator
-
-Example:
-    >>> from openvino import Core
-    >>> core = Core()
-    >>> devices = discover_accelerator_devices(core, "NPU")
-    >>> print(devices)  # ['NPU.0', 'NPU.1', 'NPU.2', 'NPU.3']
+Topology: 1 card = 2 dies. Devices appear as: NPU.0, NPU.1, NPU.2, etc.
 """
 
 import logging
@@ -32,25 +20,7 @@ def _get_die_pattern(device_prefix: str) -> re.Pattern:
 
 
 def discover_accelerator_devices(core: "Core", device_prefix: str) -> List[str]:
-    """
-    Discover all available accelerator dies for a given device type.
-
-    Queries OpenVINO Core for available devices and filters for
-    physical dies (DEVICE.0, DEVICE.1, etc.), excluding simulators.
-
-    Args:
-        core: OpenVINO Core instance
-        device_prefix: Device prefix (e.g., 'NPU', 'X', 'VPU')
-
-    Returns:
-        Sorted list of device names (e.g., ['NPU.0', 'NPU.1'])
-
-    Example:
-        >>> from openvino import Core
-        >>> core = Core()
-        >>> dies = discover_accelerator_devices(core, "NPU")
-        >>> print(f"Found {len(dies)} dies: {dies}")
-    """
+    """Discover all available accelerator dies for a device prefix."""
     try:
         all_devices = core.available_devices
     except Exception as e:
@@ -84,23 +54,8 @@ def discover_accelerator_devices(core: "Core", device_prefix: str) -> List[str]:
     return dies
 
 
-# Backward compatibility alias
-def discover_x_devices(core: "Core") -> List[str]:
-    """Backward compatible wrapper - discovers devices with 'X' prefix."""
-    return discover_accelerator_devices(core, "X")
-
-
 def is_simulator(device_name: str, device_prefix: str) -> bool:
-    """
-    Check if the device is a simulator.
-
-    Args:
-        device_name: Device name from OpenVINO
-        device_prefix: Device prefix (e.g., 'NPU')
-
-    Returns:
-        True if device is a simulator (e.g., NPU.FuncSimulator)
-    """
+    """Check if the device is a simulator."""
     if not device_name.startswith(device_prefix + "."):
         return False
 
@@ -109,44 +64,13 @@ def is_simulator(device_name: str, device_prefix: str) -> bool:
 
 
 def is_accelerator_die(device_name: str, device_prefix: str) -> bool:
-    """
-    Check if the device is a valid accelerator die.
-
-    Valid dies have format DEVICE.<number>, e.g., NPU.0, NPU.1
-
-    Args:
-        device_name: Device name from OpenVINO
-        device_prefix: Device prefix (e.g., 'NPU')
-
-    Returns:
-        True if device is a valid die
-    """
+    """Check if the device is a valid accelerator die (DEVICE.N format)."""
     pattern = _get_die_pattern(device_prefix)
     return pattern.match(device_name) is not None
 
 
-# Backward compatibility
-def is_x_die(device_name: str) -> bool:
-    """Check if device is an X die (backward compatible)."""
-    return is_accelerator_die(device_name, "X")
-
-
-def is_x_simulator(device_name: str) -> bool:
-    """Check if device is an X simulator (backward compatible)."""
-    return is_simulator(device_name, "X")
-
-
 def get_die_number_for_device(device_name: str, device_prefix: str) -> Optional[int]:
-    """
-    Extract die number from device name.
-
-    Args:
-        device_name: Device name (e.g., 'NPU.2')
-        device_prefix: Device prefix (e.g., 'NPU')
-
-    Returns:
-        Die number (e.g., 2) or None if not a valid die
-    """
+    """Extract die number from device name."""
     pattern = _get_die_pattern(device_prefix)
     match = pattern.match(device_name)
     if match:
@@ -155,7 +79,7 @@ def get_die_number_for_device(device_name: str, device_prefix: str) -> Optional[
 
 
 def get_die_number(device_name: str) -> Optional[int]:
-    """Extract die number (tries to detect prefix automatically)."""
+    """Extract die number (auto-detects prefix)."""
     if "." not in device_name:
         return None
     prefix = device_name.split(".")[0]
@@ -163,16 +87,7 @@ def get_die_number(device_name: str) -> Optional[int]:
 
 
 def sort_devices(devices: List[str], device_prefix: str) -> List[str]:
-    """
-    Sort device names by die number.
-
-    Args:
-        devices: List of device names
-        device_prefix: Device prefix
-
-    Returns:
-        Sorted list of device names
-    """
+    """Sort device names by die number."""
     def sort_key(device: str) -> int:
         num = get_die_number_for_device(device, device_prefix)
         return num if num is not None else float('inf')
@@ -180,23 +95,8 @@ def sort_devices(devices: List[str], device_prefix: str) -> List[str]:
     return sorted(devices, key=sort_key)
 
 
-# Backward compatibility
-def sort_x_devices(devices: List[str]) -> List[str]:
-    """Sort X devices (backward compatible)."""
-    return sort_devices(devices, "X")
-
-
 def get_device_info(core: "Core", device_name: str) -> dict:
-    """
-    Get detailed information about a device.
-
-    Args:
-        core: OpenVINO Core instance
-        device_name: Device name (e.g., 'NPU.0')
-
-    Returns:
-        Dictionary with device properties
-    """
+    """Get information about a device."""
     prefix = device_name.split(".")[0] if "." in device_name else device_name
 
     info = {
@@ -215,28 +115,8 @@ def get_device_info(core: "Core", device_name: str) -> dict:
     return info
 
 
-# Backward compatibility
-def get_x_device_info(core: "Core", device_name: str) -> dict:
-    """Get X device info (backward compatible)."""
-    return get_device_info(core, device_name)
-
-
 def get_card_and_die(device_name: str) -> Optional[Tuple[int, int]]:
-    """
-    Get card and die indices from device name.
-
-    Device topology: 1 card = 2 dies
-    - DEVICE.0, DEVICE.1 -> Card 0
-    - DEVICE.2, DEVICE.3 -> Card 1
-    - etc.
-
-    Args:
-        device_name: Device name (e.g., 'NPU.2')
-
-    Returns:
-        Tuple of (card_index, die_index_on_card) or None
-        Example: NPU.2 -> (1, 0) meaning Card 1, Die 0 on that card
-    """
+    """Get card and die indices (1 card = 2 dies). Returns (card_idx, die_on_card)."""
     die_num = get_die_number(device_name)
     if die_num is None:
         return None
@@ -247,16 +127,7 @@ def get_card_and_die(device_name: str) -> Optional[Tuple[int, int]]:
 
 
 def validate_accelerator_device(core: "Core", device_name: str) -> Tuple[bool, str]:
-    """
-    Validate that an accelerator device is available and usable.
-
-    Args:
-        core: OpenVINO Core instance
-        device_name: Device name to validate (e.g., 'NPU', 'NPU.0')
-
-    Returns:
-        Tuple of (is_valid, error_message)
-    """
+    """Validate that an accelerator device is available. Returns (is_valid, error_message)."""
     all_devices = core.available_devices
 
     # Determine prefix
@@ -295,28 +166,8 @@ def validate_accelerator_device(core: "Core", device_name: str) -> Tuple[bool, s
     return False, f"Invalid device specification: '{device_name}'"
 
 
-# Backward compatibility
-def validate_x_device(core: "Core", device_name: str) -> Tuple[bool, str]:
-    """Validate X device (backward compatible)."""
-    return validate_accelerator_device(core, device_name)
-
-
 def parse_device_properties(properties_str: str) -> dict:
-    """
-    Parse device properties from CLI string format.
-
-    Format: "KEY=VALUE" or "KEY=VALUE,KEY2=VALUE2,..."
-
-    Args:
-        properties_str: Properties string from CLI
-
-    Returns:
-        Dictionary of property key-value pairs
-
-    Example:
-        >>> parse_device_properties("PERFORMANCE_MODE=THROUGHPUT,NUM_STREAMS=4")
-        {'PERFORMANCE_MODE': 'THROUGHPUT', 'NUM_STREAMS': '4'}
-    """
+    """Parse device properties from CLI string (KEY=VALUE,KEY2=VALUE2,...)."""
     if not properties_str:
         return {}
 
@@ -346,54 +197,25 @@ def parse_device_properties(properties_str: str) -> dict:
 
 
 def validate_device_properties(properties: dict, device_type: str) -> Tuple[bool, List[str]]:
-    """
-    Validate device properties for a given device type.
-
-    Args:
-        properties: Dictionary of properties to validate
-        device_type: Device type ("CPU", "X", or specific like "X.0")
-
-    Returns:
-        Tuple of (is_valid, list_of_warnings)
-    """
+    """Validate device properties. Returns (is_valid, warnings)."""
     warnings = []
 
-    # Common valid properties
-    common_props = {
-        "NUM_STREAMS",
-        "PERFORMANCE_HINT",
-        "INFERENCE_NUM_THREADS",
-        "ENABLE_PROFILING",
-        "CACHE_DIR",
-    }
+    common_props = {"NUM_STREAMS", "PERFORMANCE_HINT", "INFERENCE_NUM_THREADS",
+                    "ENABLE_PROFILING", "CACHE_DIR"}
+    accelerator_props = {"PERFORMANCE_MODE", "NUM_STREAMS", "OPTIMIZATION_LEVEL",
+                         "EXECUTION_MODE_HINT"}
+    cpu_props = {"AFFINITY", "ENABLE_CPU_PINNING", "INFERENCE_THREADS_PER_STREAM",
+                 "ENABLE_HYPER_THREADING"}
 
-    # X-specific properties
-    x_props = {
-        "PERFORMANCE_MODE",
-        "NUM_STREAMS",
-        "OPTIMIZATION_LEVEL",
-        "EXECUTION_MODE_HINT",
-    }
-
-    # CPU-specific properties
-    cpu_props = {
-        "AFFINITY",
-        "ENABLE_CPU_PINNING",
-        "INFERENCE_THREADS_PER_STREAM",
-        "ENABLE_HYPER_THREADING",
-    }
-
-    is_x_device = device_type.startswith("X")
+    is_accelerator = device_type.upper() not in ("CPU", "GPU")
 
     for key in properties:
         if key in common_props:
             continue
-        if is_x_device and key in x_props:
+        if is_accelerator and key in accelerator_props:
             continue
-        if not is_x_device and key in cpu_props:
+        if not is_accelerator and key in cpu_props:
             continue
-
-        # Unknown property - warn but don't fail
         warnings.append(f"Unknown property '{key}' for device '{device_type}'")
 
     return True, warnings

@@ -66,7 +66,3 @@ mlperf-ov info                 # System information
 --batch-size, -b Batch size
 --count          Number of samples (0 = all)
 ```
-
-## License
-
-Apache 2.0

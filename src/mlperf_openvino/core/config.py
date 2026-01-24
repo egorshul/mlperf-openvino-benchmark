@@ -76,9 +76,6 @@ class OpenVINOConfig:
         # CPU and GPU are standard devices, others may be accelerators
         return device not in ("CPU", "GPU", "AUTO", "MULTI", "HETERO")
 
-    def is_x_device(self) -> bool:
-        """Check if the configured device is an accelerator (backward compatible)."""
-        return self.is_accelerator_device()
 
     def is_multi_device(self) -> bool:
         """Check if using multiple dies (device without die number like 'NPU' not 'NPU.0')."""
@@ -101,8 +98,8 @@ class OpenVINOConfig:
 
     def to_properties(self) -> Dict[str, Any]:
         """Convert to OpenVINO properties dictionary."""
-        if self.is_x_device():
-            return self.to_x_properties()
+        if self.is_accelerator_device():
+            return self.to_accelerator_properties()
         else:
             return self.to_cpu_properties()
 
@@ -123,8 +120,8 @@ class OpenVINOConfig:
         # Remove None values
         return {k: v for k, v in properties.items() if v is not None}
 
-    def to_x_properties(self) -> Dict[str, Any]:
-        """Get X accelerator-specific compilation properties."""
+    def to_accelerator_properties(self) -> Dict[str, Any]:
+        """Get accelerator-specific compilation properties."""
         properties = {
             "NUM_STREAMS": self.num_streams if self.num_streams != "AUTO" else "AUTO",
             "CACHE_DIR": self.cache_dir,
