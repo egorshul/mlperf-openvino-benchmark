@@ -34,10 +34,10 @@ from .config import BenchmarkConfig, Scenario
 logger = logging.getLogger(__name__)
 
 # Sequence length buckets - must match C++ constants
-SEQ_BUCKETS = [128, 192, 256, 384]
-# Batch sizes per bucket - batch=8 was too large, batch=4 is optimal
-DEFAULT_BATCH_SIZES = [4, 4, 2, 2]
-DEFAULT_NIREQ_PER_CONFIG = 8  # Keep higher nireq for better parallelism
+SEQ_BUCKETS = [128, 165, 256, 384]
+# Batch sizes per bucket (smaller batch for longer sequences to save memory)
+DEFAULT_BATCH_SIZES = [4, 4, 2, 1]
+DEFAULT_NIREQ_PER_CONFIG = 4  # Reduced to save NPU memory
 
 
 class BertOptimizedSUTWrapper:

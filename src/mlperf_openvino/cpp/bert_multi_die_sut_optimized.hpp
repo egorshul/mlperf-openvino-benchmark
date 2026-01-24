@@ -38,16 +38,17 @@ namespace mlperf_ov {
 // CONFIGURATION
 // =============================================================================
 
-// Sequence length buckets - optimized boundaries based on distribution analysis
-// Changed from [128, 165, 256, 384] to [128, 192, 256, 384] for better coverage
-constexpr int SEQ_BUCKETS[] = {128, 192, 256, 384};
+// Sequence length buckets based on distribution analysis
+// Bucket 0: seq <= 128 (~21%), Bucket 1: seq <= 165 (~31%)
+// Bucket 2: seq <= 256 (~37%), Bucket 3: seq <= 384 (~11%)
+constexpr int SEQ_BUCKETS[] = {128, 165, 256, 384};
 constexpr int NUM_SEQ_BUCKETS = 4;
 
-// Optimal batch sizes per bucket
-constexpr int BATCH_SIZES[] = {4, 4, 2, 2};
+// Optimal batch sizes per bucket (smaller batch for longer sequences to save memory)
+constexpr int BATCH_SIZES[] = {4, 4, 2, 1};
 
-// Per-bucket nireq multipliers (bucket 2 is busiest with 37%, give it more requests)
-constexpr int NIREQ_MULTIPLIERS[] = {1, 1, 2, 1};  // More requests for bucket 2
+// Per-bucket nireq multipliers (more requests for busier buckets 1 and 2)
+constexpr int NIREQ_MULTIPLIERS[] = {1, 2, 2, 1};
 
 // Model configuration key
 struct BertModelConfig {
@@ -113,7 +114,7 @@ struct BertOptDieContext {
 };
 
 // =============================================================================
-// PRE-STAGED BUFFER FOR FAST BATCH COPY
+// PRE-STAGED BUFFER FOR FAST BATCH COPY (PINNED MEMORY)
 // =============================================================================
 
 struct BertStagedSample {
@@ -122,14 +123,51 @@ struct BertStagedSample {
     size_t buffer_offset;  // Offset into bucket's staged buffer
 };
 
+// Pinned memory buffer for faster DMA transfers
+struct PinnedBuffer {
+    int64_t* data = nullptr;
+    size_t size = 0;
+
+    void allocate(size_t count);
+    void free();
+    ~PinnedBuffer() { free(); }
+
+    // Non-copyable
+    PinnedBuffer() = default;
+    PinnedBuffer(const PinnedBuffer&) = delete;
+    PinnedBuffer& operator=(const PinnedBuffer&) = delete;
+    PinnedBuffer(PinnedBuffer&& other) noexcept;
+    PinnedBuffer& operator=(PinnedBuffer&& other) noexcept;
+};
+
 struct BertStagedBucket {
-    std::vector<int64_t> input_ids;      // Contiguous buffer for all samples in bucket
-    std::vector<int64_t> attention_mask;
-    std::vector<int64_t> token_type_ids;
+    PinnedBuffer input_ids;           // Pinned buffer for all samples in bucket
+    PinnedBuffer attention_mask;
+    PinnedBuffer token_type_ids;
     std::vector<BertStagedSample> samples;  // Metadata for each sample
     std::unordered_map<int, size_t> sample_to_index;  // sample_idx -> index in samples
     int seq_length;  // Bucket sequence length
     bool staged = false;
+};
+
+// =============================================================================
+// DOUBLE-BUFFERING FOR ASYNC PREFETCH
+// =============================================================================
+
+struct DoubleBatchBuffer {
+    // Two buffers for ping-pong
+    PinnedBuffer input_ids[2];
+    PinnedBuffer attention_mask[2];
+    PinnedBuffer token_type_ids[2];
+
+    int current_buffer = 0;  // Which buffer is being used for inference
+    int batch_size = 0;
+    int seq_length = 0;
+    bool allocated = false;
+
+    void allocate(int batch, int seq_len);
+    void swap() { current_buffer = 1 - current_buffer; }
+    int next_buffer() const { return 1 - current_buffer; }
 };
 
 // =============================================================================
@@ -280,6 +318,9 @@ private:
     // Pre-staged buffers per bucket (used after stage_samples() called)
     BertStagedBucket staged_buckets_[NUM_SEQ_BUCKETS];
     bool samples_staged_ = false;
+
+    // Double-buffering for async prefetch (one per bucket per die)
+    std::vector<std::vector<DoubleBatchBuffer>> double_buffers_;  // [die_idx][bucket_idx]
 
     // Batching for Server mode
     int batch_timeout_us_ = 500;
