@@ -112,7 +112,7 @@ class ResNetMultiDeviceSUT:
 
     def _setup_async_queues(self) -> None:
         """Setup async inference queues for all dies."""
-        # Get input dtype from first die
+        # Get input dtype and shape from first die
         first_die = self.backend.active_devices[0]
         ctx = self.backend._die_contexts[first_die]
         compiled_model = ctx.compiled_model
@@ -128,6 +128,16 @@ class ResNetMultiDeviceSUT:
             self._input_dtype = np.int32
         else:
             self._input_dtype = np.float32
+
+        # Determine if model expects NCHW (channels at dim 1) or NHWC (channels at dim 3)
+        # Model input shape: [N, C, H, W] for NCHW or [N, H, W, C] for NHWC
+        input_shape = compiled_model.input(0).shape
+        if len(input_shape) == 4:
+            # Check if channels (3 for RGB) are at position 1 (NCHW) or 3 (NHWC)
+            self._model_expects_nchw = (input_shape[1] == 3)
+        else:
+            self._model_expects_nchw = True  # Default to NCHW
+        logger.debug(f"Model expects NCHW: {self._model_expects_nchw}, input shape: {input_shape}")
 
         # Create AsyncInferQueue for each die with high queue depth
         for die_name in self.backend.active_devices:
@@ -279,13 +289,18 @@ class ResNetMultiDeviceSUT:
 
                 batch_data.append(input_data)
 
-            # Stack into batch tensor (format depends on preprocessing: NCHW or NHWC)
+            # Stack into batch tensor
             if actual_batch_size == batch_size:
                 batched_input = np.stack(batch_data, axis=0)
             else:
                 # Pad incomplete batch
                 padded = batch_data + [batch_data[-1]] * (batch_size - actual_batch_size)
                 batched_input = np.stack(padded, axis=0)
+
+            # Convert NHWC to NCHW if model expects NCHW
+            # Data from preprocessing is NHWC: [N, H, W, C], model expects NCHW: [N, C, H, W]
+            if self._model_expects_nchw and batched_input.ndim == 4 and batched_input.shape[3] == 3:
+                batched_input = np.transpose(batched_input, (0, 3, 1, 2))
 
             # Convert dtype
             if input_dtype is not None and batched_input.dtype != input_dtype:
@@ -343,7 +358,6 @@ class ResNetMultiDeviceSUT:
 
             # Ensure correct batch dimension
             if batch_size == 1:
-                # Keep as-is or ensure [1, C, H, W]
                 if input_data.ndim == 3:
                     input_data = input_data[np.newaxis, ...]
             else:
@@ -354,9 +368,17 @@ class ResNetMultiDeviceSUT:
                     # Replicate to fill batch (only first result matters)
                     input_data = np.stack([input_data] * batch_size, axis=0)
 
+            # Convert NHWC to NCHW if model expects NCHW
+            if self._model_expects_nchw and input_data.ndim == 4 and input_data.shape[3] == 3:
+                input_data = np.transpose(input_data, (0, 3, 1, 2))
+
             # Convert dtype
             if input_dtype is not None and input_data.dtype != input_dtype:
                 input_data = input_data.astype(input_dtype, copy=False)
+
+            # Ensure contiguous after transpose
+            if not input_data.flags['C_CONTIGUOUS']:
+                input_data = np.ascontiguousarray(input_data)
 
             # Select die and submit
             die_name = self._get_next_die()
