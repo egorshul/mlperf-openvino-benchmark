@@ -43,7 +43,8 @@ constexpr int NUM_SEQ_BUCKETS = 4;
 
 // Optimal batch sizes per bucket (shorter sequences can use larger batches)
 // These can be tuned based on NPU memory and latency requirements
-constexpr int BATCH_SIZES[] = {4, 4, 2, 2};  // For buckets [128, 165, 256, 384]
+// Higher values = better throughput but more memory usage
+constexpr int BATCH_SIZES[] = {8, 8, 4, 4};  // For buckets [128, 165, 256, 384]
 
 // Model configuration key
 struct BertModelConfig {
@@ -84,7 +85,7 @@ struct BertOptInferContext {
     size_t pool_id = 0;
     BertOptimizedSUT* sut = nullptr;
 
-    static constexpr int MAX_BATCH = 8;
+    static constexpr int MAX_BATCH = 16;  // Support larger batches for throughput
     uint64_t query_ids[MAX_BATCH];
     int sample_indices[MAX_BATCH];
     int actual_batch_size = 0;
