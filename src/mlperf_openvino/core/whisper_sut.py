@@ -305,6 +305,34 @@ class WhisperOptimumSUT:
         else:
             logger.info(f"Whisper model ready on {self.device}")
 
+        # Run warmup
+        self._warmup()
+
+    def _warmup(self) -> None:
+        """Run warmup inference to ensure model is ready."""
+        import torch
+
+        logger.info("Running warmup inference...")
+        t_start = time.time()
+
+        try:
+            # Create dummy input - 30 seconds of silence (same as Whisper training)
+            # Shape: (batch=1, n_mels=128, time=3000)
+            dummy_input = torch.zeros(1, 128, 3000, dtype=torch.float32)
+
+            # Run short generation (just a few tokens for warmup)
+            _ = self.model.generate(
+                dummy_input,
+                max_new_tokens=5,  # Very short for warmup
+                language="en",
+                task="transcribe",
+            )
+
+            t_warmup = time.time() - t_start
+            logger.info(f"Warmup completed in {t_warmup:.1f}s")
+        except Exception as e:
+            logger.warning(f"Warmup failed (non-critical): {e}")
+
     def _compile_submodels(self, ov_config: dict) -> None:
         """Compile encoder and decoder on their respective devices."""
         import openvino as ov
@@ -656,21 +684,26 @@ class WhisperOptimumSUT:
         if self._progress_bar is not None:
             self._close_progress()
 
-    def _process_sample(self, sample_idx: int) -> str:
+    def _process_sample(self, sample_idx: int, timing_info: Optional[Dict] = None) -> str:
         """
         Process a single audio sample.
 
         Args:
             sample_idx: Sample index
+            timing_info: Optional dict to store timing breakdown
 
         Returns:
             Transcribed text
         """
         import torch
 
+        t_start = time.time()
+
         # Get preprocessed mel features from QSL
         features = self.qsl.get_features(sample_idx)
         input_features = features["input_features"]
+
+        t_features = time.time()
 
         # Convert to tensor
         if isinstance(input_features, np.ndarray):
@@ -680,6 +713,8 @@ class WhisperOptimumSUT:
         if input_features.dim() == 2:
             input_features = input_features.unsqueeze(0)
 
+        t_tensor = time.time()
+
         # Generate transcription using model with KV-cache support
         generated_ids = self.model.generate(
             input_features,
@@ -688,8 +723,21 @@ class WhisperOptimumSUT:
             task="transcribe",
         )
 
+        t_generate = time.time()
+
         # Decode tokens to text
         text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+
+        t_decode = time.time()
+
+        # Store timing info if requested
+        if timing_info is not None:
+            timing_info["features_ms"] = (t_features - t_start) * 1000
+            timing_info["tensor_ms"] = (t_tensor - t_features) * 1000
+            timing_info["generate_ms"] = (t_generate - t_tensor) * 1000
+            timing_info["decode_ms"] = (t_decode - t_generate) * 1000
+            timing_info["total_ms"] = (t_decode - t_start) * 1000
+            timing_info["tokens"] = generated_ids.shape[-1] if hasattr(generated_ids, 'shape') else len(generated_ids[0])
 
         return text
 
@@ -712,11 +760,30 @@ class WhisperOptimumSUT:
         total_samples = len(query_samples)
         self._start_progress(total_samples, desc="Whisper Offline inference")
 
-        for sample in query_samples:
+        # Collect timing stats for first N samples
+        timing_samples = min(5, total_samples)
+        timing_stats = []
+
+        for i, sample in enumerate(query_samples):
             sample_idx = sample.index
             self._sample_count += 1
 
-            text = self._process_sample(sample_idx)
+            # Collect timing for first few samples
+            if i < timing_samples:
+                timing_info = {}
+                text = self._process_sample(sample_idx, timing_info)
+                timing_stats.append(timing_info)
+
+                # Log timing for each sample
+                logger.info(
+                    f"Sample {i}: total={timing_info.get('total_ms', 0):.0f}ms, "
+                    f"generate={timing_info.get('generate_ms', 0):.0f}ms, "
+                    f"tokens={timing_info.get('tokens', 0)}, "
+                    f"ms/token={timing_info.get('generate_ms', 0) / max(1, timing_info.get('tokens', 1)):.1f}"
+                )
+            else:
+                text = self._process_sample(sample_idx)
+
             self._predictions[sample_idx] = text
 
             response_data = np.array([len(text)], dtype=np.int64)
@@ -728,6 +795,17 @@ class WhisperOptimumSUT:
             responses.append(response)
 
             self._update_progress(1)
+
+        # Log timing summary
+        if timing_stats:
+            avg_total = sum(t.get('total_ms', 0) for t in timing_stats) / len(timing_stats)
+            avg_generate = sum(t.get('generate_ms', 0) for t in timing_stats) / len(timing_stats)
+            avg_tokens = sum(t.get('tokens', 0) for t in timing_stats) / len(timing_stats)
+            logger.info(
+                f"Timing summary ({len(timing_stats)} samples): "
+                f"avg_total={avg_total:.0f}ms, avg_generate={avg_generate:.0f}ms, "
+                f"avg_tokens={avg_tokens:.0f}"
+            )
 
         self._close_progress()
         lg.QuerySamplesComplete(responses)
@@ -1599,10 +1677,21 @@ class WhisperMultiDieSUT:
                 f"({throughput:.1f} samples/sec, {self.num_dies} dies)"
             )
 
-    def _process_sample(self, sample_idx: int, die_name: str) -> str:
+    def _process_sample(self, sample_idx: int, die_name: str, timing_info: Optional[Dict] = None) -> str:
         """Process a single sample on specified die."""
+        import threading
+
+        t_start = time.time()
+        thread_id = threading.current_thread().name
+        logger.info(f"[{die_name}] START sample {sample_idx} (thread: {thread_id})")
+
         sut = self._die_suts[die_name]
-        return sut._process_sample(sample_idx)
+        result = sut._process_sample(sample_idx, timing_info)
+
+        t_elapsed = time.time() - t_start
+        logger.info(f"[{die_name}] DONE sample {sample_idx} in {t_elapsed:.1f}s")
+
+        return result
 
     def issue_queries(self, query_samples: List[Any]) -> None:
         """Process queries from LoadGen."""
@@ -1618,12 +1707,30 @@ class WhisperMultiDieSUT:
     def _issue_query_offline(self, query_samples: List[Any]) -> None:
         """Process queries for Offline scenario with parallel multi-die execution."""
         from concurrent.futures import ThreadPoolExecutor, as_completed
+        import threading
 
         total_samples = len(query_samples)
         self._start_progress(total_samples, f"Whisper Offline ({self.num_dies} dies)")
 
         # Prepare results storage
         results: Dict[int, Tuple[Any, str]] = {}  # sample.id -> (sample, text)
+
+        # Timing collection (thread-safe)
+        timing_samples = min(5, total_samples)
+        timing_stats = []
+        timing_lock = threading.Lock()
+
+        def process_with_timing(sample_idx: int, die_name: str, collect_timing: bool):
+            """Wrapper to optionally collect timing."""
+            if collect_timing:
+                timing_info = {}
+                text = self._process_sample(sample_idx, die_name, timing_info)
+                timing_info["die"] = die_name
+                with timing_lock:
+                    timing_stats.append(timing_info)
+                return text
+            else:
+                return self._process_sample(sample_idx, die_name)
 
         # Process samples in parallel across dies
         # Use num_dies workers to maximize parallelism
@@ -1632,12 +1739,13 @@ class WhisperMultiDieSUT:
             futures = {}
             for i, sample in enumerate(query_samples):
                 die_name = self._active_devices[i % self.num_dies]
-                future = executor.submit(self._process_sample, sample.index, die_name)
-                futures[future] = sample
+                collect_timing = (i < timing_samples)
+                future = executor.submit(process_with_timing, sample.index, die_name, collect_timing)
+                futures[future] = (sample, i)
 
             # Collect results as they complete
             for future in as_completed(futures):
-                sample = futures[future]
+                sample, idx = futures[future]
                 try:
                     text = future.result()
                     results[sample.id] = (sample, text)
@@ -1651,6 +1759,26 @@ class WhisperMultiDieSUT:
                     self._update_progress(1)
 
         self._close_progress()
+
+        # Log timing stats
+        if timing_stats:
+            for i, t in enumerate(timing_stats):
+                logger.info(
+                    f"Sample {i} ({t.get('die', '?')}): total={t.get('total_ms', 0):.0f}ms, "
+                    f"generate={t.get('generate_ms', 0):.0f}ms, "
+                    f"tokens={t.get('tokens', 0)}, "
+                    f"ms/token={t.get('generate_ms', 0) / max(1, t.get('tokens', 1)):.1f}"
+                )
+
+            avg_total = sum(t.get('total_ms', 0) for t in timing_stats) / len(timing_stats)
+            avg_generate = sum(t.get('generate_ms', 0) for t in timing_stats) / len(timing_stats)
+            avg_tokens = sum(t.get('tokens', 0) for t in timing_stats) / len(timing_stats)
+            ms_per_token = avg_generate / max(1, avg_tokens)
+            logger.info(
+                f"TIMING SUMMARY ({len(timing_stats)} samples, {self.num_dies} dies): "
+                f"avg_total={avg_total:.0f}ms, avg_generate={avg_generate:.0f}ms, "
+                f"avg_tokens={avg_tokens:.0f}, ms/token={ms_per_token:.1f}"
+            )
 
         # Build responses in original order
         responses = []
