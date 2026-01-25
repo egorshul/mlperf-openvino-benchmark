@@ -185,6 +185,8 @@ class BertOptimizedSUTWrapper:
         """Process queries in Server mode."""
         if not self._samples_registered:
             self._register_samples()
+            # Stage samples into safe buffers for dispatch threads
+            self._cpp_sut.stage_samples()
             # Enable direct LoadGen response for Server mode
             self._cpp_sut.enable_direct_loadgen(True)
 

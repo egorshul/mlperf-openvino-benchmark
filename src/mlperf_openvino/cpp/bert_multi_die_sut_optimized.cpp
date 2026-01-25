@@ -8,96 +8,8 @@
 #include <chrono>
 #include <cstring>
 #include <regex>
-#include <cstdlib>
-
-#ifdef __linux__
-#include <sys/mman.h>
-#endif
 
 namespace mlperf_ov {
-
-// =============================================================================
-// PINNED MEMORY BUFFER
-// =============================================================================
-
-void PinnedBuffer::allocate(size_t count) {
-    free();
-    if (count == 0) return;
-
-    size_t bytes = count * sizeof(int64_t);
-    // Align to page boundary (4KB) for better DMA performance
-    constexpr size_t PAGE_SIZE = 4096;
-    size_t aligned_bytes = ((bytes + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
-
-#ifdef __linux__
-    // Use posix_memalign for page-aligned allocation
-    void* ptr = nullptr;
-    if (posix_memalign(&ptr, PAGE_SIZE, aligned_bytes) == 0) {
-        data = static_cast<int64_t*>(ptr);
-        size = count;
-        // Lock pages in memory to prevent swapping (best-effort)
-        mlock(data, aligned_bytes);
-    }
-#else
-    // Fallback to aligned_alloc
-    data = static_cast<int64_t*>(std::aligned_alloc(PAGE_SIZE, aligned_bytes));
-    size = count;
-#endif
-
-    if (data) {
-        std::memset(data, 0, bytes);
-    }
-}
-
-void PinnedBuffer::free() {
-    if (data) {
-#ifdef __linux__
-        size_t bytes = size * sizeof(int64_t);
-        constexpr size_t PAGE_SIZE = 4096;
-        size_t aligned_bytes = ((bytes + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
-        munlock(data, aligned_bytes);
-#endif
-        std::free(data);
-        data = nullptr;
-        size = 0;
-    }
-}
-
-PinnedBuffer::PinnedBuffer(PinnedBuffer&& other) noexcept
-    : data(other.data), size(other.size) {
-    other.data = nullptr;
-    other.size = 0;
-}
-
-PinnedBuffer& PinnedBuffer::operator=(PinnedBuffer&& other) noexcept {
-    if (this != &other) {
-        free();
-        data = other.data;
-        size = other.size;
-        other.data = nullptr;
-        other.size = 0;
-    }
-    return *this;
-}
-
-// =============================================================================
-// DOUBLE-BUFFER ALLOCATION
-// =============================================================================
-
-void DoubleBatchBuffer::allocate(int batch, int seq_len) {
-    if (allocated && batch_size == batch && seq_length == seq_len) return;
-
-    size_t elements = static_cast<size_t>(batch) * seq_len;
-    for (int i = 0; i < 2; ++i) {
-        input_ids[i].allocate(elements);
-        attention_mask[i].allocate(elements);
-        token_type_ids[i].allocate(elements);
-    }
-    batch_size = batch;
-    seq_length = seq_len;
-    current_buffer = 0;
-    allocated = true;
-}
 
 // =============================================================================
 // STATIC HELPERS
@@ -391,15 +303,6 @@ void BertOptimizedSUT::load() {
         die_contexts_.push_back(std::move(die));
     }
 
-    // Initialize double-buffers for async prefetch
-    double_buffers_.resize(devices.size());
-    for (size_t die_idx = 0; die_idx < devices.size(); ++die_idx) {
-        double_buffers_[die_idx].resize(NUM_SEQ_BUCKETS);
-        for (int b = 0; b < NUM_SEQ_BUCKETS; ++b) {
-            double_buffers_[die_idx][b].allocate(bucket_batch_sizes_[b], SEQ_BUCKETS[b]);
-        }
-    }
-
     dispatch_running_.store(true);
     for (int b = 0; b < NUM_SEQ_BUCKETS; ++b) {
         dispatch_threads_.emplace_back(&BertOptimizedSUT::dispatch_thread_func, this, b);
@@ -432,9 +335,9 @@ void BertOptimizedSUT::clear_samples() {
     samples_staged_ = false;
 
     for (int i = 0; i < NUM_SEQ_BUCKETS; ++i) {
-        staged_buckets_[i].input_ids.free();
-        staged_buckets_[i].attention_mask.free();
-        staged_buckets_[i].token_type_ids.free();
+        staged_buckets_[i].input_ids.clear();
+        staged_buckets_[i].attention_mask.clear();
+        staged_buckets_[i].token_type_ids.clear();
         staged_buckets_[i].samples.clear();
         staged_buckets_[i].sample_to_index.clear();
         staged_buckets_[i].staged = false;
@@ -456,12 +359,12 @@ void BertOptimizedSUT::stage_samples() {
         bucket_counts[info.bucket_idx]++;
     }
 
-    // Pre-allocate pinned buffers
+    // Pre-allocate buffers
     for (int b = 0; b < NUM_SEQ_BUCKETS; ++b) {
         size_t total_elements = bucket_counts[b] * SEQ_BUCKETS[b];
-        staged_buckets_[b].input_ids.allocate(total_elements);
-        staged_buckets_[b].attention_mask.allocate(total_elements);
-        staged_buckets_[b].token_type_ids.allocate(total_elements);
+        staged_buckets_[b].input_ids.resize(total_elements);
+        staged_buckets_[b].attention_mask.resize(total_elements);
+        staged_buckets_[b].token_type_ids.resize(total_elements);
         staged_buckets_[b].samples.reserve(bucket_counts[b]);
     }
 
@@ -473,22 +376,22 @@ void BertOptimizedSUT::stage_samples() {
         int seq_len = SEQ_BUCKETS[b];
         size_t offset = bucket_offsets[b];
 
-        // Copy data to pinned buffer
+        // Copy data to staged buffer
         int copy_len = std::min(info.actual_seq_len, seq_len);
-        std::memcpy(staged_buckets_[b].input_ids.data + offset,
+        std::memcpy(staged_buckets_[b].input_ids.data() + offset,
                     info.input_ids, copy_len * sizeof(int64_t));
-        std::memcpy(staged_buckets_[b].attention_mask.data + offset,
+        std::memcpy(staged_buckets_[b].attention_mask.data() + offset,
                     info.attention_mask, copy_len * sizeof(int64_t));
-        std::memcpy(staged_buckets_[b].token_type_ids.data + offset,
+        std::memcpy(staged_buckets_[b].token_type_ids.data() + offset,
                     info.token_type_ids, copy_len * sizeof(int64_t));
 
         // Zero-pad if needed
         if (copy_len < seq_len) {
-            std::memset(staged_buckets_[b].input_ids.data + offset + copy_len,
+            std::memset(staged_buckets_[b].input_ids.data() + offset + copy_len,
                         0, (seq_len - copy_len) * sizeof(int64_t));
-            std::memset(staged_buckets_[b].attention_mask.data + offset + copy_len,
+            std::memset(staged_buckets_[b].attention_mask.data() + offset + copy_len,
                         0, (seq_len - copy_len) * sizeof(int64_t));
-            std::memset(staged_buckets_[b].token_type_ids.data + offset + copy_len,
+            std::memset(staged_buckets_[b].token_type_ids.data() + offset + copy_len,
                         0, (seq_len - copy_len) * sizeof(int64_t));
         }
 
@@ -602,10 +505,10 @@ void BertOptimizedSUT::copy_staged_sample_to_tensor(int bucket_idx, size_t stage
     size_t src_offset = bucket.samples[staged_idx].buffer_offset;
     size_t dst_offset = static_cast<size_t>(offset) * bucket_seq_len;
 
-    // Direct memcpy from pre-staged pinned buffer (already padded)
-    std::memcpy(ids_ptr + dst_offset, bucket.input_ids.data + src_offset, bucket_seq_len * sizeof(int64_t));
-    std::memcpy(mask_ptr + dst_offset, bucket.attention_mask.data + src_offset, bucket_seq_len * sizeof(int64_t));
-    std::memcpy(type_ptr + dst_offset, bucket.token_type_ids.data + src_offset, bucket_seq_len * sizeof(int64_t));
+    // Direct memcpy from pre-staged buffer (already padded)
+    std::memcpy(ids_ptr + dst_offset, bucket.input_ids.data() + src_offset, bucket_seq_len * sizeof(int64_t));
+    std::memcpy(mask_ptr + dst_offset, bucket.attention_mask.data() + src_offset, bucket_seq_len * sizeof(int64_t));
+    std::memcpy(type_ptr + dst_offset, bucket.token_type_ids.data() + src_offset, bucket_seq_len * sizeof(int64_t));
 }
 
 // =============================================================================
@@ -938,14 +841,30 @@ void BertOptimizedSUT::dispatch_thread_func(int bucket_idx) {
         int64_t* mask = ctx->attention_mask_tensor.data<int64_t>();
         int64_t* type = ctx->token_type_ids_tensor.data<int64_t>();
 
-        std::shared_lock<std::shared_mutex> lock(sample_mutex_);
+        // Use staged buffers for safe data access
+        const auto& bucket = staged_buckets_[bucket_idx];
         for (int i = 0; i < actual; ++i) {
-            copy_sample_to_tensor(batch.sample_indices[i], seq_len, ids, mask, type, i);
+            int sample_idx = batch.sample_indices[i];
+            auto it = bucket.sample_to_index.find(sample_idx);
+            if (it != bucket.sample_to_index.end()) {
+                copy_staged_sample_to_tensor(bucket_idx, it->second, seq_len, ids, mask, type, i);
+            } else {
+                // Fallback - zero fill
+                size_t dst_offset = static_cast<size_t>(i) * seq_len;
+                std::memset(ids + dst_offset, 0, seq_len * sizeof(int64_t));
+                std::memset(mask + dst_offset, 0, seq_len * sizeof(int64_t));
+                std::memset(type + dst_offset, 0, seq_len * sizeof(int64_t));
+            }
         }
-        for (int i = actual; i < batch_size; ++i) {
-            copy_sample_to_tensor(batch.sample_indices[0], seq_len, ids, mask, type, i);
+        // Pad dummies with first sample
+        if (actual > 0) {
+            auto it = bucket.sample_to_index.find(batch.sample_indices[0]);
+            for (int i = actual; i < batch_size; ++i) {
+                if (it != bucket.sample_to_index.end()) {
+                    copy_staged_sample_to_tensor(bucket_idx, it->second, seq_len, ids, mask, type, i);
+                }
+            }
         }
-        lock.unlock();
 
         bq.valid[slot].store(false, std::memory_order_release);
 
