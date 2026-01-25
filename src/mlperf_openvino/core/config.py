@@ -364,7 +364,7 @@ class BenchmarkConfig:
                     min_duration_ms=60000,
                     min_query_count=24576,
                     samples_per_query=1,
-                    target_qps=610.0,
+                    target_qps=6150.0,
                 ),
                 server=ScenarioConfig(
                     min_duration_ms=60000,
