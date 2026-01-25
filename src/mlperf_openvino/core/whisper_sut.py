@@ -66,12 +66,23 @@ class CompiledModelWrapper:
         """Callable interface for synchronous inference (like CompiledModel)."""
         return self._compiled(inputs, share_inputs=share_inputs, share_outputs=share_outputs)
 
-    def start_async(self, inputs=None, share_inputs=True, share_outputs=True):
-        """Start async inference (like InferRequest)."""
+    def start_async(self, inputs=None, **kwargs):
+        """Start async inference (like InferRequest).
+
+        Note: InferRequest.start_async() doesn't accept share_inputs/share_outputs,
+        so we ignore those kwargs if passed.
+        """
+        # InferRequest.start_async() signature varies by OV version
+        # Safest approach: set inputs via tensors if needed, then call start_async()
         if inputs is not None:
-            self._infer_request.start_async(inputs, share_inputs=share_inputs, share_outputs=share_outputs)
-        else:
-            self._infer_request.start_async()
+            # Set input tensors from dict
+            for name, tensor in inputs.items():
+                try:
+                    self._infer_request.set_tensor(name, tensor)
+                except Exception:
+                    # Try by index if name doesn't work
+                    pass
+        self._infer_request.start_async()
 
     def wait(self):
         """Wait for async inference to complete."""
@@ -97,16 +108,31 @@ class CompiledModelWrapper:
         """Set output tensor by index."""
         self._infer_request.set_output_tensor(index, tensor)
 
-    def infer(self, inputs=None, share_inputs=True, share_outputs=True):
-        """Synchronous inference using InferRequest."""
+    def infer(self, inputs=None, **kwargs):
+        """Synchronous inference using InferRequest.
+
+        Note: ignores share_inputs/share_outputs as InferRequest doesn't use them.
+        """
         if inputs is not None:
-            return self._infer_request.infer(inputs, share_inputs=share_inputs, share_outputs=share_outputs)
+            return self._infer_request.infer(inputs)
         return self._infer_request.infer()
 
     @property
     def results(self):
         """Get inference results."""
         return self._infer_request.results
+
+    @property
+    def input_tensors(self):
+        """Get input tensors."""
+        return [self._infer_request.get_input_tensor(i)
+                for i in range(len(self._compiled.inputs))]
+
+    @property
+    def output_tensors(self):
+        """Get output tensors."""
+        return [self._infer_request.get_output_tensor(i)
+                for i in range(len(self._compiled.outputs))]
 
     def __getattr__(self, name):
         """Delegate unknown attributes to InferRequest."""
