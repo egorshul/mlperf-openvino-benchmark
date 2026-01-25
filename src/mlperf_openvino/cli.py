@@ -412,6 +412,53 @@ def download_model_cmd(model: str, output_dir: str, format: str):
         sys.exit(1)
 
 
+@main.command('export-whisper-npu')
+@click.option('--output-dir', '-o', type=click.Path(), default='./models',
+              help='Output directory')
+@click.option('--model-id', default='openai/whisper-large-v3',
+              help='HuggingFace model ID')
+@click.option('--batch-size', default=1, type=int,
+              help='Fixed batch size for NPU')
+@click.option('--decoder-seq-len', default=448, type=int,
+              help='Max decoder sequence length')
+def export_whisper_npu_cmd(output_dir: str, model_id: str, batch_size: int, decoder_seq_len: int):
+    """
+    Export Whisper model with static shapes for NPU.
+
+    NPU devices require static shapes. This command exports
+    Whisper model with fixed input dimensions optimized for NPU.
+
+    Examples:
+
+        mlperf-ov export-whisper-npu --output-dir ./models
+
+        mlperf-ov export-whisper-npu --batch-size 1 --decoder-seq-len 448
+    """
+    from .utils.model_downloader import export_whisper_for_npu
+
+    click.echo(f"Exporting Whisper for NPU with static shapes...")
+    click.echo(f"  Batch size: {batch_size}")
+    click.echo(f"  Decoder seq len: {decoder_seq_len}")
+
+    try:
+        paths = export_whisper_for_npu(
+            output_dir=output_dir,
+            model_id=model_id,
+            batch_size=batch_size,
+            decoder_seq_len=decoder_seq_len,
+        )
+        click.echo(f"\nModel exported to: {paths['model_path']}")
+        click.echo(f"  Encoder: {paths.get('encoder_path', 'N/A')}")
+        click.echo(f"  Decoder: {paths.get('decoder_path', 'N/A')}")
+        click.echo(f"\nUse with:")
+        click.echo(f"  mlperf-ov run --model whisper --device X --model-path {paths['model_path']}")
+    except Exception as e:
+        click.echo(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
 @main.command()
 def info():
     """Show system and library information."""

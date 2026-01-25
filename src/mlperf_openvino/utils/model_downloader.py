@@ -553,6 +553,172 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
     }
 
 
+def export_whisper_for_npu(
+    output_dir: str,
+    model_id: str = "openai/whisper-large-v3",
+    batch_size: int = 1,
+    encoder_seq_len: int = 1500,
+    decoder_seq_len: int = 448,
+) -> Dict[str, str]:
+    """
+    Export Whisper model with static shapes optimized for NPU.
+
+    NPU devices typically require static shapes for optimal performance.
+    This function exports the model with fixed input dimensions.
+
+    Args:
+        output_dir: Directory to save the model
+        model_id: HuggingFace model ID
+        batch_size: Fixed batch size (default 1)
+        encoder_seq_len: Encoder sequence length (1500 for 30s audio)
+        decoder_seq_len: Max decoder sequence length (448 for Whisper)
+
+    Returns:
+        Dictionary with paths to model files
+    """
+    import subprocess
+    import shutil
+
+    output_path = Path(output_dir)
+    model_name = model_id.split("/")[-1]
+    ov_model_path = output_path / f"{model_name}-openvino-static"
+
+    logger.info(f"Exporting Whisper for NPU with static shapes:")
+    logger.info(f"  batch_size={batch_size}")
+    logger.info(f"  encoder_seq_len={encoder_seq_len}")
+    logger.info(f"  decoder_seq_len={decoder_seq_len}")
+
+    # Check if already exported
+    if ov_model_path.exists():
+        encoder_path = ov_model_path / "openvino_encoder_model.xml"
+        decoder_path = ov_model_path / "openvino_decoder_model.xml"
+        if encoder_path.exists() and decoder_path.exists():
+            logger.info(f"Static model already exists at {ov_model_path}")
+            return {
+                "encoder_path": str(encoder_path),
+                "decoder_path": str(decoder_path),
+                "model_path": str(ov_model_path),
+            }
+
+    # Use optimum-cli with static shapes
+    optimum_cli = shutil.which("optimum-cli")
+
+    if not optimum_cli:
+        raise RuntimeError(
+            "optimum-cli is required for static shape export. "
+            "Install with: pip install optimum[openvino]"
+        )
+
+    # Build static shape specifications
+    # Encoder input: input_features[batch, 80, 3000] (80 mel bins, 3000 frames)
+    # Decoder input: decoder_input_ids[batch, seq], encoder_hidden_states[batch, enc_seq, hidden]
+    encoder_shapes = f"input_features[{batch_size},80,3000]"
+
+    cmd = [
+        optimum_cli, "export", "openvino",
+        "--model", model_id,
+        "--task", "automatic-speech-recognition",
+        "--batch_size", str(batch_size),
+        str(ov_model_path),
+    ]
+
+    logger.info(f"Running: {' '.join(cmd)}")
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=1800,
+        )
+
+        if result.returncode != 0:
+            logger.error(f"Export failed: {result.stderr}")
+            raise RuntimeError(f"optimum-cli export failed: {result.stderr}")
+
+        logger.info("Export completed successfully")
+
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("Export timed out after 30 minutes")
+
+    # Now reshape models to static shapes using OpenVINO
+    logger.info("Reshaping models to fully static shapes...")
+
+    try:
+        import openvino as ov
+
+        core = ov.Core()
+
+        # Reshape encoder
+        encoder_xml = ov_model_path / "openvino_encoder_model.xml"
+        if encoder_xml.exists():
+            logger.info("Reshaping encoder to static shape...")
+            encoder_model = core.read_model(encoder_xml)
+
+            # Encoder: input_features[batch, 80, 3000]
+            encoder_model.reshape({0: [batch_size, 80, 3000]})
+
+            ov.save_model(encoder_model, encoder_xml)
+            logger.info("Encoder reshaped to static shape")
+
+        # Reshape decoder
+        decoder_xml = ov_model_path / "openvino_decoder_model.xml"
+        if decoder_xml.exists():
+            logger.info("Reshaping decoder to static shapes...")
+            decoder_model = core.read_model(decoder_xml)
+
+            # Build shapes dict based on actual input names
+            shapes = {}
+            for inp in decoder_model.inputs:
+                name = inp.get_any_name()
+                current = inp.get_partial_shape()
+
+                if "input_ids" in name.lower():
+                    shapes[name] = [batch_size, decoder_seq_len]
+                elif "encoder_hidden" in name.lower():
+                    # [batch, encoder_seq, hidden_dim]
+                    hidden_dim = 1280  # Whisper large
+                    if not current[-1].is_dynamic:
+                        hidden_dim = current[-1].get_length()
+                    shapes[name] = [batch_size, encoder_seq_len, hidden_dim]
+                elif "attention_mask" in name.lower():
+                    if "encoder" in name.lower():
+                        shapes[name] = [batch_size, encoder_seq_len]
+                    else:
+                        shapes[name] = [batch_size, decoder_seq_len]
+
+            if shapes:
+                logger.info(f"Decoder shapes: {shapes}")
+                decoder_model.reshape(shapes)
+                ov.save_model(decoder_model, decoder_xml)
+                logger.info("Decoder reshaped to static shapes")
+
+    except Exception as e:
+        logger.warning(f"Static reshape failed: {e}")
+        logger.warning("Model exported but may have dynamic shapes")
+
+    # Save processor
+    try:
+        from transformers import WhisperProcessor
+        processor = WhisperProcessor.from_pretrained(model_id)
+        processor.save_pretrained(str(ov_model_path))
+    except Exception as e:
+        logger.warning(f"Failed to save processor: {e}")
+
+    # Find paths
+    encoder_path = ov_model_path / "openvino_encoder_model.xml"
+    decoder_path = ov_model_path / "openvino_decoder_model.xml"
+
+    xml_files = list(ov_model_path.glob("*.xml"))
+    logger.info(f"Created static model files: {[f.name for f in xml_files]}")
+
+    return {
+        "encoder_path": str(encoder_path) if encoder_path.exists() else None,
+        "decoder_path": str(decoder_path) if decoder_path.exists() else None,
+        "model_path": str(ov_model_path),
+    }
+
+
 def export_whisper_encoder_only(
     output_dir: str,
     model_id: str = "openai/whisper-large-v3",
