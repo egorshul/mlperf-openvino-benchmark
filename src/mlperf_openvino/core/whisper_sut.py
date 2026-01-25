@@ -1605,6 +1605,10 @@ class WhisperMultiDieSUT:
         self.scenario = scenario
         self.max_new_tokens = max_new_tokens
 
+        # Get batch size from config (set via -b CLI flag)
+        self.batch_size = config.openvino.batch_size if hasattr(config, 'openvino') else 1
+        logger.info(f"WhisperMultiDieSUT: batch_size={self.batch_size} (from -b flag)")
+
         # Discover or use provided devices
         if target_devices:
             self._active_devices = target_devices
@@ -1783,17 +1787,13 @@ class WhisperMultiDieSUT:
 
     def _issue_query_offline(self, query_samples: List[Any]) -> None:
         """Process queries for Offline scenario with batched multi-die execution."""
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        import threading
         import os
 
-        total_samples = len(query_samples)
+        # Use batch_size from config (set via -b CLI flag)
+        # Can override with env var for testing
+        batch_size = int(os.environ.get("WHISPER_BATCH_SIZE", str(self.batch_size)))
 
-        # Check if batching is enabled (default: enabled)
-        use_batching = os.environ.get("WHISPER_BATCH_MODE", "1") == "1"
-        batch_size = int(os.environ.get("WHISPER_BATCH_SIZE", "0"))  # 0 = auto
-
-        if use_batching:
+        if batch_size > 1:
             self._issue_query_offline_batched(query_samples, batch_size)
         else:
             self._issue_query_offline_sequential(query_samples)
@@ -1814,7 +1814,7 @@ class WhisperMultiDieSUT:
         # Default batch size if not specified
         if batch_size <= 0:
             batch_size = 1  # Fall back to sequential if no batch size specified
-            logger.warning("No batch size specified (WHISPER_BATCH_SIZE=0), using batch_size=1")
+            logger.warning("No batch size specified (use -b flag), using batch_size=1")
 
         self._start_progress(total_samples, f"Whisper Offline BATCHED ({self.num_dies} dies, batch={batch_size})")
 
