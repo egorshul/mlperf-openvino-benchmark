@@ -433,12 +433,12 @@ class WhisperOptimumSUT:
         return ov_config
 
     def _compile_submodels(self, ov_config: dict) -> None:
-        """Компиляция encoder и decoder на соответствующих устройствах."""
+        """Compile encoder and decoder on their respective devices."""
         import openvino as ov
 
         core = ov.Core()
 
-        # Компиляция encoder на encoder_device
+        # Compile encoder on encoder_device
         if hasattr(self.model, 'encoder') and self.model.encoder is not None:
             encoder_config = self._filter_config_for_device(ov_config, self.encoder_device)
             try:
@@ -446,20 +446,20 @@ class WhisperOptimumSUT:
                     self.model.encoder, self.encoder_device, core, encoder_config, "ENCODER"
                 )
             except Exception as e:
-                logger.error(f"ENCODER: ошибка компиляции на {self.encoder_device}: {e}")
-                raise RuntimeError(f"Ошибка компиляции encoder на {self.encoder_device}: {e}") from e
+                logger.error(f"ENCODER: compilation failed on {self.encoder_device}: {e}")
+                raise RuntimeError(f"Encoder compilation failed on {self.encoder_device}: {e}") from e
 
-        # Компиляция decoder на decoder_device (с фильтрацией конфига для CPU)
+        # Compile decoder on decoder_device (with filtered config for CPU)
         if hasattr(self.model, 'decoder') and self.model.decoder is not None:
             decoder_config = self._filter_config_for_device(ov_config, self.decoder_device)
             self._compile_decoder_with_reshape(core, decoder_config)
 
-        # Компиляция decoder_with_past на decoder_device
+        # Compile decoder_with_past on decoder_device
         if hasattr(self.model, 'decoder_with_past') and self.model.decoder_with_past is not None:
             decoder_config = self._filter_config_for_device(ov_config, self.decoder_device)
             self._compile_decoder_with_past_with_reshape(core, decoder_config)
 
-        logger.info("Все submodels скомпилированы успешно")
+        logger.info("All submodels compiled successfully")
 
     def _compile_submodel_to_device(
         self,
@@ -469,45 +469,45 @@ class WhisperOptimumSUT:
         ov_config: dict,
         name: str,
     ) -> None:
-        """Компиляция submodel (encoder) на указанное устройство.
+        """Compile submodel (encoder) to specified device.
 
-        Использует core.compile_model напрямую и устанавливает request.
-        Это тот же подход, что использует optimum-intel OVModelPart.compile().
+        Uses core.compile_model directly and sets request attribute.
+        This is the same approach as optimum-intel OVModelPart.compile().
 
-        Для X/NPU используем CompiledModelWrapper (нужен async interface).
-        Для CPU устанавливаем CompiledModel напрямую.
+        For X/NPU: use CompiledModelWrapper (needed for async interface).
+        For CPU: set CompiledModel directly.
         """
         import openvino as ov
 
-        logger.info(f"Компиляция {name} на {device}...")
+        logger.info(f"Compiling {name} to {device}...")
 
         if not hasattr(submodel, 'model') or submodel.model is None:
-            logger.warning(f"{name}: нет OV модели, пропускаем")
+            logger.warning(f"{name}: no OV model, skipping")
             return
 
         ov_model = submodel.model
 
-        # Анализ модели
+        # Analyze model
         self._analyze_model_for_npu(ov_model, name)
 
-        # Конфиг для компиляции (без CACHE_DIR)
+        # Build compile config (exclude CACHE_DIR)
         compile_config = {k: v for k, v in ov_config.items() if k != "CACHE_DIR"}
-        logger.info(f"{name} конфиг: {list(compile_config.keys())}")
+        logger.info(f"{name} config: {list(compile_config.keys())}")
 
         try:
             compiled = core.compile_model(ov_model, device, compile_config)
 
             if device == "CPU":
-                # CPU: напрямую CompiledModel (как делает optimum-intel)
+                # CPU: CompiledModel directly (like optimum-intel does)
                 submodel.request = compiled
-                logger.info(f"{name} скомпилирован на CPU (напрямую)")
+                logger.info(f"{name} compiled to CPU (direct)")
             else:
-                # X/NPU: используем wrapper для async interface
+                # X/NPU: use wrapper for async interface
                 submodel.request = CompiledModelWrapper(compiled)
-                logger.info(f"{name} скомпилирован на {device} (с wrapper)")
+                logger.info(f"{name} compiled to {device} (with wrapper)")
 
         except Exception as e:
-            logger.error(f"{name}: ошибка компиляции на {device}: {e}")
+            logger.error(f"{name}: compilation failed on {device}: {e}")
             raise
 
     def _reshape_model_batch_size(self, model: "ov.Model", batch_size: int, name: str) -> None:
@@ -679,119 +679,119 @@ class WhisperOptimumSUT:
         return model
 
     def _compile_decoder_with_reshape(self, core: "ov.Core", ov_config: dict) -> None:
-        """Компиляция decoder с reshape для NPU/X устройств.
+        """Compile decoder with reshape for NPU/X devices.
 
-        Для CPU используем core.compile_model напрямую (как делает optimum-intel).
-        Для X используем CompiledModelWrapper для async interface.
+        For CPU: use core.compile_model directly (like optimum-intel).
+        For X/NPU: use CompiledModelWrapper for async interface.
         """
         import openvino as ov
 
         decoder = self.model.decoder
         device = self.decoder_device
 
-        logger.info(f"Компиляция DECODER на {device}...")
+        logger.info(f"Compiling DECODER to {device}...")
 
         if not hasattr(decoder, 'model') or decoder.model is None:
-            logger.warning("DECODER: нет OV модели, пропускаем")
+            logger.warning("DECODER: no OV model, skipping")
             return
 
         ov_model = decoder.model
         analysis = self._analyze_model_for_npu(ov_model, "decoder")
 
-        # Проверка stateful операций
+        # Check for stateful operations
         total_stateful = analysis.get("read_values", 0) + analysis.get("assigns", 0)
         if total_stateful > 0 and device != "CPU":
             logger.warning(
-                f"DECODER содержит {total_stateful} stateful операций - {device} может не поддерживать. "
-                f"Используйте: mlperf-ov export-whisper-npu --stateless"
+                f"DECODER has {total_stateful} stateful ops - {device} may not support them. "
+                f"Use: mlperf-ov export-whisper-npu --stateless"
             )
 
-        # Для X устройств: reshape к статическим shapes
+        # For X devices: reshape to static shapes
         has_dynamic = analysis.get("has_dynamic", False)
         if has_dynamic and device != "CPU":
-            logger.info(f"Reshape decoder к статическим shapes для {device}...")
+            logger.info(f"Reshaping decoder to static shapes for {device}...")
             try:
                 self._reshape_decoder_to_static(ov_model, batch_size=1, seq_len=4, encoder_seq_len=1500)
-                logger.info("DECODER: reshape успешен (batch=1, seq=4)")
+                logger.info("DECODER: reshape successful (batch=1, seq=4)")
             except Exception as e:
-                logger.warning(f"DECODER: reshape не удался: {e}")
+                logger.warning(f"DECODER: reshape failed: {e}")
 
-        # Конфиг для компиляции (без CACHE_DIR)
+        # Build compile config (exclude CACHE_DIR)
         compile_config = {k: v for k, v in ov_config.items() if k != "CACHE_DIR"}
-        logger.info(f"DECODER конфиг: {list(compile_config.keys())}")
+        logger.info(f"DECODER config: {list(compile_config.keys())}")
 
         try:
             compiled = core.compile_model(ov_model, device, compile_config)
 
             if device == "CPU":
-                # CPU: напрямую CompiledModel (как делает optimum-intel OVModelPart.compile())
+                # CPU: CompiledModel directly (like optimum-intel OVModelPart.compile())
                 decoder.request = compiled
-                logger.info("DECODER скомпилирован на CPU (напрямую)")
+                logger.info("DECODER compiled to CPU (direct)")
             else:
-                # X/NPU: используем wrapper для async interface
+                # X/NPU: use wrapper for async interface
                 decoder.request = CompiledModelWrapper(compiled)
-                logger.info(f"DECODER скомпилирован на {device} (с wrapper)")
+                logger.info(f"DECODER compiled to {device} (with wrapper)")
 
         except Exception as e:
             self._log_compilation_error(e, "decoder", device, has_stateful=(total_stateful > 0))
-            raise RuntimeError(f"Ошибка компиляции DECODER на {device}: {e}") from e
+            raise RuntimeError(f"DECODER compilation failed on {device}: {e}") from e
 
     def _compile_decoder_with_past_with_reshape(self, core: "ov.Core", ov_config: dict) -> None:
-        """Компиляция decoder_with_past с reshape для NPU/X устройств.
+        """Compile decoder_with_past with reshape for NPU/X devices.
 
-        Для CPU используем core.compile_model напрямую (как делает optimum-intel).
-        Для X используем CompiledModelWrapper для async interface.
+        For CPU: use core.compile_model directly (like optimum-intel).
+        For X/NPU: use CompiledModelWrapper for async interface.
         """
         import openvino as ov
 
         decoder = self.model.decoder_with_past
         device = self.decoder_device
 
-        logger.info(f"Компиляция DECODER_WITH_PAST на {device}...")
+        logger.info(f"Compiling DECODER_WITH_PAST to {device}...")
 
         if not hasattr(decoder, 'model') or decoder.model is None:
-            logger.warning("DECODER_WITH_PAST: нет OV модели, пропускаем")
+            logger.warning("DECODER_WITH_PAST: no OV model, skipping")
             return
 
         ov_model = decoder.model
         analysis = self._analyze_model_for_npu(ov_model, "decoder_with_past")
 
-        # Проверка stateful операций
+        # Check for stateful operations
         total_stateful = analysis.get("read_values", 0) + analysis.get("assigns", 0)
         if total_stateful > 0 and device != "CPU":
             logger.warning(
-                f"DECODER_WITH_PAST содержит {total_stateful} stateful операций"
+                f"DECODER_WITH_PAST has {total_stateful} stateful ops"
             )
 
-        # Для X устройств: reshape к статическим shapes
+        # For X devices: reshape to static shapes
         has_dynamic = analysis.get("has_dynamic", False)
         if has_dynamic and device != "CPU":
-            logger.info(f"Reshape decoder_with_past к статическим shapes для {device}...")
+            logger.info(f"Reshaping decoder_with_past to static shapes for {device}...")
             try:
                 self._reshape_decoder_to_static(ov_model, batch_size=1, seq_len=1, encoder_seq_len=1500)
-                logger.info("DECODER_WITH_PAST: reshape успешен (batch=1, seq=1)")
+                logger.info("DECODER_WITH_PAST: reshape successful (batch=1, seq=1)")
             except Exception as e:
-                logger.warning(f"DECODER_WITH_PAST: reshape не удался: {e}")
+                logger.warning(f"DECODER_WITH_PAST: reshape failed: {e}")
 
-        # Конфиг для компиляции (без CACHE_DIR)
+        # Build compile config (exclude CACHE_DIR)
         compile_config = {k: v for k, v in ov_config.items() if k != "CACHE_DIR"}
-        logger.info(f"DECODER_WITH_PAST конфиг: {list(compile_config.keys())}")
+        logger.info(f"DECODER_WITH_PAST config: {list(compile_config.keys())}")
 
         try:
             compiled = core.compile_model(ov_model, device, compile_config)
 
             if device == "CPU":
-                # CPU: напрямую CompiledModel (как делает optimum-intel OVModelPart.compile())
+                # CPU: CompiledModel directly (like optimum-intel OVModelPart.compile())
                 decoder.request = compiled
-                logger.info("DECODER_WITH_PAST скомпилирован на CPU (напрямую)")
+                logger.info("DECODER_WITH_PAST compiled to CPU (direct)")
             else:
-                # X/NPU: используем wrapper для async interface
+                # X/NPU: use wrapper for async interface
                 decoder.request = CompiledModelWrapper(compiled)
-                logger.info(f"DECODER_WITH_PAST скомпилирован на {device} (с wrapper)")
+                logger.info(f"DECODER_WITH_PAST compiled to {device} (with wrapper)")
 
         except Exception as e:
             self._log_compilation_error(e, "decoder_with_past", device, has_stateful=(total_stateful > 0))
-            raise RuntimeError(f"Ошибка компиляции DECODER_WITH_PAST на {device}: {e}") from e
+            raise RuntimeError(f"DECODER_WITH_PAST compilation failed on {device}: {e}") from e
 
     def _log_compilation_error(
         self,
@@ -800,18 +800,18 @@ class WhisperOptimumSUT:
         device: str,
         has_stateful: bool = False,
     ) -> None:
-        """Логирование ошибки компиляции с диагностикой."""
+        """Log compilation error with diagnosis."""
         error_str = str(error).lower()
-        logger.error(f"{model_name}: ОШИБКА компиляции на {device}: {error}")
+        logger.error(f"{model_name}: compilation FAILED on {device}: {error}")
 
         if has_stateful:
-            logger.error("Причина: Stateful операции (ReadValue/Assign). Решение: mlperf-ov export-whisper-npu --stateless")
+            logger.error("Cause: Stateful ops (ReadValue/Assign). Fix: mlperf-ov export-whisper-npu --stateless")
         elif "not supported" in error_str or "unsupported" in error_str:
-            logger.error("Причина: Неподдерживаемые операции. Решение: --stateless экспорт")
+            logger.error("Cause: Unsupported ops. Fix: use --stateless export")
         elif "dynamic" in error_str or "shape" in error_str:
-            logger.error("Причина: Динамические shapes. Решение: Статический экспорт")
+            logger.error("Cause: Dynamic shapes. Fix: use static shape export")
         elif "memory" in error_str:
-            logger.error("Причина: Недостаточно памяти. Решение: Уменьшить batch size")
+            logger.error("Cause: Out of memory. Fix: reduce batch size")
 
     def _start_progress(self, total: int, desc: str = "Processing") -> None:
         """Start progress tracking."""
