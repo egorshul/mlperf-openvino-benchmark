@@ -471,34 +471,33 @@ class WhisperOptimumSUT:
         ov_config: dict,
         name: str,
     ) -> None:
-        """Compile a submodel to a specific device using OpenVINO Core."""
+        """Compile a submodel to a specific device using optimum-intel's native interface.
+
+        We use optimum-intel's internal compilation to preserve the expected interface
+        for transformers generate() function.
+        """
         import openvino as ov
 
         # Get the underlying OV model
         if hasattr(submodel, 'model') and submodel.model is not None:
             ov_model = submodel.model
 
-            # NOTE: Do NOT reshape encoder to batch_size here!
-            # Encoder must stay dynamic to handle both:
-            # - Single samples (batch=1) for warmup and individual processing
-            # - Batches (batch=N) for batch processing
-            # The model.generate() handles this dynamically.
-
             # Analyze model
             self._analyze_model_for_npu(ov_model, name)
 
-            # Build config for compilation
+            # Build config for compilation (exclude CACHE_DIR)
             compile_config = {}
             for key, value in ov_config.items():
-                if key != "CACHE_DIR":  # Skip cache dir for now
+                if key != "CACHE_DIR":
                     compile_config[key] = value
 
-            # Compile using Core directly
-            logger.info(f"Compiling {name} to {device} using OpenVINO Core (config: {compile_config})...")
-            compiled = core.compile_model(ov_model, device, compile_config)
+            logger.info(f"Compiling {name} to {device} using optimum-intel interface (config: {compile_config})...")
 
-            # Use wrapper that provides both callable and async interfaces
-            submodel.request = CompiledModelWrapper(compiled)
+            # Use optimum-intel's native compilation to preserve interface
+            # Set device and config, then let optimum-intel compile
+            submodel.ov_config = compile_config
+            submodel._device = device
+            submodel._compile()
 
             logger.info(f"{name} compiled to {device}")
         else:
