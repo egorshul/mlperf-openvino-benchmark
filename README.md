@@ -37,20 +37,14 @@ mlperf-ov run --model resnet50 --mode performance --scenario Offline
 ### ResNet50
 
 ```bash
-# Offline (~610 samples/sec)
 mlperf-ov run --model resnet50 --scenario Offline --device NPU
-
-# Server (~5700 QPS) - use explicit batching
 mlperf-ov run --model resnet50 --scenario Server --device NPU --explicit-batching
 ```
 
 ### BERT-Large
 
 ```bash
-# Offline (~395 samples/sec)
 mlperf-ov run --model bert --scenario Offline --device NPU
-
-# Server (~330 QPS)
 mlperf-ov run --model bert --scenario Server --device NPU
 ```
 
