@@ -406,9 +406,17 @@ class BenchmarkRunner:
                     return
         except Exception as e:
             logger.warning(f"Failed to create Whisper Optimum SUT: {e}")
+            # For multi-die devices, optimum-intel is required
+            if is_multi_die_npu:
+                raise RuntimeError(
+                    f"Whisper on multi-die {self.config.openvino.device} requires optimum-intel. "
+                    f"Install with: pip install optimum[openvino]\n"
+                    f"Or use a specific die: --device {self.config.openvino.get_device_prefix()}.0"
+                ) from e
 
         from .whisper_sut import WhisperSUT, WhisperEncoderOnlySUT
 
+        # Fallback path only for single-die or CPU devices
         if encoder_path and decoder_path:
             encoder_backend = OpenVINOBackend(
                 model_path=str(encoder_path),
