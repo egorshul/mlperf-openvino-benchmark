@@ -337,6 +337,9 @@ class WhisperOptimumSUT:
                 else:
                     hidden_dim = hidden_dim.get_length()
                 new_shapes[name] = [batch_size, encoder_seq_len, hidden_dim]
+            elif "beam_idx" in name.lower():
+                # Beam index for beam search - [batch_size] for greedy, [batch*num_beams] for beam
+                new_shapes[name] = [batch_size]
             elif "attention_mask" in name.lower():
                 if "encoder" in name.lower():
                     new_shapes[name] = [batch_size, encoder_seq_len]
