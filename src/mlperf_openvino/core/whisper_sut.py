@@ -487,7 +487,11 @@ class WhisperOptimumSUT:
         seq_len: int = 448,
         encoder_seq_len: int = 1500,
     ) -> "ov.Model":
-        """Reshape decoder model to static shapes for NPU compatibility."""
+        """Reshape decoder model to static shapes for NPU/X compatibility.
+
+        X device requires static shapes - cannot handle multiple dynamic dimensions.
+        This reshapes all inputs to static shapes.
+        """
         logger.info(
             f"Reshaping to static: batch={batch_size}, seq={seq_len}, encoder_seq={encoder_seq_len}"
         )
@@ -498,9 +502,12 @@ class WhisperOptimumSUT:
             name = inp.get_any_name()
             current_shape = inp.get_partial_shape()
 
+            logger.debug(f"  Input '{name}': current shape = {current_shape}")
+
             # Determine static shape based on input name
             if "input_ids" in name.lower() or "decoder_input" in name.lower():
                 new_shapes[name] = [batch_size, seq_len]
+                logger.info(f"    {name}: {current_shape} -> [{batch_size}, {seq_len}]")
             elif "encoder_hidden" in name.lower() or "encoder_output" in name.lower():
                 # Encoder output: [batch, encoder_seq, hidden_dim]
                 hidden_dim = current_shape[-1]
@@ -509,17 +516,20 @@ class WhisperOptimumSUT:
                 else:
                     hidden_dim = hidden_dim.get_length()
                 new_shapes[name] = [batch_size, encoder_seq_len, hidden_dim]
+                logger.info(f"    {name}: {current_shape} -> [{batch_size}, {encoder_seq_len}, {hidden_dim}]")
             elif "beam_idx" in name.lower():
-                # Beam index for beam search - [batch_size] for greedy, [batch*num_beams] for beam
                 new_shapes[name] = [batch_size]
+                logger.info(f"    {name}: {current_shape} -> [{batch_size}]")
             elif "attention_mask" in name.lower():
                 if "encoder" in name.lower():
                     new_shapes[name] = [batch_size, encoder_seq_len]
                 else:
                     new_shapes[name] = [batch_size, seq_len]
-            elif "past_key_value" in name.lower() or "cache" in name.lower():
-                # KV cache - keep dynamic or set reasonable static size
-                # Shape is usually [batch, num_heads, seq, head_dim]
+                logger.info(f"    {name}: {current_shape} -> {new_shapes[name]}")
+            elif "past_key_value" in name.lower() or "present" in name.lower():
+                # KV cache: [batch, num_heads, past_seq, head_dim]
+                # For decoder_with_past, past_seq grows during generation
+                # Use max seq length (448) to make it fully static
                 if len(current_shape) == 4:
                     num_heads = current_shape[1]
                     head_dim = current_shape[3]
@@ -531,19 +541,44 @@ class WhisperOptimumSUT:
                         head_dim = 64
                     else:
                         head_dim = head_dim.get_length()
-                    new_shapes[name] = [batch_size, num_heads, seq_len, head_dim]
+                    # Use 448 (max Whisper seq) for past KV cache to be safe
+                    past_seq = 448
+                    new_shapes[name] = [batch_size, num_heads, past_seq, head_dim]
+                    logger.info(f"    {name}: {current_shape} -> [{batch_size}, {num_heads}, {past_seq}, {head_dim}]")
+            else:
+                # Try to make any remaining dynamic shapes static
+                if current_shape.is_dynamic:
+                    static_shape = []
+                    for i, dim in enumerate(current_shape):
+                        if dim.is_dynamic:
+                            # Use reasonable defaults based on position
+                            if i == 0:
+                                static_shape.append(batch_size)
+                            else:
+                                static_shape.append(seq_len)
+                        else:
+                            static_shape.append(dim.get_length())
+                    new_shapes[name] = static_shape
+                    logger.info(f"    {name}: {current_shape} -> {static_shape}")
 
         if new_shapes:
+            logger.info(f"Applying reshape for {len(new_shapes)} inputs...")
             try:
                 model.reshape(new_shapes)
-                logger.info(f"Reshaped {len(new_shapes)} inputs to static shapes")
+                logger.info(f"Reshape successful!")
+                # Log final shapes
+                for inp in model.inputs:
+                    logger.info(f"  Final: {inp.get_any_name()} = {inp.get_partial_shape()}")
             except Exception as e:
-                logger.warning(f"Failed to reshape decoder: {e}")
+                logger.error(f"Reshape FAILED: {e}")
+                raise
+        else:
+            logger.info("No reshape needed - all shapes already static")
 
         return model
 
     def _compile_decoder_with_reshape(self, core: "ov.Core", ov_config: dict) -> None:
-        """Compile decoder with optional static shape reshape for NPU."""
+        """Compile decoder with static shape reshape for NPU/X devices."""
         import openvino as ov
 
         decoder = self.model.decoder
@@ -567,12 +602,17 @@ class WhisperOptimumSUT:
             # Check if shapes are dynamic
             has_dynamic = analysis.get("has_dynamic", False)
 
-            # NOTE: Do NOT reshape decoder to static batch_size here!
-            # model.generate() internally uses the decoder with varying batch sizes.
-            # Reshaping to batch=4 breaks generate() when it tries to use batch=1.
-            # If static shapes are needed for NPU, use --stateless export with proper shapes.
+            # For NPU/X devices: reshape to static shapes
+            # X device cannot compile models with multiple dynamic dimensions
             if has_dynamic and device != "CPU":
-                logger.info(f"Decoder has dynamic shapes (NPU may need static - use --stateless export)")
+                logger.info(f"Reshaping decoder to static shapes for {device}...")
+                try:
+                    # Whisper decoder first call uses 4 prompt tokens: [SOT, lang, task, notimestamps]
+                    # batch=1, seq_len=4, encoder_hidden=[1, 1500, 1280]
+                    self._reshape_decoder_to_static(ov_model, batch_size=1, seq_len=4, encoder_seq_len=1500)
+                    logger.info("Decoder reshaped to static shapes: batch=1, seq=4")
+                except Exception as e:
+                    logger.warning(f"Failed to reshape decoder: {e}")
 
             # Build config for compilation
             compile_config = {}
@@ -600,7 +640,7 @@ class WhisperOptimumSUT:
                 raise RuntimeError(f"Decoder compilation failed on {device}: {e}") from e
 
     def _compile_decoder_with_past_with_reshape(self, core: "ov.Core", ov_config: dict) -> None:
-        """Compile decoder_with_past with optional static shape reshape for NPU."""
+        """Compile decoder_with_past with static shape reshape for NPU/X devices."""
         import openvino as ov
 
         decoder = self.model.decoder_with_past
@@ -623,11 +663,16 @@ class WhisperOptimumSUT:
             # Check if shapes are dynamic
             has_dynamic = analysis.get("has_dynamic", False)
 
-            # NOTE: Do NOT reshape decoder_with_past to static batch_size here!
-            # model.generate() internally uses varying batch sizes.
-            # If static shapes are needed for NPU, use --stateless export with proper shapes.
+            # For NPU/X devices: reshape to static shapes
+            # decoder_with_past processes one new token at a time
             if has_dynamic and device != "CPU":
-                logger.info(f"Decoder_with_past has dynamic shapes (NPU may need static - use --stateless export)")
+                logger.info(f"Reshaping decoder_with_past to static shapes for {device}...")
+                try:
+                    # batch=1, seq_len=1 (single new token), encoder_hidden=[1, 1500, 1280]
+                    self._reshape_decoder_to_static(ov_model, batch_size=1, seq_len=1, encoder_seq_len=1500)
+                    logger.info("Decoder_with_past reshaped to static shapes: batch=1, seq=1")
+                except Exception as e:
+                    logger.warning(f"Failed to reshape decoder_with_past: {e}")
 
             # Build config for compilation
             compile_config = {}
