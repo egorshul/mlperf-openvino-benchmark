@@ -49,6 +49,8 @@ class WhisperOptimumSUT:
 
     Uses OVModelForSpeechSeq2Seq for proper encoder-decoder inference
     with correct KV-cache handling and token generation.
+
+    Supports both CPU and NPU devices via optimum-intel.
     """
 
     def __init__(
@@ -58,6 +60,7 @@ class WhisperOptimumSUT:
         qsl: LibriSpeechQSL,
         scenario: Scenario = Scenario.OFFLINE,
         max_new_tokens: int = 440,  # Leave room for special tokens (448 - 8)
+        device: Optional[str] = None,
     ):
         """
         Initialize Whisper SUT using Optimum-Intel.
@@ -68,6 +71,7 @@ class WhisperOptimumSUT:
             qsl: Query Sample Library
             scenario: MLPerf scenario
             max_new_tokens: Maximum tokens to generate
+            device: Device to run inference on (CPU, NPU, NPU.0, etc.)
         """
         if not LOADGEN_AVAILABLE:
             raise ImportError("MLPerf LoadGen is not installed")
@@ -83,6 +87,11 @@ class WhisperOptimumSUT:
         self.qsl = qsl
         self.scenario = scenario
         self.max_new_tokens = max_new_tokens
+
+        # Get device from config if not specified
+        if device is None:
+            device = config.openvino.device if hasattr(config, 'openvino') else "CPU"
+        self.device = device.upper() if device else "CPU"
 
         # Results storage
         self._predictions: Dict[int, str] = {}
@@ -106,7 +115,7 @@ class WhisperOptimumSUT:
         """Load Whisper model using Optimum-Intel."""
         from transformers import AutoProcessor
 
-        logger.info(f"Loading Whisper model from {self.model_path}")
+        logger.info(f"Loading Whisper model from {self.model_path} on device {self.device}")
 
         # Load processor (tokenizer + feature extractor)
         try:
@@ -116,15 +125,26 @@ class WhisperOptimumSUT:
             logger.info("Falling back to openai/whisper-large-v3 processor")
             self.processor = AutoProcessor.from_pretrained("openai/whisper-large-v3")
 
-        # Load OpenVINO model (exported with --task automatic-speech-recognition-with-past)
+        # Build OpenVINO config
         ov_config = {"CACHE_DIR": ""}
+
+        # Add device-specific properties from config
+        if hasattr(self.config, 'openvino') and hasattr(self.config.openvino, 'device_properties'):
+            device_props = self.config.openvino.device_properties
+            if device_props:
+                for key, value in device_props.items():
+                    ov_config[key] = value
+
+        # Load OpenVINO model (exported with --task automatic-speech-recognition-with-past)
+        # For NPU/accelerator devices, pass device explicitly
         self.model = OVModelForSpeechSeq2Seq.from_pretrained(
             self.model_path,
             ov_config=ov_config,
+            device=self.device,
             compile=True,
         )
 
-        logger.info("Whisper model loaded successfully")
+        logger.info(f"Whisper model loaded successfully on {self.device}")
 
     def _start_progress(self, total: int, desc: str = "Processing") -> None:
         """Start progress tracking."""
@@ -935,3 +955,302 @@ class WhisperEncoderOnlySUT:
         self._predictions.clear()
         self._query_count = 0
         self._sample_count = 0
+
+
+class WhisperMultiDieSUT:
+    """
+    System Under Test for Whisper ASR on multi-die NPU accelerators.
+
+    Distributes inference across multiple NPU dies for maximum throughput.
+    Uses round-robin distribution of samples across dies.
+
+    Each die runs a separate WhisperOptimumSUT instance.
+    """
+
+    def __init__(
+        self,
+        config: BenchmarkConfig,
+        model_path: Union[str, Path],
+        qsl: LibriSpeechQSL,
+        scenario: Scenario = Scenario.OFFLINE,
+        max_new_tokens: int = 440,
+        target_devices: Optional[List[str]] = None,
+    ):
+        """
+        Initialize Whisper Multi-Die SUT.
+
+        Args:
+            config: Benchmark configuration
+            model_path: Path to OpenVINO Whisper model directory
+            qsl: Query Sample Library
+            scenario: MLPerf scenario
+            max_new_tokens: Maximum tokens to generate
+            target_devices: List of target devices (e.g., ['NPU.0', 'NPU.1'])
+        """
+        if not LOADGEN_AVAILABLE:
+            raise ImportError("MLPerf LoadGen is not installed")
+
+        if not OPTIMUM_AVAILABLE:
+            raise ImportError(
+                "Optimum-Intel is required for Whisper inference. "
+                "Install with: pip install optimum[openvino]"
+            )
+
+        self.config = config
+        self.model_path = Path(model_path)
+        self.qsl = qsl
+        self.scenario = scenario
+        self.max_new_tokens = max_new_tokens
+
+        # Discover or use provided devices
+        if target_devices:
+            self._active_devices = target_devices
+        else:
+            self._active_devices = self._discover_devices()
+
+        if not self._active_devices:
+            raise RuntimeError("No NPU devices available for multi-die inference")
+
+        logger.info(f"WhisperMultiDieSUT: using devices {self._active_devices}")
+
+        # Create SUT instance for each die
+        self._die_suts: Dict[str, WhisperOptimumSUT] = {}
+        self._load_models()
+
+        # Results storage
+        self._predictions: Dict[int, str] = {}
+        self._query_count = 0
+        self._sample_count = 0
+
+        # Round-robin counter
+        self._die_index = 0
+
+        # Progress tracking
+        self._progress_bar: Optional[Any] = None
+        self._start_time = 0.0
+        self._last_progress_update = 0.0
+        self._progress_update_interval = 0.5
+
+        # LoadGen handles
+        self._sut_handle = None
+        self._qsl_handle = None
+
+    def _discover_devices(self) -> List[str]:
+        """Discover available NPU devices."""
+        try:
+            from openvino import Core
+            from ..backends.device_discovery import discover_accelerator_devices
+
+            core = Core()
+            device_prefix = self.config.openvino.get_device_prefix()
+            devices = discover_accelerator_devices(core, device_prefix)
+            return devices
+        except Exception as e:
+            logger.warning(f"Failed to discover devices: {e}")
+            return []
+
+    def _load_models(self) -> None:
+        """Load Whisper model on each die."""
+        from transformers import AutoProcessor
+
+        logger.info(f"Loading Whisper models on {len(self._active_devices)} dies...")
+
+        # Load processor once (shared)
+        try:
+            self.processor = AutoProcessor.from_pretrained(self.model_path)
+        except Exception:
+            self.processor = AutoProcessor.from_pretrained("openai/whisper-large-v3")
+
+        # Create SUT for each die
+        for device in self._active_devices:
+            logger.info(f"Loading model on {device}...")
+
+            sut = WhisperOptimumSUT(
+                config=self.config,
+                model_path=self.model_path,
+                qsl=self.qsl,
+                scenario=self.scenario,
+                max_new_tokens=self.max_new_tokens,
+                device=device,
+            )
+            self._die_suts[device] = sut
+
+        logger.info(f"All {len(self._active_devices)} dies loaded successfully")
+
+    @property
+    def num_dies(self) -> int:
+        """Number of active dies."""
+        return len(self._active_devices)
+
+    def _get_next_die(self) -> str:
+        """Get next die for round-robin distribution."""
+        die = self._active_devices[self._die_index % len(self._active_devices)]
+        self._die_index += 1
+        return die
+
+    def _start_progress(self, total: int, desc: str = "Processing") -> None:
+        """Start progress tracking."""
+        self._start_time = time.time()
+        if TQDM_AVAILABLE:
+            self._progress_bar = tqdm(
+                total=total,
+                desc=desc,
+                unit="samples",
+                file=sys.stderr,
+                dynamic_ncols=True,
+            )
+        else:
+            logger.info(f"Starting: {desc} ({total} samples)")
+            self._last_progress_update = time.time()
+
+    def _update_progress(self, n: int = 1) -> None:
+        """Update progress by n samples."""
+        if TQDM_AVAILABLE and self._progress_bar is not None:
+            self._progress_bar.update(n)
+        else:
+            current_time = time.time()
+            if current_time - self._last_progress_update >= self._progress_update_interval:
+                elapsed = current_time - self._start_time
+                throughput = self._sample_count / elapsed if elapsed > 0 else 0
+                logger.info(
+                    f"Progress: {self._sample_count} samples, "
+                    f"{throughput:.1f} samples/sec ({self.num_dies} dies)"
+                )
+                self._last_progress_update = current_time
+
+    def _close_progress(self) -> None:
+        """Close progress tracking."""
+        if TQDM_AVAILABLE and self._progress_bar is not None:
+            self._progress_bar.close()
+            self._progress_bar = None
+        else:
+            elapsed = time.time() - self._start_time
+            throughput = self._sample_count / elapsed if elapsed > 0 else 0
+            logger.info(
+                f"Completed: {self._sample_count} samples in {elapsed:.1f}s "
+                f"({throughput:.1f} samples/sec, {self.num_dies} dies)"
+            )
+
+    def _process_sample(self, sample_idx: int, die_name: str) -> str:
+        """Process a single sample on specified die."""
+        sut = self._die_suts[die_name]
+        return sut._process_sample(sample_idx)
+
+    def issue_queries(self, query_samples: List[Any]) -> None:
+        """Process queries from LoadGen."""
+        self._query_count += len(query_samples)
+
+        if self.scenario == Scenario.OFFLINE:
+            self._issue_query_offline(query_samples)
+        elif self.scenario == Scenario.SERVER:
+            self._issue_query_server(query_samples)
+        else:
+            raise ValueError(f"Unsupported scenario: {self.scenario}")
+
+    def _issue_query_offline(self, query_samples: List[Any]) -> None:
+        """Process queries for Offline scenario with round-robin distribution."""
+        responses = []
+        response_arrays = []
+
+        total_samples = len(query_samples)
+        self._start_progress(total_samples, f"Whisper Offline ({self.num_dies} dies)")
+
+        # Process samples with round-robin distribution across dies
+        for sample in query_samples:
+            sample_idx = sample.index
+            self._sample_count += 1
+
+            # Select die for this sample
+            die_name = self._get_next_die()
+
+            # Process on selected die
+            text = self._process_sample(sample_idx, die_name)
+            self._predictions[sample_idx] = text
+
+            # Create response
+            response_data = np.array([len(text)], dtype=np.int64)
+            response_array = array.array('B', response_data.tobytes())
+            response_arrays.append(response_array)
+            bi = response_array.buffer_info()
+
+            response = lg.QuerySampleResponse(sample.id, bi[0], bi[1])
+            responses.append(response)
+
+            self._update_progress(1)
+
+        self._close_progress()
+        lg.QuerySamplesComplete(responses)
+
+    def _issue_query_server(self, query_samples: List[Any]) -> None:
+        """Process queries for Server scenario."""
+        responses = []
+        response_arrays = []
+
+        if self._sample_count == 0:
+            self._start_progress(0, f"Whisper Server ({self.num_dies} dies)")
+
+        for sample in query_samples:
+            sample_idx = sample.index
+            self._sample_count += 1
+
+            # Select die for this sample
+            die_name = self._get_next_die()
+
+            # Process on selected die
+            text = self._process_sample(sample_idx, die_name)
+            self._predictions[sample_idx] = text
+
+            # Create response
+            response_data = np.array([len(text)], dtype=np.int64)
+            response_array = array.array('B', response_data.tobytes())
+            response_arrays.append(response_array)
+            bi = response_array.buffer_info()
+
+            response = lg.QuerySampleResponse(sample.id, bi[0], bi[1])
+            responses.append(response)
+
+            self._update_progress(1)
+
+        lg.QuerySamplesComplete(responses)
+
+    def flush_queries(self) -> None:
+        """Flush any pending queries."""
+        if self._progress_bar is not None:
+            self._close_progress()
+
+    def get_sut(self) -> Any:
+        """Get LoadGen SUT handle."""
+        if self._sut_handle is None:
+            self._sut_handle = lg.ConstructSUT(self.issue_queries, self.flush_queries)
+        return self._sut_handle
+
+    def get_qsl(self) -> Any:
+        """Get LoadGen QSL handle."""
+        if self._qsl_handle is None:
+            self._qsl_handle = lg.ConstructQSL(
+                self.qsl.total_sample_count,
+                self.qsl.performance_sample_count,
+                self.qsl.load_query_samples,
+                self.qsl.unload_query_samples
+            )
+        return self._qsl_handle
+
+    def get_predictions(self) -> Dict[int, str]:
+        """Get all predictions."""
+        return self._predictions.copy()
+
+    def reset(self) -> None:
+        """Reset state for new run."""
+        self._predictions.clear()
+        self._query_count = 0
+        self._sample_count = 0
+        self._die_index = 0
+
+        # Reset all die SUTs
+        for sut in self._die_suts.values():
+            sut.reset()
+
+
+def is_whisper_multi_die_available() -> bool:
+    """Check if multi-die Whisper SUT is available."""
+    return LOADGEN_AVAILABLE and OPTIMUM_AVAILABLE

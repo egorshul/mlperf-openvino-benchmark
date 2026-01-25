@@ -366,21 +366,46 @@ class BenchmarkRunner:
                     decoder_path = dp
                     break
 
+        # Check if using multi-die NPU (device without specific die number)
+        is_multi_die_npu = (
+            self.config.openvino.is_accelerator_device() and
+            self.config.openvino.is_multi_device()
+        )
+
         try:
-            from .whisper_sut import WhisperOptimumSUT, OPTIMUM_AVAILABLE
+            from .whisper_sut import (
+                WhisperOptimumSUT,
+                WhisperMultiDieSUT,
+                OPTIMUM_AVAILABLE,
+                is_whisper_multi_die_available,
+            )
 
             if OPTIMUM_AVAILABLE and model_path.is_dir():
                 config_file = model_path / "config.json"
                 if config_file.exists():
-                    self.sut = WhisperOptimumSUT(
-                        config=self.config,
-                        model_path=model_path,
-                        qsl=self.qsl,
-                        scenario=self.config.scenario,
-                    )
+                    # Use multi-die SUT for NPU without specific die
+                    if is_multi_die_npu and is_whisper_multi_die_available():
+                        logger.info(f"Using WhisperMultiDieSUT for {self.config.openvino.device}")
+                        self.sut = WhisperMultiDieSUT(
+                            config=self.config,
+                            model_path=model_path,
+                            qsl=self.qsl,
+                            scenario=self.config.scenario,
+                        )
+                    else:
+                        # Use single-die optimum SUT (CPU or specific NPU die)
+                        device = self.config.openvino.device
+                        logger.info(f"Using WhisperOptimumSUT on {device}")
+                        self.sut = WhisperOptimumSUT(
+                            config=self.config,
+                            model_path=model_path,
+                            qsl=self.qsl,
+                            scenario=self.config.scenario,
+                            device=device,
+                        )
                     return
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to create Whisper Optimum SUT: {e}")
 
         from .whisper_sut import WhisperSUT, WhisperEncoderOnlySUT
 
