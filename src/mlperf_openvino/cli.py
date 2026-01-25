@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 @click.group()
-@click.version_option(version="0.2.0", prog_name="mlperf-ov")
+@click.version_option(version="1.0.0", prog_name="mlperf-ov")
 def main():
     """
     MLPerf v5.1 OpenVINO Benchmark Tool
