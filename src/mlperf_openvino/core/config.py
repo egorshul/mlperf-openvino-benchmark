@@ -364,6 +364,7 @@ class BenchmarkConfig:
                     min_duration_ms=60000,
                     min_query_count=24576,
                     samples_per_query=1,
+                    target_qps=610.0,
                 ),
                 server=ScenarioConfig(
                     min_duration_ms=60000,
@@ -437,6 +438,7 @@ class BenchmarkConfig:
                     min_duration_ms=60000,
                     min_query_count=10833,  # MLPerf official (SQuAD dataset size)
                     samples_per_query=1,
+                    target_qps=395.0,
                 ),
                 server=ScenarioConfig(
                     min_duration_ms=60000,

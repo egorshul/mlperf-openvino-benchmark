@@ -499,9 +499,9 @@ class BenchmarkRunner:
 
         if self.config.scenario == Scenario.OFFLINE:
             # LoadGen requires expected_qps for Offline scenario
-            # Use configured value or a reasonable default
             expected_qps = scenario_config.target_qps if scenario_config.target_qps > 0 else 1000.0
             settings.offline_expected_qps = expected_qps
+            logger.info(f"Offline expected QPS: {expected_qps}")
         elif self.config.scenario == Scenario.SERVER:
             if scenario_config.target_latency_ns > 0:
                 settings.server_target_latency_ns = scenario_config.target_latency_ns
