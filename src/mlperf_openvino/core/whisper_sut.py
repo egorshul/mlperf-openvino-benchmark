@@ -51,6 +51,8 @@ class WhisperOptimumSUT:
     with correct KV-cache handling and token generation.
 
     Supports both CPU and NPU devices via optimum-intel.
+    Supports hybrid mode: encoder on NPU, decoder on CPU (for devices
+    where decoder compilation fails).
     """
 
     def __init__(
@@ -61,6 +63,8 @@ class WhisperOptimumSUT:
         scenario: Scenario = Scenario.OFFLINE,
         max_new_tokens: int = 440,  # Leave room for special tokens (448 - 8)
         device: Optional[str] = None,
+        encoder_device: Optional[str] = None,
+        decoder_device: Optional[str] = None,
     ):
         """
         Initialize Whisper SUT using Optimum-Intel.
@@ -72,6 +76,8 @@ class WhisperOptimumSUT:
             scenario: MLPerf scenario
             max_new_tokens: Maximum tokens to generate
             device: Device to run inference on (CPU, NPU, NPU.0, etc.)
+            encoder_device: Specific device for encoder (overrides device)
+            decoder_device: Specific device for decoder (overrides device)
         """
         if not LOADGEN_AVAILABLE:
             raise ImportError("MLPerf LoadGen is not installed")
@@ -93,6 +99,11 @@ class WhisperOptimumSUT:
             device = config.openvino.device if hasattr(config, 'openvino') else "CPU"
         self.device = device.upper() if device else "CPU"
 
+        # Support hybrid mode: separate devices for encoder and decoder
+        self.encoder_device = encoder_device.upper() if encoder_device else self.device
+        self.decoder_device = decoder_device.upper() if decoder_device else self.device
+        self._hybrid_mode = (self.encoder_device != self.decoder_device)
+
         # Results storage
         self._predictions: Dict[int, str] = {}
         self._query_count = 0
@@ -112,10 +123,16 @@ class WhisperOptimumSUT:
         self._load_model()
 
     def _load_model(self) -> None:
-        """Load Whisper model using Optimum-Intel."""
+        """Load Whisper model using Optimum-Intel with hybrid device support."""
         from transformers import AutoProcessor
 
-        logger.info(f"Loading Whisper model from {self.model_path} on device {self.device}")
+        if self._hybrid_mode:
+            logger.info(
+                f"Loading Whisper model from {self.model_path} "
+                f"(encoder: {self.encoder_device}, decoder: {self.decoder_device})"
+            )
+        else:
+            logger.info(f"Loading Whisper model from {self.model_path} on device {self.device}")
 
         # Load processor (tokenizer + feature extractor)
         logger.debug(f"Loading processor from {self.model_path}")
@@ -138,21 +155,22 @@ class WhisperOptimumSUT:
                     ov_config[key] = value
 
         logger.info(f"OV config: {ov_config}")
-        logger.info(f"Target device: {self.device}")
 
         # List model files
         if self.model_path.is_dir():
             xml_files = list(self.model_path.glob("*.xml"))
             logger.info(f"Model files found: {[f.name for f in xml_files]}")
 
-        # Load OpenVINO model (exported with --task automatic-speech-recognition-with-past)
-        # For NPU/accelerator devices, pass device explicitly
-        logger.info("Loading OVModelForSpeechSeq2Seq...")
+        # Determine initial device for loading
+        initial_device = self.encoder_device if self._hybrid_mode else self.device
+
+        # Load OpenVINO model
+        logger.info(f"Loading OVModelForSpeechSeq2Seq (initial device: {initial_device})...")
         try:
             self.model = OVModelForSpeechSeq2Seq.from_pretrained(
                 self.model_path,
                 ov_config=ov_config,
-                device=self.device,
+                device=initial_device,
                 compile=False,  # Don't compile yet
             )
             logger.info("Model loaded successfully (not compiled yet)")
@@ -174,40 +192,8 @@ class WhisperOptimumSUT:
                 else:
                     logger.info(f"  Submodel '{name}': NOT present")
 
-            # Compile submodels one by one to identify which fails
-            logger.info("Compiling submodels one by one...")
-
-            # Try to compile encoder first
-            if hasattr(self.model, 'encoder') and self.model.encoder is not None:
-                logger.info(f"Compiling ENCODER on {self.device}...")
-                try:
-                    self.model.encoder._compile()
-                    logger.info("ENCODER compiled successfully!")
-                except Exception as e:
-                    logger.error(f"ENCODER compilation FAILED: {e}")
-                    raise RuntimeError(f"Encoder compilation failed on {self.device}: {e}") from e
-
-            # Try to compile decoder
-            if hasattr(self.model, 'decoder') and self.model.decoder is not None:
-                logger.info(f"Compiling DECODER on {self.device}...")
-                try:
-                    self.model.decoder._compile()
-                    logger.info("DECODER compiled successfully!")
-                except Exception as e:
-                    logger.error(f"DECODER compilation FAILED: {e}")
-                    raise RuntimeError(f"Decoder compilation failed on {self.device}: {e}") from e
-
-            # Try to compile decoder_with_past if exists
-            if hasattr(self.model, 'decoder_with_past') and self.model.decoder_with_past is not None:
-                logger.info(f"Compiling DECODER_WITH_PAST on {self.device}...")
-                try:
-                    self.model.decoder_with_past._compile()
-                    logger.info("DECODER_WITH_PAST compiled successfully!")
-                except Exception as e:
-                    logger.error(f"DECODER_WITH_PAST compilation FAILED: {e}")
-                    raise RuntimeError(f"Decoder_with_past compilation failed on {self.device}: {e}") from e
-
-            logger.info(f"All submodels compiled successfully on {self.device}")
+            # Compile submodels with device-specific handling
+            self._compile_submodels(ov_config)
 
         except Exception as load_error:
             logger.error(f"Failed to load/compile model: {load_error}")
@@ -216,7 +202,97 @@ class WhisperOptimumSUT:
             logger.error(f"Traceback:\n{traceback.format_exc()}")
             raise
 
-        logger.info(f"Whisper model ready on {self.device}")
+        if self._hybrid_mode:
+            logger.info(
+                f"Whisper model ready (encoder: {self.encoder_device}, decoder: {self.decoder_device})"
+            )
+        else:
+            logger.info(f"Whisper model ready on {self.device}")
+
+    def _compile_submodels(self, ov_config: dict) -> None:
+        """Compile encoder and decoder on their respective devices."""
+        import openvino as ov
+
+        core = ov.Core()
+
+        # Compile encoder on encoder_device
+        if hasattr(self.model, 'encoder') and self.model.encoder is not None:
+            logger.info(f"Compiling ENCODER on {self.encoder_device}...")
+            try:
+                # Set device for encoder
+                if hasattr(self.model.encoder, '_device'):
+                    self.model.encoder._device = self.encoder_device
+                self.model.encoder._compile()
+                logger.info("ENCODER compiled successfully!")
+            except Exception as e:
+                logger.error(f"ENCODER compilation FAILED on {self.encoder_device}: {e}")
+                raise RuntimeError(f"Encoder compilation failed on {self.encoder_device}: {e}") from e
+
+        # Compile decoder on decoder_device
+        decoder_compiled = False
+        if hasattr(self.model, 'decoder') and self.model.decoder is not None:
+            logger.info(f"Compiling DECODER on {self.decoder_device}...")
+            try:
+                # Set device for decoder
+                if hasattr(self.model.decoder, '_device'):
+                    self.model.decoder._device = self.decoder_device
+                self.model.decoder._compile()
+                logger.info("DECODER compiled successfully!")
+                decoder_compiled = True
+            except Exception as e:
+                # If decoder fails on target device and not already CPU, try CPU fallback
+                if self.decoder_device != "CPU":
+                    logger.warning(
+                        f"DECODER compilation FAILED on {self.decoder_device}: {e}"
+                    )
+                    logger.info("Attempting fallback: compiling DECODER on CPU...")
+                    try:
+                        if hasattr(self.model.decoder, '_device'):
+                            self.model.decoder._device = "CPU"
+                        self.model.decoder.request = None  # Reset compiled state
+                        self.model.decoder._compile()
+                        self.decoder_device = "CPU"
+                        self._hybrid_mode = True
+                        logger.info("DECODER compiled successfully on CPU (fallback)")
+                        decoder_compiled = True
+                    except Exception as cpu_e:
+                        logger.error(f"DECODER compilation FAILED on CPU fallback: {cpu_e}")
+                        raise RuntimeError(f"Decoder compilation failed: {e}") from e
+                else:
+                    logger.error(f"DECODER compilation FAILED: {e}")
+                    raise RuntimeError(f"Decoder compilation failed on {self.decoder_device}: {e}") from e
+
+        # Compile decoder_with_past on decoder_device (if exists)
+        if hasattr(self.model, 'decoder_with_past') and self.model.decoder_with_past is not None:
+            logger.info(f"Compiling DECODER_WITH_PAST on {self.decoder_device}...")
+            try:
+                if hasattr(self.model.decoder_with_past, '_device'):
+                    self.model.decoder_with_past._device = self.decoder_device
+                self.model.decoder_with_past._compile()
+                logger.info("DECODER_WITH_PAST compiled successfully!")
+            except Exception as e:
+                # If fails and not CPU, try CPU fallback
+                if self.decoder_device != "CPU":
+                    logger.warning(
+                        f"DECODER_WITH_PAST compilation FAILED on {self.decoder_device}: {e}"
+                    )
+                    logger.info("Attempting fallback: compiling DECODER_WITH_PAST on CPU...")
+                    try:
+                        if hasattr(self.model.decoder_with_past, '_device'):
+                            self.model.decoder_with_past._device = "CPU"
+                        self.model.decoder_with_past.request = None
+                        self.model.decoder_with_past._compile()
+                        logger.info("DECODER_WITH_PAST compiled successfully on CPU (fallback)")
+                    except Exception as cpu_e:
+                        logger.error(f"DECODER_WITH_PAST compilation FAILED on CPU: {cpu_e}")
+                        raise RuntimeError(f"Decoder_with_past compilation failed: {e}") from e
+                else:
+                    logger.error(f"DECODER_WITH_PAST compilation FAILED: {e}")
+                    raise RuntimeError(
+                        f"Decoder_with_past compilation failed on {self.decoder_device}: {e}"
+                    ) from e
+
+        logger.info("All submodels compiled successfully")
 
     def _start_progress(self, total: int, desc: str = "Processing") -> None:
         """Start progress tracking."""
