@@ -1077,14 +1077,24 @@ class WhisperNPUSUT:
         logger.info(f"Reading encoder from {self.encoder_path}")
         encoder_model = self._core.read_model(str(self.encoder_path))
 
-        # Try to find decoder_with_past for KV-cache
+        # Try to find decoder_with_past for KV-cache (REQUIRED for NPU)
         decoder_with_past_path = self._find_decoder_with_past()
         if decoder_with_past_path:
-            logger.info(f"Found decoder_with_past: {decoder_with_past_path}")
+            logger.info(f"Using decoder_with_past: {decoder_with_past_path}")
             decoder_model = self._core.read_model(str(decoder_with_past_path))
+            actual_decoder_path = decoder_with_past_path
         else:
-            logger.info(f"Reading decoder from {self.decoder_path}")
+            # Fallback to regular decoder (may not work on NPU due to dynamic shapes)
+            logger.warning(
+                f"decoder_with_past not found! Using {self.decoder_path} "
+                "(may fail on NPU due to dynamic shapes)"
+            )
+            logger.warning(
+                "Re-export model with: optimum-cli export openvino "
+                "--model openai/whisper-large-v3 --task automatic-speech-recognition-with-past <output>"
+            )
             decoder_model = self._core.read_model(str(self.decoder_path))
+            actual_decoder_path = self.decoder_path
 
         # Detect KV-cache support
         self._has_kv_cache = self._detect_kv_cache(decoder_model)
@@ -1102,14 +1112,33 @@ class WhisperNPUSUT:
         for die_name in self._active_devices:
             logger.info(f"Compiling models for {die_name}...")
 
-            encoder_compiled = self._core.compile_model(encoder_model, die_name, compile_config)
-            decoder_compiled = self._core.compile_model(decoder_model, die_name, compile_config)
+            try:
+                encoder_compiled = self._core.compile_model(encoder_model, die_name, compile_config)
+                logger.info(f"  {die_name}: encoder compiled")
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to compile encoder on {die_name}: {e}\n"
+                    f"Encoder path: {self.encoder_path}\n"
+                    f"Compile config: {compile_config}"
+                )
+
+            try:
+                decoder_compiled = self._core.compile_model(decoder_model, die_name, compile_config)
+                logger.info(f"  {die_name}: decoder compiled")
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to compile decoder on {die_name}: {e}\n"
+                    f"Decoder path: {actual_decoder_path}\n"
+                    f"Compile config: {compile_config}\n"
+                    f"Hint: NPU requires decoder_with_past model. Re-export with:\n"
+                    f"  optimum-cli export openvino --model openai/whisper-large-v3 "
+                    f"--task automatic-speech-recognition-with-past <output_dir>"
+                )
 
             encoder_request = encoder_compiled.create_infer_request()
             decoder_request = decoder_compiled.create_infer_request()
 
             self._die_contexts[die_name] = (encoder_request, decoder_request)
-            logger.info(f"  {die_name}: encoder + decoder compiled")
 
         logger.info(f"Whisper models loaded on {len(self._active_devices)} die(s)")
 
