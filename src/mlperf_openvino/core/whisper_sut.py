@@ -945,9 +945,9 @@ class WhisperNPUSUT:
     This implementation uses OpenVINO directly for maximum compatibility
     with NPU devices. It supports:
     - Multi-die NPU (compiles on all dies: NPU.0, NPU.1, ... when device=NPU)
-    - KV-cache for efficient autoregressive decoding (decoder_with_past)
+    - Static shapes with sequence length buckets (required for NPU)
+    - KV-cache for efficient autoregressive decoding (if available)
     - Round-robin request distribution across dies
-    - Pre-allocated tensors to minimize memory operations
 
     For MLPerf v5.1 Whisper benchmark:
     - Model: Whisper-Large-v3 (1.55B parameters)
@@ -961,11 +961,17 @@ class WhisperNPUSUT:
     TRANSCRIBE_TOKEN = 50359  # <|transcribe|>
     NO_TIMESTAMPS_TOKEN = 50363  # <|notimestamps|>
     EN_TOKEN = 50259  # <|en|> English language
+    PAD_TOKEN = 50257  # Use EOT as padding
 
     # Whisper-Large-v3 architecture constants
     NUM_DECODER_LAYERS = 32
     NUM_ATTENTION_HEADS = 20
     HEAD_DIM = 64  # 1280 / 20
+    ENCODER_SEQ_LEN = 1500  # Encoder output sequence length
+    ENCODER_HIDDEN_SIZE = 1280
+
+    # Sequence length buckets for static decoder models
+    SEQ_BUCKETS = [16, 32, 64, 128, 256, 448]
 
     def __init__(
         self,
@@ -1018,8 +1024,9 @@ class WhisperNPUSUT:
         # OpenVINO core
         self._core = None
 
-        # Multi-die support: {die_name: (encoder_request, decoder_request)}
-        self._die_contexts: Dict[str, Tuple[Any, Any]] = {}
+        # Multi-die support
+        # For static shapes: {die_name: {"encoder": request, "decoder_buckets": {seq_len: request}}}
+        self._die_contexts: Dict[str, Dict[str, Any]] = {}
         self._active_devices: List[str] = []
         self._request_counter = 0
         self._request_lock = threading.Lock()
@@ -1028,6 +1035,10 @@ class WhisperNPUSUT:
         self._encoder_input_name = None
         self._encoder_output_name = None
         self._decoder_inputs = {}
+
+        # Static shapes mode
+        self._use_static_shapes = False
+        self._available_buckets: List[int] = []
 
         # KV-cache support
         self._has_kv_cache = False
@@ -1061,37 +1072,140 @@ class WhisperNPUSUT:
         device_prefix = self.config.openvino.get_device_prefix()
 
         if self.config.openvino.is_specific_die():
-            # Specific die requested (e.g., NPU.0)
             self._active_devices = [self.device]
         else:
-            # Discover all dies for the device prefix (e.g., NPU -> [NPU.0, NPU.1, ...])
             self._active_devices = discover_accelerator_devices(self._core, device_prefix)
 
         if not self._active_devices:
-            # Fallback to the specified device
             self._active_devices = [self.device]
 
         logger.info(f"Will use {len(self._active_devices)} die(s): {self._active_devices}")
 
-        # Read models once
-        logger.info(f"Reading encoder from {self.encoder_path}")
+        model_dir = self.encoder_path.parent
+
+        # List all available models
+        all_xml = list(model_dir.glob("*.xml"))
+        logger.info(f"Available models in {model_dir}: {[f.name for f in all_xml]}")
+
+        # Check for static shape models first (required for NPU without dynamic shape support)
+        static_encoder = self._find_static_encoder(model_dir)
+        static_decoders = self._find_static_decoders(model_dir)
+
+        if static_encoder and static_decoders:
+            logger.info(f"Found static encoder: {static_encoder.name}")
+            logger.info(f"Found {len(static_decoders)} static decoder buckets: {list(static_decoders.keys())}")
+            self._use_static_shapes = True
+            self._available_buckets = sorted(static_decoders.keys())
+            self._load_static_models(static_encoder, static_decoders, compile_config)
+            logger.info(
+                f"Static shapes mode enabled (NPU compatible). "
+                f"Buckets: {self._available_buckets}, max seq: {self._available_buckets[-1]}"
+            )
+        else:
+            logger.info("Static models not found, trying dynamic models...")
+            logger.info(
+                "To create static models for NPU, run:\n"
+                "  python -c \"from mlperf_openvino.utils import export_whisper_for_npu; "
+                "export_whisper_for_npu('./models', static_shapes=True)\""
+            )
+            self._use_static_shapes = False
+            self._load_dynamic_models(compile_config)
+
+    def _find_static_encoder(self, model_dir: Path) -> Optional[Path]:
+        """Find static encoder model."""
+        candidates = [
+            model_dir / "encoder_static_b1.xml",
+            model_dir / "openvino_encoder_static_b1.xml",
+        ]
+        for path in candidates:
+            if path.exists():
+                return path
+        return None
+
+    def _find_static_decoders(self, model_dir: Path) -> Dict[int, Path]:
+        """Find static decoder models for each sequence length bucket."""
+        decoders = {}
+        for seq_len in self.SEQ_BUCKETS:
+            candidates = [
+                model_dir / f"decoder_static_b1_s{seq_len}.xml",
+                model_dir / f"openvino_decoder_static_b1_s{seq_len}.xml",
+            ]
+            for path in candidates:
+                if path.exists():
+                    decoders[seq_len] = path
+                    break
+        return decoders
+
+    def _load_static_models(
+        self,
+        encoder_path: Path,
+        decoder_paths: Dict[int, Path],
+        compile_config: Dict
+    ) -> None:
+        """Load static shape models for NPU."""
+        logger.info("Loading static shape models...")
+
+        # Read encoder
+        encoder_model = self._core.read_model(str(encoder_path))
+        self._encoder_input_name = encoder_model.inputs[0].get_any_name()
+        self._encoder_output_name = encoder_model.outputs[0].get_any_name()
+
+        # Read first decoder to get input names
+        first_decoder_path = list(decoder_paths.values())[0]
+        first_decoder = self._core.read_model(str(first_decoder_path))
+        self._decoder_inputs = self._discover_decoder_inputs(first_decoder)
+
+        # Log decoder info
+        all_inputs = [inp.get_any_name() for inp in first_decoder.inputs]
+        all_outputs = [out.get_any_name() for out in first_decoder.outputs]
+        logger.info(f"Decoder inputs: {all_inputs}")
+        logger.info(f"Decoder outputs: {all_outputs}")
+
+        # Compile for each die
+        for die_name in self._active_devices:
+            logger.info(f"Compiling static models for {die_name}...")
+
+            die_ctx = {"encoder": None, "decoder_buckets": {}}
+
+            # Compile encoder
+            try:
+                encoder_compiled = self._core.compile_model(encoder_model, die_name, compile_config)
+                die_ctx["encoder"] = encoder_compiled.create_infer_request()
+                logger.info(f"  {die_name}: encoder compiled")
+            except Exception as e:
+                raise RuntimeError(f"Failed to compile static encoder on {die_name}: {e}")
+
+            # Compile decoders for each bucket
+            for seq_len, decoder_path in decoder_paths.items():
+                try:
+                    decoder_model = self._core.read_model(str(decoder_path))
+                    decoder_compiled = self._core.compile_model(decoder_model, die_name, compile_config)
+                    die_ctx["decoder_buckets"][seq_len] = decoder_compiled.create_infer_request()
+                    logger.info(f"  {die_name}: decoder (seq={seq_len}) compiled")
+                except Exception as e:
+                    logger.warning(f"Failed to compile decoder seq={seq_len} on {die_name}: {e}")
+
+            self._die_contexts[die_name] = die_ctx
+
+        logger.info(f"Static models loaded on {len(self._active_devices)} die(s)")
+
+    def _load_dynamic_models(self, compile_config: Dict) -> None:
+        """Load dynamic shape models (fallback, may not work on all NPUs)."""
+        logger.info("Loading dynamic shape models...")
+
+        # Read encoder
         encoder_model = self._core.read_model(str(self.encoder_path))
 
-        # Try to find decoder_with_past for KV-cache (REQUIRED for NPU)
+        # Try to find decoder_with_past for KV-cache
         decoder_with_past_path = self._find_decoder_with_past()
         if decoder_with_past_path:
             logger.info(f"Using decoder_with_past: {decoder_with_past_path}")
             decoder_model = self._core.read_model(str(decoder_with_past_path))
             actual_decoder_path = decoder_with_past_path
         else:
-            # Fallback to regular decoder (may not work on NPU due to dynamic shapes)
             logger.warning(
                 f"decoder_with_past not found! Using {self.decoder_path} "
                 "(may fail on NPU due to dynamic shapes)"
-            )
-            logger.warning(
-                "Re-export model with: optimum-cli export openvino "
-                "--model openai/whisper-large-v3 --task automatic-speech-recognition-with-past <output>"
             )
             decoder_model = self._core.read_model(str(self.decoder_path))
             actual_decoder_path = self.decoder_path
@@ -1103,17 +1217,26 @@ class WhisperNPUSUT:
         else:
             logger.info("KV-cache not available, using full sequence decoding")
 
-        # Get input/output names (same for all dies)
+        # Get input/output names
         self._encoder_input_name = encoder_model.inputs[0].get_any_name()
         self._encoder_output_name = encoder_model.outputs[0].get_any_name()
         self._decoder_inputs = self._discover_decoder_inputs(decoder_model)
 
-        # Compile models for each die
+        # Log decoder info
+        all_inputs = [inp.get_any_name() for inp in decoder_model.inputs]
+        all_outputs = [out.get_any_name() for out in decoder_model.outputs]
+        logger.info(f"Decoder inputs: {all_inputs}")
+        logger.info(f"Decoder outputs: {all_outputs}")
+
+        # Compile for each die
         for die_name in self._active_devices:
-            logger.info(f"Compiling models for {die_name}...")
+            logger.info(f"Compiling dynamic models for {die_name}...")
+
+            die_ctx = {"encoder": None, "decoder": None}
 
             try:
                 encoder_compiled = self._core.compile_model(encoder_model, die_name, compile_config)
+                die_ctx["encoder"] = encoder_compiled.create_infer_request()
                 logger.info(f"  {die_name}: encoder compiled")
             except Exception as e:
                 raise RuntimeError(
@@ -1124,23 +1247,21 @@ class WhisperNPUSUT:
 
             try:
                 decoder_compiled = self._core.compile_model(decoder_model, die_name, compile_config)
+                die_ctx["decoder"] = decoder_compiled.create_infer_request()
                 logger.info(f"  {die_name}: decoder compiled")
             except Exception as e:
                 raise RuntimeError(
                     f"Failed to compile decoder on {die_name}: {e}\n"
                     f"Decoder path: {actual_decoder_path}\n"
                     f"Compile config: {compile_config}\n"
-                    f"Hint: NPU requires decoder_with_past model. Re-export with:\n"
-                    f"  optimum-cli export openvino --model openai/whisper-large-v3 "
-                    f"--task automatic-speech-recognition-with-past <output_dir>"
+                    f"Hint: NPU may require static shape models. Run:\n"
+                    f"  python -c \"from mlperf_openvino.utils import export_whisper_for_npu; "
+                    f"export_whisper_for_npu('./models', static_shapes=True)\""
                 )
 
-            encoder_request = encoder_compiled.create_infer_request()
-            decoder_request = decoder_compiled.create_infer_request()
+            self._die_contexts[die_name] = die_ctx
 
-            self._die_contexts[die_name] = (encoder_request, decoder_request)
-
-        logger.info(f"Whisper models loaded on {len(self._active_devices)} die(s)")
+        logger.info(f"Dynamic models loaded on {len(self._active_devices)} die(s)")
 
     def _get_next_die(self) -> str:
         """Get next die for round-robin distribution."""
@@ -1273,9 +1394,18 @@ class WhisperNPUSUT:
         if die_name is None:
             die_name = self._get_next_die()
 
-        encoder_request, _ = self._die_contexts[die_name]
+        die_ctx = self._die_contexts[die_name]
+        encoder_request = die_ctx["encoder"]
         encoder_request.infer({self._encoder_input_name: mel_features})
         return encoder_request.get_tensor(self._encoder_output_name).data.copy()
+
+    def _get_decoder_bucket(self, seq_len: int) -> int:
+        """Get the smallest bucket that fits the sequence length."""
+        for bucket in self._available_buckets:
+            if seq_len <= bucket:
+                return bucket
+        # Return largest bucket if sequence is too long
+        return self._available_buckets[-1] if self._available_buckets else seq_len
 
     def _decode_step(
         self,
@@ -1293,7 +1423,24 @@ class WhisperNPUSUT:
         Returns:
             Logits for next token
         """
-        _, decoder_request = self._die_contexts[die_name]
+        die_ctx = self._die_contexts[die_name]
+        seq_len = decoder_input_ids.shape[1]
+
+        # Select decoder based on mode (static buckets or dynamic)
+        if self._use_static_shapes:
+            bucket = self._get_decoder_bucket(seq_len)
+            decoder_request = die_ctx["decoder_buckets"].get(bucket)
+            if decoder_request is None:
+                raise RuntimeError(
+                    f"No decoder for bucket {bucket}. Available: {list(die_ctx['decoder_buckets'].keys())}"
+                )
+            # Pad input_ids to bucket size
+            if seq_len < bucket:
+                padded_ids = np.full((1, bucket), self.PAD_TOKEN, dtype=np.int64)
+                padded_ids[0, :seq_len] = decoder_input_ids[0, :]
+                decoder_input_ids = padded_ids
+        else:
+            decoder_request = die_ctx["decoder"]
 
         inputs = {}
 
@@ -1310,20 +1457,32 @@ class WhisperNPUSUT:
             inputs['encoder_hidden_states'] = encoder_hidden_states
 
         # Add attention masks if required
+        actual_seq_len = decoder_input_ids.shape[1]
         if 'attention_mask' in self._decoder_inputs:
-            attn_mask = np.ones(decoder_input_ids.shape, dtype=np.int64)
+            if self._use_static_shapes:
+                # For static shapes, mask out padding
+                attn_mask = np.zeros((1, actual_seq_len), dtype=np.int64)
+                attn_mask[0, :seq_len] = 1
+            else:
+                attn_mask = np.ones(decoder_input_ids.shape, dtype=np.int64)
             inputs[self._decoder_inputs['attention_mask']] = attn_mask
 
         if 'encoder_attention_mask' in self._decoder_inputs:
             batch_size = encoder_hidden_states.shape[0]
-            seq_len = encoder_hidden_states.shape[1]
-            enc_attn_mask = np.ones((batch_size, seq_len), dtype=np.int64)
+            enc_seq_len = encoder_hidden_states.shape[1]
+            enc_attn_mask = np.ones((batch_size, enc_seq_len), dtype=np.int64)
             inputs[self._decoder_inputs['encoder_attention_mask']] = enc_attn_mask
 
         decoder_request.infer(inputs)
 
         # Get first output (logits)
-        return decoder_request.get_output_tensor(0).data.copy()
+        logits = decoder_request.get_output_tensor(0).data.copy()
+
+        # For static shapes, only return logits for non-padded positions
+        if self._use_static_shapes and logits.ndim == 3 and logits.shape[1] > seq_len:
+            logits = logits[:, :seq_len, :]
+
+        return logits
 
     def _generate(self, mel_features: np.ndarray) -> Tuple[List[int], str]:
         """Generate transcript from mel spectrogram.
@@ -1331,6 +1490,8 @@ class WhisperNPUSUT:
         Uses KV-cache if available for ~10x faster decoding.
         Uses round-robin die selection for multi-die parallelism.
         Each sample uses single die for both encoder and decoder.
+
+        For static shapes mode (NPU): uses bucket-based decoding without KV-cache.
 
         Args:
             mel_features: Mel spectrogram of shape (batch, n_mels, time)
@@ -1353,7 +1514,10 @@ class WhisperNPUSUT:
             self.NO_TIMESTAMPS_TOKEN,
         ]
 
-        if self._has_kv_cache:
+        # Static shapes mode doesn't support KV-cache (uses bucket-based decoding)
+        if self._use_static_shapes:
+            return self._generate_without_kv_cache(encoder_hidden_states, initial_tokens, die_name)
+        elif self._has_kv_cache:
             return self._generate_with_kv_cache(encoder_hidden_states, initial_tokens, die_name)
         else:
             return self._generate_without_kv_cache(encoder_hidden_states, initial_tokens, die_name)
@@ -1364,11 +1528,25 @@ class WhisperNPUSUT:
         initial_tokens: List[int],
         die_name: str,
     ) -> Tuple[List[int], str]:
-        """Generate without KV-cache (slower, recomputes all attention)."""
+        """Generate without KV-cache (slower, recomputes all attention).
+
+        For static shapes mode, uses bucket-based decoder selection with padding.
+        """
         decoder_input = initial_tokens.copy()
         generated_tokens = []
 
+        # For static shapes, check maximum sequence length
+        max_bucket = self._available_buckets[-1] if self._available_buckets else float('inf')
+
         for step in range(self.max_new_tokens):
+            # Check if we've exceeded the maximum bucket size
+            if self._use_static_shapes and len(decoder_input) > max_bucket:
+                logger.warning(
+                    f"Sequence length {len(decoder_input)} exceeds max bucket {max_bucket}. "
+                    f"Stopping generation early."
+                )
+                break
+
             decoder_input_ids = np.array([decoder_input], dtype=np.int64)
 
             # Get logits
@@ -1472,7 +1650,8 @@ class WhisperNPUSUT:
         Returns:
             Tuple of (logits, new_past_key_values)
         """
-        _, decoder_request = self._die_contexts[die_name]
+        die_ctx = self._die_contexts[die_name]
+        decoder_request = die_ctx["decoder"]
 
         inputs = {}
 

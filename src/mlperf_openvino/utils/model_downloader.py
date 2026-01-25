@@ -650,6 +650,15 @@ def _reshape_whisper_for_npu(model_path: Path, batch_size: int = 1) -> None:
     """
     Reshape Whisper models for static shapes optimized for NPU.
 
+    NPU devices typically don't support dynamic shapes, so we need to
+    fix all dimensions at export/reshape time.
+
+    Whisper shapes:
+    - Encoder input: (batch, 128, 3000) - 128 mel bins, 30 seconds
+    - Encoder output: (batch, 1500, 1280)
+    - Decoder input_ids: (batch, seq_len) - variable during generation
+    - Decoder output: (batch, seq_len, 51865) - vocab logits
+
     Args:
         model_path: Path to OpenVINO model directory
         batch_size: Fixed batch size
@@ -662,7 +671,7 @@ def _reshape_whisper_for_npu(model_path: Path, batch_size: int = 1) -> None:
 
     core = ov.Core()
 
-    # Reshape encoder: (batch, 128, 3000) -> (batch, 1500, 1280)
+    # Reshape encoder: input (batch, 128, 3000)
     encoder_candidates = [
         model_path / "openvino_encoder_model.xml",
         model_path / "encoder_model.xml",
@@ -674,19 +683,67 @@ def _reshape_whisper_for_npu(model_path: Path, batch_size: int = 1) -> None:
             try:
                 encoder = core.read_model(str(encoder_path))
 
-                # Set static input shape (batch, n_mels=128, time=3000)
-                encoder.reshape({0: [batch_size, 128, 3000]})
+                # Find input by name pattern
+                new_shapes = {}
+                for inp in encoder.inputs:
+                    name = inp.get_any_name()
+                    if 'input' in name.lower() or 'feature' in name.lower():
+                        new_shapes[name] = [batch_size, 128, 3000]
 
-                # Save with static shapes
-                static_path = encoder_path.parent / f"encoder_static_b{batch_size}.xml"
-                ov.save_model(encoder, str(static_path))
-                logger.info(f"  Saved static encoder: {static_path}")
+                if new_shapes:
+                    encoder.reshape(new_shapes)
+                    static_path = encoder_path.parent / f"encoder_static_b{batch_size}.xml"
+                    ov.save_model(encoder, str(static_path))
+                    logger.info(f"  Saved static encoder: {static_path}")
 
             except Exception as e:
                 logger.warning(f"Failed to reshape encoder: {e}")
             break
 
-    logger.info("Reshape complete. Use static models for maximum NPU performance.")
+    # Reshape decoder: input_ids (batch, seq_len), encoder_hidden_states (batch, 1500, 1280)
+    decoder_candidates = [
+        model_path / "openvino_decoder_model.xml",
+        model_path / "decoder_model.xml",
+    ]
+
+    # Create multiple decoder versions for different sequence lengths (buckets)
+    seq_buckets = [16, 32, 64, 128, 256, 448]
+
+    for decoder_path in decoder_candidates:
+        if decoder_path.exists():
+            logger.info(f"Reshaping decoder for static shapes: {decoder_path}")
+
+            for seq_len in seq_buckets:
+                try:
+                    decoder = core.read_model(str(decoder_path))
+
+                    new_shapes = {}
+                    for inp in decoder.inputs:
+                        name = inp.get_any_name()
+                        name_lower = name.lower()
+
+                        if 'input_id' in name_lower or 'decoder_input' in name_lower:
+                            new_shapes[name] = [batch_size, seq_len]
+                        elif 'encoder_hidden' in name_lower or 'encoder_output' in name_lower:
+                            new_shapes[name] = [batch_size, 1500, 1280]
+                        elif 'attention_mask' in name_lower:
+                            if 'encoder' in name_lower:
+                                new_shapes[name] = [batch_size, 1500]
+                            else:
+                                new_shapes[name] = [batch_size, seq_len]
+
+                    if new_shapes:
+                        decoder.reshape(new_shapes)
+                        static_path = decoder_path.parent / f"decoder_static_b{batch_size}_s{seq_len}.xml"
+                        ov.save_model(decoder, str(static_path))
+                        logger.info(f"  Saved static decoder (seq={seq_len}): {static_path}")
+
+                except Exception as e:
+                    logger.warning(f"Failed to reshape decoder for seq_len={seq_len}: {e}")
+
+            break
+
+    logger.info("Reshape complete. Static models saved for NPU.")
 
 
 def download_sdxl_model(
