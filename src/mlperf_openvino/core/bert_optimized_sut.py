@@ -185,6 +185,8 @@ class BertOptimizedSUTWrapper:
         """Process queries in Server mode."""
         if not self._samples_registered:
             self._register_samples()
+            # Enable direct LoadGen response for Server mode
+            self._cpp_sut.enable_direct_loadgen(True)
 
         query_ids = [qs.id for qs in query_samples]
         sample_indices = [qs.index for qs in query_samples]

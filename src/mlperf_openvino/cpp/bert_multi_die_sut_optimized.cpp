@@ -142,6 +142,11 @@ BertOptimizedSUT::BertOptimizedSUT(
         for (int j = 0; j < BATCH_QUEUE_SIZE; ++j) {
             batch_queues_[i].valid[j].store(false);
         }
+        // Initialize work queue items for Server mode
+        for (int j = 0; j < QUEUE_SIZE; ++j) {
+            bucket_queues_[i].items[j].query_id = 0;
+            bucket_queues_[i].items[j].sample_idx = -1;
+        }
     }
 }
 
