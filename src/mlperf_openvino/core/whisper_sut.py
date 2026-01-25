@@ -1163,12 +1163,23 @@ class WhisperNPUSUT:
         """Find decoder_with_past model for KV-cache support."""
         decoder_dir = self.decoder_path.parent
 
-        # Priority order: decoder_with_past > decoder_model_merged > decoder
+        # List all XML files for debugging
+        all_xml = list(decoder_dir.glob("*.xml"))
+        logger.info(f"Available models in {decoder_dir}: {[f.name for f in all_xml]}")
+
+        # Priority order for decoder with KV-cache
+        # Optimum-intel creates different names depending on version
         candidates = [
+            # With "openvino_" prefix (newer optimum)
             decoder_dir / "openvino_decoder_with_past_model.xml",
+            # Without prefix (older optimum)
             decoder_dir / "decoder_with_past_model.xml",
+            # Merged decoder (has both with and without past)
             decoder_dir / "openvino_decoder_model_merged.xml",
             decoder_dir / "decoder_model_merged.xml",
+            # Some versions use just "decoder" with past inside
+            decoder_dir / "openvino_decoder.xml",
+            decoder_dir / "decoder.xml",
         ]
 
         for path in candidates:
@@ -1182,14 +1193,26 @@ class WhisperNPUSUT:
         self._kv_cache_inputs = []
         self._kv_cache_outputs = []
 
+        # Log all inputs/outputs for debugging
+        all_inputs = [inp.get_any_name() for inp in decoder_model.inputs]
+        all_outputs = [out.get_any_name() for out in decoder_model.outputs]
+        logger.info(f"Decoder inputs: {all_inputs}")
+        logger.info(f"Decoder outputs: {all_outputs}")
+
+        # Patterns for KV-cache detection
+        kv_input_patterns = ['past_key_value', 'past_key', 'past', 'cache', 'kv_cache']
+        kv_output_patterns = ['present', 'past_key', 'new_past', 'cache']
+
         for inp in decoder_model.inputs:
             name = inp.get_any_name()
-            if 'past_key_value' in name.lower() or 'past_key' in name.lower():
+            name_lower = name.lower()
+            if any(p in name_lower for p in kv_input_patterns):
                 self._kv_cache_inputs.append(name)
 
         for out in decoder_model.outputs:
             name = out.get_any_name()
-            if 'present' in name.lower() or 'past_key' in name.lower():
+            name_lower = name.lower()
+            if any(p in name_lower for p in kv_output_patterns):
                 self._kv_cache_outputs.append(name)
 
         return len(self._kv_cache_inputs) > 0 and len(self._kv_cache_outputs) > 0
