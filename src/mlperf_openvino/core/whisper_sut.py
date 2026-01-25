@@ -678,6 +678,7 @@ class WhisperOptimumSUT:
         """Compile decoder with static shape reshape for NPU/X devices.
 
         Note: ov_config should be pre-filtered for the target device.
+        For CPU, we let optimum-intel handle compilation to preserve expected interface.
         """
         import openvino as ov
 
@@ -685,6 +686,16 @@ class WhisperOptimumSUT:
         device = self.decoder_device
 
         logger.info(f"Compiling DECODER on {device} (config keys: {list(ov_config.keys())})...")
+
+        # For CPU, let optimum-intel handle compilation naturally
+        # Our CompiledModelWrapper breaks the expected interface for transformers generate()
+        if device == "CPU":
+            logger.info("Using optimum-intel default compilation for CPU decoder")
+            decoder.ov_config = ov_config
+            decoder._device = device
+            decoder._compile()
+            logger.info("DECODER compiled successfully on CPU!")
+            return
 
         # Get the underlying OV model
         if hasattr(decoder, 'model') and decoder.model is not None:
@@ -743,6 +754,7 @@ class WhisperOptimumSUT:
         """Compile decoder_with_past with static shape reshape for NPU/X devices.
 
         Note: ov_config should be pre-filtered for the target device.
+        For CPU, we let optimum-intel handle compilation to preserve expected interface.
         """
         import openvino as ov
 
@@ -750,6 +762,16 @@ class WhisperOptimumSUT:
         device = self.decoder_device
 
         logger.info(f"Compiling DECODER_WITH_PAST on {device} (config keys: {list(ov_config.keys())})...")
+
+        # For CPU, let optimum-intel handle compilation naturally
+        # Our CompiledModelWrapper breaks the expected interface for transformers generate()
+        if device == "CPU":
+            logger.info("Using optimum-intel default compilation for CPU decoder_with_past")
+            decoder.ov_config = ov_config
+            decoder._device = device
+            decoder._compile()
+            logger.info("DECODER_WITH_PAST compiled successfully on CPU!")
+            return
 
         # Get the underlying OV model
         if hasattr(decoder, 'model') and decoder.model is not None:
