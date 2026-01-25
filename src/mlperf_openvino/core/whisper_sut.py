@@ -1049,10 +1049,13 @@ class WhisperNPUSUT:
 
         self._core = ov.Core()
 
-        # NPU-optimized compilation config
+        # NPU-optimized compilation config from -p parameters
         compile_config = {}
         if self.config.openvino.device_properties:
             compile_config.update(self.config.openvino.device_properties)
+            logger.info(f"Compile properties: {compile_config}")
+        else:
+            logger.info("No custom compile properties specified")
 
         # Discover target devices
         device_prefix = self.config.openvino.get_device_prefix()
