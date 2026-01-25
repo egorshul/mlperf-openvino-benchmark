@@ -1,17 +1,14 @@
 """
-Python wrapper for optimized BERT multi-die SUT with dynamic sequence length buckets.
+BERT SUT wrapper for multi-die NPU accelerators.
 
-Key optimizations:
-- Sequence length buckets: [128, 165, 256, 384]
-- Offline mode: batched inference with optimal batch sizes per bucket
-- Server mode: batch=1 direct inference for minimum latency
-- Per-bucket round-robin distribution across dies
-- Safe data copying (data copied on registration)
+Sequence buckets: [128, 165, 256, 384]
+Offline: batch [4,4,2,2] for throughput
+Server: batch=1, direct inference for latency
 """
 
 import logging
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 
@@ -34,17 +31,12 @@ from .config import BenchmarkConfig, Scenario
 
 logger = logging.getLogger(__name__)
 
-# Sequence length buckets - must match C++ constants
 SEQ_BUCKETS = [128, 165, 256, 384]
-# Batch sizes per bucket
-DEFAULT_BATCH_SIZES = [4, 4, 2, 2]
-DEFAULT_NIREQ_PER_CONFIG = 8
+DEFAULT_NIREQ = 8
 
 
 class BertOptimizedSUTWrapper:
-    """
-    Wrapper for optimized C++ BERT SUT with dynamic sequence length buckets.
-    """
+    """BERT SUT wrapper for multi-die NPU accelerators."""
 
     def __init__(
         self,
@@ -56,63 +48,53 @@ class BertOptimizedSUTWrapper:
             raise ImportError("MLPerf LoadGen not installed")
 
         if not CPP_OPTIMIZED_AVAILABLE:
-            raise ImportError(
-                "C++ optimized BERT SUT not available. Build with: ./build_cpp.sh"
-            )
+            raise ImportError("C++ BERT SUT not available. Build with: ./build_cpp.sh")
 
         self.config = config
         self.qsl = qsl
         self.scenario = scenario
 
-        # Build compile properties
         compile_props = {}
         if hasattr(config.openvino, 'device_properties') and config.openvino.device_properties:
             compile_props = dict(config.openvino.device_properties)
 
-        # Get nireq from config (higher = more throughput for Offline)
-        nireq_per_config = DEFAULT_NIREQ_PER_CONFIG
+        nireq = DEFAULT_NIREQ
         if hasattr(config.model, 'nireq_per_config'):
-            nireq_per_config = config.model.nireq_per_config
+            nireq = config.model.nireq_per_config
         elif hasattr(config.model, 'server') and config.model.server:
-            nireq_per_config = getattr(config.model.server, 'nireq_per_config', DEFAULT_NIREQ_PER_CONFIG)
+            nireq = getattr(config.model.server, 'nireq_per_config', DEFAULT_NIREQ)
 
-        # Create C++ SUT
         device_prefix = config.openvino.get_device_prefix()
         self._cpp_sut = CppBertOptimizedSUT(
             config.model.model_path,
             device_prefix,
             compile_props,
-            nireq_per_config
+            nireq
         )
 
-        # Set target devices if specific die
         if config.openvino.is_specific_die():
             self._cpp_sut.set_target_devices([config.openvino.device])
 
-        # Server mode uses batch=1 for minimum latency
         if scenario == Scenario.SERVER:
             self._cpp_sut.set_server_mode(True)
-            logger.info("Server mode: batch=1 direct inference enabled")
 
-        # State
         self._is_loaded = False
         self._is_accuracy_mode = False
         self._start_time = 0.0
         self._query_count = 0
         self._samples_registered = False
 
-        logger.debug(f"BertOptimizedSUTWrapper: device_prefix={device_prefix}")
-
     def load(self, is_accuracy_mode: bool = False) -> None:
-        """Load and compile all model variants."""
+        """Load and compile models."""
         self._cpp_sut.load()
+        self._cpp_sut.warmup(2)
         self._cpp_sut.set_store_predictions(is_accuracy_mode)
         self._is_accuracy_mode = is_accuracy_mode
         self._is_loaded = True
 
         configs = self._cpp_sut.get_model_configs()
-        logger.info(f"Loaded {len(configs)} model configs: {configs}")
-        logger.info(f"Active devices: {self._cpp_sut.get_active_devices()}")
+        logger.info(f"Loaded {len(configs)} models: {configs}")
+        logger.info(f"Devices: {self._cpp_sut.get_active_devices()}")
 
     @property
     def is_loaded(self) -> bool:
@@ -123,12 +105,11 @@ class BertOptimizedSUTWrapper:
         return self._cpp_sut.get_num_dies()
 
     def _register_samples(self) -> None:
-        """Register all loaded samples with sequence length info."""
+        """Register loaded samples."""
         if self._samples_registered:
             return
 
         if not hasattr(self.qsl, '_loaded_samples'):
-            logger.warning("QSL has no _loaded_samples")
             return
 
         count = 0
@@ -140,63 +121,53 @@ class BertOptimizedSUTWrapper:
             if input_ids is None or attention_mask is None or token_type_ids is None:
                 continue
 
-            # Get actual sequence length
             actual_seq_len = self.qsl.get_actual_seq_len(idx)
-
-            # Register with C++
             self._cpp_sut.register_sample(
                 idx, input_ids, attention_mask, token_type_ids, actual_seq_len
             )
             count += 1
 
         self._samples_registered = True
-        logger.debug(f"Registered {count} samples with sequence length info")
+        logger.debug(f"Registered {count} samples")
 
     def _issue_query_offline(self, query_samples: List) -> None:
-        """Process queries in Offline mode with bucket-aware batching."""
+        """Offline mode: batched by bucket."""
         self._start_time = time.time()
         self._cpp_sut.reset_counters()
         self._cpp_sut.enable_direct_loadgen(True)
 
-        # Ensure samples are registered
         self._register_samples()
 
-        # Group samples by bucket
         buckets: Dict[int, List[Tuple[int, int]]] = {i: [] for i in range(len(SEQ_BUCKETS))}
 
         for qs in query_samples:
             bucket_idx = self.qsl.get_sample_bucket(qs.index)
             buckets[bucket_idx].append((qs.id, qs.index))
 
-        # Submit each bucket
         for bucket_idx, samples in buckets.items():
             if not samples:
                 continue
-
             query_ids = [s[0] for s in samples]
             sample_indices = [s[1] for s in samples]
-
             self._cpp_sut.submit_batch(bucket_idx, query_ids, sample_indices)
 
         self._cpp_sut.wait_all()
         self._query_count += 1
 
     def _issue_query_server(self, query_samples: List) -> None:
-        """Process queries in Server mode with batch=1 direct inference."""
+        """Server mode: batch=1 direct inference."""
         if not self._samples_registered:
             self._register_samples()
-            # Enable direct LoadGen response for Server mode
+            self._cpp_sut.stage_samples()
             self._cpp_sut.enable_direct_loadgen(True)
 
         query_ids = [qs.id for qs in query_samples]
         sample_indices = [qs.index for qs in query_samples]
-
-        # issue_queries calls issue_query_direct for each query (batch=1)
         self._cpp_sut.issue_queries(query_ids, sample_indices)
         self._query_count += 1
 
     def issue_queries(self, query_samples: List) -> None:
-        """Process incoming queries."""
+        """Process queries."""
         if self.scenario == Scenario.OFFLINE:
             self._issue_query_offline(query_samples)
         elif self.scenario == Scenario.SERVER:
@@ -209,11 +180,11 @@ class BertOptimizedSUTWrapper:
         self._cpp_sut.wait_all()
 
     def get_sut(self):
-        """Get LoadGen SUT object."""
+        """Get LoadGen SUT."""
         return lg.ConstructSUT(self.issue_queries, self.flush_queries)
 
     def get_qsl(self):
-        """Get LoadGen QSL object."""
+        """Get LoadGen QSL."""
         return lg.ConstructQSL(
             self.qsl.total_sample_count,
             self.qsl.performance_sample_count,
@@ -230,9 +201,8 @@ class BertOptimizedSUTWrapper:
         return self._cpp_sut.get_completed_count()
 
     def get_predictions(self) -> Dict[int, Tuple[np.ndarray, np.ndarray]]:
-        """Get stored predictions."""
-        cpp_preds = self._cpp_sut.get_predictions()
-        return {idx: pred for idx, pred in cpp_preds.items()}
+        """Get predictions."""
+        return {idx: pred for idx, pred in self._cpp_sut.get_predictions().items()}
 
     def set_store_predictions(self, store: bool) -> None:
         """Enable/disable prediction storage."""
@@ -240,7 +210,7 @@ class BertOptimizedSUTWrapper:
         self._is_accuracy_mode = store
 
     def compute_accuracy(self) -> Dict[str, float]:
-        """Compute accuracy metrics (F1 and Exact Match)."""
+        """Compute F1 and Exact Match."""
         predictions = self.get_predictions()
 
         if not predictions:
@@ -262,5 +232,5 @@ class BertOptimizedSUTWrapper:
 
 
 def is_bert_optimized_cpp_available() -> bool:
-    """Check if optimized C++ BERT SUT is available."""
+    """Check if C++ BERT SUT is available."""
     return CPP_OPTIMIZED_AVAILABLE and LOADGEN_AVAILABLE

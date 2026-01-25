@@ -817,6 +817,11 @@ PYBIND11_MODULE(_cpp_sut, m) {
              py::call_guard<py::gil_scoped_release>(),
              "Load and compile models for all bucket configurations")
 
+        .def("warmup", &mlperf_ov::BertOptimizedSUT::warmup,
+             py::call_guard<py::gil_scoped_release>(),
+             py::arg("iterations") = 2,
+             "Warmup all models with dummy inference")
+
         .def("is_loaded", &mlperf_ov::BertOptimizedSUT::is_loaded,
              "Check if models are loaded")
 
