@@ -414,7 +414,7 @@ class BenchmarkConfig:
             ),
             dataset=DatasetConfig(
                 name="librispeech",
-                path="./data/librispeech",
+                path="./data/librispeech/mlperf",  # MLPerf uses dev-clean + dev-other combined
             ),
         )
 

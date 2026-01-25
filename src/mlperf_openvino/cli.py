@@ -631,7 +631,9 @@ def setup_cmd(model: str, output_dir: str, format: str):
         elif model == 'retinanet':
             dataset_paths = download_dataset('openimages', str(data_dir))
         elif model == 'whisper':
-            dataset_paths = download_dataset('librispeech', str(data_dir), 'dev-clean')
+            # Use 'mlperf' subset (dev-clean + dev-other combined) for full benchmark
+            # or 'dev-clean' for quick testing
+            dataset_paths = download_dataset('librispeech', str(data_dir), 'mlperf')
         elif model == 'sdxl':
             dataset_paths = download_dataset('coco2014', str(data_dir))
 
