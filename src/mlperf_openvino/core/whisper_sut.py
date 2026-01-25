@@ -379,9 +379,11 @@ class WhisperOptimumSUT:
         if hasattr(submodel, 'model') and submodel.model is not None:
             ov_model = submodel.model
 
-            # Reshape to batch_size if needed
-            if self.batch_size > 1:
-                self._reshape_model_batch_size(ov_model, self.batch_size, name)
+            # NOTE: Do NOT reshape encoder to batch_size here!
+            # Encoder must stay dynamic to handle both:
+            # - Single samples (batch=1) for warmup and individual processing
+            # - Batches (batch=N) for batch processing
+            # The model.generate() handles this dynamically.
 
             # Analyze model
             self._analyze_model_for_npu(ov_model, name)
@@ -565,12 +567,12 @@ class WhisperOptimumSUT:
             # Check if shapes are dynamic
             has_dynamic = analysis.get("has_dynamic", False)
 
+            # NOTE: Do NOT reshape decoder to static batch_size here!
+            # model.generate() internally uses the decoder with varying batch sizes.
+            # Reshaping to batch=4 breaks generate() when it tries to use batch=1.
+            # If static shapes are needed for NPU, use --stateless export with proper shapes.
             if has_dynamic and device != "CPU":
-                logger.info(f"Decoder has dynamic shapes, reshaping to batch_size={self.batch_size} for NPU...")
-                try:
-                    self._reshape_decoder_to_static(ov_model, batch_size=self.batch_size)
-                except Exception as e:
-                    logger.warning(f"Static reshape failed: {e}")
+                logger.info(f"Decoder has dynamic shapes (NPU may need static - use --stateless export)")
 
             # Build config for compilation
             compile_config = {}
@@ -621,13 +623,11 @@ class WhisperOptimumSUT:
             # Check if shapes are dynamic
             has_dynamic = analysis.get("has_dynamic", False)
 
+            # NOTE: Do NOT reshape decoder_with_past to static batch_size here!
+            # model.generate() internally uses varying batch sizes.
+            # If static shapes are needed for NPU, use --stateless export with proper shapes.
             if has_dynamic and device != "CPU":
-                logger.info(f"Decoder_with_past has dynamic shapes, reshaping to batch_size={self.batch_size} for NPU...")
-                try:
-                    # For decoder_with_past, seq_len is usually 1 (single token at a time)
-                    self._reshape_decoder_to_static(ov_model, batch_size=self.batch_size, seq_len=1)
-                except Exception as e:
-                    logger.warning(f"Static reshape failed: {e}")
+                logger.info(f"Decoder_with_past has dynamic shapes (NPU may need static - use --stateless export)")
 
             # Build config for compilation
             compile_config = {}
