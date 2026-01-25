@@ -5,6 +5,8 @@ from .model_downloader import (
     convert_to_openvino,
     list_available_models,
     download_whisper_model,
+    export_whisper_for_npu,
+    export_whisper_encoder_only,
 )
 from .dataset_downloader import (
     download_dataset,
@@ -20,6 +22,8 @@ __all__ = [
     "convert_to_openvino",
     "list_available_models",
     "download_whisper_model",
+    "export_whisper_for_npu",
+    "export_whisper_encoder_only",
     # Dataset utilities
     "download_dataset",
     "download_imagenet",
