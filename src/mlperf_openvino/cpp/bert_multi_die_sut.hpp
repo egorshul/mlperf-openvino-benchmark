@@ -3,7 +3,7 @@
  *
  * Sequence buckets: [128, 165, 256, 384]
  * Offline: batch [4,4,2,2] for throughput
- * Server: batch=1, direct inference for latency
+ * Server: batch=1 for latency
  */
 
 #pragma once
@@ -28,9 +28,9 @@ constexpr int NUM_SEQ_BUCKETS = 4;
 constexpr int OFFLINE_BATCH_SIZES[] = {4, 4, 2, 2};
 constexpr int SERVER_BATCH_SIZE = 1;
 
-class BertOptimizedSUT;
+class BertMultiDieSUT;
 
-struct BertOptInferContext {
+struct BertInferContext {
     ov::InferRequest request;
     ov::Tensor input_ids_tensor;
     ov::Tensor attention_mask_tensor;
@@ -41,7 +41,7 @@ struct BertOptInferContext {
     int bucket_idx = 0;
     size_t die_idx = 0;
     size_t pool_id = 0;
-    BertOptimizedSUT* sut = nullptr;
+    BertMultiDieSUT* sut = nullptr;
 
     static constexpr int MAX_BATCH = 16;
     uint64_t query_ids[MAX_BATCH];
@@ -50,9 +50,9 @@ struct BertOptInferContext {
     int num_dummies = 0;
 };
 
-struct BertBucketModelContext {
+struct BertBucketModel {
     ov::CompiledModel compiled_model;
-    std::vector<std::unique_ptr<BertOptInferContext>> requests;
+    std::vector<std::unique_ptr<BertInferContext>> requests;
     std::atomic<int>* slot_states = nullptr;
     size_t num_requests = 0;
     std::atomic<size_t> pool_hint{0};
@@ -60,29 +60,29 @@ struct BertBucketModelContext {
     int seq_length = 0;
 };
 
-struct BertOptDieContext {
+struct BertDieContext {
     std::string device_name;
     size_t die_idx = 0;
-    std::unique_ptr<BertBucketModelContext> bucket_models[NUM_SEQ_BUCKETS];
+    std::unique_ptr<BertBucketModel> bucket_models[NUM_SEQ_BUCKETS];
 };
 
-struct BertSampleData {
+struct BertSample {
     std::vector<int64_t> input_ids;
     std::vector<int64_t> attention_mask;
     std::vector<int64_t> token_type_ids;
-    int actual_seq_len = 0;
+    int seq_len = 0;
     int bucket_idx = 0;
 };
 
-struct BertOptPrediction {
+struct BertPrediction {
     std::vector<float> start_logits;
     std::vector<float> end_logits;
 };
 
 struct BertStagedSample {
     int sample_idx;
-    int actual_seq_len;
-    size_t buffer_offset;
+    int seq_len;
+    size_t offset;
 };
 
 struct BertStagedBucket {
@@ -95,15 +95,15 @@ struct BertStagedBucket {
     bool staged = false;
 };
 
-class BertOptimizedSUT {
+class BertMultiDieSUT {
 public:
-    BertOptimizedSUT(
+    BertMultiDieSUT(
         const std::string& model_path,
         const std::string& device_prefix,
         const std::unordered_map<std::string, std::string>& compile_properties = {},
         int nireq_per_bucket = 4);
 
-    ~BertOptimizedSUT();
+    ~BertMultiDieSUT();
 
     void set_target_devices(const std::vector<std::string>& devices);
     void set_server_mode(bool server_mode) { server_mode_ = server_mode; }
@@ -121,20 +121,18 @@ public:
                          const int64_t* input_ids,
                          const int64_t* attention_mask,
                          const int64_t* token_type_ids,
-                         int actual_seq_len);
+                         int seq_len);
     void clear_samples();
     void stage_samples();
 
     static int get_bucket_index(int seq_len);
     static int get_bucket_seq_len(int bucket_idx);
 
-    // Offline: batched
     void submit_batch(int bucket_idx,
                       const std::vector<uint64_t>& query_ids,
                       const std::vector<int>& sample_indices);
 
-    // Server: direct batch=1
-    void issue_query_direct(uint64_t query_id, int sample_idx);
+    void issue_query(uint64_t query_id, int sample_idx);
     void issue_queries(const std::vector<uint64_t>& query_ids,
                        const std::vector<int>& sample_indices);
 
@@ -144,7 +142,7 @@ public:
     uint64_t get_issued_count() const { return issued_count_.load(); }
 
     void set_store_predictions(bool store) { store_predictions_ = store; }
-    std::unordered_map<int, BertOptPrediction> get_predictions() const;
+    std::unordered_map<int, BertPrediction> get_predictions() const;
     void clear_predictions();
 
     void enable_direct_loadgen(bool enable) { use_direct_loadgen_.store(enable); }
@@ -159,7 +157,7 @@ private:
 
     ov::Core core_;
     std::shared_ptr<ov::Model> base_model_;
-    std::vector<std::unique_ptr<BertOptDieContext>> die_contexts_;
+    std::vector<std::unique_ptr<BertDieContext>> die_contexts_;
 
     std::string input_ids_name_;
     std::string attention_mask_name_;
@@ -175,11 +173,10 @@ private:
     size_t total_slots_ = 0;
 
     mutable std::shared_mutex sample_mutex_;
-    std::unordered_map<int, BertSampleData> samples_;
+    std::unordered_map<int, BertSample> samples_;
 
-    // Fast bucket lookup for Server mode (avoids lock on hot path)
-    std::vector<int8_t> sample_bucket_cache_;
-    int sample_bucket_cache_size_ = 0;
+    std::vector<int8_t> bucket_cache_;
+    int bucket_cache_size_ = 0;
 
     BertStagedBucket staged_buckets_[NUM_SEQ_BUCKETS];
     bool samples_staged_ = false;
@@ -193,26 +190,24 @@ private:
 
     bool store_predictions_ = false;
     mutable std::mutex predictions_mutex_;
-    std::unordered_map<int, BertOptPrediction> predictions_;
+    std::unordered_map<int, BertPrediction> predictions_;
 
     std::atomic<bool> use_direct_loadgen_{false};
 
     std::vector<std::string> discover_devices();
     ov::AnyMap build_compile_properties();
-    void map_input_output_names();
+    void detect_io_names();
     std::shared_ptr<ov::Model> reshape_model(int batch_size, int seq_length);
     void build_bucket_cache();
 
-    BertOptInferContext* acquire_request(size_t die_idx, int bucket_idx);
-    void release_request(BertOptInferContext* ctx);
-    void on_inference_complete(BertOptInferContext* ctx);
+    BertInferContext* acquire_request(size_t die_idx, int bucket_idx);
+    void release_request(BertInferContext* ctx);
+    void on_complete(BertInferContext* ctx);
 
-    void copy_sample_to_tensor(int sample_idx, int bucket_seq_len,
-                               int64_t* ids_ptr, int64_t* mask_ptr, int64_t* type_ptr,
-                               int offset_in_batch);
-    void copy_staged_sample_to_tensor(int bucket_idx, size_t staged_idx, int bucket_seq_len,
-                                      int64_t* ids_ptr, int64_t* mask_ptr, int64_t* type_ptr,
-                                      int offset_in_batch);
+    void copy_to_tensor(int sample_idx, int seq_len,
+                        int64_t* ids, int64_t* mask, int64_t* types, int offset);
+    void copy_staged_to_tensor(int bucket_idx, size_t staged_idx, int seq_len,
+                               int64_t* ids, int64_t* mask, int64_t* types, int offset);
 };
 
-} // namespace mlperf_ov
+}  // namespace mlperf_ov

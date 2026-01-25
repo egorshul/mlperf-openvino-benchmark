@@ -212,38 +212,15 @@ class BenchmarkRunner:
         """Create BERT multi-die SUT for accelerators."""
         is_accuracy_mode = self.config.test_mode == TestMode.ACCURACY_ONLY
 
-        # For performance mode, try optimized SUT with sequence length buckets
-        if not is_accuracy_mode:
-            try:
-                from .bert_optimized_sut import (
-                    BertOptimizedSUTWrapper,
-                    is_bert_optimized_cpp_available
-                )
-
-                if is_bert_optimized_cpp_available():
-                    logger.info(f"Using BERT Optimized C++ SUT with sequence buckets on {self.config.openvino.device}")
-                    sut = BertOptimizedSUTWrapper(
-                        config=self.config,
-                        qsl=qsl,
-                        scenario=self.config.scenario,
-                    )
-                    sut.load(is_accuracy_mode=False)
-                    return sut
-            except ImportError as e:
-                logger.warning(f"Optimized BERT SUT not available: {e}, falling back to basic")
-            except Exception as e:
-                logger.warning(f"Failed to create optimized BERT SUT: {e}, falling back to basic")
-
-        # For accuracy mode or if optimized SUT failed, use basic multi-die SUT
         try:
             from .bert_multi_die_sut import (
-                BertMultiDieCppSUTWrapper,
+                BertMultiDieSUTWrapper,
                 is_bert_multi_die_cpp_available
             )
 
             if is_bert_multi_die_cpp_available():
                 logger.info(f"Using BERT C++ multi-die SUT on {self.config.openvino.device}")
-                sut = BertMultiDieCppSUTWrapper(
+                sut = BertMultiDieSUTWrapper(
                     config=self.config,
                     qsl=qsl,
                     scenario=self.config.scenario,
@@ -253,9 +230,8 @@ class BenchmarkRunner:
         except ImportError as e:
             logger.warning(f"C++ BERT multi-die SUT not available: {e}")
         except Exception as e:
-            logger.warning(f"Failed to create C++ BERT multi-die SUT: {e}, falling back to Python")
+            logger.warning(f"Failed to create C++ BERT multi-die SUT: {e}")
 
-        # Fall back to Python BERT SUT with multi-device backend
         from .bert_sut import BertSUT
         logger.info(f"Using BERT Python SUT on {self.config.openvino.device}")
         return BertSUT(

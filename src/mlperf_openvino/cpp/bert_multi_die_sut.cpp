@@ -2,7 +2,7 @@
  * BERT SUT implementation for multi-die NPU accelerators.
  */
 
-#include "bert_multi_die_sut_optimized.hpp"
+#include "bert_multi_die_sut.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -11,21 +11,21 @@
 
 namespace mlperf_ov {
 
-int BertOptimizedSUT::get_bucket_index(int seq_len) {
+int BertMultiDieSUT::get_bucket_index(int seq_len) {
     for (int i = 0; i < NUM_SEQ_BUCKETS; ++i) {
         if (seq_len <= SEQ_BUCKETS[i]) return i;
     }
     return NUM_SEQ_BUCKETS - 1;
 }
 
-int BertOptimizedSUT::get_bucket_seq_len(int bucket_idx) {
+int BertMultiDieSUT::get_bucket_seq_len(int bucket_idx) {
     if (bucket_idx < 0 || bucket_idx >= NUM_SEQ_BUCKETS) {
         return SEQ_BUCKETS[NUM_SEQ_BUCKETS - 1];
     }
     return SEQ_BUCKETS[bucket_idx];
 }
 
-BertOptimizedSUT::BertOptimizedSUT(
+BertMultiDieSUT::BertMultiDieSUT(
     const std::string& model_path,
     const std::string& device_prefix,
     const std::unordered_map<std::string, std::string>& compile_properties,
@@ -41,15 +41,15 @@ BertOptimizedSUT::BertOptimizedSUT(
     }
 }
 
-BertOptimizedSUT::~BertOptimizedSUT() {
+BertMultiDieSUT::~BertMultiDieSUT() {
     wait_all();
 }
 
-void BertOptimizedSUT::set_target_devices(const std::vector<std::string>& devices) {
+void BertMultiDieSUT::set_target_devices(const std::vector<std::string>& devices) {
     target_devices_ = devices;
 }
 
-std::vector<std::string> BertOptimizedSUT::get_active_devices() const {
+std::vector<std::string> BertMultiDieSUT::get_active_devices() const {
     std::vector<std::string> result;
     for (const auto& die : die_contexts_) {
         result.push_back(die->device_name);
@@ -57,7 +57,7 @@ std::vector<std::string> BertOptimizedSUT::get_active_devices() const {
     return result;
 }
 
-std::vector<std::pair<int, int>> BertOptimizedSUT::get_model_configs() const {
+std::vector<std::pair<int, int>> BertMultiDieSUT::get_model_configs() const {
     std::vector<std::pair<int, int>> result;
     for (int i = 0; i < NUM_SEQ_BUCKETS; ++i) {
         int batch = server_mode_ ? SERVER_BATCH_SIZE : OFFLINE_BATCH_SIZES[i];
@@ -66,7 +66,7 @@ std::vector<std::pair<int, int>> BertOptimizedSUT::get_model_configs() const {
     return result;
 }
 
-std::vector<std::string> BertOptimizedSUT::discover_devices() {
+std::vector<std::string> BertMultiDieSUT::discover_devices() {
     if (!target_devices_.empty()) return target_devices_;
 
     std::vector<std::string> devices;
@@ -86,7 +86,7 @@ std::vector<std::string> BertOptimizedSUT::discover_devices() {
     return devices;
 }
 
-ov::AnyMap BertOptimizedSUT::build_compile_properties() {
+ov::AnyMap BertMultiDieSUT::build_compile_properties() {
     ov::AnyMap props;
     for (const auto& [k, v] : compile_properties_) {
         try { props[k] = std::stoi(v); continue; } catch (...) {}
@@ -99,7 +99,7 @@ ov::AnyMap BertOptimizedSUT::build_compile_properties() {
     return props;
 }
 
-void BertOptimizedSUT::map_input_output_names() {
+void BertMultiDieSUT::detect_io_names() {
     auto inputs = base_model_->inputs();
     for (const auto& input : inputs) {
         std::string name = input.get_any_name();
@@ -157,7 +157,7 @@ void BertOptimizedSUT::map_input_output_names() {
     }
 }
 
-std::shared_ptr<ov::Model> BertOptimizedSUT::reshape_model(int batch_size, int seq_length) {
+std::shared_ptr<ov::Model> BertMultiDieSUT::reshape_model(int batch_size, int seq_length) {
     auto model = base_model_->clone();
     std::map<std::string, ov::PartialShape> shapes;
     for (const auto& input : model->inputs()) {
@@ -167,7 +167,7 @@ std::shared_ptr<ov::Model> BertOptimizedSUT::reshape_model(int batch_size, int s
     return model;
 }
 
-void BertOptimizedSUT::load() {
+void BertMultiDieSUT::load() {
     if (loaded_) return;
 
     auto devices = discover_devices();
@@ -176,7 +176,7 @@ void BertOptimizedSUT::load() {
     }
 
     base_model_ = core_.read_model(model_path_);
-    map_input_output_names();
+    detect_io_names();
 
     auto props = build_compile_properties();
 
@@ -189,7 +189,7 @@ void BertOptimizedSUT::load() {
     size_t slot_offset = 0;
 
     for (size_t die_idx = 0; die_idx < devices.size(); ++die_idx) {
-        auto die = std::make_unique<BertOptDieContext>();
+        auto die = std::make_unique<BertDieContext>();
         die->device_name = devices[die_idx];
         die->die_idx = die_idx;
 
@@ -200,15 +200,15 @@ void BertOptimizedSUT::load() {
             auto reshaped = reshape_model(batch_size, seq_length);
             auto compiled = core_.compile_model(reshaped, die->device_name, props);
 
-            auto model_ctx = std::make_unique<BertBucketModelContext>();
-            model_ctx->compiled_model = compiled;
-            model_ctx->batch_size = batch_size;
-            model_ctx->seq_length = seq_length;
-            model_ctx->slot_states = &all_slot_states_[slot_offset];
-            model_ctx->num_requests = nireq_per_bucket_;
+            auto bucket_model = std::make_unique<BertBucketModel>();
+            bucket_model->compiled_model = compiled;
+            bucket_model->batch_size = batch_size;
+            bucket_model->seq_length = seq_length;
+            bucket_model->slot_states = &all_slot_states_[slot_offset];
+            bucket_model->num_requests = nireq_per_bucket_;
 
             for (int r = 0; r < nireq_per_bucket_; ++r) {
-                auto ctx = std::make_unique<BertOptInferContext>();
+                auto ctx = std::make_unique<BertInferContext>();
                 ctx->request = compiled.create_infer_request();
                 ctx->batch_size = batch_size;
                 ctx->seq_length = seq_length;
@@ -227,16 +227,16 @@ void BertOptimizedSUT::load() {
                 ctx->request.set_tensor(attention_mask_name_, ctx->attention_mask_tensor);
                 ctx->request.set_tensor(token_type_ids_name_, ctx->token_type_ids_tensor);
 
-                BertOptInferContext* ctx_ptr = ctx.get();
-                ctx->request.set_callback([ctx_ptr](std::exception_ptr) {
-                    ctx_ptr->sut->on_inference_complete(ctx_ptr);
+                BertInferContext* raw = ctx.get();
+                ctx->request.set_callback([raw](std::exception_ptr) {
+                    raw->sut->on_complete(raw);
                 });
 
-                model_ctx->requests.push_back(std::move(ctx));
+                bucket_model->requests.push_back(std::move(ctx));
             }
 
             slot_offset += nireq_per_bucket_;
-            die->bucket_models[bucket_idx] = std::move(model_ctx);
+            die->bucket_models[bucket_idx] = std::move(bucket_model);
         }
 
         die_contexts_.push_back(std::move(die));
@@ -245,23 +245,23 @@ void BertOptimizedSUT::load() {
     loaded_ = true;
 }
 
-void BertOptimizedSUT::warmup(int iterations) {
+void BertMultiDieSUT::warmup(int iterations) {
     if (!loaded_) return;
 
     for (auto& die : die_contexts_) {
         for (int b = 0; b < NUM_SEQ_BUCKETS; ++b) {
-            auto& model_ctx = die->bucket_models[b];
-            if (model_ctx->requests.empty()) continue;
+            auto& bucket_model = die->bucket_models[b];
+            if (bucket_model->requests.empty()) continue;
 
-            auto& ctx = model_ctx->requests[0];
+            auto& ctx = bucket_model->requests[0];
             int64_t* ids = ctx->input_ids_tensor.data<int64_t>();
             int64_t* mask = ctx->attention_mask_tensor.data<int64_t>();
-            int64_t* type = ctx->token_type_ids_tensor.data<int64_t>();
+            int64_t* types = ctx->token_type_ids_tensor.data<int64_t>();
 
             size_t size = ctx->batch_size * ctx->seq_length;
             std::memset(ids, 0, size * sizeof(int64_t));
             std::fill(mask, mask + size, 1);
-            std::memset(type, 0, size * sizeof(int64_t));
+            std::memset(types, 0, size * sizeof(int64_t));
 
             for (int i = 0; i < iterations; ++i) {
                 ctx->request.infer();
@@ -270,7 +270,7 @@ void BertOptimizedSUT::warmup(int iterations) {
     }
 }
 
-void BertOptimizedSUT::build_bucket_cache() {
+void BertMultiDieSUT::build_bucket_cache() {
     if (samples_.empty()) return;
 
     int max_idx = 0;
@@ -278,52 +278,52 @@ void BertOptimizedSUT::build_bucket_cache() {
         if (idx > max_idx) max_idx = idx;
     }
 
-    sample_bucket_cache_.resize(max_idx + 1, -1);
-    for (const auto& [idx, data] : samples_) {
-        sample_bucket_cache_[idx] = static_cast<int8_t>(data.bucket_idx);
+    bucket_cache_.resize(max_idx + 1, -1);
+    for (const auto& [idx, sample] : samples_) {
+        bucket_cache_[idx] = static_cast<int8_t>(sample.bucket_idx);
     }
-    sample_bucket_cache_size_ = max_idx + 1;
+    bucket_cache_size_ = max_idx + 1;
 }
 
-void BertOptimizedSUT::register_sample(int sample_idx,
-                                        const int64_t* input_ids,
-                                        const int64_t* attention_mask,
-                                        const int64_t* token_type_ids,
-                                        int actual_seq_len) {
-    int bucket_idx = get_bucket_index(actual_seq_len);
-    int bucket_seq_len = SEQ_BUCKETS[bucket_idx];
+void BertMultiDieSUT::register_sample(int sample_idx,
+                                       const int64_t* input_ids,
+                                       const int64_t* attention_mask,
+                                       const int64_t* token_type_ids,
+                                       int seq_len) {
+    int bucket_idx = get_bucket_index(seq_len);
+    int bucket_len = SEQ_BUCKETS[bucket_idx];
 
-    BertSampleData data;
-    data.input_ids.resize(bucket_seq_len);
-    data.attention_mask.resize(bucket_seq_len);
-    data.token_type_ids.resize(bucket_seq_len);
-    data.actual_seq_len = actual_seq_len;
-    data.bucket_idx = bucket_idx;
+    BertSample sample;
+    sample.input_ids.resize(bucket_len);
+    sample.attention_mask.resize(bucket_len);
+    sample.token_type_ids.resize(bucket_len);
+    sample.seq_len = seq_len;
+    sample.bucket_idx = bucket_idx;
 
-    int copy_len = std::min(actual_seq_len, bucket_seq_len);
-    std::memcpy(data.input_ids.data(), input_ids, copy_len * sizeof(int64_t));
-    std::memcpy(data.attention_mask.data(), attention_mask, copy_len * sizeof(int64_t));
-    std::memcpy(data.token_type_ids.data(), token_type_ids, copy_len * sizeof(int64_t));
+    int copy_len = std::min(seq_len, bucket_len);
+    std::memcpy(sample.input_ids.data(), input_ids, copy_len * sizeof(int64_t));
+    std::memcpy(sample.attention_mask.data(), attention_mask, copy_len * sizeof(int64_t));
+    std::memcpy(sample.token_type_ids.data(), token_type_ids, copy_len * sizeof(int64_t));
 
-    if (copy_len < bucket_seq_len) {
-        std::memset(data.input_ids.data() + copy_len, 0,
-                    (bucket_seq_len - copy_len) * sizeof(int64_t));
-        std::memset(data.attention_mask.data() + copy_len, 0,
-                    (bucket_seq_len - copy_len) * sizeof(int64_t));
-        std::memset(data.token_type_ids.data() + copy_len, 0,
-                    (bucket_seq_len - copy_len) * sizeof(int64_t));
+    if (copy_len < bucket_len) {
+        std::memset(sample.input_ids.data() + copy_len, 0,
+                    (bucket_len - copy_len) * sizeof(int64_t));
+        std::memset(sample.attention_mask.data() + copy_len, 0,
+                    (bucket_len - copy_len) * sizeof(int64_t));
+        std::memset(sample.token_type_ids.data() + copy_len, 0,
+                    (bucket_len - copy_len) * sizeof(int64_t));
     }
 
     std::unique_lock<std::shared_mutex> lock(sample_mutex_);
-    samples_[sample_idx] = std::move(data);
+    samples_[sample_idx] = std::move(sample);
 }
 
-void BertOptimizedSUT::clear_samples() {
+void BertMultiDieSUT::clear_samples() {
     std::unique_lock<std::shared_mutex> lock(sample_mutex_);
     samples_.clear();
     samples_staged_ = false;
-    sample_bucket_cache_.clear();
-    sample_bucket_cache_size_ = 0;
+    bucket_cache_.clear();
+    bucket_cache_size_ = 0;
 
     for (int i = 0; i < NUM_SEQ_BUCKETS; ++i) {
         staged_buckets_[i].input_ids.clear();
@@ -335,43 +335,43 @@ void BertOptimizedSUT::clear_samples() {
     }
 }
 
-void BertOptimizedSUT::stage_samples() {
+void BertMultiDieSUT::stage_samples() {
     if (samples_staged_) return;
 
     std::shared_lock<std::shared_mutex> lock(sample_mutex_);
 
-    std::vector<size_t> bucket_counts(NUM_SEQ_BUCKETS, 0);
-    for (const auto& [idx, data] : samples_) {
-        bucket_counts[data.bucket_idx]++;
+    std::vector<size_t> counts(NUM_SEQ_BUCKETS, 0);
+    for (const auto& [idx, sample] : samples_) {
+        counts[sample.bucket_idx]++;
     }
 
     for (int b = 0; b < NUM_SEQ_BUCKETS; ++b) {
-        size_t total_elements = bucket_counts[b] * SEQ_BUCKETS[b];
-        staged_buckets_[b].input_ids.resize(total_elements);
-        staged_buckets_[b].attention_mask.resize(total_elements);
-        staged_buckets_[b].token_type_ids.resize(total_elements);
-        staged_buckets_[b].samples.reserve(bucket_counts[b]);
+        size_t total = counts[b] * SEQ_BUCKETS[b];
+        staged_buckets_[b].input_ids.resize(total);
+        staged_buckets_[b].attention_mask.resize(total);
+        staged_buckets_[b].token_type_ids.resize(total);
+        staged_buckets_[b].samples.reserve(counts[b]);
     }
 
-    std::vector<size_t> bucket_offsets(NUM_SEQ_BUCKETS, 0);
+    std::vector<size_t> offsets(NUM_SEQ_BUCKETS, 0);
 
-    for (const auto& [sample_idx, data] : samples_) {
-        int b = data.bucket_idx;
+    for (const auto& [sample_idx, sample] : samples_) {
+        int b = sample.bucket_idx;
         int seq_len = SEQ_BUCKETS[b];
-        size_t offset = bucket_offsets[b];
+        size_t offset = offsets[b];
 
         std::memcpy(staged_buckets_[b].input_ids.data() + offset,
-                    data.input_ids.data(), seq_len * sizeof(int64_t));
+                    sample.input_ids.data(), seq_len * sizeof(int64_t));
         std::memcpy(staged_buckets_[b].attention_mask.data() + offset,
-                    data.attention_mask.data(), seq_len * sizeof(int64_t));
+                    sample.attention_mask.data(), seq_len * sizeof(int64_t));
         std::memcpy(staged_buckets_[b].token_type_ids.data() + offset,
-                    data.token_type_ids.data(), seq_len * sizeof(int64_t));
+                    sample.token_type_ids.data(), seq_len * sizeof(int64_t));
 
         size_t staged_idx = staged_buckets_[b].samples.size();
-        staged_buckets_[b].samples.push_back({sample_idx, data.actual_seq_len, offset});
+        staged_buckets_[b].samples.push_back({sample_idx, sample.seq_len, offset});
         staged_buckets_[b].sample_to_index[sample_idx] = staged_idx;
 
-        bucket_offsets[b] += seq_len;
+        offsets[b] += seq_len;
     }
 
     for (int b = 0; b < NUM_SEQ_BUCKETS; ++b) {
@@ -382,21 +382,21 @@ void BertOptimizedSUT::stage_samples() {
     samples_staged_ = true;
 }
 
-BertOptInferContext* BertOptimizedSUT::acquire_request(size_t die_idx, int bucket_idx) {
+BertInferContext* BertMultiDieSUT::acquire_request(size_t die_idx, int bucket_idx) {
     auto& die = die_contexts_[die_idx];
-    auto& model_ctx = die->bucket_models[bucket_idx];
+    auto& bucket_model = die->bucket_models[bucket_idx];
 
-    size_t n = model_ctx->num_requests;
-    size_t hint = model_ctx->pool_hint.load(std::memory_order_relaxed);
+    size_t n = bucket_model->num_requests;
+    size_t hint = bucket_model->pool_hint.load(std::memory_order_relaxed);
 
     for (size_t attempts = 0; attempts < n * 2; ++attempts) {
         size_t idx = (hint + attempts) % n;
         int expected = SLOT_FREE;
-        if (model_ctx->slot_states[idx].compare_exchange_weak(
+        if (bucket_model->slot_states[idx].compare_exchange_weak(
                 expected, static_cast<int>(idx),
                 std::memory_order_acquire, std::memory_order_relaxed)) {
-            model_ctx->pool_hint.store((idx + 1) % n, std::memory_order_relaxed);
-            return model_ctx->requests[idx].get();
+            bucket_model->pool_hint.store((idx + 1) % n, std::memory_order_relaxed);
+            return bucket_model->requests[idx].get();
         }
     }
 
@@ -404,10 +404,10 @@ BertOptInferContext* BertOptimizedSUT::acquire_request(size_t die_idx, int bucke
     while (true) {
         for (size_t idx = 0; idx < n; ++idx) {
             int expected = SLOT_FREE;
-            if (model_ctx->slot_states[idx].compare_exchange_weak(
+            if (bucket_model->slot_states[idx].compare_exchange_weak(
                     expected, static_cast<int>(idx),
                     std::memory_order_acquire, std::memory_order_relaxed)) {
-                return model_ctx->requests[idx].get();
+                return bucket_model->requests[idx].get();
             }
         }
         if (++spin < 100) {
@@ -423,95 +423,86 @@ BertOptInferContext* BertOptimizedSUT::acquire_request(size_t die_idx, int bucke
     }
 }
 
-void BertOptimizedSUT::release_request(BertOptInferContext* ctx) {
+void BertMultiDieSUT::release_request(BertInferContext* ctx) {
     auto& die = die_contexts_[ctx->die_idx];
-    auto& model_ctx = die->bucket_models[ctx->bucket_idx];
-    model_ctx->slot_states[ctx->pool_id].store(SLOT_FREE, std::memory_order_release);
+    auto& bucket_model = die->bucket_models[ctx->bucket_idx];
+    bucket_model->slot_states[ctx->pool_id].store(SLOT_FREE, std::memory_order_release);
 }
 
-void BertOptimizedSUT::copy_sample_to_tensor(int sample_idx, int bucket_seq_len,
-                                              int64_t* ids_ptr, int64_t* mask_ptr,
-                                              int64_t* type_ptr, int offset) {
-    size_t dst_offset = static_cast<size_t>(offset) * bucket_seq_len;
+void BertMultiDieSUT::copy_to_tensor(int sample_idx, int seq_len,
+                                      int64_t* ids, int64_t* mask, int64_t* types, int offset) {
+    size_t dst = static_cast<size_t>(offset) * seq_len;
 
     std::shared_lock<std::shared_mutex> lock(sample_mutex_);
     auto it = samples_.find(sample_idx);
     if (it != samples_.end()) {
-        const BertSampleData& data = it->second;
-        std::memcpy(ids_ptr + dst_offset, data.input_ids.data(),
-                    bucket_seq_len * sizeof(int64_t));
-        std::memcpy(mask_ptr + dst_offset, data.attention_mask.data(),
-                    bucket_seq_len * sizeof(int64_t));
-        std::memcpy(type_ptr + dst_offset, data.token_type_ids.data(),
-                    bucket_seq_len * sizeof(int64_t));
+        const BertSample& s = it->second;
+        std::memcpy(ids + dst, s.input_ids.data(), seq_len * sizeof(int64_t));
+        std::memcpy(mask + dst, s.attention_mask.data(), seq_len * sizeof(int64_t));
+        std::memcpy(types + dst, s.token_type_ids.data(), seq_len * sizeof(int64_t));
     } else {
-        std::memset(ids_ptr + dst_offset, 0, bucket_seq_len * sizeof(int64_t));
-        std::memset(mask_ptr + dst_offset, 0, bucket_seq_len * sizeof(int64_t));
-        std::memset(type_ptr + dst_offset, 0, bucket_seq_len * sizeof(int64_t));
+        std::memset(ids + dst, 0, seq_len * sizeof(int64_t));
+        std::memset(mask + dst, 0, seq_len * sizeof(int64_t));
+        std::memset(types + dst, 0, seq_len * sizeof(int64_t));
     }
 }
 
-void BertOptimizedSUT::copy_staged_sample_to_tensor(int bucket_idx, size_t staged_idx,
-                                                     int bucket_seq_len,
-                                                     int64_t* ids_ptr, int64_t* mask_ptr,
-                                                     int64_t* type_ptr, int offset) {
+void BertMultiDieSUT::copy_staged_to_tensor(int bucket_idx, size_t staged_idx, int seq_len,
+                                             int64_t* ids, int64_t* mask, int64_t* types,
+                                             int offset) {
     const auto& bucket = staged_buckets_[bucket_idx];
-    size_t src_offset = bucket.samples[staged_idx].buffer_offset;
-    size_t dst_offset = static_cast<size_t>(offset) * bucket_seq_len;
+    size_t src = bucket.samples[staged_idx].offset;
+    size_t dst = static_cast<size_t>(offset) * seq_len;
 
-    std::memcpy(ids_ptr + dst_offset, bucket.input_ids.data() + src_offset,
-                bucket_seq_len * sizeof(int64_t));
-    std::memcpy(mask_ptr + dst_offset, bucket.attention_mask.data() + src_offset,
-                bucket_seq_len * sizeof(int64_t));
-    std::memcpy(type_ptr + dst_offset, bucket.token_type_ids.data() + src_offset,
-                bucket_seq_len * sizeof(int64_t));
+    std::memcpy(ids + dst, bucket.input_ids.data() + src, seq_len * sizeof(int64_t));
+    std::memcpy(mask + dst, bucket.attention_mask.data() + src, seq_len * sizeof(int64_t));
+    std::memcpy(types + dst, bucket.token_type_ids.data() + src, seq_len * sizeof(int64_t));
 }
 
-void BertOptimizedSUT::on_inference_complete(BertOptInferContext* ctx) {
+void BertMultiDieSUT::on_complete(BertInferContext* ctx) {
     int actual = ctx->actual_batch_size;
     int dummies = ctx->num_dummies;
     int real = actual - dummies;
 
     if (store_predictions_ && real > 0) {
-        ov::Tensor start_tensor = ctx->request.get_output_tensor(start_output_idx_);
-        ov::Tensor end_tensor = single_output_ ? start_tensor :
-                                ctx->request.get_output_tensor(end_output_idx_);
+        ov::Tensor start_t = ctx->request.get_output_tensor(start_output_idx_);
+        ov::Tensor end_t = single_output_ ? start_t : ctx->request.get_output_tensor(end_output_idx_);
 
-        const float* start_data = start_tensor.data<float>();
-        const float* end_data = end_tensor.data<float>();
-        size_t logits_per_sample = start_tensor.get_size() / actual;
+        const float* start_data = start_t.data<float>();
+        const float* end_data = end_t.data<float>();
+        size_t logits_size = start_t.get_size() / actual;
 
         std::lock_guard<std::mutex> lock(predictions_mutex_);
         for (int i = 0; i < real; ++i) {
-            int sample_idx = ctx->sample_indices[i];
-            BertOptPrediction pred;
+            int idx = ctx->sample_indices[i];
+            BertPrediction pred;
 
-            if (single_output_ && start_tensor.get_shape().back() == 2) {
-                pred.start_logits.resize(logits_per_sample / 2);
-                pred.end_logits.resize(logits_per_sample / 2);
-                const float* sample = start_data + i * logits_per_sample;
-                for (size_t j = 0; j < logits_per_sample / 2; ++j) {
-                    pred.start_logits[j] = sample[j * 2];
-                    pred.end_logits[j] = sample[j * 2 + 1];
+            if (single_output_ && start_t.get_shape().back() == 2) {
+                pred.start_logits.resize(logits_size / 2);
+                pred.end_logits.resize(logits_size / 2);
+                const float* ptr = start_data + i * logits_size;
+                for (size_t j = 0; j < logits_size / 2; ++j) {
+                    pred.start_logits[j] = ptr[j * 2];
+                    pred.end_logits[j] = ptr[j * 2 + 1];
                 }
             } else if (single_output_) {
-                size_t half = logits_per_sample / 2;
-                pred.start_logits.assign(start_data + i * logits_per_sample,
-                                         start_data + i * logits_per_sample + half);
-                pred.end_logits.assign(start_data + i * logits_per_sample + half,
-                                       start_data + (i + 1) * logits_per_sample);
+                size_t half = logits_size / 2;
+                pred.start_logits.assign(start_data + i * logits_size,
+                                         start_data + i * logits_size + half);
+                pred.end_logits.assign(start_data + i * logits_size + half,
+                                       start_data + (i + 1) * logits_size);
             } else {
-                pred.start_logits.assign(start_data + i * logits_per_sample,
-                                         start_data + (i + 1) * logits_per_sample);
-                pred.end_logits.assign(end_data + i * logits_per_sample,
-                                       end_data + (i + 1) * logits_per_sample);
+                pred.start_logits.assign(start_data + i * logits_size,
+                                         start_data + (i + 1) * logits_size);
+                pred.end_logits.assign(end_data + i * logits_size,
+                                       end_data + (i + 1) * logits_size);
             }
-            predictions_[sample_idx] = std::move(pred);
+            predictions_[idx] = std::move(pred);
         }
     }
 
     if (use_direct_loadgen_.load(std::memory_order_relaxed) && real > 0) {
-        mlperf::QuerySampleResponse responses[BertOptInferContext::MAX_BATCH];
+        mlperf::QuerySampleResponse responses[BertInferContext::MAX_BATCH];
         for (int i = 0; i < real; ++i) {
             responses[i] = {ctx->query_ids[i], 0, 0};
         }
@@ -524,9 +515,9 @@ void BertOptimizedSUT::on_inference_complete(BertOptInferContext* ctx) {
     release_request(ctx);
 }
 
-void BertOptimizedSUT::submit_batch(int bucket_idx,
-                                     const std::vector<uint64_t>& query_ids,
-                                     const std::vector<int>& sample_indices) {
+void BertMultiDieSUT::submit_batch(int bucket_idx,
+                                    const std::vector<uint64_t>& query_ids,
+                                    const std::vector<int>& sample_indices) {
     if (!loaded_ || bucket_idx < 0 || bucket_idx >= NUM_SEQ_BUCKETS) return;
 
     if (!samples_staged_) stage_samples();
@@ -542,7 +533,7 @@ void BertOptimizedSUT::submit_batch(int bucket_idx,
         int dummies = batch_size - actual;
 
         size_t die_idx = die_round_robin_[bucket_idx].fetch_add(1) % die_contexts_.size();
-        BertOptInferContext* ctx = acquire_request(die_idx, bucket_idx);
+        BertInferContext* ctx = acquire_request(die_idx, bucket_idx);
 
         for (int j = 0; j < actual; ++j) {
             ctx->query_ids[j] = query_ids[i + j];
@@ -553,25 +544,24 @@ void BertOptimizedSUT::submit_batch(int bucket_idx,
 
         int64_t* ids = ctx->input_ids_tensor.data<int64_t>();
         int64_t* mask = ctx->attention_mask_tensor.data<int64_t>();
-        int64_t* type = ctx->token_type_ids_tensor.data<int64_t>();
+        int64_t* types = ctx->token_type_ids_tensor.data<int64_t>();
 
         for (int j = 0; j < actual; ++j) {
-            int sample_idx = sample_indices[i + j];
-            auto it = bucket.sample_to_index.find(sample_idx);
+            int sidx = sample_indices[i + j];
+            auto it = bucket.sample_to_index.find(sidx);
             if (it != bucket.sample_to_index.end()) {
-                copy_staged_sample_to_tensor(bucket_idx, it->second, seq_len, ids, mask, type, j);
+                copy_staged_to_tensor(bucket_idx, it->second, seq_len, ids, mask, types, j);
             } else {
-                copy_sample_to_tensor(sample_idx, seq_len, ids, mask, type, j);
+                copy_to_tensor(sidx, seq_len, ids, mask, types, j);
             }
         }
 
         if (dummies > 0 && actual > 0) {
-            int first_sample_idx = sample_indices[i];
-            auto it = bucket.sample_to_index.find(first_sample_idx);
+            int first = sample_indices[i];
+            auto it = bucket.sample_to_index.find(first);
             for (int j = actual; j < batch_size; ++j) {
                 if (it != bucket.sample_to_index.end()) {
-                    copy_staged_sample_to_tensor(bucket_idx, it->second, seq_len,
-                                                 ids, mask, type, j);
+                    copy_staged_to_tensor(bucket_idx, it->second, seq_len, ids, mask, types, j);
                 }
             }
         }
@@ -582,14 +572,12 @@ void BertOptimizedSUT::submit_batch(int bucket_idx,
     }
 }
 
-void BertOptimizedSUT::issue_query_direct(uint64_t query_id, int sample_idx) {
+void BertMultiDieSUT::issue_query(uint64_t query_id, int sample_idx) {
     if (!loaded_) return;
 
     int bucket_idx = NUM_SEQ_BUCKETS - 1;
-
-    // Fast path: use cached bucket index
-    if (sample_idx < sample_bucket_cache_size_ && sample_bucket_cache_[sample_idx] >= 0) {
-        bucket_idx = sample_bucket_cache_[sample_idx];
+    if (sample_idx < bucket_cache_size_ && bucket_cache_[sample_idx] >= 0) {
+        bucket_idx = bucket_cache_[sample_idx];
     } else {
         std::shared_lock<std::shared_mutex> lock(sample_mutex_);
         auto it = samples_.find(sample_idx);
@@ -600,7 +588,7 @@ void BertOptimizedSUT::issue_query_direct(uint64_t query_id, int sample_idx) {
 
     int seq_len = SEQ_BUCKETS[bucket_idx];
     size_t die_idx = die_round_robin_[bucket_idx].fetch_add(1) % die_contexts_.size();
-    BertOptInferContext* ctx = acquire_request(die_idx, bucket_idx);
+    BertInferContext* ctx = acquire_request(die_idx, bucket_idx);
 
     ctx->query_ids[0] = query_id;
     ctx->sample_indices[0] = sample_idx;
@@ -609,42 +597,42 @@ void BertOptimizedSUT::issue_query_direct(uint64_t query_id, int sample_idx) {
 
     int64_t* ids = ctx->input_ids_tensor.data<int64_t>();
     int64_t* mask = ctx->attention_mask_tensor.data<int64_t>();
-    int64_t* type = ctx->token_type_ids_tensor.data<int64_t>();
+    int64_t* types = ctx->token_type_ids_tensor.data<int64_t>();
 
-    copy_sample_to_tensor(sample_idx, seq_len, ids, mask, type, 0);
+    copy_to_tensor(sample_idx, seq_len, ids, mask, types, 0);
 
     pending_count_.fetch_add(1, std::memory_order_relaxed);
     ctx->request.start_async();
     issued_count_.fetch_add(1, std::memory_order_relaxed);
 }
 
-void BertOptimizedSUT::issue_queries(const std::vector<uint64_t>& query_ids,
-                                      const std::vector<int>& sample_indices) {
+void BertMultiDieSUT::issue_queries(const std::vector<uint64_t>& query_ids,
+                                     const std::vector<int>& sample_indices) {
     for (size_t i = 0; i < query_ids.size(); ++i) {
-        issue_query_direct(query_ids[i], sample_indices[i]);
+        issue_query(query_ids[i], sample_indices[i]);
     }
 }
 
-void BertOptimizedSUT::wait_all() {
+void BertMultiDieSUT::wait_all() {
     while (pending_count_.load(std::memory_order_acquire) > 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 }
 
-void BertOptimizedSUT::reset_counters() {
+void BertMultiDieSUT::reset_counters() {
     wait_all();
     issued_count_.store(0);
     completed_count_.store(0);
 }
 
-std::unordered_map<int, BertOptPrediction> BertOptimizedSUT::get_predictions() const {
+std::unordered_map<int, BertPrediction> BertMultiDieSUT::get_predictions() const {
     std::lock_guard<std::mutex> lock(predictions_mutex_);
     return predictions_;
 }
 
-void BertOptimizedSUT::clear_predictions() {
+void BertMultiDieSUT::clear_predictions() {
     std::lock_guard<std::mutex> lock(predictions_mutex_);
     predictions_.clear();
 }
 
-} // namespace mlperf_ov
+}  // namespace mlperf_ov
