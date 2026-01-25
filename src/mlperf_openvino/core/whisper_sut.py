@@ -471,10 +471,12 @@ class WhisperOptimumSUT:
         ov_config: dict,
         name: str,
     ) -> None:
-        """Compile a submodel to a specific device using optimum-intel's native interface.
+        """Compile a submodel (encoder) to a specific device.
 
-        We use optimum-intel's internal compilation to preserve the expected interface
-        for transformers generate() function.
+        For encoder on accelerator (X, NPU) - use CompiledModelWrapper with Core.compile_model.
+        Encoder output format is simple (hidden states), so wrapper works fine.
+
+        Note: Decoders are compiled separately with special handling for CPU.
         """
         import openvino as ov
 
@@ -491,18 +493,17 @@ class WhisperOptimumSUT:
                 if key != "CACHE_DIR":
                     compile_config[key] = value
 
-            logger.info(f"Compiling {name} to {device} using optimum-intel interface (config: {compile_config})...")
+            logger.info(f"Компиляция {name} на {device} (конфиг: {list(compile_config.keys())})...")
 
-            # Use optimum-intel's native compilation to preserve interface
-            # Set device and config, then let optimum-intel compile
-            submodel.ov_config = compile_config
-            submodel._device = device
-            submodel._compile()
+            # Use Core.compile_model directly with CompiledModelWrapper
+            # This works for encoder because its output format is simple (hidden states)
+            compiled = core.compile_model(ov_model, device, compile_config)
+            submodel.request = CompiledModelWrapper(compiled)
 
-            logger.info(f"{name} compiled to {device}")
+            logger.info(f"{name} скомпилирован на {device}")
         else:
             # Fallback to default compilation
-            logger.info(f"Using default compilation for {name}")
+            logger.info(f"Используется дефолтная компиляция для {name}")
             submodel._compile()
 
     def _reshape_model_batch_size(self, model: "ov.Model", batch_size: int, name: str) -> None:
