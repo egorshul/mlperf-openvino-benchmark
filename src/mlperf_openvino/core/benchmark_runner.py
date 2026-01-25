@@ -910,8 +910,12 @@ class BenchmarkRunner:
         elif model_type == 'retinanet':
             print(f"mAP: {acc.get('mAP', 0):.4f}")
         elif model_type == 'whisper':
-            print(f"Word Accuracy: {acc.get('word_accuracy', 0):.4f}")
-            print(f"WER: {acc.get('wer', 0):.4f}")
+            word_acc = acc.get('word_accuracy', 0)
+            wer = acc.get('wer', 0)
+            # MLPerf Whisper threshold: Word Accuracy >= 96.94 (99% of 97.93)
+            status = "PASS" if word_acc >= 0.9694 else "FAIL"
+            print(f"Word Accuracy: {word_acc:.4f} [{status}]")
+            print(f"WER: {wer:.4f}")
         elif model_type == 'sdxl':
             print(f"CLIP: {acc.get('clip_score', 0):.4f}")
             print(f"FID: {acc.get('fid_score', 0):.4f}")

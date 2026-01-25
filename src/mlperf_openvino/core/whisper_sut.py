@@ -199,8 +199,24 @@ class WhisperOptimumSUT:
         self.device = device.upper() if device else "CPU"
 
         # Support hybrid mode: separate devices for encoder and decoder
-        self.encoder_device = encoder_device.upper() if encoder_device else self.device
-        self.decoder_device = decoder_device.upper() if decoder_device else self.device
+        # For NPU/X devices: automatically use hybrid mode (encoder=X, decoder=CPU)
+        # because decoder requires dynamic KV-cache shapes that X cannot handle
+        is_npu_device = self.device not in ('CPU', 'GPU', 'AUTO')
+
+        if encoder_device:
+            self.encoder_device = encoder_device.upper()
+        else:
+            self.encoder_device = self.device
+
+        if decoder_device:
+            self.decoder_device = decoder_device.upper()
+        elif is_npu_device:
+            # Auto hybrid mode: decoder on CPU for dynamic KV-cache
+            self.decoder_device = "CPU"
+            logger.info(f"Auto hybrid mode: encoder={self.encoder_device}, decoder=CPU (KV-cache requires dynamic shapes)")
+        else:
+            self.decoder_device = self.device
+
         self._hybrid_mode = (self.encoder_device != self.decoder_device)
 
         # Results storage
