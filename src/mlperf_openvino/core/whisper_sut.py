@@ -42,6 +42,16 @@ from ..datasets.librispeech import LibriSpeechQSL
 
 logger = logging.getLogger(__name__)
 
+# Suppress verbose logs from third-party packages
+logging.getLogger("transformers").setLevel(logging.WARNING)
+logging.getLogger("optimum").setLevel(logging.WARNING)
+logging.getLogger("openvino").setLevel(logging.WARNING)
+logging.getLogger("nncf").setLevel(logging.WARNING)
+logging.getLogger("torch").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("filelock").setLevel(logging.WARNING)
+logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
+
 
 class CompiledModelWrapper:
     """
@@ -366,9 +376,14 @@ class WhisperOptimumSUT:
         Returns:
             Filtered config appropriate for target device
         """
-        # If compiling to CPU, filter out accelerator-specific properties
+        # If compiling to CPU, filter out accelerator-specific properties and add CPU optimal defaults
         if device == "CPU":
-            filtered = {}
+            # Start with optimal CPU defaults for decoder inference
+            filtered = {
+                "PERFORMANCE_HINT": "LATENCY",  # Optimize for latency (sequential decoding)
+                "NUM_STREAMS": "1",             # Single stream for decoder
+                "INFERENCE_PRECISION_HINT": "f32",  # Full precision for accuracy
+            }
 
             # Known CPU-safe properties (whitelist approach)
             cpu_safe_props = {
@@ -404,19 +419,14 @@ class WhisperOptimumSUT:
                 )
 
                 if is_accelerator_prop:
-                    logger.debug(f"Filtering accelerator property '{key}' for CPU")
                     continue
 
                 if has_device_prefix and key_upper not in cpu_safe_props:
-                    logger.debug(f"Filtering device-prefixed property '{key}' for CPU")
                     continue
 
+                # User-provided CPU props override defaults
                 filtered[key] = value
 
-            if len(filtered) < len(ov_config):
-                logger.info(
-                    f"Filtered {len(ov_config) - len(filtered)} accelerator-specific properties for CPU compilation"
-                )
             return filtered
 
         # For non-CPU devices, return full config

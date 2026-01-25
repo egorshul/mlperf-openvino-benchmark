@@ -781,7 +781,15 @@ class BenchmarkRunner:
             else:
                 pred_texts.append("")
 
-            ground_truth.append(self.qsl.get_label(sample_idx))
+            gt = self.qsl.get_label(sample_idx)
+            ground_truth.append(gt)
+
+        # Debug: show sample of predictions vs ground truth
+        logger.info(f"Accuracy check: {len(predictions)} predictions, {len(ground_truth)} ground truth")
+        for i in range(min(3, len(pred_texts))):
+            pred_preview = pred_texts[i][:80] if pred_texts[i] else "(empty)"
+            gt_preview = ground_truth[i][:80] if ground_truth[i] else "(empty)"
+            logger.info(f"  Sample {i}: pred='{pred_preview}...' gt='{gt_preview}...'")
 
         self._accuracy_results = self.qsl.dataset.compute_accuracy(pred_texts, ground_truth)
 

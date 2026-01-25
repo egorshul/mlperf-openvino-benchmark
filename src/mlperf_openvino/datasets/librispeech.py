@@ -656,12 +656,26 @@ class LibriSpeechDataset(BaseDataset):
             predictions_norm = [p.lower().strip() for p in predictions]
             ground_truth_norm = [g.lower().strip() for g in ground_truth]
 
-        # Filter out empty references
+        # Filter out empty references (but keep pairs where prediction is empty)
         valid_pairs = [
             (p, g) for p, g in zip(predictions_norm, ground_truth_norm) if g
         ]
 
+        # Debug logging for accuracy issues
+        empty_preds = sum(1 for p in predictions_norm if not p)
+        empty_refs = sum(1 for g in ground_truth_norm if not g)
+        if empty_preds > 0 or empty_refs > 0:
+            logger.warning(
+                f"Accuracy data: {len(predictions)} total, "
+                f"{empty_preds} empty predictions, {empty_refs} empty references"
+            )
+
         if not valid_pairs:
+            logger.error(
+                f"No valid pairs for accuracy! "
+                f"Predictions: {len(predictions)}, Ground truth: {len(ground_truth)}, "
+                f"Empty refs after norm: {empty_refs}"
+            )
             return {
                 "word_accuracy": 0.0,
                 "wer": 0.0,
