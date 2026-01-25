@@ -118,8 +118,10 @@ class WhisperOptimumSUT:
         logger.info(f"Loading Whisper model from {self.model_path} on device {self.device}")
 
         # Load processor (tokenizer + feature extractor)
+        logger.debug(f"Loading processor from {self.model_path}")
         try:
             self.processor = AutoProcessor.from_pretrained(self.model_path)
+            logger.debug("Processor loaded successfully")
         except Exception as e:
             logger.warning(f"Could not load processor from model path: {e}")
             logger.info("Falling back to openai/whisper-large-v3 processor")
@@ -135,14 +137,46 @@ class WhisperOptimumSUT:
                 for key, value in device_props.items():
                     ov_config[key] = value
 
+        logger.info(f"OV config: {ov_config}")
+        logger.info(f"Target device: {self.device}")
+
+        # List model files
+        if self.model_path.is_dir():
+            xml_files = list(self.model_path.glob("*.xml"))
+            logger.info(f"Model files found: {[f.name for f in xml_files]}")
+
         # Load OpenVINO model (exported with --task automatic-speech-recognition-with-past)
         # For NPU/accelerator devices, pass device explicitly
-        self.model = OVModelForSpeechSeq2Seq.from_pretrained(
-            self.model_path,
-            ov_config=ov_config,
-            device=self.device,
-            compile=True,
-        )
+        logger.info("Loading OVModelForSpeechSeq2Seq...")
+        try:
+            self.model = OVModelForSpeechSeq2Seq.from_pretrained(
+                self.model_path,
+                ov_config=ov_config,
+                device=self.device,
+                compile=False,  # Don't compile yet
+            )
+            logger.info("Model loaded, now compiling...")
+
+            # Compile separately to catch compilation errors
+            try:
+                self.model.compile()
+                logger.info(f"Model compiled successfully on {self.device}")
+            except Exception as compile_error:
+                logger.error(f"Compilation failed on {self.device}: {compile_error}")
+                logger.error(f"Compilation error type: {type(compile_error).__name__}")
+                import traceback
+                logger.error(f"Traceback:\n{traceback.format_exc()}")
+                raise RuntimeError(
+                    f"Failed to compile Whisper model on {self.device}. "
+                    f"Error: {compile_error}"
+                ) from compile_error
+
+        except Exception as load_error:
+            logger.error(f"Failed to load model: {load_error}")
+            logger.error(f"Load error type: {type(load_error).__name__}")
+            import traceback
+            logger.error(f"Traceback:\n{traceback.format_exc()}")
+            raise
 
         logger.info(f"Whisper model loaded successfully on {self.device}")
 

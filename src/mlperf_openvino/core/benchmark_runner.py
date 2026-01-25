@@ -373,6 +373,14 @@ class BenchmarkRunner:
             self.config.openvino.is_multi_device()
         )
 
+        logger.info(f"Whisper setup: device={self.config.openvino.device}, "
+                    f"is_accelerator={is_accelerator}, is_multi_die={is_multi_die}")
+        logger.info(f"Model path: {model_path}")
+        if encoder_path:
+            logger.info(f"Encoder: {encoder_path}")
+        if decoder_path:
+            logger.info(f"Decoder: {decoder_path}")
+
         try:
             from .whisper_sut import (
                 WhisperOptimumSUT,
@@ -381,12 +389,17 @@ class BenchmarkRunner:
                 is_whisper_multi_die_available,
             )
 
+            logger.info(f"OPTIMUM_AVAILABLE={OPTIMUM_AVAILABLE}, "
+                        f"is_whisper_multi_die_available={is_whisper_multi_die_available()}")
+
             if OPTIMUM_AVAILABLE and model_path.is_dir():
                 config_file = model_path / "config.json"
+                logger.info(f"Config file exists: {config_file.exists()}")
+
                 if config_file.exists():
                     # Use multi-die SUT for accelerator without specific die (e.g., "NPU")
                     if is_multi_die and is_whisper_multi_die_available():
-                        logger.info(f"Using WhisperMultiDieSUT for {self.config.openvino.device}")
+                        logger.info(f"Creating WhisperMultiDieSUT for {self.config.openvino.device}")
                         self.sut = WhisperMultiDieSUT(
                             config=self.config,
                             model_path=model_path,
@@ -396,7 +409,7 @@ class BenchmarkRunner:
                     else:
                         # Use single-die optimum SUT (CPU or specific die like NPU.0)
                         device = self.config.openvino.device
-                        logger.info(f"Using WhisperOptimumSUT on {device}")
+                        logger.info(f"Creating WhisperOptimumSUT on {device}")
                         self.sut = WhisperOptimumSUT(
                             config=self.config,
                             model_path=model_path,
@@ -404,9 +417,12 @@ class BenchmarkRunner:
                             scenario=self.config.scenario,
                             device=device,
                         )
+                    logger.info("Whisper SUT created successfully")
                     return
         except Exception as e:
-            logger.warning(f"Failed to create Whisper Optimum SUT: {e}")
+            logger.error(f"Failed to create Whisper Optimum SUT: {e}")
+            import traceback
+            logger.error(f"Traceback:\n{traceback.format_exc()}")
             # For accelerator devices (NPU, NPU.0, etc.), optimum-intel is required
             if is_accelerator:
                 device = self.config.openvino.device
