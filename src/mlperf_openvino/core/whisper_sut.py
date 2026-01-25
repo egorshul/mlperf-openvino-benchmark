@@ -219,9 +219,9 @@ class WhisperOptimumSUT:
         if hasattr(self.model, 'encoder') and self.model.encoder is not None:
             logger.info(f"Compiling ENCODER on {self.encoder_device}...")
             try:
-                if hasattr(self.model.encoder, '_device'):
-                    self.model.encoder._device = self.encoder_device
-                self.model.encoder._compile()
+                self._compile_submodel_to_device(
+                    self.model.encoder, self.encoder_device, core, ov_config, "encoder"
+                )
                 logger.info("ENCODER compiled successfully!")
             except Exception as e:
                 logger.error(f"ENCODER compilation FAILED on {self.encoder_device}: {e}")
@@ -236,6 +236,45 @@ class WhisperOptimumSUT:
             self._compile_decoder_with_past_with_reshape(core, ov_config)
 
         logger.info("All submodels compiled successfully")
+
+    def _compile_submodel_to_device(
+        self,
+        submodel,
+        device: str,
+        core: "ov.Core",
+        ov_config: dict,
+        name: str,
+    ) -> None:
+        """Compile a submodel to a specific device using OpenVINO Core."""
+        import openvino as ov
+
+        # Get the underlying OV model
+        if hasattr(submodel, 'model') and submodel.model is not None:
+            ov_model = submodel.model
+
+            # Analyze model
+            self._analyze_model_for_npu(ov_model, name)
+
+            # Compile using Core directly
+            logger.info(f"Compiling {name} to {device} using OpenVINO Core...")
+
+            # Build config for compilation
+            compile_config = {}
+            for key, value in ov_config.items():
+                if key != "CACHE_DIR":  # Skip cache dir for now
+                    compile_config[key] = value
+
+            # Compile
+            compiled = core.compile_model(ov_model, device, compile_config)
+
+            # Replace the request in submodel
+            submodel.request = compiled.create_infer_request()
+
+            logger.info(f"{name} compiled to {device}")
+        else:
+            # Fallback to default compilation
+            logger.info(f"Using default compilation for {name}")
+            submodel._compile()
 
     def _analyze_model_for_npu(self, model: "ov.Model", name: str) -> None:
         """Analyze model for NPU compatibility issues."""
@@ -354,16 +393,30 @@ class WhisperOptimumSUT:
                 except Exception as e:
                     logger.warning(f"Static reshape failed: {e}")
 
-        # Set device and compile
-        if hasattr(decoder, '_device'):
-            decoder._device = device
+            # Build config for compilation
+            compile_config = {}
+            for key, value in ov_config.items():
+                if key != "CACHE_DIR":
+                    compile_config[key] = value
 
-        try:
-            decoder._compile()
-            logger.info("DECODER compiled successfully!")
-        except Exception as e:
-            self._log_compilation_error(e, "decoder", device)
-            raise RuntimeError(f"Decoder compilation failed on {device}: {e}") from e
+            # Compile using Core directly to specified device
+            try:
+                logger.info(f"Compiling decoder to {device} using OpenVINO Core...")
+                compiled = core.compile_model(ov_model, device, compile_config)
+                decoder.request = compiled.create_infer_request()
+                logger.info("DECODER compiled successfully!")
+                return
+            except Exception as e:
+                self._log_compilation_error(e, "decoder", device)
+                raise RuntimeError(f"Decoder compilation failed on {device}: {e}") from e
+        else:
+            # No model attribute, try default compilation
+            try:
+                decoder._compile()
+                logger.info("DECODER compiled successfully!")
+            except Exception as e:
+                self._log_compilation_error(e, "decoder", device)
+                raise RuntimeError(f"Decoder compilation failed on {device}: {e}") from e
 
     def _compile_decoder_with_past_with_reshape(self, core: "ov.Core", ov_config: dict) -> None:
         """Compile decoder_with_past with optional static shape reshape for NPU."""
@@ -390,16 +443,30 @@ class WhisperOptimumSUT:
                 except Exception as e:
                     logger.warning(f"Static reshape failed: {e}")
 
-        # Set device and compile
-        if hasattr(decoder, '_device'):
-            decoder._device = device
+            # Build config for compilation
+            compile_config = {}
+            for key, value in ov_config.items():
+                if key != "CACHE_DIR":
+                    compile_config[key] = value
 
-        try:
-            decoder._compile()
-            logger.info("DECODER_WITH_PAST compiled successfully!")
-        except Exception as e:
-            self._log_compilation_error(e, "decoder_with_past", device)
-            raise RuntimeError(f"Decoder_with_past compilation failed on {device}: {e}") from e
+            # Compile using Core directly to specified device
+            try:
+                logger.info(f"Compiling decoder_with_past to {device} using OpenVINO Core...")
+                compiled = core.compile_model(ov_model, device, compile_config)
+                decoder.request = compiled.create_infer_request()
+                logger.info("DECODER_WITH_PAST compiled successfully!")
+                return
+            except Exception as e:
+                self._log_compilation_error(e, "decoder_with_past", device)
+                raise RuntimeError(f"Decoder_with_past compilation failed on {device}: {e}") from e
+        else:
+            # No model attribute, try default compilation
+            try:
+                decoder._compile()
+                logger.info("DECODER_WITH_PAST compiled successfully!")
+            except Exception as e:
+                self._log_compilation_error(e, "decoder_with_past", device)
+                raise RuntimeError(f"Decoder_with_past compilation failed on {device}: {e}") from e
 
     def _log_compilation_error(self, error: Exception, model_name: str, device: str) -> None:
         """Log detailed information about compilation error."""
