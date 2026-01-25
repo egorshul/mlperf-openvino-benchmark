@@ -809,9 +809,9 @@ PYBIND11_MODULE(_cpp_sut, m) {
              py::arg("devices"),
              "Set specific target devices (call before load())")
 
-        .def("set_bucket_batch_sizes", &mlperf_ov::BertOptimizedSUT::set_bucket_batch_sizes,
-             py::arg("batch_sizes"),
-             "Set batch sizes for each bucket [128, 165, 256, 384]")
+        .def("set_server_mode", &mlperf_ov::BertOptimizedSUT::set_server_mode,
+             py::arg("server_mode"),
+             "Set Server mode (batch=1 direct inference). Must be called before load().")
 
         .def("load", &mlperf_ov::BertOptimizedSUT::load,
              py::call_guard<py::gil_scoped_release>(),
@@ -859,6 +859,9 @@ PYBIND11_MODULE(_cpp_sut, m) {
 
         .def("clear_samples", &mlperf_ov::BertOptimizedSUT::clear_samples,
              "Clear all registered samples")
+
+        .def("stage_samples", &mlperf_ov::BertOptimizedSUT::stage_samples,
+             "Stage samples for Offline mode batch copy (optional)")
 
         .def_static("get_bucket_index", &mlperf_ov::BertOptimizedSUT::get_bucket_index,
              py::arg("seq_len"),
@@ -948,15 +951,7 @@ PYBIND11_MODULE(_cpp_sut, m) {
 
         .def("enable_direct_loadgen", &mlperf_ov::BertOptimizedSUT::enable_direct_loadgen,
              py::arg("enable"),
-             "Enable direct LoadGen C++ mode")
-
-        .def("set_batching_timeout_us", &mlperf_ov::BertOptimizedSUT::set_batching_timeout_us,
-             py::arg("timeout_us"),
-             "Set Server mode batching timeout in microseconds")
-
-        .def("set_min_batch_size", &mlperf_ov::BertOptimizedSUT::set_min_batch_size,
-             py::arg("min_batch"),
-             "Set minimum batch size for Server mode");
+             "Enable direct LoadGen C++ mode");
 
     m.attr("__version__") = "1.0.0";
 }

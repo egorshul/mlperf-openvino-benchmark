@@ -3,9 +3,10 @@ Python wrapper for optimized BERT multi-die SUT with dynamic sequence length buc
 
 Key optimizations:
 - Sequence length buckets: [128, 165, 256, 384]
-- Optimal batch sizes per bucket
-- Multiple pre-compiled models
-- Smart batching by sequence length
+- Offline mode: batched inference with optimal batch sizes per bucket
+- Server mode: batch=1 direct inference for minimum latency
+- Per-bucket round-robin distribution across dies
+- Safe data copying (data copied on registration)
 """
 
 import logging
@@ -88,11 +89,10 @@ class BertOptimizedSUTWrapper:
         if config.openvino.is_specific_die():
             self._cpp_sut.set_target_devices([config.openvino.device])
 
-        # Configure batch sizes per bucket
-        batch_sizes = DEFAULT_BATCH_SIZES.copy()
-        if hasattr(config.model, 'bert_batch_sizes'):
-            batch_sizes = config.model.bert_batch_sizes
-        self._cpp_sut.set_bucket_batch_sizes(batch_sizes)
+        # Server mode uses batch=1 for minimum latency
+        if scenario == Scenario.SERVER:
+            self._cpp_sut.set_server_mode(True)
+            logger.info("Server mode: batch=1 direct inference enabled")
 
         # State
         self._is_loaded = False
@@ -182,17 +182,16 @@ class BertOptimizedSUTWrapper:
         self._query_count += 1
 
     def _issue_query_server(self, query_samples: List) -> None:
-        """Process queries in Server mode."""
+        """Process queries in Server mode with batch=1 direct inference."""
         if not self._samples_registered:
             self._register_samples()
-            # Stage samples into safe buffers for dispatch threads
-            self._cpp_sut.stage_samples()
             # Enable direct LoadGen response for Server mode
             self._cpp_sut.enable_direct_loadgen(True)
 
         query_ids = [qs.id for qs in query_samples]
         sample_indices = [qs.index for qs in query_samples]
 
+        # issue_queries calls issue_query_direct for each query (batch=1)
         self._cpp_sut.issue_queries(query_ids, sample_indices)
         self._query_count += 1
 

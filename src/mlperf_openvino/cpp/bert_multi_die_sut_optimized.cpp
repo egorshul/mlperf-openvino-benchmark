@@ -1,5 +1,8 @@
 /**
  * Optimized BERT SUT implementation with dynamic sequence length buckets.
+ *
+ * - Offline mode: batched inference for throughput
+ * - Server mode: batch=1 direct inference for minimum latency
  */
 
 #include "bert_multi_die_sut_optimized.hpp"
@@ -39,42 +42,19 @@ BertOptimizedSUT::BertOptimizedSUT(
     const std::string& model_path,
     const std::string& device_prefix,
     const std::unordered_map<std::string, std::string>& compile_properties,
-    int nireq_per_config)
+    int nireq_per_bucket)
     : model_path_(model_path),
       device_prefix_(device_prefix),
       compile_properties_(compile_properties),
-      nireq_per_config_(nireq_per_config) {
-
-    bucket_batch_sizes_.assign(BATCH_SIZES, BATCH_SIZES + NUM_SEQ_BUCKETS);
-    bucket_nireq_multipliers_.assign(NIREQ_MULTIPLIERS, NIREQ_MULTIPLIERS + NUM_SEQ_BUCKETS);
+      nireq_per_bucket_(nireq_per_bucket) {
 
     for (int i = 0; i < NUM_SEQ_BUCKETS; ++i) {
         die_round_robin_[i].store(0);
         staged_buckets_[i].seq_length = SEQ_BUCKETS[i];
-        for (int j = 0; j < BATCH_QUEUE_SIZE; ++j) {
-            batch_queues_[i].valid[j].store(false);
-        }
-        // Initialize work queue items for Server mode
-        for (int j = 0; j < QUEUE_SIZE; ++j) {
-            bucket_queues_[i].items[j].query_id = 0;
-            bucket_queues_[i].items[j].sample_idx = -1;
-        }
     }
 }
 
 BertOptimizedSUT::~BertOptimizedSUT() {
-    batcher_running_.store(false);
-    dispatch_running_.store(false);
-
-    if (batcher_thread_.joinable()) {
-        batcher_thread_.join();
-    }
-    for (auto& t : dispatch_threads_) {
-        if (t.joinable()) {
-            t.join();
-        }
-    }
-
     wait_all();
 }
 
@@ -86,18 +66,6 @@ void BertOptimizedSUT::set_target_devices(const std::vector<std::string>& device
     target_devices_ = devices;
 }
 
-void BertOptimizedSUT::set_bucket_batch_sizes(const std::vector<int>& batch_sizes) {
-    if (batch_sizes.size() == NUM_SEQ_BUCKETS) {
-        bucket_batch_sizes_ = batch_sizes;
-    }
-}
-
-void BertOptimizedSUT::set_bucket_nireq_multipliers(const std::vector<int>& multipliers) {
-    if (multipliers.size() == NUM_SEQ_BUCKETS) {
-        bucket_nireq_multipliers_ = multipliers;
-    }
-}
-
 std::vector<std::string> BertOptimizedSUT::get_active_devices() const {
     std::vector<std::string> result;
     for (const auto& die : die_contexts_) {
@@ -106,14 +74,11 @@ std::vector<std::string> BertOptimizedSUT::get_active_devices() const {
     return result;
 }
 
-int BertOptimizedSUT::get_num_model_configs() const {
-    return NUM_SEQ_BUCKETS;
-}
-
 std::vector<std::pair<int, int>> BertOptimizedSUT::get_model_configs() const {
     std::vector<std::pair<int, int>> result;
     for (int i = 0; i < NUM_SEQ_BUCKETS; ++i) {
-        result.emplace_back(bucket_batch_sizes_[i], SEQ_BUCKETS[i]);
+        int batch = server_mode_ ? SERVER_BATCH_SIZE : OFFLINE_BATCH_SIZES[i];
+        result.emplace_back(batch, SEQ_BUCKETS[i]);
     }
     return result;
 }
@@ -158,12 +123,12 @@ ov::AnyMap BertOptimizedSUT::build_compile_properties() {
 }
 
 void BertOptimizedSUT::map_input_output_names() {
-    for (const auto& input : base_model_->inputs()) {
+    auto inputs = base_model_->inputs();
+    for (const auto& input : inputs) {
         std::string name = input.get_any_name();
         std::string lower = name;
         std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-
-        if (lower.find("input_id") != std::string::npos || lower.find("input.1") != std::string::npos) {
+        if (lower.find("input_ids") != std::string::npos || lower.find("input-ids") != std::string::npos) {
             input_ids_name_ = name;
         } else if (lower.find("attention") != std::string::npos || lower.find("mask") != std::string::npos) {
             attention_mask_name_ = name;
@@ -172,7 +137,6 @@ void BertOptimizedSUT::map_input_output_names() {
         }
     }
 
-    auto inputs = base_model_->inputs();
     if (input_ids_name_.empty() && inputs.size() >= 1) input_ids_name_ = inputs[0].get_any_name();
     if (attention_mask_name_.empty() && inputs.size() >= 2) attention_mask_name_ = inputs[1].get_any_name();
     if (token_type_ids_name_.empty() && inputs.size() >= 3) token_type_ids_name_ = inputs[2].get_any_name();
@@ -211,13 +175,11 @@ void BertOptimizedSUT::map_input_output_names() {
 
 std::shared_ptr<ov::Model> BertOptimizedSUT::reshape_model(int batch_size, int seq_length) {
     auto model = base_model_->clone();
-
     std::map<std::string, ov::PartialShape> shapes;
     for (const auto& input : model->inputs()) {
         shapes[input.get_any_name()] = ov::PartialShape{batch_size, seq_length};
     }
     model->reshape(shapes);
-
     return model;
 }
 
@@ -238,11 +200,8 @@ void BertOptimizedSUT::load() {
 
     auto props = build_compile_properties();
 
-    // Calculate total slots with per-bucket multipliers
-    total_slots_ = 0;
-    for (int b = 0; b < NUM_SEQ_BUCKETS; ++b) {
-        total_slots_ += devices.size() * nireq_per_config_ * bucket_nireq_multipliers_[b];
-    }
+    // Calculate total slots
+    total_slots_ = devices.size() * NUM_SEQ_BUCKETS * nireq_per_bucket_;
     all_slot_states_ = std::make_unique<std::atomic<int>[]>(total_slots_);
     for (size_t i = 0; i < total_slots_; ++i) {
         all_slot_states_[i].store(SLOT_FREE);
@@ -256,25 +215,25 @@ void BertOptimizedSUT::load() {
         die->die_idx = die_idx;
 
         for (int bucket_idx = 0; bucket_idx < NUM_SEQ_BUCKETS; ++bucket_idx) {
-            int batch_size = bucket_batch_sizes_[bucket_idx];
+            int batch_size = server_mode_ ? SERVER_BATCH_SIZE : OFFLINE_BATCH_SIZES[bucket_idx];
             int seq_length = SEQ_BUCKETS[bucket_idx];
-            int nireq = nireq_per_config_ * bucket_nireq_multipliers_[bucket_idx];
-
-            BertModelConfig config{batch_size, seq_length};
 
             auto reshaped = reshape_model(batch_size, seq_length);
             auto compiled = core_.compile_model(reshaped, die->device_name, props);
 
-            auto model_ctx = std::make_unique<BertOptModelContext>();
-            model_ctx->config = config;
+            auto model_ctx = std::make_unique<BertBucketModelContext>();
             model_ctx->compiled_model = compiled;
+            model_ctx->batch_size = batch_size;
+            model_ctx->seq_length = seq_length;
             model_ctx->slot_states = &all_slot_states_[slot_offset];
-            model_ctx->num_requests = nireq;
+            model_ctx->num_requests = nireq_per_bucket_;
 
-            for (int r = 0; r < nireq; ++r) {
+            for (int r = 0; r < nireq_per_bucket_; ++r) {
                 auto ctx = std::make_unique<BertOptInferContext>();
                 ctx->request = compiled.create_infer_request();
-                ctx->config = config;
+                ctx->batch_size = batch_size;
+                ctx->seq_length = seq_length;
+                ctx->bucket_idx = bucket_idx;
                 ctx->die_idx = die_idx;
                 ctx->pool_id = r;
                 ctx->sut = this;
@@ -296,20 +255,12 @@ void BertOptimizedSUT::load() {
                 model_ctx->requests.push_back(std::move(ctx));
             }
 
-            slot_offset += nireq;
-            die->models[config] = std::move(model_ctx);
+            slot_offset += nireq_per_bucket_;
+            die->bucket_models[bucket_idx] = std::move(model_ctx);
         }
 
         die_contexts_.push_back(std::move(die));
     }
-
-    dispatch_running_.store(true);
-    for (int b = 0; b < NUM_SEQ_BUCKETS; ++b) {
-        dispatch_threads_.emplace_back(&BertOptimizedSUT::dispatch_thread_func, this, b);
-    }
-
-    batcher_running_.store(true);
-    batcher_thread_ = std::thread(&BertOptimizedSUT::batcher_thread_func, this);
 
     loaded_ = true;
 }
@@ -324,9 +275,30 @@ void BertOptimizedSUT::register_sample(int sample_idx,
                                         const int64_t* token_type_ids,
                                         int actual_seq_len) {
     int bucket_idx = get_bucket_index(actual_seq_len);
+    int bucket_seq_len = SEQ_BUCKETS[bucket_idx];
+
+    // Copy data for safe access
+    BertSampleData data;
+    data.input_ids.resize(bucket_seq_len);
+    data.attention_mask.resize(bucket_seq_len);
+    data.token_type_ids.resize(bucket_seq_len);
+    data.actual_seq_len = actual_seq_len;
+    data.bucket_idx = bucket_idx;
+
+    int copy_len = std::min(actual_seq_len, bucket_seq_len);
+    std::memcpy(data.input_ids.data(), input_ids, copy_len * sizeof(int64_t));
+    std::memcpy(data.attention_mask.data(), attention_mask, copy_len * sizeof(int64_t));
+    std::memcpy(data.token_type_ids.data(), token_type_ids, copy_len * sizeof(int64_t));
+
+    // Zero-pad if needed
+    if (copy_len < bucket_seq_len) {
+        std::memset(data.input_ids.data() + copy_len, 0, (bucket_seq_len - copy_len) * sizeof(int64_t));
+        std::memset(data.attention_mask.data() + copy_len, 0, (bucket_seq_len - copy_len) * sizeof(int64_t));
+        std::memset(data.token_type_ids.data() + copy_len, 0, (bucket_seq_len - copy_len) * sizeof(int64_t));
+    }
 
     std::unique_lock<std::shared_mutex> lock(sample_mutex_);
-    samples_[sample_idx] = {input_ids, attention_mask, token_type_ids, actual_seq_len, bucket_idx};
+    samples_[sample_idx] = std::move(data);
 }
 
 void BertOptimizedSUT::clear_samples() {
@@ -344,10 +316,6 @@ void BertOptimizedSUT::clear_samples() {
     }
 }
 
-// =============================================================================
-// STAGE SAMPLES - Pre-copy into contiguous buffers per bucket
-// =============================================================================
-
 void BertOptimizedSUT::stage_samples() {
     if (samples_staged_) return;
 
@@ -355,8 +323,8 @@ void BertOptimizedSUT::stage_samples() {
 
     // Count samples per bucket
     std::vector<size_t> bucket_counts(NUM_SEQ_BUCKETS, 0);
-    for (const auto& [idx, info] : samples_) {
-        bucket_counts[info.bucket_idx]++;
+    for (const auto& [idx, data] : samples_) {
+        bucket_counts[data.bucket_idx]++;
     }
 
     // Pre-allocate buffers
@@ -371,33 +339,20 @@ void BertOptimizedSUT::stage_samples() {
     // Copy samples into staged buffers
     std::vector<size_t> bucket_offsets(NUM_SEQ_BUCKETS, 0);
 
-    for (const auto& [sample_idx, info] : samples_) {
-        int b = info.bucket_idx;
+    for (const auto& [sample_idx, data] : samples_) {
+        int b = data.bucket_idx;
         int seq_len = SEQ_BUCKETS[b];
         size_t offset = bucket_offsets[b];
 
-        // Copy data to staged buffer
-        int copy_len = std::min(info.actual_seq_len, seq_len);
         std::memcpy(staged_buckets_[b].input_ids.data() + offset,
-                    info.input_ids, copy_len * sizeof(int64_t));
+                    data.input_ids.data(), seq_len * sizeof(int64_t));
         std::memcpy(staged_buckets_[b].attention_mask.data() + offset,
-                    info.attention_mask, copy_len * sizeof(int64_t));
+                    data.attention_mask.data(), seq_len * sizeof(int64_t));
         std::memcpy(staged_buckets_[b].token_type_ids.data() + offset,
-                    info.token_type_ids, copy_len * sizeof(int64_t));
+                    data.token_type_ids.data(), seq_len * sizeof(int64_t));
 
-        // Zero-pad if needed
-        if (copy_len < seq_len) {
-            std::memset(staged_buckets_[b].input_ids.data() + offset + copy_len,
-                        0, (seq_len - copy_len) * sizeof(int64_t));
-            std::memset(staged_buckets_[b].attention_mask.data() + offset + copy_len,
-                        0, (seq_len - copy_len) * sizeof(int64_t));
-            std::memset(staged_buckets_[b].token_type_ids.data() + offset + copy_len,
-                        0, (seq_len - copy_len) * sizeof(int64_t));
-        }
-
-        // Record metadata
         size_t staged_idx = staged_buckets_[b].samples.size();
-        staged_buckets_[b].samples.push_back({sample_idx, info.actual_seq_len, offset});
+        staged_buckets_[b].samples.push_back({sample_idx, data.actual_seq_len, offset});
         staged_buckets_[b].sample_to_index[sample_idx] = staged_idx;
 
         bucket_offsets[b] += seq_len;
@@ -414,14 +369,10 @@ void BertOptimizedSUT::stage_samples() {
 // REQUEST POOL
 // =============================================================================
 
-size_t BertOptimizedSUT::acquire_request(size_t die_idx, const BertModelConfig& config) {
+BertOptInferContext* BertOptimizedSUT::acquire_request(size_t die_idx, int bucket_idx) {
     auto& die = die_contexts_[die_idx];
-    auto it = die->models.find(config);
-    if (it == die->models.end()) {
-        throw std::runtime_error("Model config not found");
-    }
+    auto& model_ctx = die->bucket_models[bucket_idx];
 
-    BertOptModelContext* model_ctx = it->second.get();
     size_t n = model_ctx->num_requests;
     size_t hint = model_ctx->pool_hint.load(std::memory_order_relaxed);
 
@@ -432,10 +383,11 @@ size_t BertOptimizedSUT::acquire_request(size_t die_idx, const BertModelConfig& 
                 expected, static_cast<int>(idx),
                 std::memory_order_acquire, std::memory_order_relaxed)) {
             model_ctx->pool_hint.store((idx + 1) % n, std::memory_order_relaxed);
-            return idx;
+            return model_ctx->requests[idx].get();
         }
     }
 
+    // Spin wait for a slot
     int spin = 0;
     while (true) {
         for (size_t idx = 0; idx < n; ++idx) {
@@ -443,7 +395,7 @@ size_t BertOptimizedSUT::acquire_request(size_t die_idx, const BertModelConfig& 
             if (model_ctx->slot_states[idx].compare_exchange_weak(
                     expected, static_cast<int>(idx),
                     std::memory_order_acquire, std::memory_order_relaxed)) {
-                return idx;
+                return model_ctx->requests[idx].get();
             }
         }
         if (++spin < 100) {
@@ -459,16 +411,14 @@ size_t BertOptimizedSUT::acquire_request(size_t die_idx, const BertModelConfig& 
     }
 }
 
-void BertOptimizedSUT::release_request(size_t die_idx, const BertModelConfig& config, size_t pool_id) {
-    auto& die = die_contexts_[die_idx];
-    auto it = die->models.find(config);
-    if (it != die->models.end()) {
-        it->second->slot_states[pool_id].store(SLOT_FREE, std::memory_order_release);
-    }
+void BertOptimizedSUT::release_request(BertOptInferContext* ctx) {
+    auto& die = die_contexts_[ctx->die_idx];
+    auto& model_ctx = die->bucket_models[ctx->bucket_idx];
+    model_ctx->slot_states[ctx->pool_id].store(SLOT_FREE, std::memory_order_release);
 }
 
 // =============================================================================
-// DATA COPY - OPTIMIZED
+// DATA COPY
 // =============================================================================
 
 void BertOptimizedSUT::copy_sample_to_tensor(int sample_idx, int bucket_seq_len,
@@ -476,21 +426,13 @@ void BertOptimizedSUT::copy_sample_to_tensor(int sample_idx, int bucket_seq_len,
                                               int offset) {
     size_t dst_offset = static_cast<size_t>(offset) * bucket_seq_len;
 
+    std::shared_lock<std::shared_mutex> lock(sample_mutex_);
     auto it = samples_.find(sample_idx);
     if (it != samples_.end()) {
-        const BertOptSampleInfo& info = it->second;
-        int copy_len = std::min(info.actual_seq_len, bucket_seq_len);
-
-        std::memcpy(ids_ptr + dst_offset, info.input_ids, copy_len * sizeof(int64_t));
-        std::memcpy(mask_ptr + dst_offset, info.attention_mask, copy_len * sizeof(int64_t));
-        std::memcpy(type_ptr + dst_offset, info.token_type_ids, copy_len * sizeof(int64_t));
-
-        if (copy_len < bucket_seq_len) {
-            int pad_len = bucket_seq_len - copy_len;
-            std::memset(ids_ptr + dst_offset + copy_len, 0, pad_len * sizeof(int64_t));
-            std::memset(mask_ptr + dst_offset + copy_len, 0, pad_len * sizeof(int64_t));
-            std::memset(type_ptr + dst_offset + copy_len, 0, pad_len * sizeof(int64_t));
-        }
+        const BertSampleData& data = it->second;
+        std::memcpy(ids_ptr + dst_offset, data.input_ids.data(), bucket_seq_len * sizeof(int64_t));
+        std::memcpy(mask_ptr + dst_offset, data.attention_mask.data(), bucket_seq_len * sizeof(int64_t));
+        std::memcpy(type_ptr + dst_offset, data.token_type_ids.data(), bucket_seq_len * sizeof(int64_t));
     } else {
         std::memset(ids_ptr + dst_offset, 0, bucket_seq_len * sizeof(int64_t));
         std::memset(mask_ptr + dst_offset, 0, bucket_seq_len * sizeof(int64_t));
@@ -505,7 +447,6 @@ void BertOptimizedSUT::copy_staged_sample_to_tensor(int bucket_idx, size_t stage
     size_t src_offset = bucket.samples[staged_idx].buffer_offset;
     size_t dst_offset = static_cast<size_t>(offset) * bucket_seq_len;
 
-    // Direct memcpy from pre-staged buffer (already padded)
     std::memcpy(ids_ptr + dst_offset, bucket.input_ids.data() + src_offset, bucket_seq_len * sizeof(int64_t));
     std::memcpy(mask_ptr + dst_offset, bucket.attention_mask.data() + src_offset, bucket_seq_len * sizeof(int64_t));
     std::memcpy(type_ptr + dst_offset, bucket.token_type_ids.data() + src_offset, bucket_seq_len * sizeof(int64_t));
@@ -569,11 +510,11 @@ void BertOptimizedSUT::on_inference_complete(BertOptInferContext* ctx) {
     completed_count_.fetch_add(real, std::memory_order_relaxed);
     pending_count_.fetch_sub(1, std::memory_order_relaxed);
 
-    release_request(ctx->die_idx, ctx->config, ctx->pool_id);
+    release_request(ctx);
 }
 
 // =============================================================================
-// OFFLINE BATCH SUBMISSION - OPTIMIZED WITH STAGED BUFFERS
+// OFFLINE MODE: BATCHED SUBMISSION
 // =============================================================================
 
 void BertOptimizedSUT::submit_batch(int bucket_idx,
@@ -581,17 +522,15 @@ void BertOptimizedSUT::submit_batch(int bucket_idx,
                                      const std::vector<int>& sample_indices) {
     if (!loaded_ || bucket_idx < 0 || bucket_idx >= NUM_SEQ_BUCKETS) return;
 
-    // Stage samples if not already done
     if (!samples_staged_) {
         stage_samples();
     }
 
-    int batch_size = bucket_batch_sizes_[bucket_idx];
+    int batch_size = OFFLINE_BATCH_SIZES[bucket_idx];
     int seq_len = SEQ_BUCKETS[bucket_idx];
-    BertModelConfig config{batch_size, seq_len};
+    const auto& bucket = staged_buckets_[bucket_idx];
 
     int n = static_cast<int>(query_ids.size());
-    const auto& bucket = staged_buckets_[bucket_idx];
 
     for (int i = 0; i < n; i += batch_size) {
         int actual = std::min(batch_size, n - i);
@@ -599,9 +538,7 @@ void BertOptimizedSUT::submit_batch(int bucket_idx,
 
         size_t die_idx = die_round_robin_[bucket_idx].fetch_add(1) % die_contexts_.size();
 
-        size_t req_id = acquire_request(die_idx, config);
-        auto& model_ctx = die_contexts_[die_idx]->models[config];
-        BertOptInferContext* ctx = model_ctx->requests[req_id].get();
+        BertOptInferContext* ctx = acquire_request(die_idx, bucket_idx);
 
         for (int j = 0; j < actual; ++j) {
             ctx->query_ids[j] = query_ids[i + j];
@@ -614,20 +551,17 @@ void BertOptimizedSUT::submit_batch(int bucket_idx,
         int64_t* mask = ctx->attention_mask_tensor.data<int64_t>();
         int64_t* type = ctx->token_type_ids_tensor.data<int64_t>();
 
-        // Use staged buffers for fast copy
         for (int j = 0; j < actual; ++j) {
             int sample_idx = sample_indices[i + j];
             auto it = bucket.sample_to_index.find(sample_idx);
             if (it != bucket.sample_to_index.end()) {
                 copy_staged_sample_to_tensor(bucket_idx, it->second, seq_len, ids, mask, type, j);
             } else {
-                // Fallback to direct copy if not in staged buffer
-                std::shared_lock<std::shared_mutex> lock(sample_mutex_);
                 copy_sample_to_tensor(sample_idx, seq_len, ids, mask, type, j);
             }
         }
 
-        // Pad with first sample for dummies
+        // Pad dummies with first sample
         if (dummies > 0 && actual > 0) {
             int first_sample_idx = sample_indices[i];
             auto it = bucket.sample_to_index.find(first_sample_idx);
@@ -645,232 +579,53 @@ void BertOptimizedSUT::submit_batch(int bucket_idx,
 }
 
 // =============================================================================
-// SERVER MODE: ISSUE QUERIES
+// SERVER MODE: DIRECT SINGLE-QUERY INFERENCE
 // =============================================================================
+
+void BertOptimizedSUT::issue_query_direct(uint64_t query_id, int sample_idx) {
+    if (!loaded_) return;
+
+    // 1. Get bucket for this sample
+    int bucket_idx = NUM_SEQ_BUCKETS - 1;  // Default to largest
+    int seq_len = SEQ_BUCKETS[bucket_idx];
+    {
+        std::shared_lock<std::shared_mutex> lock(sample_mutex_);
+        auto it = samples_.find(sample_idx);
+        if (it != samples_.end()) {
+            bucket_idx = it->second.bucket_idx;
+            seq_len = SEQ_BUCKETS[bucket_idx];
+        }
+    }
+
+    // 2. Select die (per-bucket round-robin)
+    size_t die_idx = die_round_robin_[bucket_idx].fetch_add(1) % die_contexts_.size();
+
+    // 3. Acquire request from pool
+    BertOptInferContext* ctx = acquire_request(die_idx, bucket_idx);
+
+    // 4. Setup context
+    ctx->query_ids[0] = query_id;
+    ctx->sample_indices[0] = sample_idx;
+    ctx->actual_batch_size = 1;
+    ctx->num_dummies = 0;
+
+    // 5. Copy data (batch=1, offset=0)
+    int64_t* ids = ctx->input_ids_tensor.data<int64_t>();
+    int64_t* mask = ctx->attention_mask_tensor.data<int64_t>();
+    int64_t* type = ctx->token_type_ids_tensor.data<int64_t>();
+
+    copy_sample_to_tensor(sample_idx, seq_len, ids, mask, type, 0);
+
+    // 6. Start async inference
+    pending_count_.fetch_add(1, std::memory_order_relaxed);
+    ctx->request.start_async();
+    issued_count_.fetch_add(1, std::memory_order_relaxed);
+}
 
 void BertOptimizedSUT::issue_queries(const std::vector<uint64_t>& query_ids,
                                       const std::vector<int>& sample_indices) {
     for (size_t i = 0; i < query_ids.size(); ++i) {
-        int sample_idx = sample_indices[i];
-
-        int bucket_idx = NUM_SEQ_BUCKETS - 1;
-        {
-            std::shared_lock<std::shared_mutex> lock(sample_mutex_);
-            auto it = samples_.find(sample_idx);
-            if (it != samples_.end()) {
-                bucket_idx = it->second.bucket_idx;
-            }
-        }
-
-        auto& queue = bucket_queues_[bucket_idx];
-        size_t head = queue.head.fetch_add(1, std::memory_order_acq_rel);
-        size_t idx = head % QUEUE_SIZE;
-
-        while (queue.items[idx].query_id != 0 && queue.items[idx].sample_idx != -1) {
-            std::this_thread::yield();
-        }
-
-        queue.items[idx].query_id = query_ids[i];
-        queue.items[idx].sample_idx = sample_idx;
-        queue.items[idx].bucket_idx = bucket_idx;
-    }
-}
-
-// =============================================================================
-// BATCHER THREAD
-// =============================================================================
-
-void BertOptimizedSUT::batcher_thread_func() {
-    using namespace std::chrono;
-
-    std::vector<BertOptWorkItem> pending[NUM_SEQ_BUCKETS];
-    auto last_flush = steady_clock::now();
-
-    while (batcher_running_.load(std::memory_order_acquire)) {
-        bool got_any = false;
-
-        for (int b = 0; b < NUM_SEQ_BUCKETS; ++b) {
-            auto& queue = bucket_queues_[b];
-            size_t tail = queue.tail.load(std::memory_order_relaxed);
-            size_t idx = tail % QUEUE_SIZE;
-
-            if (queue.items[idx].sample_idx >= 0) {
-                if (queue.tail.compare_exchange_weak(tail, tail + 1)) {
-                    pending[b].push_back(queue.items[idx]);
-                    queue.items[idx].sample_idx = -1;
-                    queue.items[idx].query_id = 0;
-                    got_any = true;
-                }
-            }
-        }
-
-        auto now = steady_clock::now();
-        bool timeout = duration_cast<microseconds>(now - last_flush).count() >= batch_timeout_us_;
-
-        for (int b = 0; b < NUM_SEQ_BUCKETS; ++b) {
-            int target = bucket_batch_sizes_[b];
-
-            while (static_cast<int>(pending[b].size()) >= target) {
-                BertOptBatch batch;
-                batch.bucket_idx = b;
-                batch.target_batch_size = target;
-                batch.num_dummies = 0;
-
-                for (int i = 0; i < target; ++i) {
-                    batch.query_ids.push_back(pending[b][i].query_id);
-                    batch.sample_indices.push_back(pending[b][i].sample_idx);
-                }
-                pending[b].erase(pending[b].begin(), pending[b].begin() + target);
-
-                auto& bq = batch_queues_[b];
-                size_t head = bq.head.fetch_add(1, std::memory_order_acq_rel);
-                size_t slot = head % BATCH_QUEUE_SIZE;
-
-                while (bq.valid[slot].load(std::memory_order_acquire)) {
-                    std::this_thread::yield();
-                }
-
-                bq.batches[slot] = std::move(batch);
-                bq.valid[slot].store(true, std::memory_order_release);
-
-                last_flush = now;
-            }
-
-            if (timeout && !pending[b].empty() && static_cast<int>(pending[b].size()) >= min_batch_size_) {
-                BertOptBatch batch;
-                batch.bucket_idx = b;
-                batch.target_batch_size = target;
-
-                int actual = static_cast<int>(pending[b].size());
-                batch.num_dummies = target - actual;
-
-                for (const auto& item : pending[b]) {
-                    batch.query_ids.push_back(item.query_id);
-                    batch.sample_indices.push_back(item.sample_idx);
-                }
-                pending[b].clear();
-
-                auto& bq = batch_queues_[b];
-                size_t head = bq.head.fetch_add(1, std::memory_order_acq_rel);
-                size_t slot = head % BATCH_QUEUE_SIZE;
-
-                while (bq.valid[slot].load(std::memory_order_acquire)) {
-                    std::this_thread::yield();
-                }
-
-                bq.batches[slot] = std::move(batch);
-                bq.valid[slot].store(true, std::memory_order_release);
-
-                last_flush = now;
-            }
-        }
-
-        if (!got_any) {
-            std::this_thread::sleep_for(microseconds(50));
-        }
-    }
-
-    // Flush remaining
-    for (int b = 0; b < NUM_SEQ_BUCKETS; ++b) {
-        while (!pending[b].empty()) {
-            int target = bucket_batch_sizes_[b];
-            int actual = std::min(target, static_cast<int>(pending[b].size()));
-
-            BertOptBatch batch;
-            batch.bucket_idx = b;
-            batch.target_batch_size = target;
-            batch.num_dummies = target - actual;
-
-            for (int i = 0; i < actual; ++i) {
-                batch.query_ids.push_back(pending[b][i].query_id);
-                batch.sample_indices.push_back(pending[b][i].sample_idx);
-            }
-            pending[b].erase(pending[b].begin(), pending[b].begin() + actual);
-
-            auto& bq = batch_queues_[b];
-            size_t head = bq.head.fetch_add(1, std::memory_order_acq_rel);
-            size_t slot = head % BATCH_QUEUE_SIZE;
-
-            while (bq.valid[slot].load(std::memory_order_acquire)) {
-                std::this_thread::yield();
-            }
-
-            bq.batches[slot] = std::move(batch);
-            bq.valid[slot].store(true, std::memory_order_release);
-        }
-    }
-}
-
-// =============================================================================
-// DISPATCH THREAD
-// =============================================================================
-
-void BertOptimizedSUT::dispatch_thread_func(int bucket_idx) {
-    while (dispatch_running_.load(std::memory_order_acquire)) {
-        auto& bq = batch_queues_[bucket_idx];
-        size_t tail = bq.tail.load(std::memory_order_relaxed);
-        size_t slot = tail % BATCH_QUEUE_SIZE;
-
-        if (!bq.valid[slot].load(std::memory_order_acquire)) {
-            std::this_thread::sleep_for(std::chrono::microseconds(10));
-            continue;
-        }
-
-        bq.tail.store(tail + 1, std::memory_order_relaxed);
-
-        BertOptBatch& batch = bq.batches[slot];
-        int seq_len = SEQ_BUCKETS[bucket_idx];
-        int batch_size = bucket_batch_sizes_[bucket_idx];
-        BertModelConfig config{batch_size, seq_len};
-
-        size_t die_idx = die_round_robin_[bucket_idx].fetch_add(1) % die_contexts_.size();
-
-        size_t req_id = acquire_request(die_idx, config);
-        auto& model_ctx = die_contexts_[die_idx]->models[config];
-        BertOptInferContext* ctx = model_ctx->requests[req_id].get();
-
-        int actual = static_cast<int>(batch.query_ids.size());
-        for (int i = 0; i < actual; ++i) {
-            ctx->query_ids[i] = batch.query_ids[i];
-            ctx->sample_indices[i] = batch.sample_indices[i];
-        }
-        ctx->actual_batch_size = batch_size;
-        ctx->num_dummies = batch.num_dummies;
-
-        int64_t* ids = ctx->input_ids_tensor.data<int64_t>();
-        int64_t* mask = ctx->attention_mask_tensor.data<int64_t>();
-        int64_t* type = ctx->token_type_ids_tensor.data<int64_t>();
-
-        // Use staged buffers for safe data access
-        const auto& bucket = staged_buckets_[bucket_idx];
-        for (int i = 0; i < actual; ++i) {
-            int sample_idx = batch.sample_indices[i];
-            auto it = bucket.sample_to_index.find(sample_idx);
-            if (it != bucket.sample_to_index.end()) {
-                copy_staged_sample_to_tensor(bucket_idx, it->second, seq_len, ids, mask, type, i);
-            } else {
-                // Fallback - zero fill
-                size_t dst_offset = static_cast<size_t>(i) * seq_len;
-                std::memset(ids + dst_offset, 0, seq_len * sizeof(int64_t));
-                std::memset(mask + dst_offset, 0, seq_len * sizeof(int64_t));
-                std::memset(type + dst_offset, 0, seq_len * sizeof(int64_t));
-            }
-        }
-        // Pad dummies with first sample
-        if (actual > 0) {
-            auto it = bucket.sample_to_index.find(batch.sample_indices[0]);
-            for (int i = actual; i < batch_size; ++i) {
-                if (it != bucket.sample_to_index.end()) {
-                    copy_staged_sample_to_tensor(bucket_idx, it->second, seq_len, ids, mask, type, i);
-                }
-            }
-        }
-
-        bq.valid[slot].store(false, std::memory_order_release);
-
-        pending_count_.fetch_add(1, std::memory_order_relaxed);
-        ctx->request.start_async();
-        issued_count_.fetch_add(actual, std::memory_order_relaxed);
+        issue_query_direct(query_ids[i], sample_indices[i]);
     }
 }
 
