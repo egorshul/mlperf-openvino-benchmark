@@ -444,16 +444,14 @@ class WhisperOptimumSUT:
             # Analyze model
             self._analyze_model_for_npu(ov_model, name)
 
-            # Compile using Core directly
-            logger.info(f"Compiling {name} to {device} using OpenVINO Core (config: {compile_config})...")
-
             # Build config for compilation
             compile_config = {}
             for key, value in ov_config.items():
                 if key != "CACHE_DIR":  # Skip cache dir for now
                     compile_config[key] = value
 
-            # Compile
+            # Compile using Core directly
+            logger.info(f"Compiling {name} to {device} using OpenVINO Core (config: {compile_config})...")
             compiled = core.compile_model(ov_model, device, compile_config)
 
             # Use wrapper that provides both callable and async interfaces
