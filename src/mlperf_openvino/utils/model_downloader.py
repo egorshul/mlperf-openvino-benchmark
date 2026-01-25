@@ -457,12 +457,16 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
     # Export model with retry logic
     logger.info("Downloading and exporting model (this may take several minutes)...")
     logger.info("Large files (3+ GB) - download will resume if interrupted.")
+    logger.info("Using task: automatic-speech-recognition-with-past (stateful KV-cache)")
 
     def do_export():
+        # Export with stateful decoder (KV-cache) for efficient token generation
+        # task="automatic-speech-recognition-with-past" creates decoder_with_past_model
         return OVModelForSpeechSeq2Seq.from_pretrained(
             model_id,
             export=True,
             compile=False,
+            stateful=True,  # Use stateful model for KV-cache optimization
         )
 
     model = _download_with_retry(do_export, max_retries=3)
