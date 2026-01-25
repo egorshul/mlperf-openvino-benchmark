@@ -247,25 +247,32 @@ def download_whisper_model(
     export_to_openvino: bool = True,
 ) -> Dict[str, str]:
     """
-    Download and optionally export Whisper model to OpenVINO format.
-    
+    Download and export Whisper model to OpenVINO format.
+
+    NOTE: For optimal performance with optimum-intel, Whisper models
+    are always exported to OpenVINO IR format (.xml/.bin), regardless
+    of the export_to_openvino parameter. The parameter is kept for
+    API compatibility.
+
     Args:
         output_dir: Directory to save the model
         model_id: HuggingFace model ID
-        export_to_openvino: Whether to export to OpenVINO IR format
-        
+        export_to_openvino: Ignored - always exports to OpenVINO format
+
     Returns:
         Dictionary with paths to encoder and decoder models
     """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    
-    model_name = model_id.split("/")[-1]
-    
-    if export_to_openvino:
-        return _export_whisper_to_openvino(output_dir, model_id)
-    else:
-        return _download_whisper_from_hf(output_dir, model_id)
+
+    # Always export to OpenVINO for proper optimum-intel support
+    if not export_to_openvino:
+        logger.info(
+            "Note: Whisper models are always exported to OpenVINO format "
+            "for optimal performance with optimum-intel."
+        )
+
+    return _export_whisper_to_openvino(output_dir, model_id)
 
 
 def _download_whisper_from_hf(output_dir: str, model_id: str) -> Dict[str, str]:
@@ -407,13 +414,40 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
     model_name = model_id.split("/")[-1]
     ov_model_path = output_path / f"{model_name}-openvino"
 
-    # Check if already exported
+    # Check if already exported - try different naming conventions
     if ov_model_path.exists():
-        encoder_path = ov_model_path / "encoder_model.xml"
-        decoder_path = ov_model_path / "decoder_model.xml"
+        # Try different encoder names (optimum-intel versions vary)
+        encoder_candidates = [
+            ov_model_path / "encoder_model.xml",
+            ov_model_path / "openvino_encoder_model.xml",
+        ]
+        # Try different decoder names
+        decoder_candidates = [
+            ov_model_path / "decoder_model.xml",
+            ov_model_path / "openvino_decoder_model.xml",
+            ov_model_path / "decoder_with_past_model.xml",
+            ov_model_path / "openvino_decoder_with_past_model.xml",
+            ov_model_path / "decoder_model_merged.xml",
+            ov_model_path / "openvino_decoder_model_merged.xml",
+        ]
 
-        if encoder_path.exists() and decoder_path.exists():
+        encoder_path = None
+        decoder_path = None
+
+        for ep in encoder_candidates:
+            if ep.exists():
+                encoder_path = ep
+                break
+
+        for dp in decoder_candidates:
+            if dp.exists():
+                decoder_path = dp
+                break
+
+        if encoder_path and decoder_path:
             logger.info(f"OpenVINO model already exists at {ov_model_path}")
+            logger.info(f"  Encoder: {encoder_path.name}")
+            logger.info(f"  Decoder: {decoder_path.name}")
             return {
                 "encoder_path": str(encoder_path),
                 "decoder_path": str(decoder_path),
@@ -447,9 +481,33 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
 
     logger.info(f"OpenVINO model saved to {ov_model_path}")
 
+    # Find actual file names after export
+    encoder_path = None
+    decoder_path = None
+
+    for ep in [ov_model_path / "encoder_model.xml", ov_model_path / "openvino_encoder_model.xml"]:
+        if ep.exists():
+            encoder_path = ep
+            break
+
+    for dp in [
+        ov_model_path / "decoder_model.xml",
+        ov_model_path / "openvino_decoder_model.xml",
+        ov_model_path / "decoder_with_past_model.xml",
+        ov_model_path / "openvino_decoder_with_past_model.xml",
+        ov_model_path / "decoder_model_merged.xml",
+    ]:
+        if dp.exists():
+            decoder_path = dp
+            break
+
+    # List what was actually created
+    xml_files = list(ov_model_path.glob("*.xml"))
+    logger.info(f"Created OpenVINO IR files: {[f.name for f in xml_files]}")
+
     return {
-        "encoder_path": str(ov_model_path / "encoder_model.xml"),
-        "decoder_path": str(ov_model_path / "decoder_model.xml"),
+        "encoder_path": str(encoder_path) if encoder_path else str(ov_model_path / "encoder_model.xml"),
+        "decoder_path": str(decoder_path) if decoder_path else str(ov_model_path / "decoder_model.xml"),
         "model_path": str(ov_model_path),
     }
 
