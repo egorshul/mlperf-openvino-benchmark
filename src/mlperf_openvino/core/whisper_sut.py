@@ -8,6 +8,7 @@ using optimum-intel OVModelForSpeechSeq2Seq for proper encoder-decoder inference
 import array
 import logging
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -943,9 +944,9 @@ class WhisperNPUSUT:
 
     This implementation uses OpenVINO directly for maximum compatibility
     with NPU devices. It supports:
-    - Separate encoder/decoder models
+    - Multi-die NPU (compiles on all dies: NPU.0, NPU.1, ... when device=NPU)
     - KV-cache for efficient autoregressive decoding (decoder_with_past)
-    - NPU-optimized inference pipeline
+    - Round-robin request distribution across dies
     - Pre-allocated tensors to minimize memory operations
 
     For MLPerf v5.1 Whisper benchmark:
@@ -986,7 +987,7 @@ class WhisperNPUSUT:
             qsl: Query Sample Library
             scenario: MLPerf scenario (Offline or Server)
             max_new_tokens: Maximum tokens to generate (448 - 8 special tokens)
-            device: OpenVINO device (NPU, NPU.0, CPU, etc.)
+            device: OpenVINO device (NPU for all dies, NPU.0 for specific die)
         """
         if not LOADGEN_AVAILABLE:
             raise ImportError("MLPerf LoadGen is not installed")
@@ -1014,12 +1015,19 @@ class WhisperNPUSUT:
         self._sut_handle = None
         self._qsl_handle = None
 
-        # OpenVINO models (lazy loaded)
+        # OpenVINO core
         self._core = None
-        self._encoder_model = None
-        self._decoder_model = None
-        self._encoder_request = None
-        self._decoder_request = None
+
+        # Multi-die support: {die_name: (encoder_request, decoder_request)}
+        self._die_contexts: Dict[str, Tuple[Any, Any]] = {}
+        self._active_devices: List[str] = []
+        self._request_counter = 0
+        self._request_lock = threading.Lock()
+
+        # Model info (shared across dies)
+        self._encoder_input_name = None
+        self._encoder_output_name = None
+        self._decoder_inputs = {}
 
         # KV-cache support
         self._has_kv_cache = False
@@ -1033,8 +1041,9 @@ class WhisperNPUSUT:
         self._load_models()
 
     def _load_models(self) -> None:
-        """Load encoder and decoder models with OpenVINO optimized for NPU."""
+        """Load encoder and decoder models on all NPU dies."""
         import openvino as ov
+        from ..backends.device_discovery import discover_accelerator_devices
 
         logger.info(f"Loading Whisper models for {self.device}")
 
@@ -1045,48 +1054,78 @@ class WhisperNPUSUT:
         if self.config.openvino.device_properties:
             compile_config.update(self.config.openvino.device_properties)
 
-        # Load and compile encoder
-        logger.info(f"Loading encoder from {self.encoder_path}")
+        # Discover target devices
+        device_prefix = self.config.openvino.get_device_prefix()
+
+        if self.config.openvino.is_specific_die():
+            # Specific die requested (e.g., NPU.0)
+            self._active_devices = [self.device]
+        else:
+            # Discover all dies for the device prefix (e.g., NPU -> [NPU.0, NPU.1, ...])
+            self._active_devices = discover_accelerator_devices(self._core, device_prefix)
+
+        if not self._active_devices:
+            # Fallback to the specified device
+            self._active_devices = [self.device]
+
+        logger.info(f"Will use {len(self._active_devices)} die(s): {self._active_devices}")
+
+        # Read models once
+        logger.info(f"Reading encoder from {self.encoder_path}")
         encoder_model = self._core.read_model(str(self.encoder_path))
-        self._encoder_model = self._core.compile_model(
-            encoder_model,
-            self.device,
-            compile_config
-        )
-        self._encoder_request = self._encoder_model.create_infer_request()
 
-        # Get input/output names for encoder
-        self._encoder_input_name = encoder_model.inputs[0].get_any_name()
-        self._encoder_output_name = encoder_model.outputs[0].get_any_name()
-
-        # Try to find decoder_with_past for KV-cache (much faster decoding)
+        # Try to find decoder_with_past for KV-cache
         decoder_with_past_path = self._find_decoder_with_past()
         if decoder_with_past_path:
             logger.info(f"Found decoder_with_past: {decoder_with_past_path}")
             decoder_model = self._core.read_model(str(decoder_with_past_path))
-            self._has_kv_cache = self._detect_kv_cache(decoder_model)
         else:
-            logger.info(f"Loading decoder from {self.decoder_path}")
+            logger.info(f"Reading decoder from {self.decoder_path}")
             decoder_model = self._core.read_model(str(self.decoder_path))
-            self._has_kv_cache = self._detect_kv_cache(decoder_model)
 
-        # Compile decoder
-        self._decoder_model = self._core.compile_model(
-            decoder_model,
-            self.device,
-            compile_config
-        )
-        self._decoder_request = self._decoder_model.create_infer_request()
-
-        # Discover decoder inputs/outputs
-        self._decoder_inputs = self._discover_decoder_inputs(decoder_model)
-
+        # Detect KV-cache support
+        self._has_kv_cache = self._detect_kv_cache(decoder_model)
         if self._has_kv_cache:
             logger.info(f"KV-cache enabled: {len(self._kv_cache_inputs)} cache tensors")
         else:
             logger.info("KV-cache not available, using full sequence decoding")
 
-        logger.info(f"Whisper models loaded on {self.device}")
+        # Get input/output names (same for all dies)
+        self._encoder_input_name = encoder_model.inputs[0].get_any_name()
+        self._encoder_output_name = encoder_model.outputs[0].get_any_name()
+        self._decoder_inputs = self._discover_decoder_inputs(decoder_model)
+
+        # Compile models for each die
+        for die_name in self._active_devices:
+            logger.info(f"Compiling models for {die_name}...")
+
+            encoder_compiled = self._core.compile_model(encoder_model, die_name, compile_config)
+            decoder_compiled = self._core.compile_model(decoder_model, die_name, compile_config)
+
+            encoder_request = encoder_compiled.create_infer_request()
+            decoder_request = decoder_compiled.create_infer_request()
+
+            self._die_contexts[die_name] = (encoder_request, decoder_request)
+            logger.info(f"  {die_name}: encoder + decoder compiled")
+
+        logger.info(f"Whisper models loaded on {len(self._active_devices)} die(s)")
+
+    def _get_next_die(self) -> str:
+        """Get next die for round-robin distribution."""
+        with self._request_lock:
+            die = self._active_devices[self._request_counter % len(self._active_devices)]
+            self._request_counter += 1
+        return die
+
+    @property
+    def num_dies(self) -> int:
+        """Number of active dies."""
+        return len(self._active_devices)
+
+    @property
+    def active_devices(self) -> List[str]:
+        """List of active device names."""
+        return self._active_devices.copy()
 
     def _find_decoder_with_past(self) -> Optional[Path]:
         """Find decoder_with_past model for KV-cache support."""
@@ -1166,32 +1205,41 @@ class WhisperNPUSUT:
         else:
             return f"[tokens: {len(token_ids)}]"
 
-    def _encode(self, mel_features: np.ndarray) -> np.ndarray:
+    def _encode(self, mel_features: np.ndarray, die_name: Optional[str] = None) -> np.ndarray:
         """Run encoder on mel spectrogram.
 
         Args:
             mel_features: Mel spectrogram of shape (batch, n_mels, time)
+            die_name: Specific die to use, or None for round-robin
 
         Returns:
             Encoder hidden states
         """
-        self._encoder_request.infer({self._encoder_input_name: mel_features})
-        return self._encoder_request.get_tensor(self._encoder_output_name).data.copy()
+        if die_name is None:
+            die_name = self._get_next_die()
+
+        encoder_request, _ = self._die_contexts[die_name]
+        encoder_request.infer({self._encoder_input_name: mel_features})
+        return encoder_request.get_tensor(self._encoder_output_name).data.copy()
 
     def _decode_step(
         self,
         encoder_hidden_states: np.ndarray,
         decoder_input_ids: np.ndarray,
+        die_name: str,
     ) -> np.ndarray:
         """Run one decoder step.
 
         Args:
             encoder_hidden_states: Encoder output
             decoder_input_ids: Current token sequence
+            die_name: Device die to use for inference
 
         Returns:
             Logits for next token
         """
+        _, decoder_request = self._die_contexts[die_name]
+
         inputs = {}
 
         # Set decoder input IDs
@@ -1217,15 +1265,17 @@ class WhisperNPUSUT:
             enc_attn_mask = np.ones((batch_size, seq_len), dtype=np.int64)
             inputs[self._decoder_inputs['encoder_attention_mask']] = enc_attn_mask
 
-        self._decoder_request.infer(inputs)
+        decoder_request.infer(inputs)
 
         # Get first output (logits)
-        return self._decoder_request.get_output_tensor(0).data.copy()
+        return decoder_request.get_output_tensor(0).data.copy()
 
     def _generate(self, mel_features: np.ndarray) -> Tuple[List[int], str]:
         """Generate transcript from mel spectrogram.
 
         Uses KV-cache if available for ~10x faster decoding.
+        Uses round-robin die selection for multi-die parallelism.
+        Each sample uses single die for both encoder and decoder.
 
         Args:
             mel_features: Mel spectrogram of shape (batch, n_mels, time)
@@ -1233,8 +1283,11 @@ class WhisperNPUSUT:
         Returns:
             Tuple of (token_ids, decoded_text)
         """
-        # Encode audio (only once per sample)
-        encoder_hidden_states = self._encode(mel_features)
+        # Select die for this sample (round-robin)
+        die_name = self._get_next_die()
+
+        # Encode audio on selected die
+        encoder_hidden_states = self._encode(mel_features, die_name)
 
         # Initialize decoder with special tokens
         # [SOT, language, task, no_timestamps]
@@ -1246,14 +1299,15 @@ class WhisperNPUSUT:
         ]
 
         if self._has_kv_cache:
-            return self._generate_with_kv_cache(encoder_hidden_states, initial_tokens)
+            return self._generate_with_kv_cache(encoder_hidden_states, initial_tokens, die_name)
         else:
-            return self._generate_without_kv_cache(encoder_hidden_states, initial_tokens)
+            return self._generate_without_kv_cache(encoder_hidden_states, initial_tokens, die_name)
 
     def _generate_without_kv_cache(
         self,
         encoder_hidden_states: np.ndarray,
-        initial_tokens: List[int]
+        initial_tokens: List[int],
+        die_name: str,
     ) -> Tuple[List[int], str]:
         """Generate without KV-cache (slower, recomputes all attention)."""
         decoder_input = initial_tokens.copy()
@@ -1263,7 +1317,7 @@ class WhisperNPUSUT:
             decoder_input_ids = np.array([decoder_input], dtype=np.int64)
 
             # Get logits
-            logits = self._decode_step(encoder_hidden_states, decoder_input_ids)
+            logits = self._decode_step(encoder_hidden_states, decoder_input_ids, die_name)
 
             # Get next token (greedy decoding)
             if logits.ndim == 3:
@@ -1289,7 +1343,8 @@ class WhisperNPUSUT:
     def _generate_with_kv_cache(
         self,
         encoder_hidden_states: np.ndarray,
-        initial_tokens: List[int]
+        initial_tokens: List[int],
+        die_name: str,
     ) -> Tuple[List[int], str]:
         """Generate with KV-cache (fast, incremental decoding).
 
@@ -1302,7 +1357,7 @@ class WhisperNPUSUT:
         # First step: process all initial tokens
         decoder_input_ids = np.array([initial_tokens], dtype=np.int64)
         logits, past_key_values = self._decode_step_with_cache(
-            encoder_hidden_states, decoder_input_ids, past_key_values
+            encoder_hidden_states, decoder_input_ids, past_key_values, die_name
         )
 
         # Get first generated token
@@ -1325,7 +1380,7 @@ class WhisperNPUSUT:
             decoder_input_ids = np.array([[next_token]], dtype=np.int64)
 
             logits, past_key_values = self._decode_step_with_cache(
-                encoder_hidden_states, decoder_input_ids, past_key_values
+                encoder_hidden_states, decoder_input_ids, past_key_values, die_name
             )
 
             # Get next token
@@ -1348,7 +1403,8 @@ class WhisperNPUSUT:
         self,
         encoder_hidden_states: np.ndarray,
         decoder_input_ids: np.ndarray,
-        past_key_values: Optional[Dict[str, np.ndarray]] = None,
+        past_key_values: Optional[Dict[str, np.ndarray]],
+        die_name: str,
     ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
         """Run decoder step with KV-cache support.
 
@@ -1356,10 +1412,13 @@ class WhisperNPUSUT:
             encoder_hidden_states: Encoder output
             decoder_input_ids: Current token(s) to process
             past_key_values: Previous KV-cache (None for first step)
+            die_name: Device die to use for inference
 
         Returns:
             Tuple of (logits, new_past_key_values)
         """
+        _, decoder_request = self._die_contexts[die_name]
+
         inputs = {}
 
         # Set decoder input IDs
@@ -1405,15 +1464,15 @@ class WhisperNPUSUT:
                 inputs[name] = np.zeros((batch_size, self.NUM_ATTENTION_HEADS, 0, self.HEAD_DIM), dtype=np.float32)
 
         # Run inference
-        self._decoder_request.infer(inputs)
+        decoder_request.infer(inputs)
 
         # Get logits
-        logits = self._decoder_request.get_output_tensor(0).data.copy()
+        logits = decoder_request.get_output_tensor(0).data.copy()
 
         # Get new past key values
         new_past = {}
         for name in self._kv_cache_outputs:
-            tensor = self._decoder_request.get_tensor(name)
+            tensor = decoder_request.get_tensor(name)
             new_past[name.replace('present', 'past_key_value')] = tensor.data.copy()
 
         return logits, new_past
