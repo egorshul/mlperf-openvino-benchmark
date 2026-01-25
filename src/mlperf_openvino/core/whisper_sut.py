@@ -190,6 +190,9 @@ class WhisperOptimumSUT:
         self.scenario = scenario
         self.max_new_tokens = max_new_tokens
 
+        # Get batch size from config (set via -b CLI flag)
+        self.batch_size = config.openvino.batch_size if hasattr(config, 'openvino') else 1
+
         # Get device from config if not specified
         if device is None:
             device = config.openvino.device if hasattr(config, 'openvino') else "CPU"
@@ -225,10 +228,10 @@ class WhisperOptimumSUT:
         if self._hybrid_mode:
             logger.info(
                 f"Loading Whisper model from {self.model_path} "
-                f"(encoder: {self.encoder_device}, decoder: {self.decoder_device})"
+                f"(encoder: {self.encoder_device}, decoder: {self.decoder_device}, batch_size={self.batch_size})"
             )
         else:
-            logger.info(f"Loading Whisper model from {self.model_path} on device {self.device}")
+            logger.info(f"Loading Whisper model from {self.model_path} on device {self.device} (batch_size={self.batch_size})")
 
         # Load processor (tokenizer + feature extractor)
         logger.debug(f"Loading processor from {self.model_path}")
@@ -376,6 +379,10 @@ class WhisperOptimumSUT:
         if hasattr(submodel, 'model') and submodel.model is not None:
             ov_model = submodel.model
 
+            # Reshape to batch_size if needed
+            if self.batch_size > 1:
+                self._reshape_model_batch_size(ov_model, self.batch_size, name)
+
             # Analyze model
             self._analyze_model_for_npu(ov_model, name)
 
@@ -399,6 +406,31 @@ class WhisperOptimumSUT:
             # Fallback to default compilation
             logger.info(f"Using default compilation for {name}")
             submodel._compile()
+
+    def _reshape_model_batch_size(self, model: "ov.Model", batch_size: int, name: str) -> None:
+        """Reshape model to specified batch size for all inputs."""
+        logger.info(f"Reshaping {name} to batch_size={batch_size}...")
+
+        new_shapes = {}
+        for inp in model.inputs:
+            inp_name = inp.get_any_name()
+            shape = inp.get_partial_shape()
+
+            # Only reshape if first dimension is batch (dynamic or 1)
+            if len(shape) > 0:
+                new_shape = list(shape)
+                if shape[0].is_dynamic or (shape[0].is_static and shape[0].get_length() == 1):
+                    new_shape[0] = batch_size
+                    new_shapes[inp_name] = new_shape
+
+        if new_shapes:
+            try:
+                model.reshape(new_shapes)
+                logger.info(f"  {name} reshaped to batch_size={batch_size}")
+            except Exception as e:
+                logger.warning(f"  Failed to reshape {name} to batch_size={batch_size}: {e}")
+        else:
+            logger.info(f"  {name}: no reshape needed")
 
     def _analyze_model_for_npu(self, model: "ov.Model", name: str) -> Dict[str, int]:
         """
@@ -534,9 +566,9 @@ class WhisperOptimumSUT:
             has_dynamic = analysis.get("has_dynamic", False)
 
             if has_dynamic and device != "CPU":
-                logger.info("Decoder has dynamic shapes, attempting static reshape for NPU...")
+                logger.info(f"Decoder has dynamic shapes, reshaping to batch_size={self.batch_size} for NPU...")
                 try:
-                    self._reshape_decoder_to_static(ov_model)
+                    self._reshape_decoder_to_static(ov_model, batch_size=self.batch_size)
                 except Exception as e:
                     logger.warning(f"Static reshape failed: {e}")
 
@@ -590,10 +622,10 @@ class WhisperOptimumSUT:
             has_dynamic = analysis.get("has_dynamic", False)
 
             if has_dynamic and device != "CPU":
-                logger.info("Decoder_with_past has dynamic shapes, attempting static reshape...")
+                logger.info(f"Decoder_with_past has dynamic shapes, reshaping to batch_size={self.batch_size} for NPU...")
                 try:
                     # For decoder_with_past, seq_len is usually 1 (single token at a time)
-                    self._reshape_decoder_to_static(ov_model, seq_len=1)
+                    self._reshape_decoder_to_static(ov_model, batch_size=self.batch_size, seq_len=1)
                 except Exception as e:
                     logger.warning(f"Static reshape failed: {e}")
 

@@ -417,7 +417,7 @@ def download_model_cmd(model: str, output_dir: str, format: str):
               help='Output directory')
 @click.option('--model-id', default='openai/whisper-large-v3',
               help='HuggingFace model ID')
-@click.option('--batch-size', default=1, type=int,
+@click.option('--batch-size', '-b', default=1, type=int,
               help='Fixed batch size for NPU')
 @click.option('--decoder-seq-len', default=448, type=int,
               help='Max decoder sequence length')
