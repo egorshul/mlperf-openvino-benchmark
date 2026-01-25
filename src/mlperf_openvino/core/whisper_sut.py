@@ -879,47 +879,54 @@ class WhisperOptimumSUT:
 
         t_start = time.time()
 
-        # Get preprocessed mel features from QSL
-        features = self.qsl.get_features(sample_idx)
-        input_features = features["input_features"]
+        try:
+            # Get preprocessed mel features from QSL
+            features = self.qsl.get_features(sample_idx)
+            input_features = features["input_features"]
 
-        t_features = time.time()
+            t_features = time.time()
 
-        # Convert to tensor
-        if isinstance(input_features, np.ndarray):
-            input_features = torch.from_numpy(input_features)
+            # Convert to tensor
+            if isinstance(input_features, np.ndarray):
+                input_features = torch.from_numpy(input_features)
 
-        # Ensure correct shape (batch, n_mels, time)
-        if input_features.dim() == 2:
-            input_features = input_features.unsqueeze(0)
+            # Ensure correct shape (batch, n_mels, time)
+            if input_features.dim() == 2:
+                input_features = input_features.unsqueeze(0)
 
-        t_tensor = time.time()
+            t_tensor = time.time()
 
-        # Generate transcription using model with KV-cache support
-        generated_ids = self.model.generate(
-            input_features,
-            max_new_tokens=self.max_new_tokens,
-            language="en",
-            task="transcribe",
-        )
+            # Generate transcription using model with KV-cache support
+            generated_ids = self.model.generate(
+                input_features,
+                max_new_tokens=self.max_new_tokens,
+                language="en",
+                task="transcribe",
+            )
 
-        t_generate = time.time()
+            t_generate = time.time()
 
-        # Decode tokens to text
-        text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+            # Decode tokens to text
+            text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
 
-        t_decode = time.time()
+            t_decode = time.time()
 
-        # Store timing info if requested
-        if timing_info is not None:
-            timing_info["features_ms"] = (t_features - t_start) * 1000
-            timing_info["tensor_ms"] = (t_tensor - t_features) * 1000
-            timing_info["generate_ms"] = (t_generate - t_tensor) * 1000
-            timing_info["decode_ms"] = (t_decode - t_generate) * 1000
-            timing_info["total_ms"] = (t_decode - t_start) * 1000
-            timing_info["tokens"] = generated_ids.shape[-1] if hasattr(generated_ids, 'shape') else len(generated_ids[0])
+            # Store timing info if requested
+            if timing_info is not None:
+                timing_info["features_ms"] = (t_features - t_start) * 1000
+                timing_info["tensor_ms"] = (t_tensor - t_features) * 1000
+                timing_info["generate_ms"] = (t_generate - t_tensor) * 1000
+                timing_info["decode_ms"] = (t_decode - t_generate) * 1000
+                timing_info["total_ms"] = (t_decode - t_start) * 1000
+                timing_info["tokens"] = generated_ids.shape[-1] if hasattr(generated_ids, 'shape') else len(generated_ids[0])
 
-        return text
+            return text
+
+        except Exception as e:
+            logger.error(f"Error processing sample {sample_idx}: {e}")
+            import traceback
+            logger.error(f"Traceback:\n{traceback.format_exc()}")
+            return ""
 
     def _process_batch(self, sample_indices: List[int]) -> List[str]:
         """
@@ -980,6 +987,7 @@ class WhisperOptimumSUT:
 
     def issue_queries(self, query_samples: List[Any]) -> None:
         """Process queries from LoadGen."""
+        logger.info(f"WhisperOptimumSUT.issue_queries called with {len(query_samples)} samples")
         self._query_count += len(query_samples)
 
         if self.scenario == Scenario.OFFLINE:
@@ -988,6 +996,8 @@ class WhisperOptimumSUT:
             self._issue_query_server(query_samples)
         else:
             raise ValueError(f"Unsupported scenario: {self.scenario}")
+
+        logger.info(f"Predictions stored: {len(self._predictions)}")
 
     def _issue_query_offline(self, query_samples: List[Any]) -> None:
         """Process queries for Offline scenario."""
