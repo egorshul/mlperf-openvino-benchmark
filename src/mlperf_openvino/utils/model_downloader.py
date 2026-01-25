@@ -559,6 +559,7 @@ def export_whisper_for_npu(
     batch_size: int = 1,
     encoder_seq_len: int = 1500,
     decoder_seq_len: int = 448,
+    stateless: bool = False,
 ) -> Dict[str, str]:
     """
     Export Whisper model with static shapes optimized for NPU.
@@ -572,6 +573,7 @@ def export_whisper_for_npu(
         batch_size: Fixed batch size (default 1)
         encoder_seq_len: Encoder sequence length (1500 for 30s audio)
         decoder_seq_len: Max decoder sequence length (448 for Whisper)
+        stateless: If True, export without stateful KV-cache (for NPU compatibility)
 
     Returns:
         Dictionary with paths to model files
@@ -581,7 +583,8 @@ def export_whisper_for_npu(
 
     output_path = Path(output_dir)
     model_name = model_id.split("/")[-1]
-    ov_model_path = output_path / f"{model_name}-openvino-static"
+    suffix = "-openvino-static-stateless" if stateless else "-openvino-static"
+    ov_model_path = output_path / f"{model_name}{suffix}"
 
     logger.info(f"Exporting Whisper for NPU with static shapes:")
     logger.info(f"  batch_size={batch_size}")
@@ -612,15 +615,20 @@ def export_whisper_for_npu(
     # Build static shape specifications
     # Encoder input: input_features[batch, 80, 3000] (80 mel bins, 3000 frames)
     # Decoder input: decoder_input_ids[batch, seq], encoder_hidden_states[batch, enc_seq, hidden]
-    encoder_shapes = f"input_features[{batch_size},80,3000]"
 
     cmd = [
         optimum_cli, "export", "openvino",
         "--model", model_id,
         "--task", "automatic-speech-recognition",
         "--batch_size", str(batch_size),
-        str(ov_model_path),
     ]
+
+    # Add stateless flag if requested (disables KV-cache stateful operations)
+    if stateless:
+        cmd.append("--disable-stateful")
+        logger.info("Exporting in STATELESS mode (no ReadValue/Assign ops)")
+
+    cmd.append(str(ov_model_path))
 
     logger.info(f"Running: {' '.join(cmd)}")
 

@@ -421,24 +421,30 @@ def download_model_cmd(model: str, output_dir: str, format: str):
               help='Fixed batch size for NPU')
 @click.option('--decoder-seq-len', default=448, type=int,
               help='Max decoder sequence length')
-def export_whisper_npu_cmd(output_dir: str, model_id: str, batch_size: int, decoder_seq_len: int):
+@click.option('--stateless', is_flag=True, default=False,
+              help='Export without stateful KV-cache (for NPU without ReadValue/Assign support)')
+def export_whisper_npu_cmd(output_dir: str, model_id: str, batch_size: int, decoder_seq_len: int, stateless: bool):
     """
     Export Whisper model with static shapes for NPU.
 
     NPU devices require static shapes. This command exports
     Whisper model with fixed input dimensions optimized for NPU.
 
+    Use --stateless if your NPU doesn't support ReadValue/Assign operations
+    (stateful KV-cache). This disables KV-cache but model will still work.
+
     Examples:
 
         mlperf-ov export-whisper-npu --output-dir ./models
 
-        mlperf-ov export-whisper-npu --batch-size 1 --decoder-seq-len 448
+        mlperf-ov export-whisper-npu --stateless  # For NPU without stateful support
     """
     from .utils.model_downloader import export_whisper_for_npu
 
     click.echo(f"Exporting Whisper for NPU with static shapes...")
     click.echo(f"  Batch size: {batch_size}")
     click.echo(f"  Decoder seq len: {decoder_seq_len}")
+    click.echo(f"  Stateless mode: {stateless}")
 
     try:
         paths = export_whisper_for_npu(
@@ -446,6 +452,7 @@ def export_whisper_npu_cmd(output_dir: str, model_id: str, batch_size: int, deco
             model_id=model_id,
             batch_size=batch_size,
             decoder_seq_len=decoder_seq_len,
+            stateless=stateless,
         )
         click.echo(f"\nModel exported to: {paths['model_path']}")
         click.echo(f"  Encoder: {paths.get('encoder_path', 'N/A')}")
