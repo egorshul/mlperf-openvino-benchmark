@@ -567,6 +567,9 @@ def export_whisper_for_npu(
     NPU devices typically require static shapes for optimal performance.
     This function exports the model with fixed input dimensions.
 
+    For NPU devices that don't support stateful operations (ReadValue/Assign),
+    use stateless=True to export with explicit KV-cache tensors as inputs/outputs.
+
     Args:
         output_dir: Directory to save the model
         model_id: HuggingFace model ID
@@ -583,23 +586,30 @@ def export_whisper_for_npu(
 
     output_path = Path(output_dir)
     model_name = model_id.split("/")[-1]
-    suffix = "-openvino-static-stateless" if stateless else "-openvino-static"
+    suffix = "-openvino-npu-stateless" if stateless else "-openvino-npu"
     ov_model_path = output_path / f"{model_name}{suffix}"
 
-    logger.info(f"Exporting Whisper for NPU with static shapes:")
+    logger.info(f"Exporting Whisper for NPU:")
     logger.info(f"  batch_size={batch_size}")
     logger.info(f"  encoder_seq_len={encoder_seq_len}")
     logger.info(f"  decoder_seq_len={decoder_seq_len}")
+    logger.info(f"  stateless={stateless}")
 
     # Check if already exported
     if ov_model_path.exists():
         encoder_path = ov_model_path / "openvino_encoder_model.xml"
         decoder_path = ov_model_path / "openvino_decoder_model.xml"
-        if encoder_path.exists() and decoder_path.exists():
-            logger.info(f"Static model already exists at {ov_model_path}")
+        decoder_with_past_path = ov_model_path / "openvino_decoder_with_past_model.xml"
+
+        # Accept either decoder or decoder_with_past
+        has_decoder = decoder_path.exists() or decoder_with_past_path.exists()
+
+        if encoder_path.exists() and has_decoder:
+            logger.info(f"NPU model already exists at {ov_model_path}")
+            actual_decoder = decoder_path if decoder_path.exists() else decoder_with_past_path
             return {
                 "encoder_path": str(encoder_path),
-                "decoder_path": str(decoder_path),
+                "decoder_path": str(actual_decoder),
                 "model_path": str(ov_model_path),
             }
 
@@ -608,25 +618,30 @@ def export_whisper_for_npu(
 
     if not optimum_cli:
         raise RuntimeError(
-            "optimum-cli is required for static shape export. "
+            "optimum-cli is required for NPU export. "
             "Install with: pip install optimum[openvino]"
         )
 
-    # Build static shape specifications
-    # Encoder input: input_features[batch, 80, 3000] (80 mel bins, 3000 frames)
-    # Decoder input: decoder_input_ids[batch, seq], encoder_hidden_states[batch, enc_seq, hidden]
+    # IMPORTANT: Use automatic-speech-recognition-with-past for proper KV-cache support
+    # Combined with --disable-stateful, this gives explicit KV-cache tensors instead of
+    # internal ReadValue/Assign operations that some NPUs don't support
+    task = "automatic-speech-recognition-with-past"
 
     cmd = [
         optimum_cli, "export", "openvino",
         "--model", model_id,
-        "--task", "automatic-speech-recognition",
-        "--batch_size", str(batch_size),
+        "--task", task,
     ]
 
-    # Add stateless flag if requested (disables KV-cache stateful operations)
+    # Add stateless flag if requested (converts KV-cache from internal state to explicit tensors)
     if stateless:
         cmd.append("--disable-stateful")
-        logger.info("Exporting in STATELESS mode (no ReadValue/Assign ops)")
+        logger.info("Exporting in STATELESS mode:")
+        logger.info("  - No ReadValue/Assign operations (NPU compatible)")
+        logger.info("  - KV-cache passed as explicit input/output tensors")
+    else:
+        logger.info("Exporting in STATEFUL mode (with ReadValue/Assign ops)")
+        logger.info("NOTE: Some NPUs don't support stateful ops. Use --stateless if compilation fails.")
 
     cmd.append(str(ov_model_path))
 
@@ -649,82 +664,81 @@ def export_whisper_for_npu(
     except subprocess.TimeoutExpired:
         raise RuntimeError("Export timed out after 30 minutes")
 
-    # Now reshape models to static shapes using OpenVINO
-    logger.info("Reshaping models to fully static shapes...")
+    # List exported files
+    xml_files = list(ov_model_path.glob("*.xml"))
+    logger.info(f"Exported model files: {[f.name for f in xml_files]}")
 
-    try:
-        import openvino as ov
-
-        core = ov.Core()
-
-        # Reshape encoder
-        encoder_xml = ov_model_path / "openvino_encoder_model.xml"
-        if encoder_xml.exists():
-            logger.info("Reshaping encoder to static shape...")
-            encoder_model = core.read_model(encoder_xml)
-
-            # Encoder: input_features[batch, 80, 3000]
-            encoder_model.reshape({0: [batch_size, 80, 3000]})
-
-            ov.save_model(encoder_model, encoder_xml)
-            logger.info("Encoder reshaped to static shape")
-
-        # Reshape decoder
-        decoder_xml = ov_model_path / "openvino_decoder_model.xml"
-        if decoder_xml.exists():
-            logger.info("Reshaping decoder to static shapes...")
-            decoder_model = core.read_model(decoder_xml)
-
-            # Build shapes dict based on actual input names
-            shapes = {}
-            for inp in decoder_model.inputs:
-                name = inp.get_any_name()
-                current = inp.get_partial_shape()
-
-                if "input_ids" in name.lower():
-                    shapes[name] = [batch_size, decoder_seq_len]
-                elif "encoder_hidden" in name.lower():
-                    # [batch, encoder_seq, hidden_dim]
-                    hidden_dim = 1280  # Whisper large
-                    if not current[-1].is_dynamic:
-                        hidden_dim = current[-1].get_length()
-                    shapes[name] = [batch_size, encoder_seq_len, hidden_dim]
-                elif "attention_mask" in name.lower():
-                    if "encoder" in name.lower():
-                        shapes[name] = [batch_size, encoder_seq_len]
-                    else:
-                        shapes[name] = [batch_size, decoder_seq_len]
-
-            if shapes:
-                logger.info(f"Decoder shapes: {shapes}")
-                decoder_model.reshape(shapes)
-                ov.save_model(decoder_model, decoder_xml)
-                logger.info("Decoder reshaped to static shapes")
-
-    except Exception as e:
-        logger.warning(f"Static reshape failed: {e}")
-        logger.warning("Model exported but may have dynamic shapes")
+    # Analyze decoder for stateful ops
+    _analyze_model_stateful_ops(ov_model_path)
 
     # Save processor
     try:
         from transformers import WhisperProcessor
         processor = WhisperProcessor.from_pretrained(model_id)
         processor.save_pretrained(str(ov_model_path))
+        logger.info("Processor saved")
     except Exception as e:
         logger.warning(f"Failed to save processor: {e}")
 
     # Find paths
     encoder_path = ov_model_path / "openvino_encoder_model.xml"
     decoder_path = ov_model_path / "openvino_decoder_model.xml"
+    decoder_with_past_path = ov_model_path / "openvino_decoder_with_past_model.xml"
 
-    xml_files = list(ov_model_path.glob("*.xml"))
-    logger.info(f"Created static model files: {[f.name for f in xml_files]}")
+    actual_decoder = decoder_with_past_path if decoder_with_past_path.exists() else decoder_path
 
     return {
         "encoder_path": str(encoder_path) if encoder_path.exists() else None,
-        "decoder_path": str(decoder_path) if decoder_path.exists() else None,
+        "decoder_path": str(actual_decoder) if actual_decoder.exists() else None,
         "model_path": str(ov_model_path),
     }
+
+
+def _analyze_model_stateful_ops(model_dir: Path) -> Dict[str, int]:
+    """
+    Analyze model files for stateful operations (ReadValue/Assign).
+
+    Args:
+        model_dir: Directory containing model XML files
+
+    Returns:
+        Dictionary mapping model name to count of stateful ops
+    """
+    try:
+        import openvino as ov
+        core = ov.Core()
+    except ImportError:
+        return {}
+
+    results = {}
+
+    for xml_file in model_dir.glob("*.xml"):
+        try:
+            model = core.read_model(xml_file)
+
+            # Count stateful ops
+            read_values = 0
+            assigns = 0
+
+            for op in model.get_ordered_ops():
+                op_type = op.get_type_name()
+                if op_type == "ReadValue":
+                    read_values += 1
+                elif op_type == "Assign":
+                    assigns += 1
+
+            total_stateful = read_values + assigns
+            results[xml_file.name] = total_stateful
+
+            if total_stateful > 0:
+                logger.info(f"  {xml_file.name}: {read_values} ReadValue + {assigns} Assign = {total_stateful} stateful ops")
+            else:
+                logger.info(f"  {xml_file.name}: No stateful ops (NPU compatible)")
+
+        except Exception as e:
+            logger.warning(f"  Failed to analyze {xml_file.name}: {e}")
+
+    return results
 
 
 def export_whisper_encoder_only(

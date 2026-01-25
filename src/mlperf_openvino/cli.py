@@ -422,22 +422,29 @@ def download_model_cmd(model: str, output_dir: str, format: str):
 @click.option('--decoder-seq-len', default=448, type=int,
               help='Max decoder sequence length')
 @click.option('--stateless', is_flag=True, default=False,
-              help='Export without stateful KV-cache (for NPU without ReadValue/Assign support)')
+              help='REQUIRED for most NPUs: Export without ReadValue/Assign ops')
 def export_whisper_npu_cmd(output_dir: str, model_id: str, batch_size: int, decoder_seq_len: int, stateless: bool):
     """
-    Export Whisper model with static shapes for NPU.
+    Export Whisper model optimized for NPU devices.
 
-    NPU devices require static shapes. This command exports
-    Whisper model with fixed input dimensions optimized for NPU.
+    Most NPU devices do NOT support stateful operations (ReadValue/Assign)
+    used for KV-cache. Use --stateless flag to export a compatible model.
 
-    Use --stateless if your NPU doesn't support ReadValue/Assign operations
-    (stateful KV-cache). This disables KV-cache but model will still work.
+    The stateless model converts internal KV-cache state to explicit
+    input/output tensors, which works on all NPU devices.
 
     Examples:
 
+        # For NPU devices (RECOMMENDED - works on most NPUs):
+        mlperf-ov export-whisper-npu --output-dir ./models --stateless
+
+        # For NPU devices that DO support stateful ops:
         mlperf-ov export-whisper-npu --output-dir ./models
 
-        mlperf-ov export-whisper-npu --stateless  # For NPU without stateful support
+    After export, run benchmark with:
+
+        mlperf-ov run --model whisper --device X \\
+            --model-path ./models/whisper-large-v3-openvino-npu-stateless
     """
     from .utils.model_downloader import export_whisper_for_npu
 
