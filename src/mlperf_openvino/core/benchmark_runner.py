@@ -366,9 +366,10 @@ class BenchmarkRunner:
                     decoder_path = dp
                     break
 
-        # Check if using multi-die NPU (device without specific die number)
-        is_multi_die_npu = (
-            self.config.openvino.is_accelerator_device() and
+        # Check device type
+        is_accelerator = self.config.openvino.is_accelerator_device()
+        is_multi_die = (
+            is_accelerator and
             self.config.openvino.is_multi_device()
         )
 
@@ -383,8 +384,8 @@ class BenchmarkRunner:
             if OPTIMUM_AVAILABLE and model_path.is_dir():
                 config_file = model_path / "config.json"
                 if config_file.exists():
-                    # Use multi-die SUT for NPU without specific die
-                    if is_multi_die_npu and is_whisper_multi_die_available():
+                    # Use multi-die SUT for accelerator without specific die (e.g., "NPU")
+                    if is_multi_die and is_whisper_multi_die_available():
                         logger.info(f"Using WhisperMultiDieSUT for {self.config.openvino.device}")
                         self.sut = WhisperMultiDieSUT(
                             config=self.config,
@@ -393,7 +394,7 @@ class BenchmarkRunner:
                             scenario=self.config.scenario,
                         )
                     else:
-                        # Use single-die optimum SUT (CPU or specific NPU die)
+                        # Use single-die optimum SUT (CPU or specific die like NPU.0)
                         device = self.config.openvino.device
                         logger.info(f"Using WhisperOptimumSUT on {device}")
                         self.sut = WhisperOptimumSUT(
@@ -406,17 +407,17 @@ class BenchmarkRunner:
                     return
         except Exception as e:
             logger.warning(f"Failed to create Whisper Optimum SUT: {e}")
-            # For multi-die devices, optimum-intel is required
-            if is_multi_die_npu:
+            # For accelerator devices (NPU, NPU.0, etc.), optimum-intel is required
+            if is_accelerator:
+                device = self.config.openvino.device
                 raise RuntimeError(
-                    f"Whisper on multi-die {self.config.openvino.device} requires optimum-intel. "
-                    f"Install with: pip install optimum[openvino]\n"
-                    f"Or use a specific die: --device {self.config.openvino.get_device_prefix()}.0"
+                    f"Whisper on {device} requires optimum-intel. "
+                    f"Install with: pip install optimum[openvino]"
                 ) from e
 
         from .whisper_sut import WhisperSUT, WhisperEncoderOnlySUT
 
-        # Fallback path only for single-die or CPU devices
+        # Fallback path only for CPU devices
         if encoder_path and decoder_path:
             encoder_backend = OpenVINOBackend(
                 model_path=str(encoder_path),
