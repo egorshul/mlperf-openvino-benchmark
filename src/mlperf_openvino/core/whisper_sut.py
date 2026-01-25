@@ -219,7 +219,6 @@ class WhisperOptimumSUT:
         if hasattr(self.model, 'encoder') and self.model.encoder is not None:
             logger.info(f"Compiling ENCODER on {self.encoder_device}...")
             try:
-                # Set device for encoder
                 if hasattr(self.model.encoder, '_device'):
                     self.model.encoder._device = self.encoder_device
                 self.model.encoder._compile()
@@ -229,70 +228,201 @@ class WhisperOptimumSUT:
                 raise RuntimeError(f"Encoder compilation failed on {self.encoder_device}: {e}") from e
 
         # Compile decoder on decoder_device
-        decoder_compiled = False
         if hasattr(self.model, 'decoder') and self.model.decoder is not None:
-            logger.info(f"Compiling DECODER on {self.decoder_device}...")
-            try:
-                # Set device for decoder
-                if hasattr(self.model.decoder, '_device'):
-                    self.model.decoder._device = self.decoder_device
-                self.model.decoder._compile()
-                logger.info("DECODER compiled successfully!")
-                decoder_compiled = True
-            except Exception as e:
-                # If decoder fails on target device and not already CPU, try CPU fallback
-                if self.decoder_device != "CPU":
-                    logger.warning(
-                        f"DECODER compilation FAILED on {self.decoder_device}: {e}"
-                    )
-                    logger.info("Attempting fallback: compiling DECODER on CPU...")
-                    try:
-                        if hasattr(self.model.decoder, '_device'):
-                            self.model.decoder._device = "CPU"
-                        self.model.decoder.request = None  # Reset compiled state
-                        self.model.decoder._compile()
-                        self.decoder_device = "CPU"
-                        self._hybrid_mode = True
-                        logger.info("DECODER compiled successfully on CPU (fallback)")
-                        decoder_compiled = True
-                    except Exception as cpu_e:
-                        logger.error(f"DECODER compilation FAILED on CPU fallback: {cpu_e}")
-                        raise RuntimeError(f"Decoder compilation failed: {e}") from e
-                else:
-                    logger.error(f"DECODER compilation FAILED: {e}")
-                    raise RuntimeError(f"Decoder compilation failed on {self.decoder_device}: {e}") from e
+            self._compile_decoder_with_reshape(core, ov_config)
 
         # Compile decoder_with_past on decoder_device (if exists)
         if hasattr(self.model, 'decoder_with_past') and self.model.decoder_with_past is not None:
-            logger.info(f"Compiling DECODER_WITH_PAST on {self.decoder_device}...")
-            try:
-                if hasattr(self.model.decoder_with_past, '_device'):
-                    self.model.decoder_with_past._device = self.decoder_device
-                self.model.decoder_with_past._compile()
-                logger.info("DECODER_WITH_PAST compiled successfully!")
-            except Exception as e:
-                # If fails and not CPU, try CPU fallback
-                if self.decoder_device != "CPU":
-                    logger.warning(
-                        f"DECODER_WITH_PAST compilation FAILED on {self.decoder_device}: {e}"
-                    )
-                    logger.info("Attempting fallback: compiling DECODER_WITH_PAST on CPU...")
-                    try:
-                        if hasattr(self.model.decoder_with_past, '_device'):
-                            self.model.decoder_with_past._device = "CPU"
-                        self.model.decoder_with_past.request = None
-                        self.model.decoder_with_past._compile()
-                        logger.info("DECODER_WITH_PAST compiled successfully on CPU (fallback)")
-                    except Exception as cpu_e:
-                        logger.error(f"DECODER_WITH_PAST compilation FAILED on CPU: {cpu_e}")
-                        raise RuntimeError(f"Decoder_with_past compilation failed: {e}") from e
-                else:
-                    logger.error(f"DECODER_WITH_PAST compilation FAILED: {e}")
-                    raise RuntimeError(
-                        f"Decoder_with_past compilation failed on {self.decoder_device}: {e}"
-                    ) from e
+            self._compile_decoder_with_past_with_reshape(core, ov_config)
 
         logger.info("All submodels compiled successfully")
+
+    def _analyze_model_for_npu(self, model: "ov.Model", name: str) -> None:
+        """Analyze model for NPU compatibility issues."""
+        import openvino as ov
+
+        logger.info(f"Analyzing {name} model for NPU compatibility...")
+
+        # Check input/output shapes
+        logger.info(f"  Inputs:")
+        for inp in model.inputs:
+            shape = inp.get_partial_shape()
+            is_dynamic = shape.is_dynamic
+            logger.info(f"    {inp.get_any_name()}: {shape} (dynamic={is_dynamic})")
+
+        logger.info(f"  Outputs:")
+        for out in model.outputs:
+            shape = out.get_partial_shape()
+            is_dynamic = shape.is_dynamic
+            logger.info(f"    {out.get_any_name()}: {shape} (dynamic={is_dynamic})")
+
+        # Count operations
+        op_types = {}
+        for op in model.get_ordered_ops():
+            op_type = op.get_type_name()
+            op_types[op_type] = op_types.get(op_type, 0) + 1
+
+        logger.info(f"  Operation types ({len(op_types)} unique):")
+        # Log top 10 most common operations
+        sorted_ops = sorted(op_types.items(), key=lambda x: x[1], reverse=True)[:10]
+        for op_type, count in sorted_ops:
+            logger.info(f"    {op_type}: {count}")
+
+    def _reshape_decoder_to_static(
+        self,
+        model: "ov.Model",
+        batch_size: int = 1,
+        seq_len: int = 448,
+        encoder_seq_len: int = 1500,
+    ) -> "ov.Model":
+        """Reshape decoder model to static shapes for NPU compatibility."""
+        import openvino as ov
+
+        logger.info(f"Reshaping decoder to static shapes: batch={batch_size}, "
+                    f"seq={seq_len}, encoder_seq={encoder_seq_len}")
+
+        # Build static shapes for each input
+        new_shapes = {}
+        for inp in model.inputs:
+            name = inp.get_any_name()
+            current_shape = inp.get_partial_shape()
+
+            # Determine static shape based on input name
+            if "input_ids" in name.lower() or "decoder_input" in name.lower():
+                new_shapes[name] = [batch_size, seq_len]
+            elif "encoder_hidden" in name.lower() or "encoder_output" in name.lower():
+                # Encoder output: [batch, encoder_seq, hidden_dim]
+                hidden_dim = current_shape[-1]
+                if hidden_dim.is_dynamic:
+                    hidden_dim = 1280  # Whisper large hidden dim
+                else:
+                    hidden_dim = hidden_dim.get_length()
+                new_shapes[name] = [batch_size, encoder_seq_len, hidden_dim]
+            elif "attention_mask" in name.lower():
+                if "encoder" in name.lower():
+                    new_shapes[name] = [batch_size, encoder_seq_len]
+                else:
+                    new_shapes[name] = [batch_size, seq_len]
+            elif "past_key_value" in name.lower() or "cache" in name.lower():
+                # KV cache - keep dynamic or set reasonable static size
+                # Shape is usually [batch, num_heads, seq, head_dim]
+                if len(current_shape) == 4:
+                    num_heads = current_shape[1]
+                    head_dim = current_shape[3]
+                    if num_heads.is_dynamic:
+                        num_heads = 20  # Whisper large
+                    else:
+                        num_heads = num_heads.get_length()
+                    if head_dim.is_dynamic:
+                        head_dim = 64
+                    else:
+                        head_dim = head_dim.get_length()
+                    new_shapes[name] = [batch_size, num_heads, seq_len, head_dim]
+
+        logger.info(f"New static shapes: {new_shapes}")
+
+        try:
+            model.reshape(new_shapes)
+            logger.info("Decoder reshaped to static shapes successfully")
+        except Exception as e:
+            logger.warning(f"Failed to reshape decoder: {e}")
+            # Continue with original model
+
+        return model
+
+    def _compile_decoder_with_reshape(self, core: "ov.Core", ov_config: dict) -> None:
+        """Compile decoder with optional static shape reshape for NPU."""
+        import openvino as ov
+
+        decoder = self.model.decoder
+        device = self.decoder_device
+
+        logger.info(f"Compiling DECODER on {device}...")
+
+        # Get the underlying OV model
+        if hasattr(decoder, 'model') and decoder.model is not None:
+            ov_model = decoder.model
+            self._analyze_model_for_npu(ov_model, "decoder")
+
+            # Check if shapes are dynamic
+            has_dynamic = any(inp.get_partial_shape().is_dynamic for inp in ov_model.inputs)
+
+            if has_dynamic and device != "CPU":
+                logger.info("Decoder has dynamic shapes, attempting static reshape for NPU...")
+                try:
+                    self._reshape_decoder_to_static(ov_model)
+                except Exception as e:
+                    logger.warning(f"Static reshape failed: {e}")
+
+        # Set device and compile
+        if hasattr(decoder, '_device'):
+            decoder._device = device
+
+        try:
+            decoder._compile()
+            logger.info("DECODER compiled successfully!")
+        except Exception as e:
+            self._log_compilation_error(e, "decoder", device)
+            raise RuntimeError(f"Decoder compilation failed on {device}: {e}") from e
+
+    def _compile_decoder_with_past_with_reshape(self, core: "ov.Core", ov_config: dict) -> None:
+        """Compile decoder_with_past with optional static shape reshape for NPU."""
+        import openvino as ov
+
+        decoder = self.model.decoder_with_past
+        device = self.decoder_device
+
+        logger.info(f"Compiling DECODER_WITH_PAST on {device}...")
+
+        # Get the underlying OV model
+        if hasattr(decoder, 'model') and decoder.model is not None:
+            ov_model = decoder.model
+            self._analyze_model_for_npu(ov_model, "decoder_with_past")
+
+            # Check if shapes are dynamic
+            has_dynamic = any(inp.get_partial_shape().is_dynamic for inp in ov_model.inputs)
+
+            if has_dynamic and device != "CPU":
+                logger.info("Decoder_with_past has dynamic shapes, attempting static reshape...")
+                try:
+                    # For decoder_with_past, seq_len is usually 1 (single token at a time)
+                    self._reshape_decoder_to_static(ov_model, seq_len=1)
+                except Exception as e:
+                    logger.warning(f"Static reshape failed: {e}")
+
+        # Set device and compile
+        if hasattr(decoder, '_device'):
+            decoder._device = device
+
+        try:
+            decoder._compile()
+            logger.info("DECODER_WITH_PAST compiled successfully!")
+        except Exception as e:
+            self._log_compilation_error(e, "decoder_with_past", device)
+            raise RuntimeError(f"Decoder_with_past compilation failed on {device}: {e}") from e
+
+    def _log_compilation_error(self, error: Exception, model_name: str, device: str) -> None:
+        """Log detailed information about compilation error."""
+        error_str = str(error).lower()
+
+        logger.error(f"{model_name.upper()} compilation FAILED on {device}")
+        logger.error(f"Error: {error}")
+
+        # Analyze error type
+        if "not supported" in error_str or "unsupported" in error_str:
+            logger.error("DIAGNOSIS: Model contains unsupported operations for this device")
+            logger.error("SUGGESTION: Try exporting model with different options or use FP16/INT8 quantization")
+        elif "dynamic" in error_str or "shape" in error_str:
+            logger.error("DIAGNOSIS: Model has dynamic shapes not supported by NPU")
+            logger.error("SUGGESTION: Export model with static shapes using --input_shape option")
+        elif "memory" in error_str or "allocation" in error_str:
+            logger.error("DIAGNOSIS: Not enough memory on device")
+            logger.error("SUGGESTION: Try smaller batch size or model quantization")
+        elif "timeout" in error_str:
+            logger.error("DIAGNOSIS: Compilation timed out")
+            logger.error("SUGGESTION: Model may be too complex for this device")
+        else:
+            logger.error("DIAGNOSIS: Unknown error - check device drivers and OpenVINO version")
 
     def _start_progress(self, total: int, desc: str = "Processing") -> None:
         """Start progress tracking."""
