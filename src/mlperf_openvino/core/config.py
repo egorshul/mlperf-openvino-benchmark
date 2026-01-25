@@ -368,12 +368,12 @@ class BenchmarkConfig:
                 server=ScenarioConfig(
                     min_duration_ms=60000,
                     min_query_count=24576,
-                    target_latency_ns=15000000,  # 15ms (Closed Division)
-                    target_qps=5750.0,  # Optimized for NPU
+                    target_latency_ns=15000000,  # 15ms
+                    target_qps=5700.0,
                     nireq_multiplier=6,
                     explicit_batching=True,
                     explicit_batch_size=8,
-                    batch_timeout_us=1800,
+                    batch_timeout_us=2000,
                 ),
             ),
             dataset=DatasetConfig(
@@ -440,9 +440,9 @@ class BenchmarkConfig:
                 ),
                 server=ScenarioConfig(
                     min_duration_ms=60000,
-                    min_query_count=10833,  # Server uses min_duration primarily
+                    min_query_count=10833,
                     target_latency_ns=130000000,  # 130ms
-                    target_qps=5000.0,
+                    target_qps=330.0,
                 ),
                 onnx_url="https://zenodo.org/record/3733910/files/model.onnx",
             ),

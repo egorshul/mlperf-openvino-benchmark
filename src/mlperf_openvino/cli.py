@@ -247,11 +247,13 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         # Explicit batching (Intel-style) for Server mode
         if explicit_batching:
             scenario_config.explicit_batching = True
-            scenario_config.batch_timeout_us = batch_timeout_us
-            # Use batch_size from CLI for explicit batching
-            explicit_batch = batch_size if batch_size > 1 else 4
+            # Use optimized defaults for explicit batching
+            timeout = batch_timeout_us if batch_timeout_us != 500 else 2000
+            scenario_config.batch_timeout_us = timeout
+            scenario_config.nireq_multiplier = 6
+            explicit_batch = batch_size if batch_size > 1 else 8
             scenario_config.explicit_batch_size = explicit_batch
-            click.echo(f"Explicit batching: batch_size={explicit_batch}, timeout={batch_timeout_us}us")
+            click.echo(f"Explicit batching: batch={explicit_batch}, timeout={timeout}us, nireq=6")
 
     # Validate configuration
     if not benchmark_config.model.model_path:
