@@ -741,6 +741,63 @@ class WhisperOptimumSUT:
 
         return text
 
+    def _process_batch(self, sample_indices: List[int]) -> List[str]:
+        """
+        Process a batch of audio samples together.
+
+        This can be more efficient than processing samples one by one
+        as it allows the model to parallelize across the batch.
+
+        Args:
+            sample_indices: List of sample indices
+
+        Returns:
+            List of transcribed texts
+        """
+        import torch
+
+        if not sample_indices:
+            return []
+
+        t_start = time.time()
+
+        # Gather all features
+        all_features = []
+        for idx in sample_indices:
+            features = self.qsl.get_features(idx)
+            input_features = features["input_features"]
+            if isinstance(input_features, np.ndarray):
+                input_features = torch.from_numpy(input_features)
+            if input_features.dim() == 2:
+                input_features = input_features.unsqueeze(0)
+            all_features.append(input_features)
+
+        # Stack into batch
+        batch_input = torch.cat(all_features, dim=0)
+        batch_size = batch_input.shape[0]
+
+        t_prepare = time.time()
+        logger.info(f"Batch prepared: {batch_size} samples in {(t_prepare - t_start)*1000:.0f}ms")
+
+        # Generate for entire batch
+        generated_ids = self.model.generate(
+            batch_input,
+            max_new_tokens=self.max_new_tokens,
+            language="en",
+            task="transcribe",
+        )
+
+        t_generate = time.time()
+        logger.info(
+            f"Batch generate done: {batch_size} samples in {(t_generate - t_prepare)*1000:.0f}ms "
+            f"({(t_generate - t_prepare)*1000/batch_size:.0f}ms/sample)"
+        )
+
+        # Decode all texts
+        texts = self.processor.batch_decode(generated_ids, skip_special_tokens=True)
+
+        return texts
+
     def issue_queries(self, query_samples: List[Any]) -> None:
         """Process queries from LoadGen."""
         self._query_count += len(query_samples)
@@ -1692,6 +1749,26 @@ class WhisperMultiDieSUT:
         logger.info(f"[{die_name}] DONE sample {sample_idx} in {t_elapsed:.1f}s")
 
         return result
+
+    def _process_batch_on_die(self, sample_indices: List[int], die_name: str) -> List[str]:
+        """Process a batch of samples on specified die."""
+        import threading
+
+        t_start = time.time()
+        thread_id = threading.current_thread().name
+        batch_size = len(sample_indices)
+        logger.info(f"[{die_name}] START batch of {batch_size} samples (thread: {thread_id})")
+
+        sut = self._die_suts[die_name]
+        results = sut._process_batch(sample_indices)
+
+        t_elapsed = time.time() - t_start
+        logger.info(
+            f"[{die_name}] DONE batch of {batch_size} samples in {t_elapsed:.1f}s "
+            f"({t_elapsed/batch_size:.1f}s/sample)"
+        )
+
+        return results
 
     def issue_queries(self, query_samples: List[Any]) -> None:
         """Process queries from LoadGen."""
