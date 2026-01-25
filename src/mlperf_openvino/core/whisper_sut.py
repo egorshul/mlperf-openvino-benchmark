@@ -352,31 +352,71 @@ class WhisperOptimumSUT:
         except Exception as e:
             logger.warning(f"Warmup failed (non-critical): {e}")
 
+    def _filter_config_for_device(self, ov_config: dict, device: str) -> dict:
+        """Filter ov_config to remove device-specific properties not applicable to target device.
+
+        X-specific properties (X_ADDRS, COMPILATION_MODE, etc.) should only go to X device.
+        CPU uses its own optimal defaults.
+
+        Args:
+            ov_config: Full OpenVINO config from -p flags
+            device: Target device (CPU, X, NPU, etc.)
+
+        Returns:
+            Filtered config appropriate for target device
+        """
+        # If compiling to CPU, filter out X-specific properties
+        if device == "CPU":
+            filtered = {}
+            x_specific_props = {
+                "X_ADDRS",
+                "COMPILATION_MODE",
+                # Add any other X-specific properties here
+            }
+            for key, value in ov_config.items():
+                # Skip X-specific properties and any property starting with X_
+                if key in x_specific_props or key.startswith("X_"):
+                    logger.debug(f"Filtering out X-specific property '{key}' for CPU compilation")
+                    continue
+                filtered[key] = value
+
+            if len(filtered) < len(ov_config):
+                logger.info(
+                    f"Filtered {len(ov_config) - len(filtered)} X-specific properties for CPU compilation"
+                )
+            return filtered
+
+        # For non-CPU devices, return full config
+        return ov_config
+
     def _compile_submodels(self, ov_config: dict) -> None:
         """Compile encoder and decoder on their respective devices."""
         import openvino as ov
 
         core = ov.Core()
 
-        # Compile encoder on encoder_device
+        # Compile encoder on encoder_device (use full ov_config for X device)
         if hasattr(self.model, 'encoder') and self.model.encoder is not None:
-            logger.info(f"Compiling ENCODER on {self.encoder_device}...")
+            encoder_config = self._filter_config_for_device(ov_config, self.encoder_device)
+            logger.info(f"Compiling ENCODER on {self.encoder_device} (config keys: {list(encoder_config.keys())})...")
             try:
                 self._compile_submodel_to_device(
-                    self.model.encoder, self.encoder_device, core, ov_config, "encoder"
+                    self.model.encoder, self.encoder_device, core, encoder_config, "encoder"
                 )
                 logger.info("ENCODER compiled successfully!")
             except Exception as e:
                 logger.error(f"ENCODER compilation FAILED on {self.encoder_device}: {e}")
                 raise RuntimeError(f"Encoder compilation failed on {self.encoder_device}: {e}") from e
 
-        # Compile decoder on decoder_device
+        # Compile decoder on decoder_device (filter config for CPU)
         if hasattr(self.model, 'decoder') and self.model.decoder is not None:
-            self._compile_decoder_with_reshape(core, ov_config)
+            decoder_config = self._filter_config_for_device(ov_config, self.decoder_device)
+            self._compile_decoder_with_reshape(core, decoder_config)
 
-        # Compile decoder_with_past on decoder_device (if exists)
+        # Compile decoder_with_past on decoder_device (filter config for CPU)
         if hasattr(self.model, 'decoder_with_past') and self.model.decoder_with_past is not None:
-            self._compile_decoder_with_past_with_reshape(core, ov_config)
+            decoder_config = self._filter_config_for_device(ov_config, self.decoder_device)
+            self._compile_decoder_with_past_with_reshape(core, decoder_config)
 
         logger.info("All submodels compiled successfully")
 
@@ -405,7 +445,7 @@ class WhisperOptimumSUT:
             self._analyze_model_for_npu(ov_model, name)
 
             # Compile using Core directly
-            logger.info(f"Compiling {name} to {device} using OpenVINO Core...")
+            logger.info(f"Compiling {name} to {device} using OpenVINO Core (config: {compile_config})...")
 
             # Build config for compilation
             compile_config = {}
@@ -594,13 +634,16 @@ class WhisperOptimumSUT:
         return model
 
     def _compile_decoder_with_reshape(self, core: "ov.Core", ov_config: dict) -> None:
-        """Compile decoder with static shape reshape for NPU/X devices."""
+        """Compile decoder with static shape reshape for NPU/X devices.
+
+        Note: ov_config should be pre-filtered for the target device.
+        """
         import openvino as ov
 
         decoder = self.model.decoder
         device = self.decoder_device
 
-        logger.info(f"Compiling DECODER on {device}...")
+        logger.info(f"Compiling DECODER on {device} (config keys: {list(ov_config.keys())})...")
 
         # Get the underlying OV model
         if hasattr(decoder, 'model') and decoder.model is not None:
@@ -656,13 +699,16 @@ class WhisperOptimumSUT:
                 raise RuntimeError(f"Decoder compilation failed on {device}: {e}") from e
 
     def _compile_decoder_with_past_with_reshape(self, core: "ov.Core", ov_config: dict) -> None:
-        """Compile decoder_with_past with static shape reshape for NPU/X devices."""
+        """Compile decoder_with_past with static shape reshape for NPU/X devices.
+
+        Note: ov_config should be pre-filtered for the target device.
+        """
         import openvino as ov
 
         decoder = self.model.decoder_with_past
         device = self.decoder_device
 
-        logger.info(f"Compiling DECODER_WITH_PAST on {device}...")
+        logger.info(f"Compiling DECODER_WITH_PAST on {device} (config keys: {list(ov_config.keys())})...")
 
         # Get the underlying OV model
         if hasattr(decoder, 'model') and decoder.model is not None:
