@@ -1782,7 +1782,110 @@ class WhisperMultiDieSUT:
             raise ValueError(f"Unsupported scenario: {self.scenario}")
 
     def _issue_query_offline(self, query_samples: List[Any]) -> None:
-        """Process queries for Offline scenario with parallel multi-die execution."""
+        """Process queries for Offline scenario with batched multi-die execution."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import threading
+        import os
+
+        total_samples = len(query_samples)
+
+        # Check if batching is enabled (default: enabled)
+        use_batching = os.environ.get("WHISPER_BATCH_MODE", "1") == "1"
+        batch_size = int(os.environ.get("WHISPER_BATCH_SIZE", "0"))  # 0 = auto
+
+        if use_batching:
+            self._issue_query_offline_batched(query_samples, batch_size)
+        else:
+            self._issue_query_offline_sequential(query_samples)
+
+    def _issue_query_offline_batched(self, query_samples: List[Any], batch_size: int = 0) -> None:
+        """Process queries using batched execution across dies."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        total_samples = len(query_samples)
+
+        # Auto batch size: divide samples among dies
+        if batch_size <= 0:
+            batch_size = (total_samples + self.num_dies - 1) // self.num_dies
+
+        self._start_progress(total_samples, f"Whisper Offline BATCHED ({self.num_dies} dies, batch={batch_size})")
+
+        # Group samples by die
+        die_samples: Dict[str, List[Tuple[Any, int]]] = {d: [] for d in self._active_devices}
+        for i, sample in enumerate(query_samples):
+            die_name = self._active_devices[i % self.num_dies]
+            die_samples[die_name].append((sample, sample.index))
+
+        logger.info(f"Sample distribution: {[(d, len(s)) for d, s in die_samples.items()]}")
+
+        # Process each die's samples as a batch in parallel
+        results: Dict[int, Tuple[Any, str]] = {}  # sample.id -> (sample, text)
+
+        def process_die_batch(die_name: str, samples_with_indices: List[Tuple[Any, int]]) -> List[Tuple[Any, str]]:
+            """Process all samples for a die as a batch."""
+            if not samples_with_indices:
+                return []
+
+            samples = [s[0] for s in samples_with_indices]
+            indices = [s[1] for s in samples_with_indices]
+
+            t_start = time.time()
+            logger.info(f"[{die_name}] Starting batch of {len(indices)} samples")
+
+            try:
+                texts = self._process_batch_on_die(indices, die_name)
+                t_elapsed = time.time() - t_start
+                logger.info(
+                    f"[{die_name}] Completed batch of {len(indices)} samples in {t_elapsed:.1f}s "
+                    f"({t_elapsed/len(indices):.1f}s/sample)"
+                )
+                return list(zip(samples, texts))
+            except Exception as e:
+                logger.error(f"[{die_name}] Batch processing failed: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                # Fallback: return empty results
+                return [(s, "") for s in samples]
+
+        # Execute dies in parallel
+        with ThreadPoolExecutor(max_workers=self.num_dies) as executor:
+            futures = {}
+            for die_name, samples_with_indices in die_samples.items():
+                if samples_with_indices:
+                    future = executor.submit(process_die_batch, die_name, samples_with_indices)
+                    futures[future] = die_name
+
+            # Collect results
+            for future in as_completed(futures):
+                die_name = futures[future]
+                try:
+                    batch_results = future.result()
+                    for sample, text in batch_results:
+                        results[sample.id] = (sample, text)
+                        self._predictions[sample.index] = text
+                        self._sample_count += 1
+                        self._update_progress(1)
+                except Exception as e:
+                    logger.error(f"[{die_name}] Failed to get results: {e}")
+
+        self._close_progress()
+
+        # Build responses in original order
+        responses = []
+        response_arrays = []
+        for sample in query_samples:
+            _, text = results.get(sample.id, (sample, ""))
+            response_data = np.array([len(text)], dtype=np.int64)
+            response_array = array.array('B', response_data.tobytes())
+            response_arrays.append(response_array)
+            bi = response_array.buffer_info()
+            response = lg.QuerySampleResponse(sample.id, bi[0], bi[1])
+            responses.append(response)
+
+        lg.QuerySamplesComplete(responses)
+
+    def _issue_query_offline_sequential(self, query_samples: List[Any]) -> None:
+        """Process queries sequentially (one sample at a time per die)."""
         from concurrent.futures import ThreadPoolExecutor, as_completed
         import threading
 
