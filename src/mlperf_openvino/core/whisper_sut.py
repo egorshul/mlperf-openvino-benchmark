@@ -355,34 +355,67 @@ class WhisperOptimumSUT:
     def _filter_config_for_device(self, ov_config: dict, device: str) -> dict:
         """Filter ov_config to remove device-specific properties not applicable to target device.
 
-        X-specific properties (X_ADDRS, COMPILATION_MODE, etc.) should only go to X device.
+        Accelerator-specific properties (like *_ADDRS, COMPILATION_MODE, etc.)
+        should only go to accelerator devices, not CPU.
         CPU uses its own optimal defaults.
 
         Args:
             ov_config: Full OpenVINO config from -p flags
-            device: Target device (CPU, X, NPU, etc.)
+            device: Target device (CPU, GPU, NPU, X, MINERVA, etc.)
 
         Returns:
             Filtered config appropriate for target device
         """
-        # If compiling to CPU, filter out X-specific properties
+        # If compiling to CPU, filter out accelerator-specific properties
         if device == "CPU":
             filtered = {}
-            x_specific_props = {
-                "X_ADDRS",
-                "COMPILATION_MODE",
-                # Add any other X-specific properties here
+
+            # Known CPU-safe properties (whitelist approach)
+            cpu_safe_props = {
+                "CACHE_DIR",
+                "NUM_STREAMS",
+                "INFERENCE_NUM_THREADS",
+                "AFFINITY",
+                "INFERENCE_PRECISION_HINT",
+                "PERFORMANCE_HINT",
+                "ENABLE_CPU_PINNING",
             }
+
+            # Patterns that indicate accelerator-specific properties
+            accelerator_patterns = (
+                "_ADDRS",           # Socket addresses (X_ADDRS, NPU_ADDRS, etc.)
+                "COMPILATION_MODE", # Accelerator compilation mode
+                "_TILES",           # Tile configuration
+                "_THROUGHPUT",      # Accelerator throughput hints
+            )
+
             for key, value in ov_config.items():
-                # Skip X-specific properties and any property starting with X_
-                if key in x_specific_props or key.startswith("X_"):
-                    logger.debug(f"Filtering out X-specific property '{key}' for CPU compilation")
+                key_upper = key.upper()
+
+                # Skip if matches accelerator patterns
+                is_accelerator_prop = any(pattern in key_upper for pattern in accelerator_patterns)
+
+                # Also skip properties with device prefixes (X_, NPU_, VPU_, etc.)
+                # These are typically 1-4 letter prefixes followed by underscore
+                has_device_prefix = (
+                    "_" in key and
+                    key.split("_")[0].isupper() and
+                    len(key.split("_")[0]) <= 8
+                )
+
+                if is_accelerator_prop:
+                    logger.debug(f"Filtering accelerator property '{key}' for CPU")
                     continue
+
+                if has_device_prefix and key_upper not in cpu_safe_props:
+                    logger.debug(f"Filtering device-prefixed property '{key}' for CPU")
+                    continue
+
                 filtered[key] = value
 
             if len(filtered) < len(ov_config):
                 logger.info(
-                    f"Filtered {len(ov_config) - len(filtered)} X-specific properties for CPU compilation"
+                    f"Filtered {len(ov_config) - len(filtered)} accelerator-specific properties for CPU compilation"
                 )
             return filtered
 
