@@ -155,30 +155,68 @@ class WhisperOptimumSUT:
                 device=self.device,
                 compile=False,  # Don't compile yet
             )
-            logger.info("Model loaded, now compiling...")
+            logger.info("Model loaded successfully (not compiled yet)")
 
-            # Compile separately to catch compilation errors
-            try:
-                self.model.compile()
-                logger.info(f"Model compiled successfully on {self.device}")
-            except Exception as compile_error:
-                logger.error(f"Compilation failed on {self.device}: {compile_error}")
-                logger.error(f"Compilation error type: {type(compile_error).__name__}")
-                import traceback
-                logger.error(f"Traceback:\n{traceback.format_exc()}")
-                raise RuntimeError(
-                    f"Failed to compile Whisper model on {self.device}. "
-                    f"Error: {compile_error}"
-                ) from compile_error
+            # Log submodels info
+            submodels = ['encoder', 'decoder', 'decoder_with_past']
+            for name in submodels:
+                if hasattr(self.model, name) and getattr(self.model, name) is not None:
+                    submodel = getattr(self.model, name)
+                    logger.info(f"  Submodel '{name}': present")
+                    if hasattr(submodel, 'model') and submodel.model is not None:
+                        try:
+                            inputs = [inp.get_any_name() for inp in submodel.model.inputs]
+                            outputs = [out.get_any_name() for out in submodel.model.outputs]
+                            logger.info(f"    Inputs ({len(inputs)}): {inputs[:3]}...")
+                            logger.info(f"    Outputs ({len(outputs)}): {outputs[:3]}...")
+                        except Exception:
+                            pass
+                else:
+                    logger.info(f"  Submodel '{name}': NOT present")
+
+            # Compile submodels one by one to identify which fails
+            logger.info("Compiling submodels one by one...")
+
+            # Try to compile encoder first
+            if hasattr(self.model, 'encoder') and self.model.encoder is not None:
+                logger.info(f"Compiling ENCODER on {self.device}...")
+                try:
+                    self.model.encoder._compile()
+                    logger.info("ENCODER compiled successfully!")
+                except Exception as e:
+                    logger.error(f"ENCODER compilation FAILED: {e}")
+                    raise RuntimeError(f"Encoder compilation failed on {self.device}: {e}") from e
+
+            # Try to compile decoder
+            if hasattr(self.model, 'decoder') and self.model.decoder is not None:
+                logger.info(f"Compiling DECODER on {self.device}...")
+                try:
+                    self.model.decoder._compile()
+                    logger.info("DECODER compiled successfully!")
+                except Exception as e:
+                    logger.error(f"DECODER compilation FAILED: {e}")
+                    raise RuntimeError(f"Decoder compilation failed on {self.device}: {e}") from e
+
+            # Try to compile decoder_with_past if exists
+            if hasattr(self.model, 'decoder_with_past') and self.model.decoder_with_past is not None:
+                logger.info(f"Compiling DECODER_WITH_PAST on {self.device}...")
+                try:
+                    self.model.decoder_with_past._compile()
+                    logger.info("DECODER_WITH_PAST compiled successfully!")
+                except Exception as e:
+                    logger.error(f"DECODER_WITH_PAST compilation FAILED: {e}")
+                    raise RuntimeError(f"Decoder_with_past compilation failed on {self.device}: {e}") from e
+
+            logger.info(f"All submodels compiled successfully on {self.device}")
 
         except Exception as load_error:
-            logger.error(f"Failed to load model: {load_error}")
-            logger.error(f"Load error type: {type(load_error).__name__}")
+            logger.error(f"Failed to load/compile model: {load_error}")
+            logger.error(f"Error type: {type(load_error).__name__}")
             import traceback
             logger.error(f"Traceback:\n{traceback.format_exc()}")
             raise
 
-        logger.info(f"Whisper model loaded successfully on {self.device}")
+        logger.info(f"Whisper model ready on {self.device}")
 
     def _start_progress(self, total: int, desc: str = "Processing") -> None:
         """Start progress tracking."""
