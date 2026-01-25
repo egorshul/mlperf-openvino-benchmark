@@ -1799,74 +1799,105 @@ class WhisperMultiDieSUT:
             self._issue_query_offline_sequential(query_samples)
 
     def _issue_query_offline_batched(self, query_samples: List[Any], batch_size: int = 0) -> None:
-        """Process queries using batched execution across dies."""
+        """Process queries using batched execution across dies.
+
+        Each die processes batches of `batch_size` samples in parallel.
+        For example, with 2 dies and batch_size=4:
+        - Die 0 processes batches: [0,1,2,3], [8,9,10,11], [16,17,18,19], ...
+        - Die 1 processes batches: [4,5,6,7], [12,13,14,15], [20,21,22,23], ...
+        """
         from concurrent.futures import ThreadPoolExecutor, as_completed
+        import threading
 
         total_samples = len(query_samples)
 
-        # Auto batch size: divide samples among dies
+        # Default batch size if not specified
         if batch_size <= 0:
-            batch_size = (total_samples + self.num_dies - 1) // self.num_dies
+            batch_size = 1  # Fall back to sequential if no batch size specified
+            logger.warning("No batch size specified (WHISPER_BATCH_SIZE=0), using batch_size=1")
 
         self._start_progress(total_samples, f"Whisper Offline BATCHED ({self.num_dies} dies, batch={batch_size})")
 
-        # Group samples by die
-        die_samples: Dict[str, List[Tuple[Any, int]]] = {d: [] for d in self._active_devices}
-        for i, sample in enumerate(query_samples):
-            die_name = self._active_devices[i % self.num_dies]
-            die_samples[die_name].append((sample, sample.index))
+        # Create batches and assign to dies in round-robin
+        # Each batch is (die_name, [(sample, index), ...])
+        all_batches: List[Tuple[str, List[Tuple[Any, int]]]] = []
 
-        logger.info(f"Sample distribution: {[(d, len(s)) for d, s in die_samples.items()]}")
+        current_batch: List[Tuple[Any, int]] = []
+        current_die_idx = 0
 
-        # Process each die's samples as a batch in parallel
+        for sample in query_samples:
+            current_batch.append((sample, sample.index))
+
+            if len(current_batch) >= batch_size:
+                die_name = self._active_devices[current_die_idx % self.num_dies]
+                all_batches.append((die_name, current_batch))
+                current_batch = []
+                current_die_idx += 1
+
+        # Don't forget the last partial batch
+        if current_batch:
+            die_name = self._active_devices[current_die_idx % self.num_dies]
+            all_batches.append((die_name, current_batch))
+
+        num_batches = len(all_batches)
+        logger.info(f"Created {num_batches} batches of size {batch_size} for {self.num_dies} dies")
+
+        # Results storage (thread-safe)
         results: Dict[int, Tuple[Any, str]] = {}  # sample.id -> (sample, text)
+        results_lock = threading.Lock()
 
-        def process_die_batch(die_name: str, samples_with_indices: List[Tuple[Any, int]]) -> List[Tuple[Any, str]]:
-            """Process all samples for a die as a batch."""
-            if not samples_with_indices:
-                return []
-
+        def process_batch(batch_idx: int, die_name: str, samples_with_indices: List[Tuple[Any, int]]) -> None:
+            """Process a single batch on specified die."""
             samples = [s[0] for s in samples_with_indices]
             indices = [s[1] for s in samples_with_indices]
+            actual_batch_size = len(indices)
 
             t_start = time.time()
-            logger.info(f"[{die_name}] Starting batch of {len(indices)} samples")
+            logger.info(f"[{die_name}] Batch {batch_idx}: starting {actual_batch_size} samples")
 
             try:
                 texts = self._process_batch_on_die(indices, die_name)
                 t_elapsed = time.time() - t_start
+
                 logger.info(
-                    f"[{die_name}] Completed batch of {len(indices)} samples in {t_elapsed:.1f}s "
-                    f"({t_elapsed/len(indices):.1f}s/sample)"
+                    f"[{die_name}] Batch {batch_idx}: done {actual_batch_size} samples in {t_elapsed:.1f}s "
+                    f"({t_elapsed/actual_batch_size:.1f}s/sample)"
                 )
-                return list(zip(samples, texts))
-            except Exception as e:
-                logger.error(f"[{die_name}] Batch processing failed: {e}")
-                import traceback
-                logger.error(traceback.format_exc())
-                # Fallback: return empty results
-                return [(s, "") for s in samples]
 
-        # Execute dies in parallel
-        with ThreadPoolExecutor(max_workers=self.num_dies) as executor:
-            futures = {}
-            for die_name, samples_with_indices in die_samples.items():
-                if samples_with_indices:
-                    future = executor.submit(process_die_batch, die_name, samples_with_indices)
-                    futures[future] = die_name
-
-            # Collect results
-            for future in as_completed(futures):
-                die_name = futures[future]
-                try:
-                    batch_results = future.result()
-                    for sample, text in batch_results:
+                # Store results
+                with results_lock:
+                    for sample, text in zip(samples, texts):
                         results[sample.id] = (sample, text)
                         self._predictions[sample.index] = text
                         self._sample_count += 1
                         self._update_progress(1)
+
+            except Exception as e:
+                logger.error(f"[{die_name}] Batch {batch_idx} failed: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+
+                # Store empty results for failed batch
+                with results_lock:
+                    for sample in samples:
+                        results[sample.id] = (sample, "")
+                        self._sample_count += 1
+                        self._update_progress(1)
+
+        # Process batches with num_dies parallel workers
+        # This allows each die to process one batch at a time
+        with ThreadPoolExecutor(max_workers=self.num_dies) as executor:
+            futures = []
+            for batch_idx, (die_name, samples_with_indices) in enumerate(all_batches):
+                future = executor.submit(process_batch, batch_idx, die_name, samples_with_indices)
+                futures.append(future)
+
+            # Wait for all batches to complete
+            for future in as_completed(futures):
+                try:
+                    future.result()  # Raises exception if batch failed
                 except Exception as e:
-                    logger.error(f"[{die_name}] Failed to get results: {e}")
+                    logger.error(f"Batch execution error: {e}")
 
         self._close_progress()
 
