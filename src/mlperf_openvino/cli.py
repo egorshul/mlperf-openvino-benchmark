@@ -367,31 +367,50 @@ def _print_dataset_help(model: str) -> None:
               default='./models', help='Output directory')
 @click.option('--format', '-f', type=click.Choice(['onnx', 'openvino']),
               default='onnx', help='Model format')
-def download_model_cmd(model: str, output_dir: str, format: str):
+@click.option('--device', '-d', type=str, default='CPU',
+              help='Target device (CPU, GPU, NPU, X, etc.). NPU/X triggers stateless export for Whisper')
+def download_model_cmd(model: str, output_dir: str, format: str, device: str):
     """
     Download model files.
 
     Examples:
 
-        mlperf-ov download --model resnet50 --output-dir ./models
+        mlperf-ov download-model --model resnet50 --output-dir ./models
 
-        mlperf-ov download --model bert --format onnx
+        mlperf-ov download-model --model bert --format onnx
 
-        mlperf-ov download --model whisper --format openvino
+        mlperf-ov download-model --model whisper --format openvino
+
+        mlperf-ov download-model --model whisper --device NPU  # NPU-optimized stateless export
     """
-    click.echo(f"Downloading {model} model...")
+    device = device.upper()
+    is_npu_device = device not in ('CPU', 'GPU', 'AUTO')
+
+    if is_npu_device:
+        click.echo(f"Downloading {model} model for {device} (NPU-optimized)...")
+    else:
+        click.echo(f"Downloading {model} model...")
 
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
     try:
         if model == 'whisper':
-            from .utils.model_downloader import download_whisper_model
-            export_to_openvino = (format == 'openvino')
-            paths = download_whisper_model(
-                str(output_path),
-                export_to_openvino=export_to_openvino
-            )
+            if is_npu_device:
+                # Use NPU-optimized export (stateless)
+                from .utils.model_downloader import export_whisper_for_npu
+                click.echo(f"  Exporting with --stateless for {device} compatibility...")
+                paths = export_whisper_for_npu(
+                    str(output_path),
+                    stateless=True,
+                )
+            else:
+                from .utils.model_downloader import download_whisper_model
+                export_to_openvino = (format == 'openvino')
+                paths = download_whisper_model(
+                    str(output_path),
+                    export_to_openvino=export_to_openvino
+                )
             click.echo(f"Model downloaded to: {paths['model_path']}")
             if 'encoder_path' in paths:
                 click.echo(f"  Encoder: {paths['encoder_path']}")
@@ -623,7 +642,9 @@ def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str],
               default='.', help='Base output directory')
 @click.option('--format', '-f', type=click.Choice(['onnx', 'openvino']),
               default='onnx', help='Model format')
-def setup_cmd(model: str, output_dir: str, format: str):
+@click.option('--device', '-d', type=str, default='CPU',
+              help='Target device (CPU, GPU, NPU, X, etc.). NPU/X triggers stateless export for Whisper')
+def setup_cmd(model: str, output_dir: str, format: str, device: str):
     """
     Download both model and dataset for a benchmark.
 
@@ -644,29 +665,43 @@ def setup_cmd(model: str, output_dir: str, format: str):
         # Set up Whisper benchmark with OpenVINO format
         mlperf-ov setup --model whisper --format openvino
 
+        # Set up Whisper benchmark for NPU (stateless export)
+        mlperf-ov setup --model whisper --device NPU
+
         # Set up SDXL benchmark
         mlperf-ov setup --model sdxl --format openvino
     """
-    from .utils.model_downloader import download_model, download_whisper_model, download_sdxl_model
+    from .utils.model_downloader import download_model, download_whisper_model, download_sdxl_model, export_whisper_for_npu
     from .utils.dataset_downloader import download_dataset
+
+    device = device.upper()
+    is_npu_device = device not in ('CPU', 'GPU', 'AUTO')
 
     output_path = Path(output_dir)
     models_dir = output_path / "models"
     data_dir = output_path / "data"
 
     click.echo(f"\n{'='*60}")
-    click.echo(f"Setting up {model} benchmark")
+    click.echo(f"Setting up {model} benchmark" + (f" for {device}" if is_npu_device else ""))
     click.echo(f"{'='*60}\n")
 
     # Download model
     click.echo("Step 1: Downloading model...")
     try:
         if model == 'whisper':
-            export_to_openvino = (format == 'openvino')
-            model_paths = download_whisper_model(
-                str(models_dir),
-                export_to_openvino=export_to_openvino
-            )
+            if is_npu_device:
+                # Use NPU-optimized export (stateless)
+                click.echo(f"  Exporting with --stateless for {device} compatibility...")
+                model_paths = export_whisper_for_npu(
+                    str(models_dir),
+                    stateless=True,
+                )
+            else:
+                export_to_openvino = (format == 'openvino')
+                model_paths = download_whisper_model(
+                    str(models_dir),
+                    export_to_openvino=export_to_openvino
+                )
             model_path = model_paths['model_path']
         elif model == 'sdxl':
             export_to_openvino = (format == 'openvino')
@@ -711,6 +746,8 @@ def setup_cmd(model: str, output_dir: str, format: str):
     data_path = dataset_paths.get('data_path', f'{data_dir}/{model}')
 
     click.echo(f"  mlperf-ov run --model {model} \\")
+    if is_npu_device:
+        click.echo(f"    --device {device} \\")
     click.echo(f"    --model-path {model_path} \\")
     click.echo(f"    --data-path {data_path}")
 
