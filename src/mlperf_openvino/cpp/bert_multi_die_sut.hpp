@@ -30,7 +30,7 @@ constexpr int SERVER_BATCH_SIZE = 1;
 
 class BertMultiDieSUT;
 
-struct BertInferContext {
+struct MultiDieInferContext {
     ov::InferRequest request;
     ov::Tensor input_ids_tensor;
     ov::Tensor attention_mask_tensor;
@@ -50,9 +50,9 @@ struct BertInferContext {
     int num_dummies = 0;
 };
 
-struct BertBucketModel {
+struct MultiDieBucketModel {
     ov::CompiledModel compiled_model;
-    std::vector<std::unique_ptr<BertInferContext>> requests;
+    std::vector<std::unique_ptr<MultiDieInferContext>> requests;
     std::atomic<int>* slot_states = nullptr;
     size_t num_requests = 0;
     std::atomic<size_t> pool_hint{0};
@@ -60,13 +60,13 @@ struct BertBucketModel {
     int seq_length = 0;
 };
 
-struct BertDieContext {
+struct MultiDieDieContext {
     std::string device_name;
     size_t die_idx = 0;
-    std::unique_ptr<BertBucketModel> bucket_models[NUM_SEQ_BUCKETS];
+    std::unique_ptr<MultiDieBucketModel> bucket_models[NUM_SEQ_BUCKETS];
 };
 
-struct BertSample {
+struct MultiDieSample {
     std::vector<int64_t> input_ids;
     std::vector<int64_t> attention_mask;
     std::vector<int64_t> token_type_ids;
@@ -74,22 +74,22 @@ struct BertSample {
     int bucket_idx = 0;
 };
 
-struct BertPrediction {
+struct MultiDiePrediction {
     std::vector<float> start_logits;
     std::vector<float> end_logits;
 };
 
-struct BertStagedSample {
+struct MultiDieStagedSample {
     int sample_idx;
     int seq_len;
     size_t offset;
 };
 
-struct BertStagedBucket {
+struct MultiDieStagedBucket {
     std::vector<int64_t> input_ids;
     std::vector<int64_t> attention_mask;
     std::vector<int64_t> token_type_ids;
-    std::vector<BertStagedSample> samples;
+    std::vector<MultiDieStagedSample> samples;
     std::unordered_map<int, size_t> sample_to_index;
     int seq_length = 0;
     bool staged = false;
@@ -142,7 +142,7 @@ public:
     uint64_t get_issued_count() const { return issued_count_.load(); }
 
     void set_store_predictions(bool store) { store_predictions_ = store; }
-    std::unordered_map<int, BertPrediction> get_predictions() const;
+    std::unordered_map<int, MultiDiePrediction> get_predictions() const;
     void clear_predictions();
 
     void enable_direct_loadgen(bool enable) { use_direct_loadgen_.store(enable); }
@@ -157,7 +157,7 @@ private:
 
     ov::Core core_;
     std::shared_ptr<ov::Model> base_model_;
-    std::vector<std::unique_ptr<BertDieContext>> die_contexts_;
+    std::vector<std::unique_ptr<MultiDieDieContext>> die_contexts_;
 
     std::string input_ids_name_;
     std::string attention_mask_name_;
@@ -173,12 +173,12 @@ private:
     size_t total_slots_ = 0;
 
     mutable std::shared_mutex sample_mutex_;
-    std::unordered_map<int, BertSample> samples_;
+    std::unordered_map<int, MultiDieSample> samples_;
 
     std::vector<int8_t> bucket_cache_;
     int bucket_cache_size_ = 0;
 
-    BertStagedBucket staged_buckets_[NUM_SEQ_BUCKETS];
+    MultiDieStagedBucket staged_buckets_[NUM_SEQ_BUCKETS];
     bool samples_staged_ = false;
 
     std::atomic<size_t> die_round_robin_[NUM_SEQ_BUCKETS];
@@ -190,7 +190,7 @@ private:
 
     bool store_predictions_ = false;
     mutable std::mutex predictions_mutex_;
-    std::unordered_map<int, BertPrediction> predictions_;
+    std::unordered_map<int, MultiDiePrediction> predictions_;
 
     std::atomic<bool> use_direct_loadgen_{false};
 
@@ -200,9 +200,9 @@ private:
     std::shared_ptr<ov::Model> reshape_model(int batch_size, int seq_length);
     void build_bucket_cache();
 
-    BertInferContext* acquire_request(size_t die_idx, int bucket_idx);
-    void release_request(BertInferContext* ctx);
-    void on_complete(BertInferContext* ctx);
+    MultiDieInferContext* acquire_request(size_t die_idx, int bucket_idx);
+    void release_request(MultiDieInferContext* ctx);
+    void on_complete(MultiDieInferContext* ctx);
 
     void copy_to_tensor(int sample_idx, int seq_len,
                         int64_t* ids, int64_t* mask, int64_t* types, int offset);
