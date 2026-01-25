@@ -460,13 +460,13 @@ def export_whisper_encoder_only(
 ) -> str:
     """
     Export only the Whisper encoder to ONNX format.
-    
+
     Useful for encoder-only benchmarking or using external decoder.
-    
+
     Args:
         output_dir: Output directory
         model_id: HuggingFace model ID
-        
+
     Returns:
         Path to encoder ONNX model
     """
@@ -478,30 +478,31 @@ def export_whisper_encoder_only(
             "torch and transformers are required. "
             "Install with: pip install torch transformers"
         )
-    
+
     logger.info(f"Exporting Whisper encoder: {model_id}")
-    
+
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    
+
     model_name = model_id.split("/")[-1]
     encoder_path = output_path / f"{model_name}_encoder.onnx"
-    
+
     if encoder_path.exists():
         logger.info(f"Encoder already exists: {encoder_path}")
         return str(encoder_path)
-    
+
     # Load model
     model = WhisperForConditionalGeneration.from_pretrained(model_id)
     encoder = model.get_encoder()
     encoder.eval()
-    
-    # Create dummy input (batch=1, n_mels=80, time=3000 for 30 seconds)
-    dummy_input = torch.randn(1, 80, 3000)
-    
+
+    # Create dummy input (batch=1, n_mels=128, time=3000 for 30 seconds)
+    # MLPerf v5.1 requires 128 mel bins for Whisper-Large-v3
+    dummy_input = torch.randn(1, 128, 3000)
+
     # Export to ONNX
     logger.info(f"Exporting to {encoder_path}...")
-    
+
     torch.onnx.export(
         encoder,
         dummy_input,
@@ -514,10 +515,178 @@ def export_whisper_encoder_only(
         },
         opset_version=14,
     )
-    
+
     logger.info(f"Encoder exported to {encoder_path}")
 
     return str(encoder_path)
+
+
+def export_whisper_for_npu(
+    output_dir: str,
+    model_id: str = "openai/whisper-large-v3",
+    static_shapes: bool = True,
+    batch_size: int = 1,
+) -> Dict[str, str]:
+    """
+    Export Whisper model optimized for NPU with static shapes.
+
+    NPU accelerators work best with static tensor shapes. This function
+    exports encoder and decoder with fixed dimensions for maximum performance.
+
+    MLPerf v5.1 Whisper specifications:
+    - Input: (batch, 128, 3000) - 128 mel bins, 30 seconds
+    - Encoder output: (batch, 1500, 1280)
+    - Decoder: with KV-cache for efficient autoregressive generation
+
+    Args:
+        output_dir: Output directory
+        model_id: HuggingFace model ID
+        static_shapes: Use static shapes (recommended for NPU)
+        batch_size: Batch size for static shapes
+
+    Returns:
+        Dictionary with paths to optimized OpenVINO IR models
+    """
+    try:
+        from optimum.intel import OVModelForSpeechSeq2Seq
+        from optimum.exporters.openvino import main_export
+        from transformers import WhisperProcessor
+    except ImportError:
+        raise ImportError(
+            "optimum-intel is required. Install with: pip install optimum[openvino]"
+        )
+
+    _configure_hf_download()
+
+    logger.info(f"Exporting Whisper for NPU: {model_id}")
+    logger.info(f"  Static shapes: {static_shapes}, Batch size: {batch_size}")
+
+    output_path = Path(output_dir)
+    model_name = model_id.split("/")[-1]
+    ov_model_path = output_path / f"{model_name}-openvino-npu"
+
+    # Check if already exported
+    encoder_xml = ov_model_path / "openvino_encoder_model.xml"
+    decoder_xml = ov_model_path / "openvino_decoder_with_past_model.xml"
+
+    if encoder_xml.exists() and decoder_xml.exists():
+        logger.info(f"NPU-optimized model already exists at {ov_model_path}")
+        return {
+            "model_path": str(ov_model_path),
+            "encoder_path": str(encoder_xml),
+            "decoder_path": str(decoder_xml),
+        }
+
+    ov_model_path.mkdir(parents=True, exist_ok=True)
+
+    # Use optimum-cli style export with NPU-optimized settings
+    logger.info("Exporting with optimum-intel (this may take several minutes)...")
+
+    try:
+        # Try using main_export for more control
+        main_export(
+            model_name_or_path=model_id,
+            output=str(ov_model_path),
+            task="automatic-speech-recognition-with-past",
+            fp16=False,  # NPU may prefer FP32 or INT8
+            int8=False,
+            # Static shapes for encoder (batch, n_mels=128, time=3000)
+            # Note: optimum handles this via model config
+        )
+    except Exception as e:
+        logger.warning(f"main_export failed ({e}), falling back to OVModelForSpeechSeq2Seq")
+
+        # Fallback: use OVModelForSpeechSeq2Seq
+        def do_export():
+            return OVModelForSpeechSeq2Seq.from_pretrained(
+                model_id,
+                export=True,
+                compile=False,
+            )
+
+        model = _download_with_retry(do_export, max_retries=3)
+        model.save_pretrained(str(ov_model_path))
+
+    # Save processor
+    logger.info("Downloading processor...")
+
+    def do_processor():
+        return WhisperProcessor.from_pretrained(model_id)
+
+    processor = _download_with_retry(do_processor, max_retries=3)
+    processor.save_pretrained(str(ov_model_path))
+
+    # Reshape models for static shapes if requested
+    if static_shapes:
+        _reshape_whisper_for_npu(ov_model_path, batch_size)
+
+    # Find actual model paths (naming varies)
+    encoder_path = None
+    decoder_path = None
+
+    for pattern in ["openvino_encoder_model.xml", "encoder_model.xml"]:
+        p = ov_model_path / pattern
+        if p.exists():
+            encoder_path = p
+            break
+
+    for pattern in ["openvino_decoder_with_past_model.xml", "decoder_with_past_model.xml",
+                    "openvino_decoder_model.xml", "decoder_model.xml"]:
+        p = ov_model_path / pattern
+        if p.exists():
+            decoder_path = p
+            break
+
+    logger.info(f"NPU-optimized Whisper model saved to {ov_model_path}")
+
+    return {
+        "model_path": str(ov_model_path),
+        "encoder_path": str(encoder_path) if encoder_path else None,
+        "decoder_path": str(decoder_path) if decoder_path else None,
+    }
+
+
+def _reshape_whisper_for_npu(model_path: Path, batch_size: int = 1) -> None:
+    """
+    Reshape Whisper models for static shapes optimized for NPU.
+
+    Args:
+        model_path: Path to OpenVINO model directory
+        batch_size: Fixed batch size
+    """
+    try:
+        import openvino as ov
+    except ImportError:
+        logger.warning("OpenVINO not available, skipping reshape")
+        return
+
+    core = ov.Core()
+
+    # Reshape encoder: (batch, 128, 3000) -> (batch, 1500, 1280)
+    encoder_candidates = [
+        model_path / "openvino_encoder_model.xml",
+        model_path / "encoder_model.xml",
+    ]
+
+    for encoder_path in encoder_candidates:
+        if encoder_path.exists():
+            logger.info(f"Reshaping encoder for static shapes: {encoder_path}")
+            try:
+                encoder = core.read_model(str(encoder_path))
+
+                # Set static input shape (batch, n_mels=128, time=3000)
+                encoder.reshape({0: [batch_size, 128, 3000]})
+
+                # Save with static shapes
+                static_path = encoder_path.parent / f"encoder_static_b{batch_size}.xml"
+                ov.save_model(encoder, str(static_path))
+                logger.info(f"  Saved static encoder: {static_path}")
+
+            except Exception as e:
+                logger.warning(f"Failed to reshape encoder: {e}")
+            break
+
+    logger.info("Reshape complete. Use static models for maximum NPU performance.")
 
 
 def download_sdxl_model(
