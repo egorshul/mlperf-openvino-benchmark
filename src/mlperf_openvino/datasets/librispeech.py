@@ -16,12 +16,12 @@ from .base import BaseDataset, QuerySampleLibrary
 
 logger = logging.getLogger(__name__)
 
-# Audio processing constants
+# Audio processing constants (MLPerf v5.1 Whisper specification)
 SAMPLE_RATE = 16000  # Whisper expects 16kHz audio
-N_FFT = 400
-HOP_LENGTH = 160
-N_MELS = 80
-CHUNK_LENGTH = 30  # seconds
+N_FFT = 400  # Fourier transform size (25ms window at 16kHz)
+HOP_LENGTH = 160  # Hop length (10ms stride at 16kHz)
+N_MELS = 128  # MLPerf v5.1 requires 128 mel bins (Whisper-Large-v3)
+CHUNK_LENGTH = 30  # seconds (fixed Whisper input window)
 N_SAMPLES = CHUNK_LENGTH * SAMPLE_RATE  # 480000 samples for 30 seconds
 
 # Global feature extractor (lazy loaded)
@@ -116,22 +116,24 @@ def log_mel_spectrogram(
 ) -> np.ndarray:
     """
     Compute log-Mel spectrogram from audio waveform.
-    
-    This matches the preprocessing used by Whisper.
-    
+
+    This matches the preprocessing used by Whisper-Large-v3.
+    MLPerf v5.1 requires 128 mel frequency bins.
+
     Args:
         audio: Audio waveform (16kHz)
-        n_mels: Number of mel filterbanks
-        n_fft: FFT window size
-        hop_length: Hop length for STFT
-        
+        n_mels: Number of mel filterbanks (default: 128 for MLPerf v5.1)
+        n_fft: FFT window size (default: 400, 25ms at 16kHz)
+        hop_length: Hop length for STFT (default: 160, 10ms at 16kHz)
+
     Returns:
         Log-mel spectrogram of shape (n_mels, time_frames)
+        For 30 seconds audio: (128, 3000)
     """
     try:
         import librosa
-        
-        # Compute mel spectrogram
+
+        # Compute mel spectrogram (Whisper uses fmax=8000 for 128 mel bins)
         mel_spec = librosa.feature.melspectrogram(
             y=audio,
             sr=SAMPLE_RATE,
@@ -141,14 +143,14 @@ def log_mel_spectrogram(
             fmin=0,
             fmax=8000,
         )
-        
-        # Convert to log scale
+
+        # Convert to log scale (Whisper normalization)
         log_mel = np.log10(np.clip(mel_spec, a_min=1e-10, a_max=None))
-        
-        # Normalize
+
+        # Normalize (Whisper-style)
         log_mel = np.maximum(log_mel, log_mel.max() - 8.0)
         log_mel = (log_mel + 4.0) / 4.0
-        
+
         return log_mel.astype(np.float32)
         
     except ImportError:

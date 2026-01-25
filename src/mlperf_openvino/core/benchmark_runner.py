@@ -323,7 +323,12 @@ class BenchmarkRunner:
             )
 
     def _setup_whisper(self) -> None:
-        """Set up Whisper benchmark."""
+        """Set up Whisper benchmark.
+
+        Supports:
+        - NPU devices: Uses WhisperNPUSUT or WhisperOptimumNPUSUT
+        - CPU devices: Uses WhisperOptimumSUT or WhisperSUT
+        """
         from ..datasets.librispeech import LibriSpeechQSL
 
         self.qsl = LibriSpeechQSL(
@@ -335,8 +340,10 @@ class BenchmarkRunner:
         self.qsl.load()
 
         model_path = Path(self.config.model.model_path)
+        device = self.config.openvino.device
+        is_npu = self.config.openvino.is_accelerator_device()
 
-        # Check for separate encoder/decoder models (try different naming conventions)
+        # Check for separate encoder/decoder models
         encoder_path = None
         decoder_path = None
 
@@ -366,12 +373,84 @@ class BenchmarkRunner:
                     decoder_path = dp
                     break
 
+        # --- NPU Device Path ---
+        if is_npu:
+            logger.info(f"Setting up Whisper for NPU device: {device}")
+
+            # Try WhisperOptimumNPUSUT first (better KV-cache support)
+            try:
+                from .whisper_sut import WhisperOptimumNPUSUT, OPTIMUM_AVAILABLE
+
+                if OPTIMUM_AVAILABLE and model_path.is_dir():
+                    config_file = model_path / "config.json"
+                    if config_file.exists():
+                        logger.info("Using WhisperOptimumNPUSUT for NPU")
+                        self.sut = WhisperOptimumNPUSUT(
+                            config=self.config,
+                            model_path=model_path,
+                            qsl=self.qsl,
+                            scenario=self.config.scenario,
+                            device=device,
+                        )
+                        return
+            except Exception as e:
+                logger.warning(f"WhisperOptimumNPUSUT not available: {e}")
+
+            # Fall back to WhisperNPUSUT with separate encoder/decoder
+            if encoder_path and decoder_path:
+                from .whisper_sut import WhisperNPUSUT
+
+                logger.info("Using WhisperNPUSUT for NPU")
+                self.sut = WhisperNPUSUT(
+                    config=self.config,
+                    encoder_path=encoder_path,
+                    decoder_path=decoder_path,
+                    qsl=self.qsl,
+                    scenario=self.config.scenario,
+                    device=device,
+                )
+                return
+
+            # Last resort: try basic OpenVINO backend
+            if encoder_path and decoder_path:
+                from .whisper_sut import WhisperSUT
+
+                logger.info("Using WhisperSUT with OpenVINO backend for NPU")
+                encoder_backend = OpenVINOBackend(
+                    model_path=str(encoder_path),
+                    config=self.config.openvino,
+                )
+                encoder_backend.load()
+
+                decoder_backend = OpenVINOBackend(
+                    model_path=str(decoder_path),
+                    config=self.config.openvino,
+                )
+                decoder_backend.load()
+
+                self.sut = WhisperSUT(
+                    config=self.config,
+                    encoder_backend=encoder_backend,
+                    decoder_backend=decoder_backend,
+                    qsl=self.qsl,
+                    scenario=self.config.scenario,
+                )
+                return
+
+            raise ValueError(
+                f"Whisper model directory {model_path} missing encoder/decoder for NPU. "
+                f"Please export model with: optimum-cli export openvino --model openai/whisper-large-v3 "
+                f"--task automatic-speech-recognition-with-past {model_path}"
+            )
+
+        # --- CPU/GPU Device Path ---
         try:
             from .whisper_sut import WhisperOptimumSUT, OPTIMUM_AVAILABLE
 
             if OPTIMUM_AVAILABLE and model_path.is_dir():
                 config_file = model_path / "config.json"
                 if config_file.exists():
+                    logger.info("Using WhisperOptimumSUT for CPU/GPU")
                     self.sut = WhisperOptimumSUT(
                         config=self.config,
                         model_path=model_path,
@@ -379,8 +458,8 @@ class BenchmarkRunner:
                         scenario=self.config.scenario,
                     )
                     return
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"WhisperOptimumSUT not available: {e}")
 
         from .whisper_sut import WhisperSUT, WhisperEncoderOnlySUT
 

@@ -385,13 +385,20 @@ class BenchmarkConfig:
 
     @classmethod
     def default_whisper(cls) -> "BenchmarkConfig":
-        """Create default Whisper configuration."""
+        """Create default Whisper-Large-v3 configuration (MLPerf v5.1).
+
+        MLPerf v5.1 Whisper specifications:
+        - Model: openai/whisper-large-v3 (1.55B parameters)
+        - Input: 128 mel frequency bins, 3000 time frames (30 seconds)
+        - Dataset: LibriSpeech dev-all (dev-clean + dev-other)
+        - Accuracy target: 97.9329% Word Accuracy
+        """
         return cls(
             model=ModelConfig(
                 name="Whisper-Large-v3",
                 task="speech_recognition",
                 model_type=ModelType.WHISPER,
-                input_shape=[1, 80, 3000],  # (batch, n_mels, time_frames)
+                input_shape=[1, 128, 3000],  # (batch, n_mels, time_frames) - MLPerf v5.1
                 input_name="input_features",
                 output_name="sequences",
                 data_format="NCT",  # batch, channels (mels), time
@@ -401,14 +408,15 @@ class BenchmarkConfig:
                 preprocessing=PreprocessingConfig(),  # Not used for audio
                 offline=ScenarioConfig(
                     min_duration_ms=60000,
-                    min_query_count=2513,  # MLPerf official (LibriSpeech)
+                    min_query_count=2513,  # MLPerf official (LibriSpeech dev-all)
                     samples_per_query=1,
+                    target_qps=10.0,  # Expected QPS for Whisper (encoder-decoder is slow)
                 ),
                 server=ScenarioConfig(
                     min_duration_ms=60000,
                     min_query_count=2513,  # Server uses min_duration primarily
-                    target_latency_ns=1000000000,  # 1 second for ASR
-                    target_qps=500.0,
+                    target_latency_ns=30000000000,  # 30 seconds latency for ASR
+                    target_qps=5.0,
                 ),
                 onnx_url="https://huggingface.co/openai/whisper-large-v3/resolve/main/model.onnx",
             ),
