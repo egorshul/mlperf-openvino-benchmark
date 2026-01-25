@@ -231,10 +231,6 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
     scenario_config.min_duration_ms = duration
     if target_qps > 0:
         scenario_config.target_qps = target_qps
-    elif scenario == 'Server':
-        # For Server mode, set high target_qps to not limit throughput
-        # LoadGen will measure actual achieved QPS
-        scenario_config.target_qps = 100000.0
 
     # Server mode settings
     if scenario == 'Server':
