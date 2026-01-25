@@ -43,6 +43,76 @@ from ..datasets.librispeech import LibriSpeechQSL
 logger = logging.getLogger(__name__)
 
 
+class CompiledModelWrapper:
+    """
+    Wrapper that provides both CompiledModel and InferRequest interfaces.
+
+    optimum-intel expects the request object to support:
+    - Callable interface: request(inputs, share_inputs=True, share_outputs=True)
+    - Async interface: request.start_async(), request.wait(), etc.
+
+    This wrapper delegates to the appropriate underlying object.
+    """
+
+    def __init__(self, compiled_model):
+        """
+        Args:
+            compiled_model: OpenVINO CompiledModel
+        """
+        self._compiled = compiled_model
+        self._infer_request = compiled_model.create_infer_request()
+
+    def __call__(self, inputs, share_inputs=True, share_outputs=True):
+        """Callable interface for synchronous inference (like CompiledModel)."""
+        return self._compiled(inputs, share_inputs=share_inputs, share_outputs=share_outputs)
+
+    def start_async(self, inputs=None, share_inputs=True, share_outputs=True):
+        """Start async inference (like InferRequest)."""
+        if inputs is not None:
+            self._infer_request.start_async(inputs, share_inputs=share_inputs, share_outputs=share_outputs)
+        else:
+            self._infer_request.start_async()
+
+    def wait(self):
+        """Wait for async inference to complete."""
+        self._infer_request.wait()
+
+    def get_output_tensor(self, index=0):
+        """Get output tensor by index."""
+        return self._infer_request.get_output_tensor(index)
+
+    def get_tensor(self, name):
+        """Get tensor by name."""
+        return self._infer_request.get_tensor(name)
+
+    def set_tensor(self, name, tensor):
+        """Set tensor by name."""
+        self._infer_request.set_tensor(name, tensor)
+
+    def set_input_tensor(self, index, tensor):
+        """Set input tensor by index."""
+        self._infer_request.set_input_tensor(index, tensor)
+
+    def set_output_tensor(self, index, tensor):
+        """Set output tensor by index."""
+        self._infer_request.set_output_tensor(index, tensor)
+
+    def infer(self, inputs=None, share_inputs=True, share_outputs=True):
+        """Synchronous inference using InferRequest."""
+        if inputs is not None:
+            return self._infer_request.infer(inputs, share_inputs=share_inputs, share_outputs=share_outputs)
+        return self._infer_request.infer()
+
+    @property
+    def results(self):
+        """Get inference results."""
+        return self._infer_request.results
+
+    def __getattr__(self, name):
+        """Delegate unknown attributes to InferRequest."""
+        return getattr(self._infer_request, name)
+
+
 class WhisperOptimumSUT:
     """
     System Under Test for Whisper ASR using Optimum-Intel.
@@ -267,9 +337,8 @@ class WhisperOptimumSUT:
             # Compile
             compiled = core.compile_model(ov_model, device, compile_config)
 
-            # Replace the request in submodel with CompiledModel (not InferRequest!)
-            # optimum-intel expects request to be callable: request(inputs)
-            submodel.request = compiled
+            # Use wrapper that provides both callable and async interfaces
+            submodel.request = CompiledModelWrapper(compiled)
 
             logger.info(f"{name} compiled to {device}")
         else:
@@ -426,8 +495,8 @@ class WhisperOptimumSUT:
             # Compile using Core directly to specified device
             try:
                 compiled = core.compile_model(ov_model, device, compile_config)
-                # Use CompiledModel directly (it's callable), not InferRequest
-                decoder.request = compiled
+                # Use wrapper that provides both callable and async interfaces
+                decoder.request = CompiledModelWrapper(compiled)
                 logger.info("DECODER compiled successfully!")
                 return
             except Exception as e:
@@ -483,8 +552,8 @@ class WhisperOptimumSUT:
             # Compile using Core directly to specified device
             try:
                 compiled = core.compile_model(ov_model, device, compile_config)
-                # Use CompiledModel directly (it's callable), not InferRequest
-                decoder.request = compiled
+                # Use wrapper that provides both callable and async interfaces
+                decoder.request = CompiledModelWrapper(compiled)
                 logger.info("DECODER_WITH_PAST compiled successfully!")
                 return
             except Exception as e:
