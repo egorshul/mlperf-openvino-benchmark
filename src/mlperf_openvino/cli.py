@@ -436,13 +436,9 @@ def download_model_cmd(model: str, output_dir: str, format: str, device: str):
               help='Output directory')
 @click.option('--model-id', default='openai/whisper-large-v3',
               help='HuggingFace model ID')
-@click.option('--batch-size', '-b', default=1, type=int,
-              help='Fixed batch size for NPU')
-@click.option('--decoder-seq-len', default=448, type=int,
-              help='Max decoder sequence length')
 @click.option('--stateless', is_flag=True, default=False,
               help='REQUIRED for most NPUs: Export without ReadValue/Assign ops')
-def export_whisper_npu_cmd(output_dir: str, model_id: str, batch_size: int, decoder_seq_len: int, stateless: bool):
+def export_whisper_npu_cmd(output_dir: str, model_id: str, stateless: bool):
     """
     Export Whisper model optimized for NPU devices.
 
@@ -452,32 +448,28 @@ def export_whisper_npu_cmd(output_dir: str, model_id: str, batch_size: int, deco
     The stateless model converts internal KV-cache state to explicit
     input/output tensors, which works on all NPU devices.
 
+    IMPORTANT: Models are exported with DYNAMIC batch dimension.
+    Use -b flag during 'mlperf-ov run' to control batch processing.
+
     Examples:
 
-        # For NPU devices (RECOMMENDED - works on most NPUs):
-        mlperf-ov export-whisper-npu --output-dir ./models --stateless
+        # Export for NPU (RECOMMENDED):
+        mlperf-ov export-whisper-npu --stateless -o ./models
 
-        # For NPU devices that DO support stateful ops:
-        mlperf-ov export-whisper-npu --output-dir ./models
-
-    After export, run benchmark with:
-
-        mlperf-ov run --model whisper --device X \\
+        # Run with batch processing:
+        mlperf-ov run --model whisper --device X -b 4 \\
             --model-path ./models/whisper-large-v3-openvino-npu-stateless
     """
     from .utils.model_downloader import export_whisper_for_npu
 
-    click.echo(f"Exporting Whisper for NPU with static shapes...")
-    click.echo(f"  Batch size: {batch_size}")
-    click.echo(f"  Decoder seq len: {decoder_seq_len}")
+    click.echo(f"Exporting Whisper for NPU...")
     click.echo(f"  Stateless mode: {stateless}")
+    click.echo(f"  Batch dimension: DYNAMIC (use -b at runtime)")
 
     try:
         paths = export_whisper_for_npu(
             output_dir=output_dir,
             model_id=model_id,
-            batch_size=batch_size,
-            decoder_seq_len=decoder_seq_len,
             stateless=stateless,
         )
         click.echo(f"\nModel exported to: {paths['model_path']}")

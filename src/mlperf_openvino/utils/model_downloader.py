@@ -556,16 +556,14 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
 def export_whisper_for_npu(
     output_dir: str,
     model_id: str = "openai/whisper-large-v3",
-    batch_size: int = 1,
-    encoder_seq_len: int = 1500,
-    decoder_seq_len: int = 448,
     stateless: bool = False,
 ) -> Dict[str, str]:
     """
-    Export Whisper model with static shapes optimized for NPU.
+    Export Whisper model optimized for NPU with stateless KV-cache.
 
-    NPU devices typically require static shapes for optimal performance.
-    This function exports the model with fixed input dimensions.
+    IMPORTANT: Models are exported with DYNAMIC batch dimension.
+    The -b flag controls how samples are grouped during inference,
+    NOT the model's compiled batch size.
 
     For NPU devices that don't support stateful operations (ReadValue/Assign),
     use stateless=True to export with explicit KV-cache tensors as inputs/outputs.
@@ -573,9 +571,6 @@ def export_whisper_for_npu(
     Args:
         output_dir: Directory to save the model
         model_id: HuggingFace model ID
-        batch_size: Fixed batch size (default 1)
-        encoder_seq_len: Encoder sequence length (1500 for 30s audio)
-        decoder_seq_len: Max decoder sequence length (448 for Whisper)
         stateless: If True, export without stateful KV-cache (for NPU compatibility)
 
     Returns:
@@ -590,10 +585,9 @@ def export_whisper_for_npu(
     ov_model_path = output_path / f"{model_name}{suffix}"
 
     logger.info(f"Exporting Whisper for NPU:")
-    logger.info(f"  batch_size={batch_size}")
-    logger.info(f"  encoder_seq_len={encoder_seq_len}")
-    logger.info(f"  decoder_seq_len={decoder_seq_len}")
     logger.info(f"  stateless={stateless}")
+    logger.info(f"  batch dimension: DYNAMIC (controlled by -b at runtime)")
+    logger.info(f"  output: {ov_model_path}")
 
     # Check if already exported
     if ov_model_path.exists():
