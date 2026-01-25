@@ -1616,37 +1616,54 @@ class WhisperMultiDieSUT:
             raise ValueError(f"Unsupported scenario: {self.scenario}")
 
     def _issue_query_offline(self, query_samples: List[Any]) -> None:
-        """Process queries for Offline scenario with round-robin distribution."""
-        responses = []
-        response_arrays = []
+        """Process queries for Offline scenario with parallel multi-die execution."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
         total_samples = len(query_samples)
         self._start_progress(total_samples, f"Whisper Offline ({self.num_dies} dies)")
 
-        # Process samples with round-robin distribution across dies
+        # Prepare results storage
+        results: Dict[int, Tuple[Any, str]] = {}  # sample.id -> (sample, text)
+
+        # Process samples in parallel across dies
+        # Use num_dies workers to maximize parallelism
+        with ThreadPoolExecutor(max_workers=self.num_dies) as executor:
+            # Submit all tasks with die assignment
+            futures = {}
+            for i, sample in enumerate(query_samples):
+                die_name = self._active_devices[i % self.num_dies]
+                future = executor.submit(self._process_sample, sample.index, die_name)
+                futures[future] = sample
+
+            # Collect results as they complete
+            for future in as_completed(futures):
+                sample = futures[future]
+                try:
+                    text = future.result()
+                    results[sample.id] = (sample, text)
+                    self._predictions[sample.index] = text
+                    self._sample_count += 1
+                    self._update_progress(1)
+                except Exception as e:
+                    logger.error(f"Sample {sample.index} failed: {e}")
+                    results[sample.id] = (sample, "")
+                    self._sample_count += 1
+                    self._update_progress(1)
+
+        self._close_progress()
+
+        # Build responses in original order
+        responses = []
+        response_arrays = []
         for sample in query_samples:
-            sample_idx = sample.index
-            self._sample_count += 1
-
-            # Select die for this sample
-            die_name = self._get_next_die()
-
-            # Process on selected die
-            text = self._process_sample(sample_idx, die_name)
-            self._predictions[sample_idx] = text
-
-            # Create response
+            _, text = results.get(sample.id, (sample, ""))
             response_data = np.array([len(text)], dtype=np.int64)
             response_array = array.array('B', response_data.tobytes())
             response_arrays.append(response_array)
             bi = response_array.buffer_info()
-
             response = lg.QuerySampleResponse(sample.id, bi[0], bi[1])
             responses.append(response)
 
-            self._update_progress(1)
-
-        self._close_progress()
         lg.QuerySamplesComplete(responses)
 
     def _issue_query_server(self, query_samples: List[Any]) -> None:
