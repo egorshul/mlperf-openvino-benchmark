@@ -454,27 +454,64 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
                 "model_path": str(ov_model_path),
             }
 
-    # Export model with retry logic
+    # Export model using optimum-cli for proper KV-cache support
     logger.info("Downloading and exporting model (this may take several minutes)...")
     logger.info("Large files (3+ GB) - download will resume if interrupted.")
-    logger.info("Using task: automatic-speech-recognition-with-past (stateful KV-cache)")
 
-    def do_export():
-        # Export with stateful decoder (KV-cache) for efficient token generation
-        # task="automatic-speech-recognition-with-past" creates decoder_with_past_model
-        return OVModelForSpeechSeq2Seq.from_pretrained(
-            model_id,
-            export=True,
-            compile=False,
-            stateful=True,  # Use stateful model for KV-cache optimization
-        )
+    # Try optimum-cli first (more reliable for stateful export)
+    import subprocess
+    import shutil
 
-    model = _download_with_retry(do_export, max_retries=3)
+    optimum_cli = shutil.which("optimum-cli")
+    export_success = False
 
-    # Save model
-    model.save_pretrained(str(ov_model_path))
+    if optimum_cli:
+        logger.info("Using optimum-cli for export with stateful decoder...")
+        try:
+            cmd = [
+                optimum_cli, "export", "openvino",
+                "--model", model_id,
+                "--task", "automatic-speech-recognition-with-past",
+                str(ov_model_path),
+            ]
+            logger.info(f"Running: {' '.join(cmd)}")
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=1800,  # 30 min timeout
+            )
+            if result.returncode == 0:
+                export_success = True
+                logger.info("optimum-cli export completed successfully")
+            else:
+                logger.warning(f"optimum-cli failed: {result.stderr}")
+        except subprocess.TimeoutExpired:
+            logger.warning("optimum-cli export timed out")
+        except Exception as e:
+            logger.warning(f"optimum-cli export failed: {e}")
 
-    # Also save processor with retry
+    # Fallback to Python API if CLI failed
+    if not export_success:
+        logger.info("Using Python API for export...")
+
+        def do_export():
+            # Try with use_cache=True for decoder_with_past
+            return OVModelForSpeechSeq2Seq.from_pretrained(
+                model_id,
+                export=True,
+                compile=False,
+                use_cache=True,  # Enable KV-cache for decoder
+            )
+
+        model = _download_with_retry(do_export, max_retries=3)
+        model.save_pretrained(str(ov_model_path))
+
+    # List exported files
+    xml_files = list(ov_model_path.glob("*.xml"))
+    logger.info(f"Exported model files: {[f.name for f in xml_files]}")
+
+    # Save processor
     logger.info("Downloading processor...")
 
     def do_processor():
