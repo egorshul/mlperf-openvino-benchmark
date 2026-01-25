@@ -267,8 +267,9 @@ class WhisperOptimumSUT:
             # Compile
             compiled = core.compile_model(ov_model, device, compile_config)
 
-            # Replace the request in submodel
-            submodel.request = compiled.create_infer_request()
+            # Replace the request in submodel with CompiledModel (not InferRequest!)
+            # optimum-intel expects request to be callable: request(inputs)
+            submodel.request = compiled
 
             logger.info(f"{name} compiled to {device}")
         else:
@@ -283,52 +284,42 @@ class WhisperOptimumSUT:
         Returns:
             Dictionary with analysis results including stateful op counts
         """
-        import openvino as ov
-
-        logger.info(f"Analyzing {name} model for NPU compatibility...")
-
         results = {"has_dynamic": False, "read_values": 0, "assigns": 0}
 
-        # Check input/output shapes
-        logger.info(f"  Inputs:")
+        # Check for dynamic shapes
+        num_inputs = len(model.inputs)
+        num_outputs = len(model.outputs)
+        dynamic_inputs = 0
+
         for inp in model.inputs:
-            shape = inp.get_partial_shape()
-            is_dynamic = shape.is_dynamic
-            if is_dynamic:
+            if inp.get_partial_shape().is_dynamic:
                 results["has_dynamic"] = True
-            logger.info(f"    {inp.get_any_name()}: {shape} (dynamic={is_dynamic})")
+                dynamic_inputs += 1
 
-        logger.info(f"  Outputs:")
         for out in model.outputs:
-            shape = out.get_partial_shape()
-            is_dynamic = shape.is_dynamic
-            if is_dynamic:
+            if out.get_partial_shape().is_dynamic:
                 results["has_dynamic"] = True
-            logger.info(f"    {out.get_any_name()}: {shape} (dynamic={is_dynamic})")
 
-        # Count operations including stateful ones
-        op_types = {}
+        # Count stateful operations
         for op in model.get_ordered_ops():
             op_type = op.get_type_name()
-            op_types[op_type] = op_types.get(op_type, 0) + 1
-
-            # Track stateful ops specifically
             if op_type == "ReadValue":
                 results["read_values"] += 1
             elif op_type == "Assign":
                 results["assigns"] += 1
 
-        logger.info(f"  Operation types ({len(op_types)} unique):")
-        # Log top 10 most common operations
-        sorted_ops = sorted(op_types.items(), key=lambda x: x[1], reverse=True)[:10]
-        for op_type, count in sorted_ops:
-            logger.info(f"    {op_type}: {count}")
-
-        # Warn about stateful ops
+        # Log summary (not every input/output)
         total_stateful = results["read_values"] + results["assigns"]
         if total_stateful > 0:
-            logger.warning(f"  STATEFUL OPS DETECTED: {results['read_values']} ReadValue + {results['assigns']} Assign")
-            logger.warning(f"  Some NPU devices do not support stateful operations!")
+            logger.warning(
+                f"  {name}: {num_inputs} inputs, {num_outputs} outputs, "
+                f"{dynamic_inputs} dynamic, {total_stateful} stateful ops (ReadValue/Assign)"
+            )
+        else:
+            logger.info(
+                f"  {name}: {num_inputs} inputs, {num_outputs} outputs, "
+                f"{dynamic_inputs} dynamic, no stateful ops"
+            )
 
         return results
 
@@ -340,10 +331,9 @@ class WhisperOptimumSUT:
         encoder_seq_len: int = 1500,
     ) -> "ov.Model":
         """Reshape decoder model to static shapes for NPU compatibility."""
-        import openvino as ov
-
-        logger.info(f"Reshaping decoder to static shapes: batch={batch_size}, "
-                    f"seq={seq_len}, encoder_seq={encoder_seq_len}")
+        logger.info(
+            f"Reshaping to static: batch={batch_size}, seq={seq_len}, encoder_seq={encoder_seq_len}"
+        )
 
         # Build static shapes for each input
         new_shapes = {}
@@ -386,14 +376,12 @@ class WhisperOptimumSUT:
                         head_dim = head_dim.get_length()
                     new_shapes[name] = [batch_size, num_heads, seq_len, head_dim]
 
-        logger.info(f"New static shapes: {new_shapes}")
-
-        try:
-            model.reshape(new_shapes)
-            logger.info("Decoder reshaped to static shapes successfully")
-        except Exception as e:
-            logger.warning(f"Failed to reshape decoder: {e}")
-            # Continue with original model
+        if new_shapes:
+            try:
+                model.reshape(new_shapes)
+                logger.info(f"Reshaped {len(new_shapes)} inputs to static shapes")
+            except Exception as e:
+                logger.warning(f"Failed to reshape decoder: {e}")
 
         return model
 
@@ -414,20 +402,10 @@ class WhisperOptimumSUT:
             # Check for stateful ops on non-CPU devices
             total_stateful = analysis.get("read_values", 0) + analysis.get("assigns", 0)
             if total_stateful > 0 and device != "CPU":
-                logger.error("=" * 70)
-                logger.error("STATEFUL OPERATIONS DETECTED IN DECODER")
-                logger.error("=" * 70)
-                logger.error(f"The decoder model contains {total_stateful} stateful operations")
-                logger.error(f"(ReadValue/Assign for KV-cache) that device {device} may not support.")
-                logger.error("")
-                logger.error("SOLUTION: Re-export the model with --stateless flag:")
-                logger.error("")
-                logger.error("  mlperf-ov export-whisper-npu --output-dir ./models --stateless")
-                logger.error("")
-                logger.error("Then run the benchmark with the new model path:")
-                logger.error("  ./models/whisper-large-v3-openvino-npu-stateless")
-                logger.error("=" * 70)
-                # Still try to compile - some devices might support it
+                logger.warning(
+                    f"Decoder has {total_stateful} stateful ops - {device} may not support them. "
+                    f"Use: mlperf-ov export-whisper-npu --stateless"
+                )
 
             # Check if shapes are dynamic
             has_dynamic = analysis.get("has_dynamic", False)
@@ -447,9 +425,9 @@ class WhisperOptimumSUT:
 
             # Compile using Core directly to specified device
             try:
-                logger.info(f"Compiling decoder to {device} using OpenVINO Core...")
                 compiled = core.compile_model(ov_model, device, compile_config)
-                decoder.request = compiled.create_infer_request()
+                # Use CompiledModel directly (it's callable), not InferRequest
+                decoder.request = compiled
                 logger.info("DECODER compiled successfully!")
                 return
             except Exception as e:
@@ -481,15 +459,9 @@ class WhisperOptimumSUT:
             # Check for stateful ops on non-CPU devices
             total_stateful = analysis.get("read_values", 0) + analysis.get("assigns", 0)
             if total_stateful > 0 and device != "CPU":
-                logger.error("=" * 70)
-                logger.error("STATEFUL OPERATIONS DETECTED IN DECODER_WITH_PAST")
-                logger.error("=" * 70)
-                logger.error(f"The decoder_with_past model contains {total_stateful} stateful operations")
-                logger.error(f"that device {device} may not support.")
-                logger.error("")
-                logger.error("SOLUTION: Re-export the model with --stateless flag:")
-                logger.error("  mlperf-ov export-whisper-npu --output-dir ./models --stateless")
-                logger.error("=" * 70)
+                logger.warning(
+                    f"Decoder_with_past has {total_stateful} stateful ops - {device} may not support them"
+                )
 
             # Check if shapes are dynamic
             has_dynamic = analysis.get("has_dynamic", False)
@@ -510,9 +482,9 @@ class WhisperOptimumSUT:
 
             # Compile using Core directly to specified device
             try:
-                logger.info(f"Compiling decoder_with_past to {device} using OpenVINO Core...")
                 compiled = core.compile_model(ov_model, device, compile_config)
-                decoder.request = compiled.create_infer_request()
+                # Use CompiledModel directly (it's callable), not InferRequest
+                decoder.request = compiled
                 logger.info("DECODER_WITH_PAST compiled successfully!")
                 return
             except Exception as e:
@@ -534,44 +506,18 @@ class WhisperOptimumSUT:
         device: str,
         has_stateful: bool = False,
     ) -> None:
-        """Log detailed information about compilation error."""
+        """Log compilation error with diagnosis."""
         error_str = str(error).lower()
+        logger.error(f"{model_name} compilation FAILED on {device}: {error}")
 
-        logger.error(f"{model_name.upper()} compilation FAILED on {device}")
-        logger.error(f"Error: {error}")
-
-        # Analyze error type
         if has_stateful:
-            logger.error("")
-            logger.error("=" * 70)
-            logger.error("LIKELY CAUSE: STATEFUL OPERATIONS (ReadValue/Assign)")
-            logger.error("=" * 70)
-            logger.error(f"The {model_name} contains stateful KV-cache operations that")
-            logger.error(f"device {device} does not support.")
-            logger.error("")
-            logger.error("SOLUTION: Export model without stateful ops:")
-            logger.error("")
-            logger.error("  mlperf-ov export-whisper-npu --output-dir ./models --stateless")
-            logger.error("")
-            logger.error("Then use the new model path:")
-            logger.error("  --model-path ./models/whisper-large-v3-openvino-npu-stateless")
-            logger.error("=" * 70)
+            logger.error("Cause: Stateful ops (ReadValue/Assign). Fix: mlperf-ov export-whisper-npu --stateless")
         elif "not supported" in error_str or "unsupported" in error_str:
-            logger.error("DIAGNOSIS: Model contains unsupported operations for this device")
-            logger.error("SUGGESTION: Try exporting model with --stateless flag")
+            logger.error("Cause: Unsupported ops. Fix: Try --stateless export")
         elif "dynamic" in error_str or "shape" in error_str:
-            logger.error("DIAGNOSIS: Model has dynamic shapes not supported by NPU")
-            logger.error("SUGGESTION: Export model with static shapes")
-        elif "memory" in error_str or "allocation" in error_str:
-            logger.error("DIAGNOSIS: Not enough memory on device")
-            logger.error("SUGGESTION: Try smaller batch size or model quantization")
-        elif "timeout" in error_str:
-            logger.error("DIAGNOSIS: Compilation timed out")
-            logger.error("SUGGESTION: Model may be too complex for this device")
-        else:
-            logger.error("DIAGNOSIS: Unknown error - check device drivers and OpenVINO version")
-            if device != "CPU":
-                logger.error("SUGGESTION: Try exporting with --stateless flag for NPU compatibility")
+            logger.error("Cause: Dynamic shapes. Fix: Static shape export")
+        elif "memory" in error_str:
+            logger.error("Cause: Out of memory. Fix: Reduce batch size")
 
     def _start_progress(self, total: int, desc: str = "Processing") -> None:
         """Start progress tracking."""
