@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 @click.group()
-@click.version_option(version="0.2.0", prog_name="mlperf-ov")
+@click.version_option(version="1.0.0", prog_name="mlperf-ov")
 def main():
     """
     MLPerf v5.1 OpenVINO Benchmark Tool
@@ -231,10 +231,6 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
     scenario_config.min_duration_ms = duration
     if target_qps > 0:
         scenario_config.target_qps = target_qps
-    elif scenario == 'Server':
-        # For Server mode, set high target_qps to not limit throughput
-        # LoadGen will measure actual achieved QPS
-        scenario_config.target_qps = 100000.0
 
     # Server mode settings
     if scenario == 'Server':
@@ -247,11 +243,13 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         # Explicit batching (Intel-style) for Server mode
         if explicit_batching:
             scenario_config.explicit_batching = True
-            scenario_config.batch_timeout_us = batch_timeout_us
-            # Use batch_size from CLI for explicit batching
-            explicit_batch = batch_size if batch_size > 1 else 4
+            # Use optimized defaults for explicit batching
+            timeout = batch_timeout_us if batch_timeout_us != 500 else 2000
+            scenario_config.batch_timeout_us = timeout
+            scenario_config.nireq_multiplier = 6
+            explicit_batch = batch_size if batch_size > 1 else 8
             scenario_config.explicit_batch_size = explicit_batch
-            click.echo(f"Explicit batching: batch_size={explicit_batch}, timeout={batch_timeout_us}us")
+            click.echo(f"Explicit batching: batch={explicit_batch}, timeout={timeout}us, nireq=6")
 
     # Validate configuration
     if not benchmark_config.model.model_path:

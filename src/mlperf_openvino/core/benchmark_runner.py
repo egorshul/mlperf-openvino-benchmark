@@ -208,6 +208,39 @@ class BenchmarkRunner:
             scenario=self.config.scenario,
         )
 
+    def _create_bert_multi_die_sut(self, qsl: QuerySampleLibrary) -> Any:
+        """Create BERT multi-die SUT for accelerators."""
+        is_accuracy_mode = self.config.test_mode == TestMode.ACCURACY_ONLY
+
+        try:
+            from .bert_multi_die_sut import (
+                BertMultiDieSUTWrapper,
+                is_bert_multi_die_cpp_available
+            )
+
+            if is_bert_multi_die_cpp_available():
+                logger.info(f"Using BERT C++ multi-die SUT on {self.config.openvino.device}")
+                sut = BertMultiDieSUTWrapper(
+                    config=self.config,
+                    qsl=qsl,
+                    scenario=self.config.scenario,
+                )
+                sut.load(is_accuracy_mode=is_accuracy_mode)
+                return sut
+        except ImportError as e:
+            logger.warning(f"C++ BERT multi-die SUT not available: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to create C++ BERT multi-die SUT: {e}")
+
+        from .bert_sut import BertSUT
+        logger.info(f"Using BERT Python SUT on {self.config.openvino.device}")
+        return BertSUT(
+            config=self.config,
+            backend=self.backend,
+            qsl=qsl,
+            scenario=self.config.scenario,
+        )
+
     def _setup_resnet50(self) -> None:
         """Set up ResNet50 benchmark."""
         from ..datasets.imagenet import ImageNetQSL
@@ -247,9 +280,9 @@ class BenchmarkRunner:
         )
         self.qsl.load()
 
-        # Use multi-device SUT for accelerator
+        # Use BERT multi-die SUT for accelerator
         if self.config.openvino.is_accelerator_device():
-            self.sut = self._create_sut_for_backend(self.qsl)
+            self.sut = self._create_bert_multi_die_sut(self.qsl)
         else:
             # Use create_bert_sut to automatically select C++ or Python SUT for CPU
             self.sut = create_bert_sut(
@@ -466,9 +499,9 @@ class BenchmarkRunner:
 
         if self.config.scenario == Scenario.OFFLINE:
             # LoadGen requires expected_qps for Offline scenario
-            # Use configured value or a reasonable default
             expected_qps = scenario_config.target_qps if scenario_config.target_qps > 0 else 1000.0
             settings.offline_expected_qps = expected_qps
+            logger.info(f"Offline expected QPS: {expected_qps}")
         elif self.config.scenario == Scenario.SERVER:
             if scenario_config.target_latency_ns > 0:
                 settings.server_target_latency_ns = scenario_config.target_latency_ns
@@ -818,8 +851,12 @@ class BenchmarkRunner:
             status = "PASS" if accuracy >= 0.7569 else "FAIL"
             print(f"Top-1: {accuracy:.4f} ({correct}/{total}) [{status}]")
         elif model_type == 'bert':
-            print(f"F1: {acc.get('f1', 0):.2f}")
-            print(f"EM: {acc.get('exact_match', 0):.2f}")
+            f1 = acc.get('f1', 0)
+            em = acc.get('exact_match', 0)
+            # MLPerf BERT threshold: F1 >= 89.965 (99% of 90.874)
+            status = "PASS" if f1 >= 89.965 else "FAIL"
+            print(f"F1: {f1:.2f} [{status}]")
+            print(f"EM: {em:.2f}")
         elif model_type == 'retinanet':
             print(f"mAP: {acc.get('mAP', 0):.4f}")
         elif model_type == 'whisper':

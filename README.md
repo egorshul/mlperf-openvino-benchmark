@@ -32,6 +32,22 @@ mlperf-ov run --model resnet50 --mode accuracy
 mlperf-ov run --model resnet50 --mode performance --scenario Offline
 ```
 
+## Optimal Run Commands (NPU)
+
+### ResNet50
+
+```bash
+mlperf-ov run --model resnet50 --scenario Offline --device NPU
+mlperf-ov run --model resnet50 --scenario Server --device NPU --explicit-batching
+```
+
+### BERT-Large
+
+```bash
+mlperf-ov run --model bert --scenario Offline --device NPU
+mlperf-ov run --model bert --scenario Server --device NPU
+```
+
 ## Device Selection
 
 ```bash

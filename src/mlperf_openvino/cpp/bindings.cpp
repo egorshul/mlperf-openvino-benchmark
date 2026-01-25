@@ -19,6 +19,7 @@
 #include "bert_sut_cpp.hpp"
 #include "retinanet_sut_cpp.hpp"
 #include "resnet_multi_die_sut_cpp.hpp"
+#include "bert_multi_die_sut.hpp"
 
 namespace py = pybind11;
 
@@ -564,6 +565,169 @@ PYBIND11_MODULE(_cpp_sut, m) {
              py::arg("min_query_count") = 0,
              py::arg("is_accuracy_mode") = false,
              "Run Server benchmark with pure C++ SUT");
+
+    // BertMultiDieSUT - BERT with sequence length buckets for multi-die NPU
+    py::class_<mlperf_ov::BertMultiDieSUT>(m, "BertMultiDieSUT")
+        .def(py::init<const std::string&, const std::string&,
+                      const std::unordered_map<std::string, std::string>&, int>(),
+             py::arg("model_path"),
+             py::arg("device_prefix"),
+             py::arg("compile_properties") = std::unordered_map<std::string, std::string>{},
+             py::arg("nireq_per_config") = 4,
+             "Create optimized BERT SUT with sequence length buckets")
+
+        .def("set_target_devices", &mlperf_ov::BertMultiDieSUT::set_target_devices,
+             py::arg("devices"),
+             "Set specific target devices (call before load())")
+
+        .def("set_server_mode", &mlperf_ov::BertMultiDieSUT::set_server_mode,
+             py::arg("server_mode"),
+             "Set Server mode (batch=1 direct inference). Must be called before load().")
+
+        .def("load", &mlperf_ov::BertMultiDieSUT::load,
+             py::call_guard<py::gil_scoped_release>(),
+             "Load and compile models for all bucket configurations")
+
+        .def("warmup", &mlperf_ov::BertMultiDieSUT::warmup,
+             py::call_guard<py::gil_scoped_release>(),
+             py::arg("iterations") = 2,
+             "Warmup all models with dummy inference")
+
+        .def("is_loaded", &mlperf_ov::BertMultiDieSUT::is_loaded,
+             "Check if models are loaded")
+
+        .def("get_num_dies", &mlperf_ov::BertMultiDieSUT::get_num_dies,
+             "Get number of active dies")
+
+        .def("get_active_devices", &mlperf_ov::BertMultiDieSUT::get_active_devices,
+             "Get list of active device names")
+
+        .def("get_num_model_configs", &mlperf_ov::BertMultiDieSUT::get_num_model_configs,
+             "Get number of model configurations")
+
+        .def("get_model_configs", &mlperf_ov::BertMultiDieSUT::get_model_configs,
+             "Get model configurations as list of (batch_size, seq_len) pairs")
+
+        .def("register_sample",
+             [](mlperf_ov::BertMultiDieSUT& self,
+                int sample_idx,
+                py::array_t<int64_t, py::array::c_style | py::array::forcecast> input_ids,
+                py::array_t<int64_t, py::array::c_style | py::array::forcecast> attention_mask,
+                py::array_t<int64_t, py::array::c_style | py::array::forcecast> token_type_ids,
+                int actual_seq_len) {
+                 py::buffer_info ids_buf = input_ids.request();
+                 py::buffer_info mask_buf = attention_mask.request();
+                 py::buffer_info type_buf = token_type_ids.request();
+
+                 self.register_sample(
+                     sample_idx,
+                     static_cast<const int64_t*>(ids_buf.ptr),
+                     static_cast<const int64_t*>(mask_buf.ptr),
+                     static_cast<const int64_t*>(type_buf.ptr),
+                     actual_seq_len);
+             },
+             py::arg("sample_idx"),
+             py::arg("input_ids"),
+             py::arg("attention_mask"),
+             py::arg("token_type_ids"),
+             py::arg("actual_seq_len"),
+             "Register sample with sequence length info")
+
+        .def("clear_samples", &mlperf_ov::BertMultiDieSUT::clear_samples,
+             "Clear all registered samples")
+
+        .def("stage_samples", &mlperf_ov::BertMultiDieSUT::stage_samples,
+             "Stage samples for Offline mode batch copy (optional)")
+
+        .def_static("get_bucket_index", &mlperf_ov::BertMultiDieSUT::get_bucket_index,
+             py::arg("seq_len"),
+             "Get bucket index for a sequence length")
+
+        .def_static("get_bucket_seq_len", &mlperf_ov::BertMultiDieSUT::get_bucket_seq_len,
+             py::arg("bucket_idx"),
+             "Get sequence length for a bucket index")
+
+        .def("submit_batch",
+             [](mlperf_ov::BertMultiDieSUT& self,
+                int bucket_idx,
+                py::list query_ids,
+                py::list sample_indices) {
+                 size_t n = py::len(query_ids);
+                 std::vector<uint64_t> qids(n);
+                 std::vector<int> sidxs(n);
+
+                 for (size_t i = 0; i < n; ++i) {
+                     qids[i] = query_ids[i].cast<uint64_t>();
+                     sidxs[i] = sample_indices[i].cast<int>();
+                 }
+
+                 py::gil_scoped_release release;
+                 self.submit_batch(bucket_idx, qids, sidxs);
+             },
+             py::arg("bucket_idx"),
+             py::arg("query_ids"),
+             py::arg("sample_indices"),
+             "Submit batch for Offline mode (grouped by bucket)")
+
+        .def("issue_queries",
+             [](mlperf_ov::BertMultiDieSUT& self,
+                py::list query_ids,
+                py::list sample_indices) {
+                 size_t n = py::len(query_ids);
+                 std::vector<uint64_t> qids(n);
+                 std::vector<int> sidxs(n);
+
+                 for (size_t i = 0; i < n; ++i) {
+                     qids[i] = query_ids[i].cast<uint64_t>();
+                     sidxs[i] = sample_indices[i].cast<int>();
+                 }
+
+                 py::gil_scoped_release release;
+                 self.issue_queries(qids, sidxs);
+             },
+             py::arg("query_ids"),
+             py::arg("sample_indices"),
+             "Issue queries for Server mode (auto-batching)")
+
+        .def("wait_all", &mlperf_ov::BertMultiDieSUT::wait_all,
+             py::call_guard<py::gil_scoped_release>(),
+             "Wait for all pending inferences")
+
+        .def("reset_counters", &mlperf_ov::BertMultiDieSUT::reset_counters,
+             "Reset counters")
+
+        .def("get_completed_count", &mlperf_ov::BertMultiDieSUT::get_completed_count,
+             "Get number of completed samples")
+
+        .def("get_issued_count", &mlperf_ov::BertMultiDieSUT::get_issued_count,
+             "Get number of issued samples")
+
+        .def("set_store_predictions", &mlperf_ov::BertMultiDieSUT::set_store_predictions,
+             py::arg("store"),
+             "Enable/disable storing predictions")
+
+        .def("get_predictions",
+             [](mlperf_ov::BertMultiDieSUT& self) {
+                 auto cpp_preds = self.get_predictions();
+                 py::dict py_preds;
+
+                 for (const auto& [idx, pred] : cpp_preds) {
+                     py::tuple entry = py::make_tuple(
+                         py::array_t<float>(pred.start_logits.size(), pred.start_logits.data()),
+                         py::array_t<float>(pred.end_logits.size(), pred.end_logits.data())
+                     );
+                     py_preds[py::int_(idx)] = entry;
+                 }
+                 return py_preds;
+             },
+             "Get stored predictions as dict of {sample_idx: (start_logits, end_logits)}")
+
+        .def("clear_predictions", &mlperf_ov::BertMultiDieSUT::clear_predictions,
+             "Clear stored predictions")
+
+        .def("enable_direct_loadgen", &mlperf_ov::BertMultiDieSUT::enable_direct_loadgen,
+             py::arg("enable"),
+             "Enable direct LoadGen C++ mode");
 
     m.attr("__version__") = "1.0.0";
 }
