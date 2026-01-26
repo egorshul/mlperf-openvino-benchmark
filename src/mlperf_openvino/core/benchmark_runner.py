@@ -109,10 +109,10 @@ class BenchmarkRunner:
 
         device = self.config.openvino.device
 
-        # Determine if NHWC input is needed
-        use_nhwc = False
+        # Determine if NHWC input is needed (default is NHWC)
+        use_nhwc = True
         if hasattr(self.config.model, 'preprocessing') and self.config.model.preprocessing:
-            use_nhwc = getattr(self.config.model.preprocessing, 'output_layout', 'NCHW') == 'NHWC'
+            use_nhwc = getattr(self.config.model.preprocessing, 'output_layout', 'NHWC') == 'NHWC'
 
         # For accelerator devices, always use MultiDeviceBackend
         # - "NPU" -> all dies (target_devices=None)
@@ -297,15 +297,15 @@ class BenchmarkRunner:
         from ..datasets.openimages import OpenImagesQSL
         from .cpp_sut_wrapper import create_retinanet_sut
 
-        output_layout = "NCHW"
+        output_layout = "NHWC"  # Default NHWC, model handles conversion via PrePostProcessor
         if hasattr(self.config.model, 'preprocessing') and self.config.model.preprocessing:
-            output_layout = getattr(self.config.model.preprocessing, 'output_layout', 'NCHW')
+            output_layout = getattr(self.config.model.preprocessing, 'output_layout', 'NHWC')
 
         self.qsl = OpenImagesQSL(
             data_path=self.config.dataset.path,
             annotations_file=self.config.dataset.val_map,
             count=self.config.dataset.num_samples if self.config.dataset.num_samples > 0 else None,
-            performance_sample_count=24576,
+            # performance_sample_count uses MLPerf official default (64) from OpenImagesQSL
             output_layout=output_layout,
         )
         self.qsl.load()
@@ -858,12 +858,24 @@ class BenchmarkRunner:
             print(f"F1: {f1:.2f} [{status}]")
             print(f"EM: {em:.2f}")
         elif model_type == 'retinanet':
-            print(f"mAP: {acc.get('mAP', 0):.4f}")
+            mAP = acc.get('mAP', 0)
+            # MLPerf RetinaNet threshold: 37.19% mAP (99% of 37.57%)
+            status = "PASS" if mAP >= 0.3719 else "FAIL"
+            print(f"mAP: {mAP:.4f} [{status}]")
         elif model_type == 'whisper':
-            print(f"Word Accuracy: {acc.get('word_accuracy', 0):.4f}")
-            print(f"WER: {acc.get('wer', 0):.4f}")
+            word_acc = acc.get('word_accuracy', 0)
+            wer = acc.get('wer', 0)
+            # MLPerf Whisper threshold: 96.94% word accuracy (99% of 97.93%)
+            status = "PASS" if word_acc >= 0.9694 else "FAIL"
+            print(f"Word Accuracy: {word_acc:.4f} [{status}]")
+            print(f"WER: {wer:.4f}")
         elif model_type == 'sdxl':
-            print(f"CLIP: {acc.get('clip_score', 0):.4f}")
-            print(f"FID: {acc.get('fid_score', 0):.4f}")
+            clip = acc.get('clip_score', 0)
+            fid = acc.get('fid_score', 0)
+            # MLPerf SDXL: CLIP >= 31.68632 and FID within range
+            clip_pass = clip >= 31.68632
+            status = "PASS" if clip_pass else "FAIL"
+            print(f"CLIP: {clip:.4f} [{status}]")
+            print(f"FID: {fid:.4f}")
 
         print("="*50 + "\n")

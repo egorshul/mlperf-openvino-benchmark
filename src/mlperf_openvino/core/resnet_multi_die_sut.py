@@ -70,10 +70,10 @@ class ResNetMultiDieCppSUTWrapper:
         if hasattr(config.openvino, 'device_properties') and config.openvino.device_properties:
             compile_props = dict(config.openvino.device_properties)
 
-        # Check if using NHWC input layout
-        use_nhwc = False
+        # Check if using NHWC input layout (default is NHWC)
+        use_nhwc = True
         if hasattr(config.model, 'preprocessing') and config.model.preprocessing:
-            use_nhwc = getattr(config.model.preprocessing, 'output_layout', 'NCHW') == 'NHWC'
+            use_nhwc = getattr(config.model.preprocessing, 'output_layout', 'NHWC') == 'NHWC'
 
         # Get nireq_multiplier from config
         server_config = config.model.server if hasattr(config.model, 'server') else None

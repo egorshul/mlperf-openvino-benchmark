@@ -62,7 +62,8 @@ public:
     ResNetCppSUT(const std::string& model_path,
            const std::string& device = "CPU",
            int num_streams = 0,
-           const std::string& performance_hint = "THROUGHPUT");
+           const std::string& performance_hint = "THROUGHPUT",
+           bool use_nhwc_input = true);  // NHWC is default
 
     ~ResNetCppSUT();
 
@@ -155,6 +156,7 @@ private:
     std::string device_;
     int num_streams_;
     std::string performance_hint_;
+    bool use_nhwc_input_;
 
     // OpenVINO objects
     ov::Core core_;

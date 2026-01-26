@@ -65,7 +65,8 @@ public:
     RetinaNetCppSUT(const std::string& model_path,
                     const std::string& device = "CPU",
                     int num_streams = 0,
-                    const std::string& performance_hint = "THROUGHPUT");
+                    const std::string& performance_hint = "THROUGHPUT",
+                    bool use_nhwc_input = true);  // NHWC is default
 
     ~RetinaNetCppSUT();
 
@@ -120,6 +121,7 @@ private:
     std::string device_;
     int num_streams_;
     std::string performance_hint_;
+    bool use_nhwc_input_;
 
     ov::Core core_;
     std::shared_ptr<ov::Model> model_;

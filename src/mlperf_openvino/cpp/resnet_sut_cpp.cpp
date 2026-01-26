@@ -19,11 +19,13 @@ namespace mlperf_ov {
 ResNetCppSUT::ResNetCppSUT(const std::string& model_path,
                const std::string& device,
                int num_streams,
-               const std::string& performance_hint)
+               const std::string& performance_hint,
+               bool use_nhwc_input)
     : model_path_(model_path),
       device_(device),
       num_streams_(num_streams),
       performance_hint_(performance_hint),
+      use_nhwc_input_(use_nhwc_input),
       optimal_nireq_(1),
       loaded_(false),
       issued_count_(0),
@@ -64,14 +66,41 @@ void ResNetCppSUT::load() {
     }
 
     input_name_ = inputs[0].get_any_name();
-    input_shape_ = inputs[0].get_partial_shape().get_min_shape();
+    ov::Shape model_input_shape = inputs[0].get_partial_shape().get_min_shape();
     input_type_ = inputs[0].get_element_type();
+
+    // Handle dynamic batch
+    if (model_input_shape.size() > 0 && model_input_shape[0] == 0) {
+        model_input_shape[0] = 1;
+    }
+
+    // Apply NHWC input layout if requested (default)
+    // Model expects NCHW [1, 3, 224, 224], we provide NHWC [1, 224, 224, 3]
+    if (use_nhwc_input_) {
+        ov::preprocess::PrePostProcessor ppp(model_);
+        ppp.input().tensor().set_layout("NHWC");
+        ppp.input().model().set_layout("NCHW");
+        model_ = ppp.build();
+
+        // Input shape for NHWC: [batch, height, width, channels]
+        if (model_input_shape.size() == 4) {
+            input_shape_ = ov::Shape{
+                model_input_shape[0],  // batch
+                model_input_shape[2],  // height
+                model_input_shape[3],  // width
+                model_input_shape[1]   // channels
+            };
+        } else {
+            input_shape_ = model_input_shape;
+        }
+    } else {
+        input_shape_ = model_input_shape;
+    }
 
     // Cache output index: for models with ArgMax+Softmax outputs, use softmax (index 1)
     // For single-output models, use index 0
     output_idx_ = outputs.size() > 1 ? 1 : 0;
     output_name_ = outputs[output_idx_].get_any_name();
-
 
     // Build compile properties
     ov::AnyMap properties;
@@ -107,21 +136,15 @@ void ResNetCppSUT::load() {
     // Create InferRequest pool with 2x optimal requests for better pipelining
     int num_requests = std::max(optimal_nireq_ * 2, 16);
 
-    // Calculate actual shape (handle dynamic batch)
-    ov::Shape actual_shape = input_shape_;
-    if (actual_shape.size() > 0 && actual_shape[0] == 0) {
-        actual_shape[0] = 1;  // Set batch size to 1
-    }
-
     for (int i = 0; i < num_requests; ++i) {
         auto ctx = std::make_unique<InferContext>();
         ctx->request = compiled_model_.create_infer_request();
         ctx->pool_id = static_cast<size_t>(i);
         ctx->sut = this;
 
-        // Pre-allocate input tensor with correct shape (for dynamic batch models)
-        // Store in context to ensure it stays alive during inference
-        ctx->input_tensor = ov::Tensor(input_type_, actual_shape);
+        // Pre-allocate input tensor with correct shape
+        // input_shape_ is already set correctly (NHWC or NCHW) and batch handled
+        ctx->input_tensor = ov::Tensor(input_type_, input_shape_);
         ctx->request.set_input_tensor(ctx->input_tensor);
 
         // Set completion callback - this runs in OpenVINO thread WITHOUT GIL!

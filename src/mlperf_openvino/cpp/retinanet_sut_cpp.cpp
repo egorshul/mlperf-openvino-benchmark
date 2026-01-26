@@ -8,17 +8,20 @@
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
+#include <openvino/openvino.hpp>
 
 namespace mlperf_ov {
 
 RetinaNetCppSUT::RetinaNetCppSUT(const std::string& model_path,
                                    const std::string& device,
                                    int num_streams,
-                                   const std::string& performance_hint)
+                                   const std::string& performance_hint,
+                                   bool use_nhwc_input)
     : model_path_(model_path),
       device_(device),
       num_streams_(num_streams),
-      performance_hint_(performance_hint) {
+      performance_hint_(performance_hint),
+      use_nhwc_input_(use_nhwc_input) {
 }
 
 RetinaNetCppSUT::~RetinaNetCppSUT() {
@@ -93,11 +96,35 @@ void RetinaNetCppSUT::load() {
     }
 
     input_name_ = inputs[0].get_any_name();
-    input_shape_ = inputs[0].get_partial_shape().get_min_shape();
+    ov::Shape model_input_shape = inputs[0].get_partial_shape().get_min_shape();
 
     // Handle dynamic batch
-    if (input_shape_.size() > 0 && input_shape_[0] == 0) {
-        input_shape_[0] = 1;
+    if (model_input_shape.size() > 0 && model_input_shape[0] == 0) {
+        model_input_shape[0] = 1;
+    }
+
+    // Apply NHWC input layout if requested (default)
+    // Model expects NCHW [1, 3, 800, 800], we provide NHWC [1, 800, 800, 3]
+    if (use_nhwc_input_) {
+        ov::preprocess::PrePostProcessor ppp(model_);
+        ppp.input().tensor().set_layout("NHWC");
+        ppp.input().model().set_layout("NCHW");
+        model_ = ppp.build();
+
+        // Input shape for NHWC: [batch, height, width, channels]
+        // Convert from NCHW [1, 3, 800, 800] to NHWC [1, 800, 800, 3]
+        if (model_input_shape.size() == 4) {
+            input_shape_ = ov::Shape{
+                model_input_shape[0],  // batch
+                model_input_shape[2],  // height
+                model_input_shape[3],  // width
+                model_input_shape[1]   // channels
+            };
+        } else {
+            input_shape_ = model_input_shape;
+        }
+    } else {
+        input_shape_ = model_input_shape;
     }
 
     // Map output names

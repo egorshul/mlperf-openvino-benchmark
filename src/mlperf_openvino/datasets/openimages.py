@@ -19,6 +19,12 @@ try:
 except ImportError:
     PIL_AVAILABLE = False
 
+try:
+    import cv2
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
+
 from .base import BaseDataset, QuerySampleLibrary
 
 logger = logging.getLogger(__name__)
@@ -230,7 +236,8 @@ class OpenImagesDataset(BaseDataset):
         input_size: int = INPUT_SIZE,
         cache_preprocessed: bool = True,
         use_disk_cache: bool = True,  # Use preprocessed numpy files
-        output_layout: str = "NCHW",  # "NCHW" or "NHWC"
+        output_layout: str = "NHWC",  # "NCHW" or "NHWC" - NHWC default, model handles conversion
+        use_opencv: bool = True,  # Use OpenCV for faster preprocessing
     ):
         """
         Initialize OpenImages dataset.
@@ -243,9 +250,10 @@ class OpenImagesDataset(BaseDataset):
             cache_preprocessed: Whether to cache preprocessed images in memory
             use_disk_cache: Whether to use/create preprocessed numpy cache on disk
             output_layout: Output tensor layout ("NCHW" or "NHWC")
+            use_opencv: Use OpenCV for faster preprocessing (falls back to PIL if unavailable)
         """
-        if not PIL_AVAILABLE:
-            raise ImportError("Pillow is required. Install with: pip install Pillow")
+        if not PIL_AVAILABLE and not CV2_AVAILABLE:
+            raise ImportError("Either Pillow or OpenCV is required")
 
         super().__init__(data_path=data_path, count=count)
 
@@ -255,6 +263,7 @@ class OpenImagesDataset(BaseDataset):
         self.cache_preprocessed = cache_preprocessed
         self.use_disk_cache = use_disk_cache
         self.output_layout = output_layout
+        self.use_opencv = use_opencv and CV2_AVAILABLE
 
         self._samples: List[Dict[str, Any]] = []
         self._annotations: Dict[str, List[Dict]] = defaultdict(list)
@@ -561,10 +570,11 @@ class OpenImagesDataset(BaseDataset):
         """
         Preprocess image for RetinaNet.
 
-        MLPerf reference preprocessing:
-        1. Resize to [800, 800] (simple resize, no aspect ratio preservation)
-        2. Normalize: divide by 255.0 ONLY (NO ImageNet mean/std!)
-        3. Convert to NCHW or NHWC format based on output_layout
+        MLPerf reference preprocessing (identical for both backends):
+        1. Load image as RGB
+        2. Resize to [800, 800] (simple resize, no aspect ratio preservation)
+        3. Normalize: divide by 255.0 ONLY (NO ImageNet mean/std!)
+        4. Convert to NCHW or NHWC format based on output_layout
 
         Args:
             image_path: Path to image file
@@ -572,6 +582,51 @@ class OpenImagesDataset(BaseDataset):
         Returns:
             Tuple of (preprocessed_image, preprocessing_info)
         """
+        if self.use_opencv:
+            return self._preprocess_image_opencv(image_path)
+        else:
+            return self._preprocess_image_pil(image_path)
+
+    def _preprocess_image_opencv(self, image_path: str) -> Tuple[np.ndarray, Dict]:
+        """OpenCV implementation - faster preprocessing."""
+        # Load image (OpenCV loads as BGR)
+        img = cv2.imread(image_path)
+        if img is None:
+            raise ValueError(f"Failed to load image: {image_path}")
+
+        orig_height, orig_width = img.shape[:2]
+
+        # Convert BGR -> RGB (MLPerf reference uses RGB)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+        # MLPerf reference: simple resize to target size (no aspect ratio preservation)
+        # cv2.INTER_LINEAR is equivalent to PIL's BILINEAR
+        img = cv2.resize(img, (self.input_size, self.input_size), interpolation=cv2.INTER_LINEAR)
+
+        # Convert to float32 and normalize - ONLY divide by 255!
+        # MLPerf RetinaNet does NOT use ImageNet mean/std normalization
+        img_array = img.astype(np.float32) / 255.0
+
+        # Convert to target layout
+        output_layout = getattr(self, 'output_layout', 'NHWC')
+        if output_layout == "NCHW":
+            # HWC -> CHW
+            img_array = np.transpose(img_array, (2, 0, 1))
+        # else: keep HWC for NHWC
+
+        img_array = np.expand_dims(img_array, axis=0)
+
+        preprocess_info = {
+            'orig_width': orig_width,
+            'orig_height': orig_height,
+            'scale_x': self.input_size / orig_width,
+            'scale_y': self.input_size / orig_height,
+        }
+
+        return img_array, preprocess_info
+
+    def _preprocess_image_pil(self, image_path: str) -> Tuple[np.ndarray, Dict]:
+        """PIL implementation - fallback when OpenCV unavailable."""
         img = Image.open(image_path).convert('RGB')
         orig_width, orig_height = img.size
 
@@ -583,7 +638,7 @@ class OpenImagesDataset(BaseDataset):
         img_array = np.array(img, dtype=np.float32) / 255.0
 
         # Convert to target layout
-        output_layout = getattr(self, 'output_layout', 'NCHW')
+        output_layout = getattr(self, 'output_layout', 'NHWC')
         if output_layout == "NCHW":
             # HWC -> CHW
             img_array = np.transpose(img_array, (2, 0, 1))
@@ -864,16 +919,23 @@ class OpenImagesQSL(QuerySampleLibrary):
     Query Sample Library for OpenImages dataset.
 
     Implements the MLPerf LoadGen QSL interface for RetinaNet benchmark.
+    Uses lazy loading with LRU cache to avoid OOM on large datasets.
     """
+
+    # Maximum samples to keep in memory (800x800x3 float32 = 7.3MB each)
+    # 1000 samples ≈ 7.3GB memory
+    MAX_CACHE_SIZE = 1000
 
     def __init__(
         self,
         data_path: str,
         annotations_file: Optional[str] = None,
         count: Optional[int] = None,
-        performance_sample_count: int = 24576,  # MLPerf default
+        performance_sample_count: int = 64,  # MLPerf official for RetinaNet
         input_size: int = INPUT_SIZE,
-        output_layout: str = "NCHW",
+        output_layout: str = "NHWC",  # NHWC default, model handles conversion via PrePostProcessor
+        use_opencv: bool = True,  # Use OpenCV for faster preprocessing
+        max_cache_size: Optional[int] = None,  # Override MAX_CACHE_SIZE
     ):
         """
         Initialize OpenImages QSL.
@@ -885,6 +947,8 @@ class OpenImagesQSL(QuerySampleLibrary):
             performance_sample_count: Number of samples for performance run
             input_size: Input image size
             output_layout: Output tensor layout ("NCHW" or "NHWC")
+            use_opencv: Use OpenCV for faster preprocessing
+            max_cache_size: Maximum samples to cache in memory (default: 1000)
         """
         super().__init__()
 
@@ -893,12 +957,18 @@ class OpenImagesQSL(QuerySampleLibrary):
             annotations_file=annotations_file,
             count=count,
             input_size=input_size,
-            cache_preprocessed=True,
+            cache_preprocessed=False,  # Disable internal cache - we use LRU cache in QSL
             output_layout=output_layout,
+            use_opencv=use_opencv,
         )
 
         self._performance_sample_count = performance_sample_count
-        self._loaded_samples: Dict[int, np.ndarray] = {}
+        self._max_cache_size = max_cache_size or self.MAX_CACHE_SIZE
+
+        # LRU cache: OrderedDict maintains insertion order
+        from collections import OrderedDict
+        self._loaded_samples: OrderedDict[int, np.ndarray] = OrderedDict()
+        self._cache_lock = None  # Lazy init for thread safety
 
     def load(self) -> None:
         """Load the dataset."""
@@ -914,56 +984,116 @@ class OpenImagesQSL(QuerySampleLibrary):
     def performance_sample_count(self) -> int:
         return min(self._performance_sample_count, self.total_sample_count)
 
+    def _ensure_cache_lock(self):
+        """Lazy init thread lock."""
+        if self._cache_lock is None:
+            import threading
+            self._cache_lock = threading.Lock()
+
+    def _cache_put(self, idx: int, data: np.ndarray) -> None:
+        """Add item to LRU cache, evicting oldest if needed."""
+        self._ensure_cache_lock()
+        with self._cache_lock:
+            # If already in cache, move to end (most recently used)
+            if idx in self._loaded_samples:
+                self._loaded_samples.move_to_end(idx)
+                return
+
+            # Evict oldest items if cache is full
+            while len(self._loaded_samples) >= self._max_cache_size:
+                self._loaded_samples.popitem(last=False)
+
+            self._loaded_samples[idx] = data
+
+    def _cache_get(self, idx: int) -> Optional[np.ndarray]:
+        """Get item from cache, updating LRU order."""
+        self._ensure_cache_lock()
+        with self._cache_lock:
+            if idx in self._loaded_samples:
+                self._loaded_samples.move_to_end(idx)
+                return self._loaded_samples[idx]
+            return None
+
     def load_query_samples(self, sample_indices: List[int]) -> None:
-        """Load samples into memory with progress tracking and parallel loading."""
+        """
+        Load samples - uses lazy loading for large datasets.
+
+        For small batches (performance mode), preload all.
+        For large batches (accuracy mode), just warm up disk cache.
+        """
         if not self.dataset._is_loaded:
             self.dataset.load()
 
-        # Filter indices that need to be loaded
-        to_load = [idx for idx in sample_indices if idx not in self._loaded_samples]
+        # If small batch, preload all into memory
+        if len(sample_indices) <= self._max_cache_size:
+            self._preload_samples(sample_indices)
+        else:
+            # Large batch (accuracy mode) - just ensure disk cache exists
+            # Samples will be loaded on-demand in get_features
+            logger.info(f"Lazy loading mode: {len(sample_indices)} samples "
+                       f"(cache size: {self._max_cache_size})")
+
+    def _preload_samples(self, sample_indices: List[int]) -> None:
+        """Preload samples into memory cache."""
+        import os
+        import sys
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        to_load = [idx for idx in sample_indices if self._cache_get(idx) is None]
 
         if not to_load:
             return
 
-        logger.debug(f"Loading {len(to_load)} OpenImages samples into memory...")
-
-        # Use parallel loading for faster preprocessing
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        import sys
+        logger.debug(f"Preloading {len(to_load)} samples...")
 
         def load_single(idx):
             img, _ = self.dataset.get_sample(idx)
             return idx, img
 
-        num_workers = min(8, len(to_load))
+        num_workers = min(os.cpu_count() or 4, len(to_load), 16)
         completed = 0
+        total = len(to_load)
 
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
             futures = {executor.submit(load_single, idx): idx for idx in to_load}
 
             for future in as_completed(futures):
-                idx, img = future.result()
-                self._loaded_samples[idx] = img
-                completed += 1
+                try:
+                    idx, img = future.result()
+                    self._cache_put(idx, img)
+                    completed += 1
 
-                # Progress update every 500 samples
-                if completed % 500 == 0 or completed == len(to_load):
-                    print(f"\rLoading samples: {completed}/{len(to_load)} ({100*completed/len(to_load):.1f}%)", end="", flush=True)
+                    if completed % 100 == 0 or completed == total:
+                        pct = completed / total * 100
+                        sys.stderr.write(f"\rPreprocessing: {completed}/{total} ({pct:.1f}%)   ")
+                        sys.stderr.flush()
+                except Exception as e:
+                    logger.warning(f"Failed to load sample: {e}")
 
-        print()  # Newline after progress
-        logger.info(f"Loaded {len(to_load)} samples into memory")
+        if total > 0:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
 
     def unload_query_samples(self, sample_indices: List[int]) -> None:
         """Unload samples from memory."""
-        for idx in sample_indices:
-            self._loaded_samples.pop(idx, None)
+        self._ensure_cache_lock()
+        with self._cache_lock:
+            for idx in sample_indices:
+                self._loaded_samples.pop(idx, None)
 
     def get_features(self, sample_index: int) -> Dict[str, np.ndarray]:
-        """Get input features for a sample."""
-        if sample_index in self._loaded_samples:
-            return {'input': self._loaded_samples[sample_index]}
+        """Get input features for a sample with LRU caching."""
+        # Try cache first
+        cached = self._cache_get(sample_index)
+        if cached is not None:
+            return {'input': cached}
 
+        # Load from disk (uses disk cache internally)
         img, _ = self.dataset.get_sample(sample_index)
+
+        # Add to LRU cache
+        self._cache_put(sample_index, img)
+
         return {'input': img}
 
     def get_label(self, sample_index: int) -> Dict[str, Any]:

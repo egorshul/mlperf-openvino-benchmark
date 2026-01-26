@@ -43,7 +43,7 @@ class PreprocessingConfig:
     mean: Tuple[float, float, float] = (123.68, 116.78, 103.94)
     std: Tuple[float, float, float] = (1.0, 1.0, 1.0)
     channel_order: str = "RGB"
-    output_layout: str = "NCHW"  # "NCHW" or "NHWC"
+    output_layout: str = "NHWC"  # "NCHW" or "NHWC" - NHWC is default, model handles conversion
 
 
 @dataclass
@@ -361,15 +361,15 @@ class BenchmarkConfig:
                 accuracy_threshold=0.99,
                 onnx_url="https://zenodo.org/record/4735647/files/resnet50_v1.onnx",
                 offline=ScenarioConfig(
-                    min_duration_ms=60000,
+                    min_duration_ms=600000,  # MLPerf official: 10 minutes
                     min_query_count=24576,
                     samples_per_query=1,
                     target_qps=6150.0,
                 ),
                 server=ScenarioConfig(
-                    min_duration_ms=60000,
+                    min_duration_ms=600000,  # MLPerf official: 10 minutes
                     min_query_count=24576,
-                    target_latency_ns=15000000,  # 15ms
+                    target_latency_ns=15000000,  # 15ms (MLPerf official)
                     target_qps=5700.0,
                     nireq_multiplier=6,
                     explicit_batching=True,
@@ -400,13 +400,13 @@ class BenchmarkConfig:
                 accuracy_threshold=0.99,
                 preprocessing=PreprocessingConfig(),  # Not used for audio
                 offline=ScenarioConfig(
-                    min_duration_ms=60000,
-                    min_query_count=2513,  # MLPerf official (LibriSpeech)
+                    min_duration_ms=600000,  # MLPerf official: 10 minutes
+                    min_query_count=1633,  # MLPerf official
                     samples_per_query=1,
                 ),
                 server=ScenarioConfig(
-                    min_duration_ms=60000,
-                    min_query_count=2513,  # Server uses min_duration primarily
+                    min_duration_ms=600000,  # MLPerf official: 10 minutes
+                    min_query_count=1633,  # MLPerf official
                     target_latency_ns=1000000000,  # 1 second for ASR
                     target_qps=500.0,
                 ),
@@ -435,15 +435,15 @@ class BenchmarkConfig:
                 accuracy_threshold=0.99,
                 preprocessing=PreprocessingConfig(),  # Not used for text
                 offline=ScenarioConfig(
-                    min_duration_ms=60000,
+                    min_duration_ms=600000,  # MLPerf official: 10 minutes
                     min_query_count=10833,  # MLPerf official (SQuAD dataset size)
                     samples_per_query=1,
                     target_qps=395.0,
                 ),
                 server=ScenarioConfig(
-                    min_duration_ms=60000,
+                    min_duration_ms=600000,  # MLPerf official: 10 minutes
                     min_query_count=10833,
-                    target_latency_ns=130000000,  # 130ms
+                    target_latency_ns=130000000,  # 130ms (MLPerf official)
                     target_qps=330.0,
                 ),
                 onnx_url="https://zenodo.org/record/3733910/files/model.onnx",
@@ -472,19 +472,21 @@ class BenchmarkConfig:
                 preprocessing=PreprocessingConfig(
                     resize=(800, 800),
                     center_crop=(800, 800),
-                    mean=(0.485 * 255, 0.456 * 255, 0.406 * 255),
-                    std=(0.229 * 255, 0.224 * 255, 0.225 * 255),
+                    # NOTE: MLPerf RetinaNet uses only /255.0 normalization, NO ImageNet mean/std
+                    mean=(0.0, 0.0, 0.0),
+                    std=(255.0, 255.0, 255.0),  # Equivalent to /255.0
                     channel_order="RGB",
+                    # output_layout="NHWC" (default) - model uses PrePostProcessor for NHWC->NCHW
                 ),
                 offline=ScenarioConfig(
-                    min_duration_ms=60000,
+                    min_duration_ms=600000,  # MLPerf official: 10 minutes
                     min_query_count=24576,  # MLPerf official
                     samples_per_query=1,
                 ),
                 server=ScenarioConfig(
-                    min_duration_ms=60000,
-                    min_query_count=24576,  # Server uses min_duration primarily
-                    target_latency_ns=100000000,  # 100ms
+                    min_duration_ms=600000,  # MLPerf official: 10 minutes
+                    min_query_count=24576,
+                    target_latency_ns=100000000,  # 100ms (MLPerf official)
                     target_qps=1000.0,
                 ),
                 onnx_url="https://zenodo.org/record/6617879/files/resnext50_32x4d_fpn.onnx",
@@ -515,15 +517,15 @@ class BenchmarkConfig:
                 accuracy_threshold=0.99,
                 preprocessing=PreprocessingConfig(),  # Not used for text input
                 offline=ScenarioConfig(
-                    min_duration_ms=60000,
-                    min_query_count=5000,  # MLPerf official (COCO subset)
+                    min_duration_ms=600000,  # MLPerf official: 10 minutes
+                    min_query_count=5000,  # MLPerf official
                     samples_per_query=1,
                 ),
                 server=ScenarioConfig(
-                    min_duration_ms=60000,
-                    min_query_count=5000,  # Server uses min_duration primarily
+                    min_duration_ms=600000,  # MLPerf official: 10 minutes
+                    min_query_count=5000,  # MLPerf official
                     target_latency_ns=20000000000,  # 20 seconds for image generation
-                    target_qps=10.0,  # Lower QPS due to high latency
+                    target_qps=10.0,
                 ),
             ),
             dataset=DatasetConfig(

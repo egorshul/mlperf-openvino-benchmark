@@ -82,8 +82,8 @@ def get_default_config(model: str) -> BenchmarkConfig:
               help='Number of threads (0 = auto)')
 @click.option('--num-streams', type=str, default='AUTO',
               help='Number of inference streams')
-@click.option('--batch-size', '-b', type=int, default=1,
-              help='Inference batch size')
+@click.option('--batch-size', '-b', type=int, default=None,
+              help='Inference batch size (default: 1, or 32 for CPU Offline with THROUGHPUT hint)')
 @click.option('--nchw', is_flag=True,
               help='Use NCHW input layout (default is NHWC for ResNet50)')
 @click.option('--performance-hint', type=click.Choice(['THROUGHPUT', 'LATENCY', 'AUTO']),
@@ -193,7 +193,7 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         elif scenario == 'Offline':
             # CPU Offline: optimize for maximum THROUGHPUT with batching
             actual_hint = 'THROUGHPUT'
-            if batch_size == 1:  # User didn't specify batch size
+            if batch_size is None:  # User didn't specify batch size
                 batch_size = 32  # Larger batch for throughput
         else:
             # CPU Server: THROUGHPUT hint for parallelism, batch=1 for low latency
@@ -201,6 +201,10 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
             # Keep batch_size=1 for Server (each query = 1 sample)
     else:
         actual_hint = performance_hint
+
+    # Apply default batch_size if not specified
+    if batch_size is None:
+        batch_size = 1
 
     benchmark_config.openvino.num_streams = num_streams
     benchmark_config.openvino.batch_size = batch_size

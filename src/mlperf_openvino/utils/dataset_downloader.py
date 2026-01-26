@@ -1214,6 +1214,12 @@ def _convert_openimages_to_coco(
 
     # Build COCO format
     coco = {
+        'info': {
+            'description': 'OpenImages MLPerf subset',
+            'version': '1.0',
+            'year': 2024,
+        },
+        'licenses': [],
         'images': [],
         'annotations': [],
         'categories': [{'id': cid, 'name': name} for cid, name in class_names.items()],

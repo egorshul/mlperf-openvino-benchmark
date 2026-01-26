@@ -160,7 +160,12 @@ class ResNetCppSUTWrapper:
 
         performance_hint = config.openvino.performance_hint
 
-        self._cpp_sut = ResNetCppSUT(model_path, device, num_streams, performance_hint)
+        # Determine if NHWC input is needed (default is NHWC)
+        use_nhwc = True
+        if hasattr(config.model, 'preprocessing') and config.model.preprocessing:
+            use_nhwc = getattr(config.model.preprocessing, 'output_layout', 'NHWC') == 'NHWC'
+
+        self._cpp_sut = ResNetCppSUT(model_path, device, num_streams, performance_hint, use_nhwc)
         self._cpp_sut.load()
 
         # Get input/output names
@@ -598,7 +603,12 @@ class RetinaNetCppSUTWrapper:
 
         performance_hint = config.openvino.performance_hint
 
-        self._cpp_sut = RetinaNetCppSUT(model_path, device, num_streams, performance_hint)
+        # Determine if NHWC input is needed (default is NHWC)
+        use_nhwc = True
+        if hasattr(config.model, 'preprocessing') and config.model.preprocessing:
+            use_nhwc = getattr(config.model.preprocessing, 'output_layout', 'NHWC') == 'NHWC'
+
+        self._cpp_sut = RetinaNetCppSUT(model_path, device, num_streams, performance_hint, use_nhwc)
         self._cpp_sut.load()
 
         # Get info
@@ -815,5 +825,10 @@ def create_retinanet_sut(
     from .retinanet_sut import RetinaNetSUT
     from ..backends.openvino_backend import OpenVINOBackend
 
-    backend = OpenVINOBackend(model_path, config.openvino)
+    # Determine if NHWC input is needed (default is NHWC)
+    use_nhwc = True
+    if hasattr(config.model, 'preprocessing') and config.model.preprocessing:
+        use_nhwc = getattr(config.model.preprocessing, 'output_layout', 'NHWC') == 'NHWC'
+
+    backend = OpenVINOBackend(model_path, config.openvino, use_nhwc_input=use_nhwc)
     return RetinaNetSUT(config, backend, qsl, scenario)

@@ -27,11 +27,12 @@ PYBIND11_MODULE(_cpp_sut, m) {
     m.doc() = "C++ SUT for maximum throughput (bypasses Python GIL)";
 
     py::class_<mlperf_ov::ResNetCppSUT>(m, "ResNetCppSUT")
-        .def(py::init<const std::string&, const std::string&, int, const std::string&>(),
+        .def(py::init<const std::string&, const std::string&, int, const std::string&, bool>(),
              py::arg("model_path"),
              py::arg("device") = "CPU",
              py::arg("num_streams") = 0,
              py::arg("performance_hint") = "THROUGHPUT",
+             py::arg("use_nhwc_input") = true,  // NHWC is default
              "Create C++ SUT instance")
 
         .def("load", &mlperf_ov::ResNetCppSUT::load,
@@ -251,11 +252,12 @@ PYBIND11_MODULE(_cpp_sut, m) {
 
     // RetinaNetCppSUT - optimized for RetinaNet Object Detection
     py::class_<mlperf_ov::RetinaNetCppSUT>(m, "RetinaNetCppSUT")
-        .def(py::init<const std::string&, const std::string&, int, const std::string&>(),
+        .def(py::init<const std::string&, const std::string&, int, const std::string&, bool>(),
              py::arg("model_path"),
              py::arg("device") = "CPU",
              py::arg("num_streams") = 0,
              py::arg("performance_hint") = "THROUGHPUT",
+             py::arg("use_nhwc_input") = true,  // NHWC is default
              "Create RetinaNet C++ SUT instance")
 
         .def("load", &mlperf_ov::RetinaNetCppSUT::load,
@@ -387,7 +389,7 @@ PYBIND11_MODULE(_cpp_sut, m) {
              py::arg("device_prefix"),
              py::arg("batch_size") = 1,
              py::arg("compile_properties") = std::unordered_map<std::string, std::string>{},
-             py::arg("use_nhwc_input") = false,
+             py::arg("use_nhwc_input") = true,  // NHWC is default
              py::arg("nireq_multiplier") = 4,
              "Create multi-die accelerator SUT. nireq_multiplier controls queue depth "
              "(lower = less latency for Server mode, higher = more throughput for Offline)")
