@@ -43,7 +43,7 @@ class PreprocessingConfig:
     mean: Tuple[float, float, float] = (123.68, 116.78, 103.94)
     std: Tuple[float, float, float] = (1.0, 1.0, 1.0)
     channel_order: str = "RGB"
-    output_layout: str = "NCHW"  # "NCHW" or "NHWC"
+    output_layout: str = "NHWC"  # "NCHW" or "NHWC" - NHWC is default, model handles conversion
 
 
 @dataclass
@@ -476,7 +476,7 @@ class BenchmarkConfig:
                     mean=(0.0, 0.0, 0.0),
                     std=(255.0, 255.0, 255.0),  # Equivalent to /255.0
                     channel_order="RGB",
-                    output_layout="NCHW",  # RetinaNet ONNX model expects NCHW
+                    # output_layout="NHWC" (default) - model uses PrePostProcessor for NHWC->NCHW
                 ),
                 offline=ScenarioConfig(
                     min_duration_ms=600000,  # MLPerf official: 10 minutes

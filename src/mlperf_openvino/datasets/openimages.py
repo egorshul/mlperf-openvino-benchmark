@@ -230,7 +230,7 @@ class OpenImagesDataset(BaseDataset):
         input_size: int = INPUT_SIZE,
         cache_preprocessed: bool = True,
         use_disk_cache: bool = True,  # Use preprocessed numpy files
-        output_layout: str = "NCHW",  # "NCHW" or "NHWC"
+        output_layout: str = "NHWC",  # "NCHW" or "NHWC" - NHWC default, model handles conversion
     ):
         """
         Initialize OpenImages dataset.
@@ -583,7 +583,7 @@ class OpenImagesDataset(BaseDataset):
         img_array = np.array(img, dtype=np.float32) / 255.0
 
         # Convert to target layout
-        output_layout = getattr(self, 'output_layout', 'NCHW')
+        output_layout = getattr(self, 'output_layout', 'NHWC')
         if output_layout == "NCHW":
             # HWC -> CHW
             img_array = np.transpose(img_array, (2, 0, 1))
@@ -873,7 +873,7 @@ class OpenImagesQSL(QuerySampleLibrary):
         count: Optional[int] = None,
         performance_sample_count: int = 64,  # MLPerf official for RetinaNet
         input_size: int = INPUT_SIZE,
-        output_layout: str = "NCHW",
+        output_layout: str = "NHWC",  # NHWC default, model handles conversion via PrePostProcessor
     ):
         """
         Initialize OpenImages QSL.

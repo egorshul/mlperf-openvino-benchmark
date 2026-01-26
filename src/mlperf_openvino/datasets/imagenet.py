@@ -181,8 +181,8 @@ class ImageNetDataset(BaseDataset):
         std = np.array(self.preprocessing.std, dtype=np.float32)
         img_array = img_array / std
 
-        # Convert to target layout
-        output_layout = getattr(self.preprocessing, 'output_layout', 'NCHW')
+        # Convert to target layout (NHWC is default, model handles conversion via PrePostProcessor)
+        output_layout = getattr(self.preprocessing, 'output_layout', 'NHWC')
         if output_layout == "NCHW":
             # HWC -> CHW
             img_array = np.transpose(img_array, (2, 0, 1))

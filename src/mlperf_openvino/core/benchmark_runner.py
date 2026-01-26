@@ -297,9 +297,9 @@ class BenchmarkRunner:
         from ..datasets.openimages import OpenImagesQSL
         from .cpp_sut_wrapper import create_retinanet_sut
 
-        output_layout = "NCHW"
+        output_layout = "NHWC"  # Default NHWC, model handles conversion via PrePostProcessor
         if hasattr(self.config.model, 'preprocessing') and self.config.model.preprocessing:
-            output_layout = getattr(self.config.model.preprocessing, 'output_layout', 'NCHW')
+            output_layout = getattr(self.config.model.preprocessing, 'output_layout', 'NHWC')
 
         self.qsl = OpenImagesQSL(
             data_path=self.config.dataset.path,

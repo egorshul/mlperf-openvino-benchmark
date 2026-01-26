@@ -251,11 +251,12 @@ PYBIND11_MODULE(_cpp_sut, m) {
 
     // RetinaNetCppSUT - optimized for RetinaNet Object Detection
     py::class_<mlperf_ov::RetinaNetCppSUT>(m, "RetinaNetCppSUT")
-        .def(py::init<const std::string&, const std::string&, int, const std::string&>(),
+        .def(py::init<const std::string&, const std::string&, int, const std::string&, bool>(),
              py::arg("model_path"),
              py::arg("device") = "CPU",
              py::arg("num_streams") = 0,
              py::arg("performance_hint") = "THROUGHPUT",
+             py::arg("use_nhwc_input") = true,  // NHWC is default
              "Create RetinaNet C++ SUT instance")
 
         .def("load", &mlperf_ov::RetinaNetCppSUT::load,
