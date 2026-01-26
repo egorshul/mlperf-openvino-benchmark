@@ -15,6 +15,12 @@ try:
 except ImportError:
     PIL_AVAILABLE = False
 
+try:
+    import cv2
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
+
 from .base import BaseDataset, QuerySampleLibrary
 from ..core.config import PreprocessingConfig
 
@@ -40,27 +46,30 @@ class ImageNetDataset(BaseDataset):
         preprocessing: Optional[PreprocessingConfig] = None,
         count: Optional[int] = None,
         cache_preprocessed: bool = True,
+        use_opencv: bool = True,  # Use OpenCV for faster preprocessing
         **kwargs
     ):
         """
         Initialize ImageNet dataset.
-        
+
         Args:
             data_path: Path to ImageNet validation images
             val_map_path: Path to validation map file
             preprocessing: Preprocessing configuration
             count: Number of samples to use
             cache_preprocessed: Whether to cache preprocessed images
+            use_opencv: Use OpenCV for faster preprocessing (falls back to PIL if unavailable)
         """
-        if not PIL_AVAILABLE:
-            raise ImportError("Pillow is required for image loading. Install with: pip install Pillow")
-        
+        if not PIL_AVAILABLE and not CV2_AVAILABLE:
+            raise ImportError("Either Pillow or OpenCV is required")
+
         super().__init__(data_path, count, **kwargs)
-        
+
         self.val_map_path = val_map_path
         self.preprocessing = preprocessing or PreprocessingConfig()
         self.cache_preprocessed = cache_preprocessed
-        
+        self.use_opencv = use_opencv and CV2_AVAILABLE
+
         self._image_paths: List[str] = []
         self._preprocessed_cache: Dict[int, np.ndarray] = {}
     
@@ -124,12 +133,97 @@ class ImageNetDataset(BaseDataset):
         """
         Preprocess a single image following MLCommons reference (pre_process_vgg).
 
+        MLCommons reference preprocessing:
+        1. Load image as RGB
+        2. Resize preserving aspect ratio (scale=87.5%, target ~256 for crop 224)
+        3. Center crop to target size (224x224)
+        4. Convert to float32
+        5. Apply mean subtraction
+        6. Apply std normalization
+        7. Convert to NCHW or NHWC based on output_layout
+
         Args:
             image_path: Path to the image
 
         Returns:
-            Preprocessed image as numpy array (NCHW format)
+            Preprocessed image as numpy array
         """
+        if self.use_opencv:
+            return self._preprocess_image_opencv(image_path)
+        else:
+            return self._preprocess_image_pil(image_path)
+
+    def _preprocess_image_opencv(self, image_path: str) -> np.ndarray:
+        """OpenCV implementation - faster preprocessing."""
+        # Load image (OpenCV loads as BGR)
+        img = cv2.imread(image_path)
+        if img is None:
+            raise ValueError(f"Failed to load image: {image_path}")
+
+        # Convert BGR -> RGB (MLCommons reference uses RGB)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+        # Get crop size
+        if self.preprocessing and self.preprocessing.center_crop:
+            crop_h, crop_w = self.preprocessing.center_crop
+        else:
+            crop_h, crop_w = 224, 224
+
+        # Resize with aspect ratio preservation (MLCommons reference)
+        # Scale so that after center crop we get the target size
+        # MLCommons uses scale=87.5%, so target_size / 0.875 ≈ 256 for 224
+        h, w = img.shape[:2]
+        scale = 87.5
+        new_height = int(100.0 * crop_h / scale)  # 256 for crop_h=224
+        new_width = int(100.0 * crop_w / scale)   # 256 for crop_w=224
+
+        if h > w:
+            # Width is smaller, scale based on width
+            new_w = new_width
+            new_h = int(new_height * h / w)
+        else:
+            # Height is smaller, scale based on height
+            new_h = new_height
+            new_w = int(new_width * w / h)
+
+        # Resize preserving aspect ratio
+        # cv2.INTER_AREA is best for downscaling (matches MLCommons reference)
+        img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+        # Center crop
+        h, w = img.shape[:2]
+        left = (w - crop_w) // 2
+        top = (h - crop_h) // 2
+        img = img[top:top + crop_h, left:left + crop_w]
+
+        # Convert to float32
+        img_array = img.astype(np.float32)
+
+        # Channel order conversion if needed (already RGB)
+        if self.preprocessing.channel_order == "BGR":
+            img_array = img_array[:, :, ::-1].copy()
+
+        # Apply mean subtraction
+        mean = np.array(self.preprocessing.mean, dtype=np.float32)
+        img_array = img_array - mean
+
+        # Apply std normalization
+        std = np.array(self.preprocessing.std, dtype=np.float32)
+        img_array = img_array / std
+
+        # Convert to target layout
+        output_layout = getattr(self.preprocessing, 'output_layout', 'NHWC')
+        if output_layout == "NCHW":
+            # HWC -> CHW
+            img_array = np.transpose(img_array, (2, 0, 1))
+
+        # Add batch dimension
+        img_array = np.expand_dims(img_array, axis=0)
+
+        return img_array
+
+    def _preprocess_image_pil(self, image_path: str) -> np.ndarray:
+        """PIL implementation - fallback when OpenCV unavailable."""
         # Load image
         img = Image.open(image_path).convert("RGB")
 
