@@ -472,9 +472,11 @@ class BenchmarkConfig:
                 preprocessing=PreprocessingConfig(
                     resize=(800, 800),
                     center_crop=(800, 800),
-                    mean=(0.485 * 255, 0.456 * 255, 0.406 * 255),
-                    std=(0.229 * 255, 0.224 * 255, 0.225 * 255),
+                    # NOTE: MLPerf RetinaNet uses only /255.0 normalization, NO ImageNet mean/std
+                    mean=(0.0, 0.0, 0.0),
+                    std=(255.0, 255.0, 255.0),  # Equivalent to /255.0
                     channel_order="RGB",
+                    output_layout="NCHW",  # RetinaNet ONNX model expects NCHW
                 ),
                 offline=ScenarioConfig(
                     min_duration_ms=600000,  # MLPerf official: 10 minutes
