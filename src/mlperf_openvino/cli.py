@@ -193,7 +193,8 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         elif scenario == 'Offline':
             # CPU Offline: optimize for maximum THROUGHPUT with batching
             actual_hint = 'THROUGHPUT'
-            if batch_size == 1:  # User didn't specify batch size
+            # Only auto-batch for models that support it (not object detection)
+            if batch_size == 1 and model not in ['retinanet']:
                 batch_size = 32  # Larger batch for throughput
         else:
             # CPU Server: THROUGHPUT hint for parallelism, batch=1 for low latency
