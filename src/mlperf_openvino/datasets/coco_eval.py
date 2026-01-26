@@ -58,6 +58,12 @@ def evaluate_openimages_accuracy(
     # Load COCO ground truth
     coco_gt = COCO(coco_annotations_file)
 
+    # Ensure required COCO fields exist (pycocotools expects these)
+    if 'info' not in coco_gt.dataset:
+        coco_gt.dataset['info'] = {'description': 'OpenImages for MLPerf', 'version': '1.0'}
+    if 'licenses' not in coco_gt.dataset:
+        coco_gt.dataset['licenses'] = []
+
     # Build filename to image_id mapping from COCO
     filename_to_image_id = {}
     for img_id, img_info in coco_gt.imgs.items():
