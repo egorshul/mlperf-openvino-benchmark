@@ -136,6 +136,20 @@ def evaluate_openimages_accuracy(
     skipped_categories = set()
     valid_cat_ids = set(coco_gt.cats.keys())
 
+    # Diagnostic: count total detections and analyze predictions
+    total_detections = 0
+    total_after_score_filter = 0
+    score_threshold = 0.05  # Only count detections above this threshold for diagnostics
+
+    for pred in predictions.values():
+        boxes = pred.get('boxes', np.array([]))
+        scores = pred.get('scores', np.array([]))
+        total_detections += len(scores)
+        total_after_score_filter += np.sum(scores > score_threshold)
+
+    logger.info(f"Total detections from model: {total_detections} ({len(predictions)} images)")
+    logger.info(f"Detections with score > {score_threshold}: {total_after_score_filter}")
+
     # Debug: log first few predictions
     debug_count = 0
 
@@ -210,8 +224,10 @@ def evaluate_openimages_accuracy(
                 'score': float(score),
             })
 
+    logger.info(f"Valid predictions after category filter: {len(coco_results)}")
+
     if skipped_categories:
-        logger.warning(f"Skipped {len(skipped_categories)} invalid category IDs: {sorted(skipped_categories)[:20]}")
+        logger.warning(f"Skipped {len(skipped_categories)} unique invalid category IDs: {sorted(skipped_categories)[:20]}")
 
         # If we skipped too many and they look like off-by-one error, suggest fix
         if 0 in skipped_categories and model_labels_zero_indexed:
