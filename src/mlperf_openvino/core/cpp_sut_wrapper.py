@@ -510,7 +510,12 @@ def create_sut(
     from .sut import OpenVINOSUT
     from ..backends.openvino_backend import OpenVINOBackend
 
-    backend = OpenVINOBackend(model_path, config.openvino)
+    # Check if using NHWC layout
+    use_nhwc = False
+    if hasattr(config.model, 'preprocessing') and config.model.preprocessing:
+        use_nhwc = getattr(config.model.preprocessing, 'output_layout', 'NCHW') == 'NHWC'
+
+    backend = OpenVINOBackend(model_path, config.openvino, use_nhwc_input=use_nhwc)
     return OpenVINOSUT(config, backend, qsl, scenario)
 
 
