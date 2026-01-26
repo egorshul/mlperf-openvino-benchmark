@@ -858,12 +858,24 @@ class BenchmarkRunner:
             print(f"F1: {f1:.2f} [{status}]")
             print(f"EM: {em:.2f}")
         elif model_type == 'retinanet':
-            print(f"mAP: {acc.get('mAP', 0):.4f}")
+            mAP = acc.get('mAP', 0)
+            # MLPerf RetinaNet threshold: 37.19% mAP (99% of 37.57%)
+            status = "PASS" if mAP >= 0.3719 else "FAIL"
+            print(f"mAP: {mAP:.4f} [{status}]")
         elif model_type == 'whisper':
-            print(f"Word Accuracy: {acc.get('word_accuracy', 0):.4f}")
-            print(f"WER: {acc.get('wer', 0):.4f}")
+            word_acc = acc.get('word_accuracy', 0)
+            wer = acc.get('wer', 0)
+            # MLPerf Whisper threshold: 96.94% word accuracy (99% of 97.93%)
+            status = "PASS" if word_acc >= 0.9694 else "FAIL"
+            print(f"Word Accuracy: {word_acc:.4f} [{status}]")
+            print(f"WER: {wer:.4f}")
         elif model_type == 'sdxl':
-            print(f"CLIP: {acc.get('clip_score', 0):.4f}")
-            print(f"FID: {acc.get('fid_score', 0):.4f}")
+            clip = acc.get('clip_score', 0)
+            fid = acc.get('fid_score', 0)
+            # MLPerf SDXL: CLIP >= 31.68632 and FID within range
+            clip_pass = clip >= 31.68632
+            status = "PASS" if clip_pass else "FAIL"
+            print(f"CLIP: {clip:.4f} [{status}]")
+            print(f"FID: {fid:.4f}")
 
         print("="*50 + "\n")
