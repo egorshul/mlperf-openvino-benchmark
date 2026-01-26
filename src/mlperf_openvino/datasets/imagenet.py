@@ -371,20 +371,55 @@ class ImageNetQSL(QuerySampleLibrary):
     
     def load_query_samples(self, sample_list: List[int]) -> None:
         """
-        Load samples into memory.
-        
+        Load samples into memory with parallel preprocessing.
+
         Args:
             sample_list: List of sample indices to load
         """
         if not self._dataset.is_loaded:
             self._dataset.load()
-        
-        logger.debug(f"Loading {len(sample_list)} query samples...")
-        
-        for sample_id in sample_list:
-            if sample_id not in self._loaded_samples:
-                data, _ = self._dataset.get_sample(sample_id)
-                self._loaded_samples[sample_id] = data
+
+        # Filter indices that need to be loaded
+        to_load = [idx for idx in sample_list if idx not in self._loaded_samples]
+
+        if not to_load:
+            return
+
+        logger.debug(f"Loading {len(to_load)} ImageNet samples with parallel preprocessing...")
+
+        import os
+        import sys
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def load_single(idx):
+            data, _ = self._dataset.get_sample(idx)
+            return idx, data
+
+        # Use more workers for I/O-bound operations
+        num_workers = min(os.cpu_count() or 4, len(to_load), 16)
+        completed = 0
+        total = len(to_load)
+
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = {executor.submit(load_single, idx): idx for idx in to_load}
+
+            for future in as_completed(futures):
+                try:
+                    idx, data = future.result()
+                    self._loaded_samples[idx] = data
+                    completed += 1
+
+                    # Progress update
+                    if completed % 100 == 0 or completed == total:
+                        pct = completed / total * 100
+                        sys.stderr.write(f"\rPreprocessing: {completed}/{total} ({pct:.1f}%)   ")
+                        sys.stderr.flush()
+                except Exception as e:
+                    logger.warning(f"Failed to load sample: {e}")
+
+        if total > 0:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
     
     def unload_query_samples(self, sample_list: List[int]) -> None:
         """

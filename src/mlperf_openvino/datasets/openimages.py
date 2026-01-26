@@ -925,32 +925,41 @@ class OpenImagesQSL(QuerySampleLibrary):
         if not to_load:
             return
 
-        logger.debug(f"Loading {len(to_load)} OpenImages samples into memory...")
+        logger.debug(f"Loading {len(to_load)} OpenImages samples with parallel preprocessing...")
 
-        # Use parallel loading for faster preprocessing
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import os
         import sys
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
         def load_single(idx):
             img, _ = self.dataset.get_sample(idx)
             return idx, img
 
-        num_workers = min(8, len(to_load))
+        # Use more workers - preprocessing is I/O bound (disk cache) + some CPU
+        num_workers = min(os.cpu_count() or 4, len(to_load), 16)
         completed = 0
+        total = len(to_load)
 
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
             futures = {executor.submit(load_single, idx): idx for idx in to_load}
 
             for future in as_completed(futures):
-                idx, img = future.result()
-                self._loaded_samples[idx] = img
-                completed += 1
+                try:
+                    idx, img = future.result()
+                    self._loaded_samples[idx] = img
+                    completed += 1
 
-                # Progress update every 500 samples
-                if completed % 500 == 0 or completed == len(to_load):
-                    print(f"\rLoading samples: {completed}/{len(to_load)} ({100*completed/len(to_load):.1f}%)", end="", flush=True)
+                    # Progress update
+                    if completed % 100 == 0 or completed == total:
+                        pct = completed / total * 100
+                        sys.stderr.write(f"\rPreprocessing: {completed}/{total} ({pct:.1f}%)   ")
+                        sys.stderr.flush()
+                except Exception as e:
+                    logger.warning(f"Failed to load sample: {e}")
 
-        print()  # Newline after progress
+        if total > 0:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
         logger.info(f"Loaded {len(to_load)} samples into memory")
 
     def unload_query_samples(self, sample_indices: List[int]) -> None:
