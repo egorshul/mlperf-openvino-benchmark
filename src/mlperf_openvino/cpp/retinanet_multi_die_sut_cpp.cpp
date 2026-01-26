@@ -307,6 +307,26 @@ void RetinaNetMultiDieCppSUT::on_inference_complete(RetinaNetMultiDieInferContex
         ov::Tensor scores_tensor = ctx->request.get_output_tensor(scores_idx_);
         ov::Tensor labels_tensor = ctx->request.get_output_tensor(labels_idx_);
 
+        // Get actual shapes from output tensors (important for dynamic shapes)
+        auto boxes_shape = boxes_tensor.get_shape();
+        auto scores_shape = scores_tensor.get_shape();
+
+        // Calculate actual per-sample sizes from tensor shapes
+        // boxes: [batch, num_detections, 4] or [batch, num_detections*4]
+        size_t actual_boxes_per_sample = 1;
+        for (size_t i = 1; i < boxes_shape.size(); ++i) {
+            actual_boxes_per_sample *= boxes_shape[i];
+        }
+        actual_boxes_per_sample /= 4;
+
+        // scores: [batch, num_detections]
+        size_t actual_scores_per_sample = 1;
+        for (size_t i = 1; i < scores_shape.size(); ++i) {
+            actual_scores_per_sample *= scores_shape[i];
+        }
+
+        size_t actual_labels_per_sample = actual_scores_per_sample;
+
         std::lock_guard<std::mutex> lock(predictions_mutex_);
 
         for (int i = 0; i < real_samples; ++i) {
@@ -314,48 +334,48 @@ void RetinaNetMultiDieCppSUT::on_inference_complete(RetinaNetMultiDieInferContex
             RetinaNetDetection det;
 
             // Extract boxes for this sample
-            if (boxes_per_sample_ > 0) {
-                const float* boxes_data = boxes_tensor.data<float>() + (i * boxes_per_sample_ * 4);
-                det.boxes.assign(boxes_data, boxes_data + boxes_per_sample_ * 4);
+            if (actual_boxes_per_sample > 0) {
+                const float* boxes_data = boxes_tensor.data<float>() + (i * actual_boxes_per_sample * 4);
+                det.boxes.assign(boxes_data, boxes_data + actual_boxes_per_sample * 4);
             }
 
             // Extract scores for this sample
-            if (scores_per_sample_ > 0) {
+            if (actual_scores_per_sample > 0) {
                 auto scores_type = scores_tensor.get_element_type();
                 if (scores_type == ov::element::f32) {
-                    const float* scores_data = scores_tensor.data<float>() + (i * scores_per_sample_);
-                    det.scores.assign(scores_data, scores_data + scores_per_sample_);
+                    const float* scores_data = scores_tensor.data<float>() + (i * actual_scores_per_sample);
+                    det.scores.assign(scores_data, scores_data + actual_scores_per_sample);
                 } else if (scores_type == ov::element::f16) {
-                    const ov::float16* f16_data = scores_tensor.data<ov::float16>() + (i * scores_per_sample_);
-                    det.scores.resize(scores_per_sample_);
-                    for (size_t j = 0; j < scores_per_sample_; ++j) {
+                    const ov::float16* f16_data = scores_tensor.data<ov::float16>() + (i * actual_scores_per_sample);
+                    det.scores.resize(actual_scores_per_sample);
+                    for (size_t j = 0; j < actual_scores_per_sample; ++j) {
                         det.scores[j] = static_cast<float>(f16_data[j]);
                     }
                 }
             }
 
             // Extract labels for this sample
-            if (labels_per_sample_ > 0) {
+            if (actual_labels_per_sample > 0) {
                 auto labels_type = labels_tensor.get_element_type();
                 if (labels_type == ov::element::f32) {
-                    const float* labels_data = labels_tensor.data<float>() + (i * labels_per_sample_);
-                    det.labels.assign(labels_data, labels_data + labels_per_sample_);
+                    const float* labels_data = labels_tensor.data<float>() + (i * actual_labels_per_sample);
+                    det.labels.assign(labels_data, labels_data + actual_labels_per_sample);
                 } else if (labels_type == ov::element::i64) {
-                    const int64_t* i64_data = labels_tensor.data<int64_t>() + (i * labels_per_sample_);
-                    det.labels.resize(labels_per_sample_);
-                    for (size_t j = 0; j < labels_per_sample_; ++j) {
+                    const int64_t* i64_data = labels_tensor.data<int64_t>() + (i * actual_labels_per_sample);
+                    det.labels.resize(actual_labels_per_sample);
+                    for (size_t j = 0; j < actual_labels_per_sample; ++j) {
                         det.labels[j] = static_cast<float>(i64_data[j]);
                     }
                 } else if (labels_type == ov::element::i32) {
-                    const int32_t* i32_data = labels_tensor.data<int32_t>() + (i * labels_per_sample_);
-                    det.labels.resize(labels_per_sample_);
-                    for (size_t j = 0; j < labels_per_sample_; ++j) {
+                    const int32_t* i32_data = labels_tensor.data<int32_t>() + (i * actual_labels_per_sample);
+                    det.labels.resize(actual_labels_per_sample);
+                    for (size_t j = 0; j < actual_labels_per_sample; ++j) {
                         det.labels[j] = static_cast<float>(i32_data[j]);
                     }
                 }
             }
 
-            det.num_detections = static_cast<int>(scores_per_sample_);
+            det.num_detections = static_cast<int>(actual_scores_per_sample);
             predictions_[sample_idx] = std::move(det);
         }
     }
@@ -495,8 +515,41 @@ void RetinaNetMultiDieCppSUT::map_output_names() {
     }
 
     // Calculate per-sample output sizes
-    auto boxes_shape = model_->outputs()[boxes_idx_].get_partial_shape().get_min_shape();
-    auto scores_shape = model_->outputs()[scores_idx_].get_partial_shape().get_min_shape();
+    // Use get_max_shape() for dynamic shapes, fallback to MLPerf RetinaNet default (1000 detections)
+    auto boxes_partial = model_->outputs()[boxes_idx_].get_partial_shape();
+    auto scores_partial = model_->outputs()[scores_idx_].get_partial_shape();
+
+    // Try max_shape first (for dynamic shapes), then min_shape
+    ov::Shape boxes_shape, scores_shape;
+
+    if (boxes_partial.is_static()) {
+        boxes_shape = boxes_partial.get_shape();
+    } else {
+        boxes_shape = boxes_partial.get_max_shape();
+        // Check for invalid max (often returns very large values for dynamic)
+        bool invalid = false;
+        for (auto d : boxes_shape) {
+            if (d == 0 || d > 100000) invalid = true;
+        }
+        if (invalid) {
+            // MLPerf RetinaNet default: [batch, 1000, 4]
+            boxes_shape = {static_cast<size_t>(batch_size_), 1000, 4};
+        }
+    }
+
+    if (scores_partial.is_static()) {
+        scores_shape = scores_partial.get_shape();
+    } else {
+        scores_shape = scores_partial.get_max_shape();
+        bool invalid = false;
+        for (auto d : scores_shape) {
+            if (d == 0 || d > 100000) invalid = true;
+        }
+        if (invalid) {
+            // MLPerf RetinaNet default: [batch, 1000]
+            scores_shape = {static_cast<size_t>(batch_size_), 1000};
+        }
+    }
 
     // boxes: [batch, num_detections, 4] or [batch, num_detections * 4]
     boxes_per_sample_ = 1;

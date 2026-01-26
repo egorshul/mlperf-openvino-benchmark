@@ -896,10 +896,6 @@ class BenchmarkRunner:
             # MLPerf RetinaNet threshold: mAP >= 0.3734 (99% of 0.3773)
             status = "PASS" if mAP >= 0.3734 else "FAIL"
             print(f"mAP: {mAP:.4f} [{status}]")
-            if 'mAP@0.5' in acc:
-                print(f"mAP@0.5: {acc['mAP@0.5']:.4f}")
-            if 'num_predictions' in acc:
-                print(f"Predictions: {acc['num_predictions']}")
         elif model_type == 'whisper':
             print(f"Word Accuracy: {acc.get('word_accuracy', 0):.4f}")
             print(f"WER: {acc.get('wer', 0):.4f}")
