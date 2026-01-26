@@ -68,7 +68,7 @@ public:
                          const std::string& device_prefix,
                          int batch_size = 1,
                          const std::unordered_map<std::string, std::string>& compile_properties = {},
-                         bool use_nhwc_input = false,
+                         bool use_nhwc_input = true,  // NHWC is default
                          int nireq_multiplier = 4);
 
     ~ResNetMultiDieCppSUT();

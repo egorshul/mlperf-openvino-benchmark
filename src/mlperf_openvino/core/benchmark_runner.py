@@ -109,10 +109,10 @@ class BenchmarkRunner:
 
         device = self.config.openvino.device
 
-        # Determine if NHWC input is needed
-        use_nhwc = False
+        # Determine if NHWC input is needed (default is NHWC)
+        use_nhwc = True
         if hasattr(self.config.model, 'preprocessing') and self.config.model.preprocessing:
-            use_nhwc = getattr(self.config.model.preprocessing, 'output_layout', 'NCHW') == 'NHWC'
+            use_nhwc = getattr(self.config.model.preprocessing, 'output_layout', 'NHWC') == 'NHWC'
 
         # For accelerator devices, always use MultiDeviceBackend
         # - "NPU" -> all dies (target_devices=None)
