@@ -375,7 +375,7 @@ class OpenImagesDataset(BaseDataset):
         print(f"Preprocessing {total} images to disk cache...")
         print("(This only happens once, subsequent runs will be fast)")
 
-        num_workers = min(8, total)
+        num_workers = min(32, total)  # More workers for faster preprocessing
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
             futures = {executor.submit(process_and_save, i): i for i in range(total)}
 
