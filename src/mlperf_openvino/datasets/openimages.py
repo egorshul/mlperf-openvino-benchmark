@@ -871,7 +871,7 @@ class OpenImagesQSL(QuerySampleLibrary):
         data_path: str,
         annotations_file: Optional[str] = None,
         count: Optional[int] = None,
-        performance_sample_count: int = 24576,  # MLPerf default
+        performance_sample_count: int = 64,  # MLPerf official for RetinaNet
         input_size: int = INPUT_SIZE,
         output_layout: str = "NCHW",
     ):

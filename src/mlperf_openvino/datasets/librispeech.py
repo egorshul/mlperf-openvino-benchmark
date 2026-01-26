@@ -697,7 +697,7 @@ class LibriSpeechQSL(QuerySampleLibrary):
         data_path: str,
         transcript_path: Optional[str] = None,
         count: Optional[int] = None,
-        performance_sample_count: int = 2513,  # MLPerf default
+        performance_sample_count: int = 1633,  # MLPerf official for Whisper
     ):
         """
         Initialize LibriSpeech QSL.
