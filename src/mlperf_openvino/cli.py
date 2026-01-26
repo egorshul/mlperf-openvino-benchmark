@@ -206,16 +206,12 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
     benchmark_config.openvino.num_streams = num_streams
     benchmark_config.openvino.batch_size = batch_size
 
-    # Set input layout: NHWC for NPU accelerators, NCHW for CPU
+    # Set input layout: NHWC by default (--nchw overrides)
     if hasattr(benchmark_config.model, 'preprocessing') and benchmark_config.model.preprocessing:
         if nchw:
             benchmark_config.model.preprocessing.output_layout = 'NCHW'
-        elif is_accelerator:
-            # NHWC is optimized for NPU accelerators
-            benchmark_config.model.preprocessing.output_layout = 'NHWC'
         else:
-            # CPU requires NCHW
-            benchmark_config.model.preprocessing.output_layout = 'NCHW'
+            benchmark_config.model.preprocessing.output_layout = 'NHWC'
 
     # Only set performance_hint for CPU devices
     if not is_accelerator and actual_hint:
