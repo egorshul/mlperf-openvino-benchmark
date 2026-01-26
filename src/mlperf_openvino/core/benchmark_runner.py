@@ -339,7 +339,7 @@ class BenchmarkRunner:
             data_path=self.config.dataset.path,
             annotations_file=self.config.dataset.val_map,
             count=self.config.dataset.num_samples if self.config.dataset.num_samples > 0 else None,
-            performance_sample_count=24576,
+            performance_sample_count=64,  # MLPerf official: retinanet.*.performance_sample_count_override = 64
             output_layout=output_layout,
         )
         self.qsl.load()
