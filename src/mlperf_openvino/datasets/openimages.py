@@ -957,7 +957,7 @@ class OpenImagesQSL(QuerySampleLibrary):
             annotations_file=annotations_file,
             count=count,
             input_size=input_size,
-            cache_preprocessed=True,
+            cache_preprocessed=False,  # Disable internal cache - we use LRU cache in QSL
             output_layout=output_layout,
             use_opencv=use_opencv,
         )
