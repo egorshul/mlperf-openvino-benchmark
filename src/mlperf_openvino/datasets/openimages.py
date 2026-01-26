@@ -919,7 +919,12 @@ class OpenImagesQSL(QuerySampleLibrary):
     Query Sample Library for OpenImages dataset.
 
     Implements the MLPerf LoadGen QSL interface for RetinaNet benchmark.
+    Uses lazy loading with LRU cache to avoid OOM on large datasets.
     """
+
+    # Maximum samples to keep in memory (800x800x3 float32 = 7.3MB each)
+    # 1000 samples ≈ 7.3GB memory
+    MAX_CACHE_SIZE = 1000
 
     def __init__(
         self,
@@ -930,6 +935,7 @@ class OpenImagesQSL(QuerySampleLibrary):
         input_size: int = INPUT_SIZE,
         output_layout: str = "NHWC",  # NHWC default, model handles conversion via PrePostProcessor
         use_opencv: bool = True,  # Use OpenCV for faster preprocessing
+        max_cache_size: Optional[int] = None,  # Override MAX_CACHE_SIZE
     ):
         """
         Initialize OpenImages QSL.
@@ -942,6 +948,7 @@ class OpenImagesQSL(QuerySampleLibrary):
             input_size: Input image size
             output_layout: Output tensor layout ("NCHW" or "NHWC")
             use_opencv: Use OpenCV for faster preprocessing
+            max_cache_size: Maximum samples to cache in memory (default: 1000)
         """
         super().__init__()
 
@@ -956,7 +963,12 @@ class OpenImagesQSL(QuerySampleLibrary):
         )
 
         self._performance_sample_count = performance_sample_count
-        self._loaded_samples: Dict[int, np.ndarray] = {}
+        self._max_cache_size = max_cache_size or self.MAX_CACHE_SIZE
+
+        # LRU cache: OrderedDict maintains insertion order
+        from collections import OrderedDict
+        self._loaded_samples: OrderedDict[int, np.ndarray] = OrderedDict()
+        self._cache_lock = None  # Lazy init for thread safety
 
     def load(self) -> None:
         """Load the dataset."""
@@ -972,28 +984,72 @@ class OpenImagesQSL(QuerySampleLibrary):
     def performance_sample_count(self) -> int:
         return min(self._performance_sample_count, self.total_sample_count)
 
+    def _ensure_cache_lock(self):
+        """Lazy init thread lock."""
+        if self._cache_lock is None:
+            import threading
+            self._cache_lock = threading.Lock()
+
+    def _cache_put(self, idx: int, data: np.ndarray) -> None:
+        """Add item to LRU cache, evicting oldest if needed."""
+        self._ensure_cache_lock()
+        with self._cache_lock:
+            # If already in cache, move to end (most recently used)
+            if idx in self._loaded_samples:
+                self._loaded_samples.move_to_end(idx)
+                return
+
+            # Evict oldest items if cache is full
+            while len(self._loaded_samples) >= self._max_cache_size:
+                self._loaded_samples.popitem(last=False)
+
+            self._loaded_samples[idx] = data
+
+    def _cache_get(self, idx: int) -> Optional[np.ndarray]:
+        """Get item from cache, updating LRU order."""
+        self._ensure_cache_lock()
+        with self._cache_lock:
+            if idx in self._loaded_samples:
+                self._loaded_samples.move_to_end(idx)
+                return self._loaded_samples[idx]
+            return None
+
     def load_query_samples(self, sample_indices: List[int]) -> None:
-        """Load samples into memory with progress tracking and parallel loading."""
+        """
+        Load samples - uses lazy loading for large datasets.
+
+        For small batches (performance mode), preload all.
+        For large batches (accuracy mode), just warm up disk cache.
+        """
         if not self.dataset._is_loaded:
             self.dataset.load()
 
-        # Filter indices that need to be loaded
-        to_load = [idx for idx in sample_indices if idx not in self._loaded_samples]
+        # If small batch, preload all into memory
+        if len(sample_indices) <= self._max_cache_size:
+            self._preload_samples(sample_indices)
+        else:
+            # Large batch (accuracy mode) - just ensure disk cache exists
+            # Samples will be loaded on-demand in get_features
+            logger.info(f"Lazy loading mode: {len(sample_indices)} samples "
+                       f"(cache size: {self._max_cache_size})")
+
+    def _preload_samples(self, sample_indices: List[int]) -> None:
+        """Preload samples into memory cache."""
+        import os
+        import sys
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        to_load = [idx for idx in sample_indices if self._cache_get(idx) is None]
 
         if not to_load:
             return
 
-        logger.debug(f"Loading {len(to_load)} OpenImages samples with parallel preprocessing...")
-
-        import os
-        import sys
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        logger.debug(f"Preloading {len(to_load)} samples...")
 
         def load_single(idx):
             img, _ = self.dataset.get_sample(idx)
             return idx, img
 
-        # Use more workers - preprocessing is I/O bound (disk cache) + some CPU
         num_workers = min(os.cpu_count() or 4, len(to_load), 16)
         completed = 0
         total = len(to_load)
@@ -1004,10 +1060,9 @@ class OpenImagesQSL(QuerySampleLibrary):
             for future in as_completed(futures):
                 try:
                     idx, img = future.result()
-                    self._loaded_samples[idx] = img
+                    self._cache_put(idx, img)
                     completed += 1
 
-                    # Progress update
                     if completed % 100 == 0 or completed == total:
                         pct = completed / total * 100
                         sys.stderr.write(f"\rPreprocessing: {completed}/{total} ({pct:.1f}%)   ")
@@ -1018,19 +1073,27 @@ class OpenImagesQSL(QuerySampleLibrary):
         if total > 0:
             sys.stderr.write("\n")
             sys.stderr.flush()
-        logger.info(f"Loaded {len(to_load)} samples into memory")
 
     def unload_query_samples(self, sample_indices: List[int]) -> None:
         """Unload samples from memory."""
-        for idx in sample_indices:
-            self._loaded_samples.pop(idx, None)
+        self._ensure_cache_lock()
+        with self._cache_lock:
+            for idx in sample_indices:
+                self._loaded_samples.pop(idx, None)
 
     def get_features(self, sample_index: int) -> Dict[str, np.ndarray]:
-        """Get input features for a sample."""
-        if sample_index in self._loaded_samples:
-            return {'input': self._loaded_samples[sample_index]}
+        """Get input features for a sample with LRU caching."""
+        # Try cache first
+        cached = self._cache_get(sample_index)
+        if cached is not None:
+            return {'input': cached}
 
+        # Load from disk (uses disk cache internally)
         img, _ = self.dataset.get_sample(sample_index)
+
+        # Add to LRU cache
+        self._cache_put(sample_index, img)
+
         return {'input': img}
 
     def get_label(self, sample_index: int) -> Dict[str, Any]:
