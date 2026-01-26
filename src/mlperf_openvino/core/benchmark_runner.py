@@ -241,6 +241,40 @@ class BenchmarkRunner:
             scenario=self.config.scenario,
         )
 
+    def _create_retinanet_multi_die_sut(self, qsl: QuerySampleLibrary) -> Any:
+        """Create RetinaNet multi-die SUT for accelerators."""
+        is_accuracy_mode = self.config.test_mode == TestMode.ACCURACY_ONLY
+
+        try:
+            from .retinanet_multi_die_sut import (
+                RetinaNetMultiDieCppSUTWrapper,
+                is_retinanet_multi_die_cpp_available
+            )
+
+            if is_retinanet_multi_die_cpp_available():
+                logger.info(f"Using RetinaNet C++ multi-die SUT on {self.config.openvino.device}")
+                sut = RetinaNetMultiDieCppSUTWrapper(
+                    config=self.config,
+                    qsl=qsl,
+                    scenario=self.config.scenario,
+                )
+                sut.load(is_accuracy_mode=is_accuracy_mode)
+                return sut
+        except ImportError as e:
+            logger.warning(f"C++ RetinaNet multi-die SUT not available: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to create C++ RetinaNet multi-die SUT: {e}")
+
+        # Fall back to Python RetinaNet SUT with standard backend
+        from .retinanet_sut import RetinaNetSUT
+        logger.info(f"Using RetinaNet Python SUT on {self.config.openvino.device}")
+        return RetinaNetSUT(
+            config=self.config,
+            backend=self.backend,
+            qsl=qsl,
+            scenario=self.config.scenario,
+        )
+
     def _setup_resnet50(self) -> None:
         """Set up ResNet50 benchmark."""
         from ..datasets.imagenet import ImageNetQSL
@@ -310,9 +344,9 @@ class BenchmarkRunner:
         )
         self.qsl.load()
 
-        # Use multi-device SUT for accelerator
+        # Use RetinaNet multi-die SUT for accelerator
         if self.config.openvino.is_accelerator_device():
-            self.sut = self._create_sut_for_backend(self.qsl)
+            self.sut = self._create_retinanet_multi_die_sut(self.qsl)
         else:
             # Use create_retinanet_sut to automatically select C++ or Python SUT for CPU
             self.sut = create_retinanet_sut(
