@@ -24,9 +24,9 @@ from .base import BaseDataset, QuerySampleLibrary
 logger = logging.getLogger(__name__)
 
 # RetinaNet preprocessing constants
+# MLPerf reference: simple resize to 800x800 + divide by 255.0
+# NOTE: NO ImageNet mean/std normalization (unlike ResNet50)!
 INPUT_SIZE = 800
-NORMALIZE_MEAN = [0.485, 0.456, 0.406]
-NORMALIZE_STD = [0.229, 0.224, 0.225]
 
 # COCO classes used in MLPerf (80 classes)
 COCO_CLASSES = [
