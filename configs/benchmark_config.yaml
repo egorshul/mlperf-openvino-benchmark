@@ -89,20 +89,41 @@ models:
     task: "object_detection"
     dataset: "openimages-800"
     input_shape: [1, 3, 800, 800]
+    input_name: "image"
+    data_format: "NCHW"
     dtype: "FP32"
 
-    accuracy_target: 0.3757  # mAP (official MLPerf v5.1)
+    # Output tensor names (MLPerf RetinaNet ONNX model)
+    output_names:
+      boxes: "boxes"      # [N, 4] - x1, y1, x2, y2
+      scores: "scores"    # [N] - confidence scores
+      labels: "labels"    # [N] - class labels
+
+    # MLPerf closed division accuracy target
+    accuracy_target: 0.3755  # mAP (37.55% = 99% of 37.93% reference)
     accuracy_threshold: 0.99
-    
+
+    # Preprocessing (closed division requirements)
+    preprocessing:
+      resize: [800, 800]
+      mean: [103.53, 116.28, 123.675]  # BGR order (OpenCV default)
+      std: [57.375, 57.12, 58.395]     # BGR order
+      channel_order: "BGR"
+      output_layout: "NHWC"  # Convert to NHWC for NPU efficiency
+
+    # Model sources (official MLPerf model)
+    sources:
+      onnx_url: "https://zenodo.org/record/6617879/files/resnext50_32x4d_fpn.onnx"
+
     offline:
       min_duration_ms: 60000  # 60s for testing (600000 for official submission)
       min_query_count: 24576  # MLPerf official requirement
+      samples_per_query: 24781  # OpenImages validation set size
 
     server:
       target_latency_ns: 100000000  # 100ms
       target_qps: 1000.0  # High default for max throughput
       min_duration_ms: 60000  # 60s for testing (600000 for official submission)
-      # Note: Server mode uses min_duration, not min_query_count
 
   whisper:
     name: "Whisper-Large-v3"
