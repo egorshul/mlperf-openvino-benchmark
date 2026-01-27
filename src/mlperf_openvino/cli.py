@@ -371,17 +371,21 @@ def _print_dataset_help(model: str) -> None:
               default='./models', help='Output directory')
 @click.option('--format', '-f', type=click.Choice(['onnx', 'openvino']),
               default='onnx', help='Model format')
-def download_model_cmd(model: str, output_dir: str, format: str):
+@click.option('--batch-sizes', type=str, default='1,2,4,8',
+              help='Batch sizes for RetinaNet (comma-separated, default: 1,2,4,8)')
+def download_model_cmd(model: str, output_dir: str, format: str, batch_sizes: str):
     """
     Download model files.
 
     Examples:
 
-        mlperf-ov download --model resnet50 --output-dir ./models
+        mlperf-ov download-model --model resnet50 --output-dir ./models
 
-        mlperf-ov download --model bert --format onnx
+        mlperf-ov download-model --model bert --format onnx
 
-        mlperf-ov download --model whisper --format openvino
+        mlperf-ov download-model --model whisper --format openvino
+
+        mlperf-ov download-model --model retinanet --format openvino --batch-sizes 1,2,4,8
     """
     click.echo(f"Downloading {model} model...")
 
@@ -408,6 +412,21 @@ def download_model_cmd(model: str, output_dir: str, format: str):
                 export_to_openvino=export_to_openvino
             )
             click.echo(f"Model downloaded to: {paths['model_path']}")
+        elif model == 'retinanet':
+            from .utils.model_downloader import download_retinanet_model
+            # Parse batch sizes
+            bs_list = [int(x.strip()) for x in batch_sizes.split(',')]
+            convert_to_openvino = (format == 'openvino')
+            paths = download_retinanet_model(
+                str(output_path),
+                batch_sizes=bs_list,
+                convert_to_openvino=convert_to_openvino,
+            )
+            click.echo(f"RetinaNet ONNX model: {paths['onnx_path']}")
+            if 'batch_models' in paths and paths['batch_models']:
+                click.echo("OpenVINO IR models:")
+                for bs, path in sorted(paths['batch_models'].items()):
+                    click.echo(f"  Batch size {bs}: {path}")
         else:
             model_path = download_model(model, str(output_path), format)
             click.echo(f"Model downloaded to: {model_path}")
@@ -581,8 +600,8 @@ def setup_cmd(model: str, output_dir: str, format: str):
         # Set up BERT benchmark
         mlperf-ov setup --model bert
 
-        # Set up RetinaNet benchmark
-        mlperf-ov setup --model retinanet
+        # Set up RetinaNet benchmark (downloads ONNX and creates OpenVINO IR with batch sizes 1,2,4,8)
+        mlperf-ov setup --model retinanet --format openvino
 
         # Set up Whisper benchmark with OpenVINO format
         mlperf-ov setup --model whisper --format openvino
@@ -591,6 +610,7 @@ def setup_cmd(model: str, output_dir: str, format: str):
         mlperf-ov setup --model sdxl --format openvino
     """
     from .utils.model_downloader import download_model, download_whisper_model, download_sdxl_model
+    from .utils.model_downloader import download_retinanet_model
     from .utils.dataset_downloader import download_dataset
 
     output_path = Path(output_dir)
@@ -618,6 +638,20 @@ def setup_cmd(model: str, output_dir: str, format: str):
                 export_to_openvino=export_to_openvino
             )
             model_path = model_paths['model_path']
+        elif model == 'retinanet':
+            # RetinaNet: download ONNX and convert to OpenVINO with batch sizes 1, 2, 4, 8
+            convert_to_openvino = (format == 'openvino')
+            model_paths = download_retinanet_model(
+                str(models_dir),
+                batch_sizes=[1, 2, 4, 8],
+                convert_to_openvino=convert_to_openvino,
+            )
+            model_path = model_paths.get('model_path', model_paths['onnx_path'])
+            click.echo(f"  ONNX model: {model_paths['onnx_path']}")
+            if 'batch_models' in model_paths and model_paths['batch_models']:
+                click.echo("  OpenVINO IR models:")
+                for bs, path in sorted(model_paths['batch_models'].items()):
+                    click.echo(f"    Batch size {bs}: {path}")
         else:
             model_path = download_model(model, str(models_dir), format)
         click.echo(f"  Model: {model_path}\n")

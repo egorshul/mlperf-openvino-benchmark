@@ -659,3 +659,140 @@ def _export_sdxl_to_openvino(output_dir: str, model_id: str) -> Dict[str, str]:
         "text_encoder_path": str(ov_model_path / "text_encoder" / "openvino_model.xml"),
         "text_encoder_2_path": str(ov_model_path / "text_encoder_2" / "openvino_model.xml"),
     }
+
+
+def download_retinanet_model(
+    output_dir: str,
+    batch_sizes: list = None,
+    convert_to_openvino: bool = True,
+    force: bool = False,
+) -> Dict[str, Any]:
+    """
+    Download MLPerf RetinaNet model and prepare with multiple batch sizes.
+
+    Downloads the pre-converted ONNX model from Zenodo and creates
+    OpenVINO IR models for different batch sizes (1, 2, 4, 8).
+
+    Args:
+        output_dir: Directory to save the models
+        batch_sizes: List of batch sizes to create (default: [1, 2, 4, 8])
+        convert_to_openvino: Whether to convert to OpenVINO IR format
+        force: Force re-download even if files exist
+
+    Returns:
+        Dictionary with paths to models for each batch size
+    """
+    if batch_sizes is None:
+        batch_sizes = [1, 2, 4, 8]
+
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    # MLPerf RetinaNet ONNX model from Zenodo
+    onnx_url = "https://zenodo.org/record/6617879/files/resnext50_32x4d_fpn.onnx"
+    onnx_filename = "retinanet.onnx"
+    onnx_path = output_path / onnx_filename
+
+    # Download ONNX model if not exists
+    if not onnx_path.exists() or force:
+        logger.info(f"Downloading RetinaNet ONNX model from Zenodo...")
+        temp_file = str(onnx_path) + ".tmp"
+        try:
+            _download_file(onnx_url, temp_file)
+            shutil.move(temp_file, str(onnx_path))
+        except Exception as e:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+            raise RuntimeError(f"Failed to download RetinaNet model: {e}")
+    else:
+        logger.info(f"RetinaNet ONNX model already exists: {onnx_path}")
+
+    result = {
+        "onnx_path": str(onnx_path),
+        "batch_models": {},
+    }
+
+    if not convert_to_openvino:
+        return result
+
+    # Convert to OpenVINO IR for each batch size
+    logger.info(f"Converting RetinaNet to OpenVINO IR with batch sizes: {batch_sizes}")
+
+    try:
+        import openvino as ov
+    except ImportError:
+        raise ImportError("OpenVINO is required for model conversion")
+
+    core = ov.Core()
+
+    for batch_size in batch_sizes:
+        batch_dir = output_path / f"retinanet_bs{batch_size}"
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        xml_path = batch_dir / f"retinanet_bs{batch_size}.xml"
+
+        if xml_path.exists() and not force:
+            logger.info(f"  Batch size {batch_size}: already exists at {xml_path}")
+            result["batch_models"][batch_size] = str(xml_path)
+            continue
+
+        logger.info(f"  Converting batch size {batch_size}...")
+
+        # Read ONNX model
+        model = core.read_model(str(onnx_path))
+
+        # Set static batch size for input
+        # RetinaNet input: [N, 3, 800, 800] - set N to batch_size
+        for input_node in model.inputs:
+            input_shape = input_node.get_partial_shape()
+            if input_shape.rank.get_length() == 4:
+                # Set batch dimension to static value
+                input_shape[0] = batch_size
+                model.reshape({input_node: input_shape})
+                logger.info(f"    Input shape set to: {input_shape}")
+
+        # Save model with FP16 compression
+        ov.save_model(model, str(xml_path), compress_to_fp16=True)
+        logger.info(f"    Saved to: {xml_path}")
+
+        result["batch_models"][batch_size] = str(xml_path)
+
+    # Set default model path (batch size 1)
+    if 1 in result["batch_models"]:
+        result["model_path"] = result["batch_models"][1]
+    elif result["batch_models"]:
+        result["model_path"] = list(result["batch_models"].values())[0]
+
+    logger.info(f"RetinaNet models ready:")
+    for bs, path in result["batch_models"].items():
+        logger.info(f"  Batch {bs}: {path}")
+
+    return result
+
+
+def get_retinanet_model_path(
+    models_dir: str,
+    batch_size: int = 1,
+) -> Optional[str]:
+    """
+    Get path to RetinaNet model for a specific batch size.
+
+    Args:
+        models_dir: Directory containing models
+        batch_size: Desired batch size
+
+    Returns:
+        Path to model file or None if not found
+    """
+    models_path = Path(models_dir)
+
+    # Try batch-specific OpenVINO IR
+    batch_xml = models_path / f"retinanet_bs{batch_size}" / f"retinanet_bs{batch_size}.xml"
+    if batch_xml.exists():
+        return str(batch_xml)
+
+    # Fall back to ONNX
+    onnx_path = models_path / "retinanet.onnx"
+    if onnx_path.exists():
+        return str(onnx_path)
+
+    return None
