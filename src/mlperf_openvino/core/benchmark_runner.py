@@ -18,6 +18,7 @@ except ImportError:
 
 from .config import BenchmarkConfig, ModelType, Scenario, TestMode
 from .sut import OpenVINOSUT
+from .sut_factory import SUTFactory
 from ..backends.openvino_backend import OpenVINOBackend
 from ..datasets.base import QuerySampleLibrary
 
@@ -123,21 +124,19 @@ class BenchmarkRunner:
         self,
         qsl: QuerySampleLibrary,
     ) -> Any:
-        """Create appropriate SUT based on backend type.
-
-        For multi-die accelerators, prefer C++ SUT for maximum performance.
-        Falls back to Python SUT if C++ is not available.
-        """
+        """Create appropriate SUT based on backend type."""
         from ..backends.multi_device_backend import MultiDeviceBackend
         from .sut import OpenVINOSUT
 
-        model_type = self.config.model.model_type
-
-        # For accelerators (backend=None), use C++ multi-die SUT directly
+        # For accelerators, use SUTFactory
         if self.backend is None and self.config.openvino.is_accelerator_device():
-            return self._create_resnet_multi_die_sut(qsl)
+            return SUTFactory.create_multi_die_sut(
+                ModelType.RESNET50, self.config, qsl, self.backend
+            )
         elif isinstance(self.backend, MultiDeviceBackend):
-            return self._create_resnet_multi_die_sut(qsl)
+            return SUTFactory.create_multi_die_sut(
+                ModelType.RESNET50, self.config, qsl, self.backend
+            )
         else:
             logger.info(f"Using OpenVINOSUT on {self.config.openvino.device}")
             return OpenVINOSUT(
@@ -146,120 +145,6 @@ class BenchmarkRunner:
                 qsl=qsl,
                 scenario=self.config.scenario,
             )
-
-    def _create_resnet_multi_die_sut(self, qsl: QuerySampleLibrary) -> Any:
-        """Create ResNet multi-die SUT."""
-        is_accuracy_mode = self.config.test_mode == TestMode.ACCURACY_ONLY
-
-        # Try C++ multi-die SUT first (much faster, doesn't need Python backend)
-        try:
-            from .resnet_multi_die_sut import (
-                ResNetMultiDieCppSUTWrapper,
-                is_resnet_multi_die_cpp_available
-            )
-
-            if is_resnet_multi_die_cpp_available():
-                logger.info(f"Using ResNet C++ multi-die SUT on {self.config.openvino.device}")
-                sut = ResNetMultiDieCppSUTWrapper(
-                    config=self.config,
-                    qsl=qsl,
-                    scenario=self.config.scenario,
-                )
-                sut.load(is_accuracy_mode=is_accuracy_mode)
-                return sut
-        except ImportError as e:
-            logger.warning(f"C++ ResNet multi-die SUT not available: {e}")
-        except Exception as e:
-            logger.warning(f"Failed to create C++ ResNet multi-die SUT: {e}, falling back to Python")
-
-        # Fall back to Python multi-device SUT (requires backend)
-        if self.backend is None:
-            raise RuntimeError("C++ SUT not available and Python backend is None. Build C++ SUT first.")
-
-        from .resnet_multi_device_sut import ResNetMultiDeviceSUT
-        logger.info(f"Using ResNet Python multi-die SUT ({self.backend.num_dies} dies)")
-        return ResNetMultiDeviceSUT(
-            config=self.config,
-            backend=self.backend,
-            qsl=qsl,
-            scenario=self.config.scenario,
-        )
-
-    def _create_bert_multi_die_sut(self, qsl: QuerySampleLibrary) -> Any:
-        """Create BERT multi-die SUT for accelerators."""
-        is_accuracy_mode = self.config.test_mode == TestMode.ACCURACY_ONLY
-
-        # Try C++ multi-die SUT first (doesn't need Python backend)
-        try:
-            from .bert_multi_die_sut import (
-                BertMultiDieSUTWrapper,
-                is_bert_multi_die_cpp_available
-            )
-
-            if is_bert_multi_die_cpp_available():
-                logger.info(f"Using BERT C++ multi-die SUT on {self.config.openvino.device}")
-                sut = BertMultiDieSUTWrapper(
-                    config=self.config,
-                    qsl=qsl,
-                    scenario=self.config.scenario,
-                )
-                sut.load(is_accuracy_mode=is_accuracy_mode)
-                return sut
-        except ImportError as e:
-            logger.warning(f"C++ BERT multi-die SUT not available: {e}")
-        except Exception as e:
-            logger.warning(f"Failed to create C++ BERT multi-die SUT: {e}")
-
-        # Fall back to Python SUT (requires backend)
-        if self.backend is None:
-            raise RuntimeError("C++ SUT not available and Python backend is None. Build C++ SUT first.")
-
-        from .bert_sut import BertSUT
-        logger.info(f"Using BERT Python SUT on {self.config.openvino.device}")
-        return BertSUT(
-            config=self.config,
-            backend=self.backend,
-            qsl=qsl,
-            scenario=self.config.scenario,
-        )
-
-    def _create_retinanet_multi_die_sut(self, qsl: QuerySampleLibrary) -> Any:
-        """Create RetinaNet multi-die SUT for accelerators."""
-        is_accuracy_mode = self.config.test_mode == TestMode.ACCURACY_ONLY
-
-        # Try C++ multi-die SUT first (doesn't need Python backend)
-        try:
-            from .retinanet_multi_die_sut import (
-                RetinaNetMultiDieCppSUTWrapper,
-                is_retinanet_multi_die_cpp_available
-            )
-
-            if is_retinanet_multi_die_cpp_available():
-                logger.info(f"Using RetinaNet C++ multi-die SUT on {self.config.openvino.device}")
-                sut = RetinaNetMultiDieCppSUTWrapper(
-                    config=self.config,
-                    qsl=qsl,
-                    scenario=self.config.scenario,
-                )
-                sut.load(is_accuracy_mode=is_accuracy_mode)
-                return sut
-        except ImportError as e:
-            logger.warning(f"C++ RetinaNet multi-die SUT not available: {e}")
-        except Exception as e:
-            logger.warning(f"Failed to create C++ RetinaNet multi-die SUT: {e}")
-
-        # Fall back to Python SUT (requires backend)
-        if self.backend is None:
-            raise RuntimeError("C++ SUT not available and Python backend is None. Build C++ SUT first.")
-
-        from .retinanet_sut import RetinaNetSUT
-        logger.info(f"Using RetinaNet Python SUT on {self.config.openvino.device}")
-        return RetinaNetSUT(
-            config=self.config,
-            backend=self.backend,
-            qsl=qsl,
-            scenario=self.config.scenario,
-        )
 
     def _setup_resnet50(self) -> None:
         """Set up ResNet50 benchmark."""
@@ -302,7 +187,9 @@ class BenchmarkRunner:
 
         # Use BERT multi-die SUT for accelerator
         if self.config.openvino.is_accelerator_device():
-            self.sut = self._create_bert_multi_die_sut(self.qsl)
+            self.sut = SUTFactory.create_multi_die_sut(
+                ModelType.BERT, self.config, self.qsl, self.backend
+            )
         else:
             # Use create_bert_sut to automatically select C++ or Python SUT for CPU
             self.sut = create_bert_sut(
@@ -332,7 +219,9 @@ class BenchmarkRunner:
 
         # Use RetinaNet multi-die SUT for accelerator
         if self.config.openvino.is_accelerator_device():
-            self.sut = self._create_retinanet_multi_die_sut(self.qsl)
+            self.sut = SUTFactory.create_multi_die_sut(
+                ModelType.RETINANET, self.config, self.qsl, self.backend
+            )
         else:
             # Use create_retinanet_sut to automatically select C++ or Python SUT for CPU
             self.sut = create_retinanet_sut(
