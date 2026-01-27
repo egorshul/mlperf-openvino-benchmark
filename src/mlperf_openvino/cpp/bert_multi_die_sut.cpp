@@ -270,15 +270,18 @@ void BertMultiDieSUT::load() {
 void BertMultiDieSUT::warmup(int iterations) {
     if (!loaded_) return;
 
-    std::cerr << "[BERT] Warming up (" << iterations << " iterations per die)..." << std::endl;
+    std::cerr << "[BERT] Warming up (" << iterations << " iterations per die, "
+              << NUM_SEQ_BUCKETS << " buckets)..." << std::endl;
 
     for (auto& die : die_contexts_) {
-        std::cerr << "[BERT] Warmup " << die->device_name << " ";
+        std::cerr << "[BERT] Warmup " << die->device_name << std::flush;
         auto warmup_start = std::chrono::steady_clock::now();
 
         for (int b = 0; b < NUM_SEQ_BUCKETS; ++b) {
             auto& bucket_model = die->bucket_models[b];
             if (bucket_model->requests.empty()) continue;
+
+            std::cerr << " b" << b << ":" << std::flush;
 
             auto& ctx = bucket_model->requests[0];
             int64_t* ids = ctx->input_ids_tensor.data<int64_t>();
