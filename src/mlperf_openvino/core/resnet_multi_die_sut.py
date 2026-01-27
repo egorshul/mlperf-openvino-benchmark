@@ -122,10 +122,16 @@ class ResNetMultiDieCppSUTWrapper:
         self._is_accuracy_mode = is_accuracy_mode
         self.input_name = self._cpp_sut.get_input_name()
 
-        logger.debug(
-            f"C++ SUT loaded: {self._cpp_sut.get_num_dies()} dies, "
+        logger.info(
+            f"C++ ResNet SUT loaded: {self._cpp_sut.get_num_dies()} dies, "
             f"{self._cpp_sut.get_total_requests()} total requests"
         )
+
+    def warmup(self, iterations: int = 2) -> None:
+        """Run warmup inferences on all dies."""
+        if not self.is_loaded:
+            raise RuntimeError("Model not loaded, call load() first")
+        self._cpp_sut.warmup(iterations)
 
     @property
     def is_loaded(self) -> bool:

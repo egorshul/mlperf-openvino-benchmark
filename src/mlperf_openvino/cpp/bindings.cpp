@@ -399,6 +399,11 @@ PYBIND11_MODULE(_cpp_sut, m) {
              py::call_guard<py::gil_scoped_release>(),
              "Load model and compile for all available dies")
 
+        .def("warmup", &mlperf_ov::ResNetMultiDieCppSUT::warmup,
+             py::call_guard<py::gil_scoped_release>(),
+             py::arg("iterations") = 2,
+             "Run warmup inferences on all dies")
+
         .def("set_target_devices", &mlperf_ov::ResNetMultiDieCppSUT::set_target_devices,
              py::arg("devices"),
              "Set specific target devices (call before load())")

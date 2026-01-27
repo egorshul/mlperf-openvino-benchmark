@@ -74,6 +74,7 @@ public:
     ~ResNetMultiDieCppSUT();
 
     void load();
+    void warmup(int iterations = 2);  // Warmup inference on all dies
     bool is_loaded() const { return loaded_; }
     int get_num_dies() const { return static_cast<int>(die_contexts_.size()); }
     std::vector<std::string> get_active_devices() const;

@@ -86,7 +86,6 @@ class BertMultiDieSUTWrapper:
 
     def load(self, is_accuracy_mode: bool = False) -> None:
         self._cpp_sut.load()
-        self._cpp_sut.warmup(2)
         self._cpp_sut.set_store_predictions(is_accuracy_mode)
         self._is_accuracy_mode = is_accuracy_mode
         self._is_loaded = True
@@ -94,6 +93,12 @@ class BertMultiDieSUTWrapper:
         configs = self._cpp_sut.get_model_configs()
         logger.info(f"Loaded {len(configs)} models: {configs}")
         logger.info(f"Devices: {self._cpp_sut.get_active_devices()}")
+
+    def warmup(self, iterations: int = 2) -> None:
+        """Run warmup inferences on all dies."""
+        if not self._is_loaded:
+            raise RuntimeError("Model not loaded, call load() first")
+        self._cpp_sut.warmup(iterations)
 
     @property
     def is_loaded(self) -> bool:

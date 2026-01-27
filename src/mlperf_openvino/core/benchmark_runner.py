@@ -82,7 +82,10 @@ class BenchmarkRunner:
         # Skip backend creation for models that use C++ multi-die SUT on accelerators
         # (they compile the model internally, so Python backend would cause double compilation)
         is_accelerator = self.config.openvino.is_accelerator_device()
-        is_retinanet = (model_type == ModelType.RETINANET)
+        uses_cpp_multi_die_sut = (
+            model_type in (ModelType.RESNET50, ModelType.BERT, ModelType.RETINANET)
+            and is_accelerator
+        )
 
         if is_sdxl:
             self.backend = None
@@ -92,8 +95,8 @@ class BenchmarkRunner:
                 self.backend = None
             else:
                 self.backend = self._create_backend()
-        elif is_retinanet and is_accelerator:
-            # RetinaNet C++ multi-die SUT handles compilation internally
+        elif uses_cpp_multi_die_sut:
+            # C++ multi-die SUT handles compilation internally (ResNet, BERT, RetinaNet)
             self.backend = None
             logger.info("Skipping Python backend (C++ SUT will compile model)")
         else:
