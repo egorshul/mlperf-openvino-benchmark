@@ -958,6 +958,7 @@ class OpenImagesQSL(QuerySampleLibrary):
             count=count,
             input_size=input_size,
             cache_preprocessed=False,  # Disable internal cache - we use LRU cache in QSL
+            use_disk_cache=True,  # Enable disk cache for fast loading (explicit)
             output_layout=output_layout,
             use_opencv=use_opencv,
         )

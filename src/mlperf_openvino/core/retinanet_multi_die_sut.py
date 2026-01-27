@@ -57,11 +57,20 @@ class RetinaNetMultiDieCppSUTWrapper:
         self.qsl = qsl
         self.scenario = scenario
 
-        # Batch size: 1 for Server (AUTO_BATCH handles batching), configured for Offline
+        # Batch size:
+        # - Server: 1 (AUTO_BATCH or explicit batching handles it)
+        # - Offline: use configured batch_size, default to 2 for NPU (efficiency)
         if scenario == Scenario.SERVER:
             self.batch_size = 1
         else:
-            self.batch_size = config.openvino.batch_size
+            configured_batch = config.openvino.batch_size
+            # For NPU Offline, use at least batch_size=2 for better efficiency
+            # RetinaNet is memory-heavy (800x800x3 = 7.7MB), so don't use too large batches
+            if configured_batch <= 1:
+                self.batch_size = 2  # Default for NPU Offline with RetinaNet
+                logger.info(f"RetinaNet NPU Offline: using batch_size={self.batch_size} for efficiency")
+            else:
+                self.batch_size = configured_batch
 
         # Get input name from config
         self.input_name = config.model.input_name
@@ -202,6 +211,8 @@ class RetinaNetMultiDieCppSUTWrapper:
         batch_size = self.batch_size
         num_samples = len(query_samples)
 
+        logger.info(f"[Offline] Starting inference: {num_samples} samples, batch_size={batch_size}")
+
         i = 0
         while i < num_samples:
             end_idx = min(i + batch_size, num_samples)
@@ -235,9 +246,19 @@ class RetinaNetMultiDieCppSUTWrapper:
             self._cpp_sut.start_async_batch(
                 batched_input, query_ids, sample_indices, actual_batch_size
             )
+
+            # Progress logging for Offline mode (useful for debugging slow inference)
+            if i == batch_size:  # First batch
+                logger.info(f"[Offline] First batch submitted, waiting for inference...")
+            elif i % 10 == 0:
+                logger.debug(f"[Offline] Progress: {i}/{num_samples} samples submitted")
+
             i = end_idx
 
+        logger.info(f"[Offline] All {num_samples} samples submitted, waiting for completion...")
         self._cpp_sut.wait_all()
+        elapsed = time.time() - self._start_time
+        logger.info(f"[Offline] Completed in {elapsed:.2f}s ({num_samples/elapsed:.1f} samples/sec)")
         self._query_count += 1
 
     def _issue_query_server(self, query_samples: List) -> None:
