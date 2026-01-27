@@ -733,6 +733,8 @@ PYBIND11_MODULE(_cpp_sut, m) {
              "Enable direct LoadGen C++ mode");
 
     // RetinaNetMultiDieCppSUT - optimized for multi-die accelerators with batching
+    // Note: RetinaNet has larger input (800x800x3=7.7MB vs ResNet 224x224x3=0.6MB)
+    // so we use smaller defaults: nireq_multiplier=2, explicit_batch=2, timeout=1000us
     py::class_<mlperf_ov::RetinaNetMultiDieCppSUT>(m, "RetinaNetMultiDieCppSUT")
         .def(py::init<const std::string&, const std::string&, int,
                       const std::unordered_map<std::string, std::string>&, bool, int>(),
@@ -741,7 +743,7 @@ PYBIND11_MODULE(_cpp_sut, m) {
              py::arg("batch_size") = 1,
              py::arg("compile_properties") = std::unordered_map<std::string, std::string>{},
              py::arg("use_nhwc_input") = true,  // NHWC is default
-             py::arg("nireq_multiplier") = 4,
+             py::arg("nireq_multiplier") = 2,   // Lower than ResNet (4) due to large input
              "Create multi-die RetinaNet SUT. nireq_multiplier controls queue depth "
              "(lower = less latency for Server mode, higher = more throughput for Offline)")
 
@@ -907,11 +909,11 @@ PYBIND11_MODULE(_cpp_sut, m) {
 
         .def("enable_explicit_batching", &mlperf_ov::RetinaNetMultiDieCppSUT::enable_explicit_batching,
              py::arg("enable"),
-             py::arg("batch_size") = 4,
-             py::arg("timeout_us") = 500,
+             py::arg("batch_size") = 2,      // Smaller than ResNet (4) due to 7.7MB input
+             py::arg("timeout_us") = 1000,   // Longer timeout (1ms) for larger data copy
              "Enable Intel-style explicit batching for Server mode. "
-             "batch_size: target batch size (default 4). "
-             "timeout_us: max time to wait for batch fill (default 500us)")
+             "batch_size: target batch size (default 2 for RetinaNet, 4 for ResNet). "
+             "timeout_us: max time to wait for batch fill (default 1000us for RetinaNet)")
 
         .def("is_explicit_batching_enabled", &mlperf_ov::RetinaNetMultiDieCppSUT::is_explicit_batching_enabled,
              "Check if explicit batching is enabled")

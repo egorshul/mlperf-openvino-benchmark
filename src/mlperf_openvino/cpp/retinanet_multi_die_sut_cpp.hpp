@@ -77,12 +77,14 @@ struct RetinaNetMultiDieInferContext {
  */
 class RetinaNetMultiDieCppSUT {
 public:
+    // Note: RetinaNet has much larger input (800x800x3 = 7.7MB vs ResNet 224x224x3 = 0.6MB)
+    // so we use smaller defaults: nireq_multiplier=2 (vs 4 for ResNet)
     RetinaNetMultiDieCppSUT(const std::string& model_path,
                             const std::string& device_prefix,
                             int batch_size = 1,
                             const std::unordered_map<std::string, std::string>& compile_properties = {},
                             bool use_nhwc_input = true,  // NHWC is default
-                            int nireq_multiplier = 4);
+                            int nireq_multiplier = 2);   // Lower for large model (vs 4 for ResNet)
 
     ~RetinaNetMultiDieCppSUT();
 
@@ -165,14 +167,15 @@ private:
     std::vector<std::unique_ptr<RetinaNetDieContext>> die_contexts_;
     std::vector<std::string> active_devices_;
 
-    // Request pool
-    static constexpr int MAX_REQUESTS = 512;
+    // Request pool - smaller than ResNet due to larger input size (7.7MB vs 0.6MB)
+    // 256 requests × 7.7MB = ~2GB memory for input buffers
+    static constexpr int MAX_REQUESTS = 256;
     std::vector<std::unique_ptr<RetinaNetMultiDieInferContext>> infer_contexts_;
     std::atomic<int> request_slots_[MAX_REQUESTS];
     std::atomic<size_t> pool_search_hint_{0};
 
-    // Work queue (IssueQuery pushes, issue threads pull)
-    static constexpr int WORK_QUEUE_SIZE = 4096;
+    // Work queue - smaller than ResNet (lower throughput due to larger model)
+    static constexpr int WORK_QUEUE_SIZE = 2048;
     struct WorkItem {
         uint64_t query_id;
         int sample_idx;
@@ -187,15 +190,15 @@ private:
     std::atomic<bool> issue_running_{false};
     void issue_thread_func(size_t die_idx);
 
-    // Explicit batching (Intel-style)
+    // Explicit batching (Intel-style) - smaller batch for large model
     bool use_explicit_batching_ = false;
-    int explicit_batch_size_ = 4;
-    int batch_timeout_us_ = 500;  // 500 microseconds default
+    int explicit_batch_size_ = 2;     // Smaller than ResNet (4) due to 7.7MB input
+    int batch_timeout_us_ = 1000;     // Longer timeout (1ms) for larger data copy
     std::thread batcher_thread_;
     std::atomic<bool> batcher_running_{false};
 
-    // Per-die batch queues (batcher dispatches round-robin, each die has own queue)
-    static constexpr int BATCH_QUEUE_SIZE = 256;
+    // Per-die batch queues - smaller than ResNet due to lower throughput
+    static constexpr int BATCH_QUEUE_SIZE = 128;
     static constexpr int MAX_DIES = 8;
     struct BatchItem {
         uint64_t query_ids[64];

@@ -77,11 +77,14 @@ class RetinaNetMultiDieCppSUTWrapper:
             use_nhwc = getattr(config.model.preprocessing, 'output_layout', 'NHWC') == 'NHWC'
 
         # Get nireq_multiplier from config
+        # RetinaNet uses smaller values than ResNet due to large input (800x800x3 = 7.7MB)
+        # ResNet: Server=2, Offline=4
+        # RetinaNet: Server=2, Offline=2 (reduced due to memory)
         server_config = config.model.server if hasattr(config.model, 'server') else None
         if scenario == Scenario.SERVER:
             nireq_multiplier = getattr(server_config, 'nireq_multiplier', 2) if server_config else 2
         else:
-            nireq_multiplier = 4
+            nireq_multiplier = 2  # Lower than ResNet (4) due to large input size
 
         # Create C++ SUT
         device_prefix = config.openvino.get_device_prefix()
@@ -111,11 +114,13 @@ class RetinaNetMultiDieCppSUTWrapper:
     def load(self, is_accuracy_mode: bool = False) -> None:
         """Load and compile the model."""
         # Configure explicit batching if enabled (before load)
+        # RetinaNet uses smaller batch (2) and longer timeout (1000us) than ResNet (4, 500us)
+        # due to larger input size (800x800x3 = 7.7MB vs 224x224x3 = 0.6MB)
         if self.scenario == Scenario.SERVER:
             server_config = self.config.model.server if hasattr(self.config.model, 'server') else None
             if server_config and getattr(server_config, 'explicit_batching', False):
-                batch_size = getattr(server_config, 'explicit_batch_size', 4)
-                timeout_us = getattr(server_config, 'batch_timeout_us', 500)
+                batch_size = getattr(server_config, 'explicit_batch_size', 2)    # Smaller for RetinaNet
+                timeout_us = getattr(server_config, 'batch_timeout_us', 1000)    # Longer for large input
                 self._cpp_sut.enable_explicit_batching(True, batch_size, timeout_us)
 
         self._cpp_sut.load()
