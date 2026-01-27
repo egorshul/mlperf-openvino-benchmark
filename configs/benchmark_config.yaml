@@ -4,7 +4,7 @@
 # Global settings
 global:
   mlperf_version: "5.1"
-  division: "open"  # open or closed
+  division: "closed"  # open or closed
   category: "datacenter"  # datacenter or edge
 
 # Supported scenarios
@@ -23,11 +23,11 @@ models:
     output_name: "output"
     data_format: "NCHW"
     dtype: "FP32"
-    
+
     # MLPerf requirements
     accuracy_target: 0.7646  # 76.46% Top-1 accuracy
     accuracy_threshold: 0.99  # Must achieve 99% of reference accuracy
-    
+
     # Preprocessing
     preprocessing:
       resize: [256, 256]
@@ -35,12 +35,15 @@ models:
       mean: [123.68, 116.78, 103.94]  # RGB order
       std: [1.0, 1.0, 1.0]
       channel_order: "RGB"
-    
+
     # Model sources
     sources:
       onnx_url: "https://zenodo.org/record/4735647/files/resnet50_v1.onnx"
       onnx_md5: "b51de8b3c86c48bb7c1f6f8a7f8c72d7"
-    
+
+    # MLPerf LoadGen settings (from mlperf.conf v5.1)
+    performance_sample_count: 1024  # QSL size for performance runs
+
     # Scenario-specific settings
     offline:
       min_duration_ms: 60000  # 60s for testing (600000 for official submission)
@@ -69,10 +72,13 @@ models:
 
     accuracy_target: 0.90874  # F1 score (official MLPerf v5.1)
     accuracy_threshold: 0.99
-    
+
     sources:
       onnx_url: "https://zenodo.org/record/3733910/files/model.onnx"
-    
+
+    # MLPerf LoadGen settings (from mlperf.conf v5.1)
+    performance_sample_count: 10833  # QSL size for performance runs
+
     offline:
       min_duration_ms: 60000  # 60s for testing (600000 for official submission)
       min_query_count: 10833  # MLPerf official requirement (SQuAD dataset size)
@@ -153,15 +159,18 @@ models:
       no_timestamps: true
 
     accuracy_target: 0.979329  # Word Accuracy (official MLPerf v5.1)
-    accuracy_threshold: 0.99  # Must achieve 99% of reference accuracy
+    accuracy_threshold: 0.99  # Must achieve 99% of reference accuracy (BF16)
 
     sources:
       huggingface_model_id: "openai/whisper-large-v3"
 
+    # MLPerf LoadGen settings (from mlperf.conf v5.1)
+    performance_sample_count: 1633  # QSL size for performance runs
+
     offline:
       min_duration_ms: 60000  # 60s for testing (600000 for official submission)
-      min_query_count: 2513  # MLPerf official requirement (LibriSpeech dev-clean+dev-other)
-      samples_per_query: 2513
+      min_query_count: 1633  # MLPerf v5.1 official requirement
+      samples_per_query: 1633
 
     server:
       target_latency_ns: 1000000000  # 1 second for ASR
@@ -201,6 +210,9 @@ models:
     sources:
       huggingface_model_id: "stabilityai/stable-diffusion-xl-base-1.0"
 
+    # MLPerf LoadGen settings (from mlperf.conf v5.1)
+    performance_sample_count: 5000  # QSL size for performance runs
+
     offline:
       min_duration_ms: 60000  # 60s for testing (600000 for official submission)
       min_query_count: 5000  # MLPerf official requirement (COCO subset)
@@ -237,16 +249,16 @@ openvino:
 loadgen:
   # Test modes
   test_mode: "PerformanceOnly"  # AccuracyOnly, PerformanceOnly, FindPeakPerformance
-  
+
   # Logging
   log_output_path: "./results"
   log_copy_summary: true
   log_enable_trace: false
-  
+
   # Performance settings
-  performance_sample_count: 1024
+  # Note: performance_sample_count is model-specific, see each model's config
   target_qps: 0  # 0 = auto-discover
-  
+
   # Accuracy settings
   accuracy_log_rng_seed: 0
   accuracy_log_probability: 0.0

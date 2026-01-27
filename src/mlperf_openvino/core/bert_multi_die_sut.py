@@ -103,13 +103,19 @@ class BertMultiDieSUTWrapper:
         return self._cpp_sut.get_num_dies()
 
     def _register_samples(self) -> None:
+        import sys
+
         if self._samples_registered:
             return
 
         if not hasattr(self.qsl, '_loaded_samples'):
             return
 
+        total = len(self.qsl._loaded_samples)
+        print(f"[Preprocess] ", end="", file=sys.stderr)
+
         count = 0
+        dots_printed = 0
         for idx, data in self.qsl._loaded_samples.items():
             input_ids = data.get('input_ids')
             attention_mask = data.get('attention_mask')
@@ -122,6 +128,18 @@ class BertMultiDieSUTWrapper:
             self._cpp_sut.register_sample(idx, input_ids, attention_mask, token_type_ids, seq_len)
             count += 1
 
+            # Print progress dots
+            if total > 0:
+                progress = int(count * 10 / total)
+                while dots_printed < progress:
+                    print(".", end="", file=sys.stderr, flush=True)
+                    dots_printed += 1
+
+        while dots_printed < 10:
+            print(".", end="", file=sys.stderr, flush=True)
+            dots_printed += 1
+
+        print(f" {count} samples", file=sys.stderr)
         self._samples_registered = True
         logger.debug(f"Registered {count} samples")
 
