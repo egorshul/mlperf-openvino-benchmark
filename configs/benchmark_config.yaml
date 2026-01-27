@@ -46,14 +46,14 @@ models:
 
     # Scenario-specific settings
     offline:
-      min_duration_ms: 60000  # 60s for testing (600000 for official submission)
+      min_duration_ms: 600000  # 10 minutes (MLPerf v5.1 official requirement)
       min_query_count: 24576  # MLPerf official requirement
       samples_per_query: 50000  # All samples in one query
 
     server:
       target_latency_ns: 15000000  # 15ms
       target_qps: 10000.0  # High default for max throughput
-      min_duration_ms: 60000  # 60s for testing (600000 for official submission)
+      min_duration_ms: 600000  # 10 minutes (MLPerf v5.1 official requirement)
       # Note: Server mode uses min_duration, not min_query_count
       qsl_rng_seed: 13281865557512327830
       sample_index_rng_seed: 198141574272810017
@@ -80,15 +80,14 @@ models:
     performance_sample_count: 10833  # QSL size for performance runs
 
     offline:
-      min_duration_ms: 60000  # 60s for testing (600000 for official submission)
+      min_duration_ms: 600000  # 10 minutes (MLPerf v5.1 official requirement)
       min_query_count: 10833  # MLPerf official requirement (SQuAD dataset size)
       samples_per_query: 10833
 
     server:
       target_latency_ns: 130000000  # 130ms
       target_qps: 5000.0  # High default for max throughput
-      min_duration_ms: 60000  # 60s for testing (600000 for official submission)
-      # Note: Server mode uses min_duration, not min_query_count
+      min_duration_ms: 600000  # 10 minutes (MLPerf v5.1 official requirement)
 
   retinanet:
     name: "RetinaNet"
@@ -125,13 +124,13 @@ models:
     performance_sample_count: 64  # QSL size for performance runs
 
     offline:
-      min_duration_ms: 60000  # 60s for testing (600000 for official submission)
+      min_duration_ms: 600000  # 10 minutes (MLPerf v5.1 official requirement)
       min_query_count: 24576  # MLPerf official requirement
 
     server:
       target_latency_ns: 100000000  # 100ms (from mlperf.conf)
       target_qps: 1000.0  # Starting point, auto-tuned
-      min_duration_ms: 60000  # 60s for testing (600000 for official submission)
+      min_duration_ms: 600000  # 10 minutes (MLPerf v5.1 official requirement)
 
   whisper:
     name: "Whisper-Large-v3"
@@ -168,15 +167,14 @@ models:
     performance_sample_count: 1633  # QSL size for performance runs
 
     offline:
-      min_duration_ms: 60000  # 60s for testing (600000 for official submission)
+      min_duration_ms: 600000  # 10 minutes (MLPerf v5.1 official requirement)
       min_query_count: 1633  # MLPerf v5.1 official requirement
       samples_per_query: 1633
 
     server:
       target_latency_ns: 1000000000  # 1 second for ASR
       target_qps: 500.0  # High default for max throughput
-      min_duration_ms: 60000  # 60s for testing (600000 for official submission)
-      # Note: Server mode uses min_duration, not min_query_count
+      min_duration_ms: 600000  # 10 minutes (MLPerf v5.1 official requirement)
 
   sdxl:
     name: "Stable-Diffusion-XL"
@@ -214,15 +212,14 @@ models:
     performance_sample_count: 5000  # QSL size for performance runs
 
     offline:
-      min_duration_ms: 60000  # 60s for testing (600000 for official submission)
+      min_duration_ms: 600000  # 10 minutes (MLPerf v5.1 official requirement)
       min_query_count: 5000  # MLPerf official requirement (COCO subset)
       samples_per_query: 1
 
     server:
       target_latency_ns: 20000000000  # 20 seconds for image generation
       target_qps: 10.0  # Lower QPS due to high latency
-      min_duration_ms: 60000  # 60s for testing (600000 for official submission)
-      # Note: Server mode uses min_duration, not min_query_count
+      min_duration_ms: 600000  # 10 minutes (MLPerf v5.1 official requirement)
 
 # OpenVINO specific settings
 openvino:
