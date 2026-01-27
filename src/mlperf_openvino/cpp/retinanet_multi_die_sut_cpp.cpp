@@ -985,7 +985,7 @@ void RetinaNetMultiDieCppSUT::warmup(int iterations) {
     for (auto& die_ctx : die_contexts_) {
         if (die_ctx->request_count == 0) continue;
 
-        std::cerr << "[RetinaNet] Warmup " << die_ctx->device_name << " ";
+        std::cerr << "[RetinaNet] Warmup " << die_ctx->device_name << " " << std::flush;
 
         // Use the first request for this die
         size_t req_idx = die_ctx->request_start_idx;
