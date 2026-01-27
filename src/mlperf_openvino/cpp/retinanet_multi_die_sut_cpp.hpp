@@ -1,16 +1,5 @@
 /**
- * High-performance C++ SUT for RetinaNet Object Detection on multi-die accelerators.
- *
- * Clean architecture for Server mode with AUTO_BATCH:
- * - IssueQuery: instant return, pushes to work queue
- * - Per-die Issue Threads: pull from queue, submit to device
- * - Async callbacks: call QuerySamplesComplete directly
- * - AUTO_BATCH: OpenVINO handles batching internally (1ms timeout)
- *
- * RetinaNet outputs:
- * - boxes: [N, 4] bounding box coordinates (x1, y1, x2, y2)
- * - scores: [N] detection confidence scores
- * - labels: [N] class labels for detections
+ * C++ SUT for RetinaNet Object Detection on multi-die accelerators.
  */
 
 #pragma once

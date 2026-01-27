@@ -1,8 +1,4 @@
-"""
-Python wrapper for C++ RetinaNetMultiDieCppSUT.
-
-Clean implementation for Server mode with AUTO_BATCH.
-"""
+"""Python wrapper for C++ RetinaNetMultiDieCppSUT."""
 
 import array
 import logging

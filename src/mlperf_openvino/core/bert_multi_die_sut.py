@@ -1,10 +1,4 @@
-"""
-BERT SUT wrapper for multi-die NPU accelerators.
-
-Sequence buckets: [128, 165, 256, 384]
-Offline: batch [4,4,2,2] for throughput
-Server: batch=1 for latency
-"""
+"""BERT SUT wrapper for multi-die NPU accelerators."""
 
 import logging
 import time

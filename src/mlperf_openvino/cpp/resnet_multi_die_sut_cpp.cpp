@@ -1,11 +1,5 @@
 /**
- * Clean C++ SUT implementation for multi-die accelerators.
- *
- * Architecture:
- * - IssueQuery: pushes to work queue (non-blocking)
- * - Per-die threads: pull from queue, copy data, start_async
- * - Async callbacks: call QuerySamplesComplete directly
- * - AUTO_BATCH: OpenVINO handles batching internally
+ * C++ SUT implementation for multi-die accelerators.
  */
 
 #include "resnet_multi_die_sut_cpp.hpp"

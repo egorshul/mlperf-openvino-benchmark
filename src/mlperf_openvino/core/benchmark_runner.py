@@ -1,8 +1,4 @@
-"""
-Main benchmark runner for MLPerf OpenVINO Benchmark.
-
-Supports multiple models: ResNet50, BERT, RetinaNet, Whisper, SDXL.
-"""
+"""MLPerf OpenVINO Benchmark runner."""
 
 import json
 import logging
@@ -29,30 +25,9 @@ logger = logging.getLogger(__name__)
 
 
 class BenchmarkRunner:
-    """
-    Main class for running MLPerf benchmarks.
-
-    This class orchestrates:
-    - Model loading
-    - Dataset preparation
-    - Benchmark execution
-    - Results collection and reporting
-
-    Supports models:
-    - ResNet50 (Image Classification)
-    - BERT-Large (Question Answering)
-    - RetinaNet (Object Detection)
-    - Whisper (Speech Recognition)
-    - Stable Diffusion XL (Text-to-Image)
-    """
+    """Main class for running MLPerf benchmarks."""
 
     def __init__(self, config: BenchmarkConfig):
-        """
-        Initialize the benchmark runner.
-
-        Args:
-            config: Benchmark configuration
-        """
         if not LOADGEN_AVAILABLE:
             raise ImportError(
                 "MLPerf LoadGen is not installed. Please install with: "
@@ -73,14 +48,8 @@ class BenchmarkRunner:
         Path(self.config.logs_dir).mkdir(parents=True, exist_ok=True)
 
         model_type = self.config.model.model_type
-
-        is_sdxl = (model_type == ModelType.SDXL or
-                   (hasattr(model_type, 'value') and model_type.value == 'sdxl'))
-        is_whisper = (model_type == ModelType.WHISPER or
-                      (hasattr(model_type, 'value') and model_type.value == 'whisper'))
-
-        # Skip backend creation for models that use C++ multi-die SUT on accelerators
-        # (they compile the model internally, so Python backend would cause double compilation)
+        is_sdxl = model_type == ModelType.SDXL
+        is_whisper = model_type == ModelType.WHISPER
         is_accelerator = self.config.openvino.is_accelerator_device()
         uses_cpp_multi_die_sut = (
             model_type in (ModelType.RESNET50, ModelType.BERT, ModelType.RETINANET)
@@ -96,7 +65,6 @@ class BenchmarkRunner:
             else:
                 self.backend = self._create_backend()
         elif uses_cpp_multi_die_sut:
-            # C++ multi-die SUT handles compilation internally (ResNet, BERT, RetinaNet)
             self.backend = None
             logger.info("Skipping Python backend (C++ SUT will compile model)")
         else:
@@ -150,15 +118,6 @@ class BenchmarkRunner:
         )
         backend.load()
         return backend
-
-    def _log_available_devices(self) -> None:
-        """Log available OpenVINO devices (debug level only)."""
-        try:
-            from openvino import Core
-            core = Core()
-            logger.debug(f"Available devices: {core.available_devices}")
-        except Exception:
-            pass
 
     def _create_sut_for_backend(
         self,
@@ -528,7 +487,6 @@ class BenchmarkRunner:
         """Create LoadGen test settings."""
         settings = lg.TestSettings()
 
-        # Set scenario
         if self.config.scenario == Scenario.OFFLINE:
             settings.scenario = lg.TestScenario.Offline
         elif self.config.scenario == Scenario.SERVER:
@@ -536,7 +494,6 @@ class BenchmarkRunner:
         else:
             raise ValueError(f"Unsupported scenario: {self.config.scenario}")
 
-        # Set mode
         if self.config.test_mode == TestMode.ACCURACY_ONLY:
             settings.mode = lg.TestMode.AccuracyOnly
         elif self.config.test_mode == TestMode.PERFORMANCE_ONLY:
@@ -546,20 +503,14 @@ class BenchmarkRunner:
         else:
             settings.mode = lg.TestMode.PerformanceOnly
 
-        # Get scenario-specific config
         scenario_config = self.config.get_scenario_config()
-
-        # Set timing constraints
         settings.min_duration_ms = scenario_config.min_duration_ms
         settings.min_query_count = scenario_config.min_query_count
-
-        # Set MLPerf seeds for reproducibility
         settings.qsl_rng_seed = scenario_config.qsl_rng_seed
         settings.sample_index_rng_seed = scenario_config.sample_index_rng_seed
         settings.schedule_rng_seed = scenario_config.schedule_rng_seed
 
         if self.config.scenario == Scenario.OFFLINE:
-            # LoadGen requires expected_qps for Offline scenario
             expected_qps = scenario_config.target_qps if scenario_config.target_qps > 0 else 1000.0
             settings.offline_expected_qps = expected_qps
             logger.info(f"Offline expected QPS: {expected_qps}")

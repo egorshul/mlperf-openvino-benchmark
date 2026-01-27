@@ -1,8 +1,4 @@
-"""
-Python wrapper for C++ ResNetMultiDieCppSUT.
-
-Clean implementation for Server mode with AUTO_BATCH.
-"""
+"""Python wrapper for C++ ResNetMultiDieCppSUT."""
 
 import array
 import logging

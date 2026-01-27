@@ -1,11 +1,5 @@
 /**
- * High-performance C++ SUT for ResNet50 on multi-die accelerators.
- *
- * Clean architecture for Server mode with AUTO_BATCH:
- * - IssueQuery: instant return, pushes to work queue
- * - Per-die Issue Threads: pull from queue, submit to device
- * - Async callbacks: call QuerySamplesComplete directly
- * - AUTO_BATCH: OpenVINO handles batching internally (1ms timeout)
+ * C++ SUT for ResNet50 on multi-die accelerators.
  */
 
 #pragma once
