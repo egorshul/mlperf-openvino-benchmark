@@ -399,6 +399,9 @@ class BenchmarkRunner:
         settings.sample_index_rng_seed = scenario_config.sample_index_rng_seed
         settings.schedule_rng_seed = scenario_config.schedule_rng_seed
 
+        # Log LoadGen settings for visibility
+        logger.info(f"LoadGen settings: min_duration={scenario_config.min_duration_ms/1000:.0f}s, min_query_count={scenario_config.min_query_count}")
+
         if self.config.scenario == Scenario.OFFLINE:
             expected_qps = scenario_config.target_qps if scenario_config.target_qps > 0 else 1000.0
             settings.offline_expected_qps = expected_qps

@@ -141,7 +141,9 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
 
     if config:
         benchmark_config = BenchmarkConfig.from_yaml(config, model)
+        click.echo(f"Config: {config}")
     else:
+        click.echo("WARNING: No --config specified, using hardcoded defaults (min_duration=600s)")
         benchmark_config = get_default_config(model)
 
     benchmark_config.scenario = Scenario(scenario)
