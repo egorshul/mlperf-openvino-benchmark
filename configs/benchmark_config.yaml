@@ -115,14 +115,16 @@ models:
     sources:
       onnx_url: "https://zenodo.org/record/6617879/files/resnext50_32x4d_fpn.onnx"
 
+    # MLPerf LoadGen settings (from mlperf.conf)
+    performance_sample_count: 64  # QSL size for performance runs
+
     offline:
       min_duration_ms: 60000  # 60s for testing (600000 for official submission)
       min_query_count: 24576  # MLPerf official requirement
-      samples_per_query: 24781  # OpenImages validation set size
 
     server:
-      target_latency_ns: 100000000  # 100ms
-      target_qps: 1000.0  # High default for max throughput
+      target_latency_ns: 100000000  # 100ms (from mlperf.conf)
+      target_qps: 1000.0  # Starting point, auto-tuned
       min_duration_ms: 60000  # 60s for testing (600000 for official submission)
 
   whisper:
