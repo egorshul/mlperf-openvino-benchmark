@@ -273,6 +273,7 @@ void BertMultiDieSUT::warmup(int iterations) {
     std::cerr << "[BERT] Warming up (" << iterations << " iterations per die)..." << std::endl;
 
     for (auto& die : die_contexts_) {
+        std::cerr << "[BERT] Warmup " << die->device_name << " ";
         auto warmup_start = std::chrono::steady_clock::now();
 
         for (int b = 0; b < NUM_SEQ_BUCKETS; ++b) {
@@ -291,14 +292,15 @@ void BertMultiDieSUT::warmup(int iterations) {
 
             for (int i = 0; i < iterations; ++i) {
                 ctx->request.infer();
+                std::cerr << "." << std::flush;
             }
         }
 
         auto warmup_time = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - warmup_start).count();
-        std::cerr << "[BERT] Warmup " << die->device_name
-                  << ": " << (iterations * NUM_SEQ_BUCKETS) << " inferences in " << warmup_time << "ms"
-                  << " (" << (warmup_time / (iterations * NUM_SEQ_BUCKETS)) << "ms avg)" << std::endl;
+        int total_inferences = iterations * NUM_SEQ_BUCKETS;
+        std::cerr << " " << warmup_time << "ms"
+                  << " (" << (warmup_time / total_inferences) << "ms avg)" << std::endl;
     }
 
     std::cerr << "[BERT] Warmup complete" << std::endl;
