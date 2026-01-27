@@ -170,10 +170,19 @@ std::shared_ptr<ov::Model> BertMultiDieSUT::reshape_model(int batch_size, int se
 void BertMultiDieSUT::load() {
     if (loaded_) return;
 
+    std::cerr << "[BERT] Loading model: " << model_path_ << std::endl;
+    std::cerr << "[BERT] Device prefix: " << device_prefix_
+              << ", nireq_per_bucket: " << nireq_per_bucket_
+              << ", server_mode: " << server_mode_ << std::endl;
+
     auto devices = discover_devices();
     if (devices.empty()) {
         throw std::runtime_error("No " + device_prefix_ + " devices found");
     }
+
+    std::cerr << "[BERT] Found " << devices.size() << " dies: ";
+    for (const auto& d : devices) std::cerr << d << " ";
+    std::cerr << std::endl;
 
     base_model_ = core_.read_model(model_path_);
     detect_io_names();
@@ -192,6 +201,9 @@ void BertMultiDieSUT::load() {
         auto die = std::make_unique<MultiDieDieContext>();
         die->device_name = devices[die_idx];
         die->die_idx = die_idx;
+
+        std::cerr << "[BERT] Compiling for " << die->device_name << "..." << std::endl;
+        auto die_compile_start = std::chrono::steady_clock::now();
 
         for (int bucket_idx = 0; bucket_idx < NUM_SEQ_BUCKETS; ++bucket_idx) {
             int batch_size = server_mode_ ? SERVER_BATCH_SIZE : OFFLINE_BATCH_SIZES[bucket_idx];
@@ -239,8 +251,18 @@ void BertMultiDieSUT::load() {
             die->bucket_models[bucket_idx] = std::move(bucket_model);
         }
 
+        auto die_compile_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - die_compile_start).count();
+        std::cerr << "[BERT] Compiled " << die->device_name << " in " << die_compile_time << "ms"
+                  << " (" << NUM_SEQ_BUCKETS << " buckets)" << std::endl;
+
         die_contexts_.push_back(std::move(die));
     }
+
+    // Load summary
+    std::cout << "[BERT SUT] Loaded: " << die_contexts_.size() << " dies, "
+              << total_slots_ << " total slots, "
+              << NUM_SEQ_BUCKETS << " buckets" << std::endl;
 
     loaded_ = true;
 }
@@ -248,7 +270,11 @@ void BertMultiDieSUT::load() {
 void BertMultiDieSUT::warmup(int iterations) {
     if (!loaded_) return;
 
+    std::cerr << "[BERT] Warming up (" << iterations << " iterations per die)..." << std::endl;
+
     for (auto& die : die_contexts_) {
+        auto warmup_start = std::chrono::steady_clock::now();
+
         for (int b = 0; b < NUM_SEQ_BUCKETS; ++b) {
             auto& bucket_model = die->bucket_models[b];
             if (bucket_model->requests.empty()) continue;
@@ -267,7 +293,15 @@ void BertMultiDieSUT::warmup(int iterations) {
                 ctx->request.infer();
             }
         }
+
+        auto warmup_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - warmup_start).count();
+        std::cerr << "[BERT] Warmup " << die->device_name
+                  << ": " << (iterations * NUM_SEQ_BUCKETS) << " inferences in " << warmup_time << "ms"
+                  << " (" << (warmup_time / (iterations * NUM_SEQ_BUCKETS)) << "ms avg)" << std::endl;
     }
+
+    std::cerr << "[BERT] Warmup complete" << std::endl;
 }
 
 void BertMultiDieSUT::build_bucket_cache() {

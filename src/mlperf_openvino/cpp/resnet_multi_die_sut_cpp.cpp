@@ -745,10 +745,19 @@ ov::AnyMap ResNetMultiDieCppSUT::build_compile_properties() {
 void ResNetMultiDieCppSUT::load() {
     if (loaded_) return;
 
+    std::cerr << "[ResNet] Loading model: " << model_path_ << std::endl;
+    std::cerr << "[ResNet] Device prefix: " << device_prefix_
+              << ", batch_size: " << batch_size_
+              << ", use_nhwc: " << use_nhwc_input_ << std::endl;
+
     active_devices_ = discover_dies();
     if (active_devices_.empty()) {
         throw std::runtime_error("No " + device_prefix_ + " dies found");
     }
+
+    std::cerr << "[ResNet] Found " << active_devices_.size() << " dies: ";
+    for (const auto& d : active_devices_) std::cerr << d << " ";
+    std::cerr << std::endl;
 
     // Limit to MAX_DIES for per-die batch queues
     if (active_devices_.size() > MAX_DIES) {
@@ -816,13 +825,24 @@ void ResNetMultiDieCppSUT::load() {
     for (auto d : input_shape_) input_byte_size_ *= d;
     input_byte_size_ *= input_type_.size();
 
+    std::cerr << "[ResNet] Final input shape: ";
+    for (auto d : input_shape_) std::cerr << d << " ";
+    std::cerr << " (" << input_byte_size_ << " bytes)" << std::endl;
+
     ov::AnyMap properties = build_compile_properties();
 
     size_t total_requests = 0;
     for (const auto& device_name : active_devices_) {
+        std::cerr << "[ResNet] Compiling for " << device_name << "..." << std::endl;
+        auto compile_start = std::chrono::steady_clock::now();
+
         auto die_ctx = std::make_unique<DieContext>();
         die_ctx->device_name = device_name;
         die_ctx->compiled_model = core_.compile_model(model_, device_name, properties);
+
+        auto compile_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - compile_start).count();
+        std::cerr << "[ResNet] Compiled " << device_name << " in " << compile_time << "ms" << std::endl;
 
         try {
             die_ctx->optimal_nireq = die_ctx->compiled_model.get_property(ov::optimal_number_of_infer_requests);
@@ -887,7 +907,7 @@ void ResNetMultiDieCppSUT::load() {
     }
 
     // Load summary
-    std::cout << "[SUT] Loaded: " << die_contexts_.size() << " dies, "
+    std::cout << "[ResNet SUT] Loaded: " << die_contexts_.size() << " dies, "
               << total_requests << " requests";
     if (use_explicit_batching_) {
         std::cout << ", batch=" << batch_size_ << ", timeout=" << batch_timeout_us_ << "us";
