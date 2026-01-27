@@ -1,9 +1,4 @@
-"""
-OpenImages dataset for RetinaNet Object Detection benchmark.
-
-This module provides dataset handling for the OpenImages dataset
-used in MLPerf Inference for RetinaNet model evaluation.
-"""
+"""OpenImages dataset for RetinaNet Object Detection."""
 
 import csv
 import logging

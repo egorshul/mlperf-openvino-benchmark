@@ -139,7 +139,6 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
     click.echo("MLPerf v5.1 OpenVINO Benchmark")
     click.echo(f"{'='*60}\n")
 
-    # Load or create configuration based on model
     if config:
         benchmark_config = BenchmarkConfig.from_yaml(config, model)
     else:
@@ -153,8 +152,6 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         from .backends.device_discovery import parse_device_properties, validate_device_properties
         parsed_props = parse_device_properties(properties)
         benchmark_config.openvino.device_properties = parsed_props
-
-        # Validate properties (silently log warnings)
         is_valid, warnings = validate_device_properties(parsed_props, device)
         for warning in warnings:
             logger.debug(warning)

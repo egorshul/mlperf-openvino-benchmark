@@ -1,9 +1,4 @@
-"""
-BERT-specific System Under Test implementation.
-
-This module provides SUT implementation for BERT Question Answering model
-on SQuAD dataset for MLPerf Inference benchmark.
-"""
+"""BERT SUT implementation for MLPerf Question Answering."""
 
 import array
 import logging

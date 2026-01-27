@@ -1,9 +1,4 @@
-"""
-LibriSpeech dataset for Whisper ASR benchmark.
-
-This module provides dataset handling for the LibriSpeech dataset
-used in MLPerf Inference for Whisper model evaluation.
-"""
+"""LibriSpeech dataset for Whisper ASR."""
 
 import logging
 import os

@@ -1,9 +1,4 @@
-"""
-RetinaNet-specific System Under Test implementation.
-
-This module provides SUT implementation for RetinaNet Object Detection model
-on OpenImages dataset for MLPerf Inference benchmark.
-"""
+"""RetinaNet SUT implementation for MLPerf Object Detection."""
 
 import array
 import logging
