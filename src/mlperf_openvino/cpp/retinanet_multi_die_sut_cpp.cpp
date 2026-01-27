@@ -577,6 +577,13 @@ void RetinaNetMultiDieCppSUT::issue_thread_func(size_t die_idx) {
 // =============================================================================
 
 void RetinaNetMultiDieCppSUT::on_inference_complete(RetinaNetMultiDieInferContext* ctx) {
+    // Debug: log first callback
+    static std::atomic<int> callback_count{0};
+    int count = callback_count.fetch_add(1);
+    if (count == 0) {
+        std::cerr << "[DEBUG] First inference COMPLETE on " << ctx->die_name << std::endl;
+    }
+
     int actual_batch_size = ctx->actual_batch_size;
     int num_dummies = ctx->num_dummies;
     int real_samples = actual_batch_size - num_dummies;
@@ -809,10 +816,19 @@ void RetinaNetMultiDieCppSUT::map_output_names() {
 void RetinaNetMultiDieCppSUT::load() {
     if (loaded_) return;
 
+    std::cerr << "[RetinaNet] Loading model: " << model_path_ << std::endl;
+    std::cerr << "[RetinaNet] Device prefix: " << device_prefix_
+              << ", batch_size: " << batch_size_
+              << ", use_nhwc: " << use_nhwc_input_ << std::endl;
+
     active_devices_ = discover_dies();
     if (active_devices_.empty()) {
         throw std::runtime_error("No " + device_prefix_ + " dies found");
     }
+
+    std::cerr << "[RetinaNet] Found " << active_devices_.size() << " dies: ";
+    for (const auto& d : active_devices_) std::cerr << d << " ";
+    std::cerr << std::endl;
 
     // Limit to MAX_DIES for per-die batch queues
     if (active_devices_.size() > MAX_DIES) {
@@ -884,13 +900,24 @@ void RetinaNetMultiDieCppSUT::load() {
     for (auto d : input_shape_) input_byte_size_ *= d;
     input_byte_size_ *= input_type_.size();
 
+    std::cerr << "[RetinaNet] Final input shape: ";
+    for (auto d : input_shape_) std::cerr << d << " ";
+    std::cerr << " (" << input_byte_size_ << " bytes)" << std::endl;
+
     ov::AnyMap properties = build_compile_properties();
 
     size_t total_requests = 0;
     for (const auto& device_name : active_devices_) {
+        std::cerr << "[RetinaNet] Compiling for " << device_name << "..." << std::endl;
+        auto compile_start = std::chrono::steady_clock::now();
+
         auto die_ctx = std::make_unique<RetinaNetDieContext>();
         die_ctx->device_name = device_name;
         die_ctx->compiled_model = core_.compile_model(model_, device_name, properties);
+
+        auto compile_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - compile_start).count();
+        std::cerr << "[RetinaNet] Compiled " << device_name << " in " << compile_time << "ms" << std::endl;
 
         try {
             die_ctx->optimal_nireq = die_ctx->compiled_model.get_property(ov::optimal_number_of_infer_requests);
@@ -980,8 +1007,20 @@ void RetinaNetMultiDieCppSUT::start_async_batch(const float* input_data,
         throw std::runtime_error("Model not loaded");
     }
 
+    // Debug: log first inference to diagnose hangs
+    static std::atomic<int> inference_count{0};
+    int count = inference_count.fetch_add(1);
+    if (count == 0) {
+        std::cerr << "[DEBUG] First inference: batch=" << actual_batch_size
+                  << ", input_bytes=" << input_size << std::endl;
+    }
+
     size_t id = acquire_request();
     RetinaNetMultiDieInferContext* ctx = infer_contexts_[id].get();
+
+    if (count == 0) {
+        std::cerr << "[DEBUG] Got slot " << id << " on " << ctx->die_name << std::endl;
+    }
 
     actual_batch_size = std::min(actual_batch_size, RetinaNetMultiDieInferContext::MAX_BATCH);
     for (int i = 0; i < actual_batch_size; ++i) {
@@ -994,8 +1033,17 @@ void RetinaNetMultiDieCppSUT::start_async_batch(const float* input_data,
     float* tensor_data = ctx->input_tensor.data<float>();
     std::memcpy(tensor_data, input_data, std::min(input_size, ctx->input_tensor.get_byte_size()));
 
+    if (count == 0) {
+        std::cerr << "[DEBUG] Calling start_async()..." << std::endl;
+    }
+
     pending_count_.fetch_add(1, std::memory_order_relaxed);
     ctx->request.start_async();
+
+    if (count == 0) {
+        std::cerr << "[DEBUG] start_async() returned OK" << std::endl;
+    }
+
     issued_count_.fetch_add(actual_batch_size, std::memory_order_relaxed);
 }
 
@@ -1004,11 +1052,26 @@ void RetinaNetMultiDieCppSUT::enable_direct_loadgen(bool enable) {
 }
 
 void RetinaNetMultiDieCppSUT::wait_all() {
+    using namespace std::chrono;
+    auto start = steady_clock::now();
+    int last_log = 0;
+
     while (queued_count_.load(std::memory_order_acquire) > 0) {
-        std::this_thread::sleep_for(std::chrono::microseconds(100));
+        std::this_thread::sleep_for(microseconds(100));
     }
+
     while (pending_count_.load(std::memory_order_acquire) > 0) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        std::this_thread::sleep_for(milliseconds(1));
+
+        // Log progress every 10 seconds
+        auto elapsed = duration_cast<seconds>(steady_clock::now() - start).count();
+        if (elapsed > 0 && elapsed % 10 == 0 && elapsed != last_log) {
+            last_log = elapsed;
+            int pending = pending_count_.load(std::memory_order_relaxed);
+            int completed = completed_count_.load(std::memory_order_relaxed);
+            std::cerr << "[DEBUG] Waiting " << elapsed << "s: pending=" << pending
+                      << ", completed=" << completed << std::endl;
+        }
     }
 }
 
