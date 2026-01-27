@@ -132,17 +132,31 @@ class BertMultiDieSUTWrapper:
         logger.debug(f"Registered {count} samples")
 
     def _issue_query_offline(self, query_samples: List) -> None:
+        import sys
+
         self._start_time = time.time()
         self._cpp_sut.reset_counters()
         self._cpp_sut.enable_direct_loadgen(True)
 
         self._register_samples()
 
+        num_samples = len(query_samples)
+        print(f"[Offline] {num_samples} samples, {len(SEQ_BUCKETS)} buckets", file=sys.stderr)
+
+        # Group by bucket
+        print(f"[Bucketing] ", end="", file=sys.stderr)
         buckets: Dict[int, List[Tuple[int, int]]] = {i: [] for i in range(len(SEQ_BUCKETS))}
 
         for qs in query_samples:
             bucket_idx = self.qsl.get_sample_bucket(qs.index)
             buckets[bucket_idx].append((qs.id, qs.index))
+
+        bucket_counts = [len(buckets[i]) for i in range(len(SEQ_BUCKETS))]
+        print(f"{bucket_counts}", file=sys.stderr)
+
+        # Submit batches
+        print(f"[Submit] ", end="", file=sys.stderr)
+        buckets_submitted = 0
 
         for bucket_idx, samples in buckets.items():
             if not samples:
@@ -150,8 +164,42 @@ class BertMultiDieSUTWrapper:
             query_ids = [s[0] for s in samples]
             sample_indices = [s[1] for s in samples]
             self._cpp_sut.submit_batch(bucket_idx, query_ids, sample_indices)
+            buckets_submitted += 1
+            print(".", end="", file=sys.stderr, flush=True)
 
-        self._cpp_sut.wait_all()
+        print(f" {buckets_submitted} buckets", file=sys.stderr)
+
+        # Wait for completion
+        print(f"[Inference] ", end="", file=sys.stderr)
+        last_completed = 0
+        wait_start = time.time()
+        dots_printed = 0
+
+        while True:
+            completed = self._cpp_sut.get_completed_count()
+            if completed >= num_samples:
+                break
+
+            progress = int(completed * 10 / num_samples)
+            while dots_printed < progress:
+                print(".", end="", file=sys.stderr, flush=True)
+                dots_printed += 1
+
+            if completed > last_completed:
+                last_completed = completed
+                wait_start = time.time()
+            elif time.time() - wait_start > 30:
+                print(f"\n[WARN] Stalled at {completed}/{num_samples}", file=sys.stderr)
+                wait_start = time.time()
+
+            time.sleep(0.1)
+
+        while dots_printed < 10:
+            print(".", end="", file=sys.stderr, flush=True)
+            dots_printed += 1
+
+        elapsed = time.time() - self._start_time
+        print(f" {num_samples}/{num_samples} ({elapsed:.1f}s, {num_samples/elapsed:.1f} qps)", file=sys.stderr)
         self._query_count += 1
 
     def _issue_query_server(self, query_samples: List) -> None:

@@ -210,16 +210,22 @@ class RetinaNetMultiDieCppSUTWrapper:
 
     def _issue_query_offline(self, query_samples: List) -> None:
         """Process queries in Offline mode with batching."""
+        import sys
+
         self._start_time = time.time()
         self._cpp_sut.reset_counters()
         self._cpp_sut.enable_direct_loadgen(True)
 
         batch_size = self.batch_size
         num_samples = len(query_samples)
+        num_batches = (num_samples + batch_size - 1) // batch_size
 
-        logger.info(f"[Offline] Starting inference: {num_samples} samples, batch_size={batch_size}")
+        print(f"[Offline] {num_samples} samples, batch_size={batch_size}", file=sys.stderr)
 
+        # Phase 1: Preprocessing + Submit
+        print(f"[Preprocess] ", end="", file=sys.stderr)
         i = 0
+        batches_submitted = 0
         while i < num_samples:
             end_idx = min(i + batch_size, num_samples)
             actual_batch_size = end_idx - i
@@ -253,18 +259,49 @@ class RetinaNetMultiDieCppSUTWrapper:
                 batched_input, query_ids, sample_indices, actual_batch_size
             )
 
-            # Progress logging for Offline mode (useful for debugging slow inference)
-            if i == batch_size:  # First batch
-                logger.info(f"[Offline] First batch submitted, waiting for inference...")
-            elif i % 10 == 0:
-                logger.debug(f"[Offline] Progress: {i}/{num_samples} samples submitted")
+            batches_submitted += 1
+            # Progress bar: show dot every 10% or every batch if < 10
+            if num_batches <= 10 or batches_submitted % max(1, num_batches // 10) == 0:
+                print(".", end="", file=sys.stderr, flush=True)
 
             i = end_idx
 
-        logger.info(f"[Offline] All {num_samples} samples submitted, waiting for completion...")
-        self._cpp_sut.wait_all()
+        print(f" {batches_submitted}/{num_batches} batches", file=sys.stderr)
+
+        # Phase 2: Wait for completion with progress
+        print(f"[Inference] ", end="", file=sys.stderr)
+        last_completed = 0
+        wait_start = time.time()
+        dots_printed = 0
+
+        while True:
+            completed = self._cpp_sut.get_completed_count()
+            if completed >= num_samples:
+                break
+
+            # Print progress dot every 10%
+            progress = int(completed * 10 / num_samples)
+            while dots_printed < progress:
+                print(".", end="", file=sys.stderr, flush=True)
+                dots_printed += 1
+
+            # Check for stall (no progress for 30s)
+            if completed > last_completed:
+                last_completed = completed
+                wait_start = time.time()
+            elif time.time() - wait_start > 30:
+                print(f"\n[WARN] Stalled at {completed}/{num_samples}", file=sys.stderr)
+                wait_start = time.time()
+
+            time.sleep(0.1)
+
+        # Final dots
+        while dots_printed < 10:
+            print(".", end="", file=sys.stderr, flush=True)
+            dots_printed += 1
+
         elapsed = time.time() - self._start_time
-        logger.info(f"[Offline] Completed in {elapsed:.2f}s ({num_samples/elapsed:.1f} samples/sec)")
+        print(f" {num_samples}/{num_samples} ({elapsed:.1f}s, {num_samples/elapsed:.1f} qps)", file=sys.stderr)
         self._query_count += 1
 
     def _issue_query_server(self, query_samples: List) -> None:

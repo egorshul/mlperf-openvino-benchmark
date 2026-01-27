@@ -195,14 +195,22 @@ class ResNetMultiDieCppSUTWrapper:
 
     def _issue_query_offline(self, query_samples: List) -> None:
         """Process queries in Offline mode with batching."""
+        import sys
+
         self._start_time = time.time()
         self._cpp_sut.reset_counters()
         self._cpp_sut.enable_direct_loadgen(True)
 
         batch_size = self.batch_size
         num_samples = len(query_samples)
+        num_batches = (num_samples + batch_size - 1) // batch_size
 
+        print(f"[Offline] {num_samples} samples, batch_size={batch_size}", file=sys.stderr)
+
+        # Phase 1: Preprocessing + Submit
+        print(f"[Preprocess] ", end="", file=sys.stderr)
         i = 0
+        batches_submitted = 0
         while i < num_samples:
             end_idx = min(i + batch_size, num_samples)
             actual_batch_size = end_idx - i
@@ -235,9 +243,46 @@ class ResNetMultiDieCppSUTWrapper:
             self._cpp_sut.start_async_batch(
                 batched_input, query_ids, sample_indices, actual_batch_size
             )
+
+            batches_submitted += 1
+            if num_batches <= 10 or batches_submitted % max(1, num_batches // 10) == 0:
+                print(".", end="", file=sys.stderr, flush=True)
+
             i = end_idx
 
-        self._cpp_sut.wait_all()
+        print(f" {batches_submitted}/{num_batches} batches", file=sys.stderr)
+
+        # Phase 2: Wait for completion with progress
+        print(f"[Inference] ", end="", file=sys.stderr)
+        last_completed = 0
+        wait_start = time.time()
+        dots_printed = 0
+
+        while True:
+            completed = self._cpp_sut.get_completed_count()
+            if completed >= num_samples:
+                break
+
+            progress = int(completed * 10 / num_samples)
+            while dots_printed < progress:
+                print(".", end="", file=sys.stderr, flush=True)
+                dots_printed += 1
+
+            if completed > last_completed:
+                last_completed = completed
+                wait_start = time.time()
+            elif time.time() - wait_start > 30:
+                print(f"\n[WARN] Stalled at {completed}/{num_samples}", file=sys.stderr)
+                wait_start = time.time()
+
+            time.sleep(0.1)
+
+        while dots_printed < 10:
+            print(".", end="", file=sys.stderr, flush=True)
+            dots_printed += 1
+
+        elapsed = time.time() - self._start_time
+        print(f" {num_samples}/{num_samples} ({elapsed:.1f}s, {num_samples/elapsed:.1f} qps)", file=sys.stderr)
         self._query_count += 1
 
     def _issue_query_server(self, query_samples: List) -> None:
