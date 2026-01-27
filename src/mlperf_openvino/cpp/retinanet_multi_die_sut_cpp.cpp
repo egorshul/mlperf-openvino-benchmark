@@ -577,11 +577,15 @@ void RetinaNetMultiDieCppSUT::issue_thread_func(size_t die_idx) {
 // =============================================================================
 
 void RetinaNetMultiDieCppSUT::on_inference_complete(RetinaNetMultiDieInferContext* ctx) {
-    // Debug: log first callback
+    // Debug: log callbacks to track progress
     static std::atomic<int> callback_count{0};
     int count = callback_count.fetch_add(1);
-    if (count == 0) {
-        std::cerr << "[DEBUG] First inference COMPLETE on " << ctx->die_name << std::endl;
+
+    // Log first 10 callbacks and then every 100
+    if (count < 10 || count % 100 == 0) {
+        int pending = pending_count_.load(std::memory_order_relaxed);
+        std::cerr << "[CALLBACK #" << count << "] Completed on " << ctx->die_name
+                  << ", pending=" << pending << std::endl;
     }
 
     int actual_batch_size = ctx->actual_batch_size;
@@ -1007,19 +1011,23 @@ void RetinaNetMultiDieCppSUT::start_async_batch(const float* input_data,
         throw std::runtime_error("Model not loaded");
     }
 
-    // Debug: log first inference to diagnose hangs
+    // Debug: log inferences to diagnose hangs
     static std::atomic<int> inference_count{0};
     int count = inference_count.fetch_add(1);
-    if (count == 0) {
-        std::cerr << "[DEBUG] First inference: batch=" << actual_batch_size
-                  << ", input_bytes=" << input_size << std::endl;
+
+    // Log first 10 submissions and then every 100
+    bool should_log = (count < 10 || count % 100 == 0);
+    if (should_log) {
+        int pending = pending_count_.load(std::memory_order_relaxed);
+        std::cerr << "[SUBMIT #" << count << "] batch=" << actual_batch_size
+                  << ", pending_before=" << pending << std::endl;
     }
 
     size_t id = acquire_request();
     RetinaNetMultiDieInferContext* ctx = infer_contexts_[id].get();
 
-    if (count == 0) {
-        std::cerr << "[DEBUG] Got slot " << id << " on " << ctx->die_name << std::endl;
+    if (should_log) {
+        std::cerr << "[SUBMIT #" << count << "] Got slot " << id << " on " << ctx->die_name << std::endl;
     }
 
     actual_batch_size = std::min(actual_batch_size, RetinaNetMultiDieInferContext::MAX_BATCH);

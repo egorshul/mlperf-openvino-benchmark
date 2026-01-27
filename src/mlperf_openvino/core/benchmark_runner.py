@@ -79,6 +79,11 @@ class BenchmarkRunner:
         is_whisper = (model_type == ModelType.WHISPER or
                       (hasattr(model_type, 'value') and model_type.value == 'whisper'))
 
+        # Skip backend creation for models that use C++ multi-die SUT on accelerators
+        # (they compile the model internally, so Python backend would cause double compilation)
+        is_accelerator = self.config.openvino.is_accelerator_device()
+        is_retinanet = (model_type == ModelType.RETINANET)
+
         if is_sdxl:
             self.backend = None
         elif is_whisper:
@@ -87,6 +92,10 @@ class BenchmarkRunner:
                 self.backend = None
             else:
                 self.backend = self._create_backend()
+        elif is_retinanet and is_accelerator:
+            # RetinaNet C++ multi-die SUT handles compilation internally
+            self.backend = None
+            logger.info("Skipping Python backend (C++ SUT will compile model)")
         else:
             self.backend = self._create_backend()
 
