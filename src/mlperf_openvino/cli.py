@@ -88,8 +88,10 @@ def get_default_config(model: str) -> BenchmarkConfig:
               help='Use NCHW input layout (default is NHWC for ResNet50)')
 @click.option('--performance-hint', type=click.Choice(['THROUGHPUT', 'LATENCY', 'AUTO']),
               default='AUTO', help='Performance hint (AUTO selects based on scenario)')
-@click.option('--duration', type=int, default=60000,
-              help='Minimum test duration in ms')
+@click.option('--duration', type=int, default=None,
+              help='Minimum test duration in ms (default: from config)')
+@click.option('--min-query-count', type=int, default=None,
+              help='Minimum query count (default: from config)')
 @click.option('--target-qps', type=float, default=0,
               help='Target QPS (queries per second)')
 @click.option('--target-latency-ns', type=int, default=0,
@@ -112,7 +114,8 @@ def get_default_config(model: str) -> BenchmarkConfig:
 def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         data_path: Optional[str], output_dir: str, config: Optional[str],
         device: str, properties: str, num_threads: int, num_streams: str,
-        batch_size: int, nchw: bool, performance_hint: str, duration: int, target_qps: float,
+        batch_size: int, nchw: bool, performance_hint: str, duration: Optional[int],
+        min_query_count: Optional[int], target_qps: float,
         target_latency_ns: int, count: int, warmup: int, nireq_multiplier: int,
         auto_batch_timeout_ms: int, optimal_batch_size: int,
         explicit_batching: bool, batch_timeout_us: int, verbose: bool):
@@ -232,7 +235,10 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
 
     # Update scenario config
     scenario_config = benchmark_config.get_scenario_config()
-    scenario_config.min_duration_ms = duration
+    if duration is not None:
+        scenario_config.min_duration_ms = duration
+    if min_query_count is not None:
+        scenario_config.min_query_count = min_query_count
     if target_qps > 0:
         scenario_config.target_qps = target_qps
 
