@@ -287,9 +287,13 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         click.echo(f"Warming up ({warmup} iterations)...")
         runner.setup()
         if runner.backend is not None:
+            # Use Python backend warmup (ResNet, BERT on CPU, etc.)
             runner.backend.warmup(warmup)
+        elif hasattr(runner.sut, 'warmup') and callable(getattr(runner.sut, 'warmup')):
+            # Use C++ SUT warmup (RetinaNet on NPU, etc.)
+            runner.sut.warmup(warmup)
         else:
-            click.echo("Skipping warmup (Whisper uses separate encoder/decoder)")
+            click.echo("Skipping warmup (model uses separate components)")
 
     # Run benchmark
     if mode == 'accuracy':

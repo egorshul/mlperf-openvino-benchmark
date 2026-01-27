@@ -991,6 +991,42 @@ void RetinaNetMultiDieCppSUT::load() {
 }
 
 // =============================================================================
+// WARMUP
+// =============================================================================
+
+void RetinaNetMultiDieCppSUT::warmup(int iterations) {
+    if (!loaded_) return;
+
+    std::cerr << "[RetinaNet] Warming up (" << iterations << " iterations per die)..." << std::endl;
+
+    for (auto& die_ctx : die_contexts_) {
+        if (die_ctx->request_count == 0) continue;
+
+        // Use the first request for this die
+        size_t req_idx = die_ctx->request_start_idx;
+        auto& ctx = infer_contexts_[req_idx];
+
+        // Fill input tensor with zeros (dummy data)
+        float* tensor_data = ctx->input_tensor.data<float>();
+        std::memset(tensor_data, 0, ctx->input_tensor.get_byte_size());
+
+        // Run synchronous inference
+        auto warmup_start = std::chrono::steady_clock::now();
+        for (int i = 0; i < iterations; ++i) {
+            ctx->request.infer();
+        }
+        auto warmup_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - warmup_start).count();
+
+        std::cerr << "[RetinaNet] Warmup " << die_ctx->device_name
+                  << ": " << iterations << " inferences in " << warmup_time << "ms"
+                  << " (" << (warmup_time / iterations) << "ms avg)" << std::endl;
+    }
+
+    std::cerr << "[RetinaNet] Warmup complete" << std::endl;
+}
+
+// =============================================================================
 // PUBLIC API
 // =============================================================================
 
