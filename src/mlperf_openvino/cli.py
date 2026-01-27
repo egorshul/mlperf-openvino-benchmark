@@ -229,7 +229,7 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
             scenario_config.nireq_multiplier = 6
             explicit_batch = batch_size if batch_size > 1 else 8
             scenario_config.explicit_batch_size = explicit_batch
-            click.echo(f"Explicit batching: batch={explicit_batch}, timeout={timeout}us, nireq=6")
+            click.echo(f"Explicit batching: batch={explicit_batch}, timeout={scenario_config.batch_timeout_us}us, nireq=6")
 
     # Validate configuration
     if not benchmark_config.model.model_path:
