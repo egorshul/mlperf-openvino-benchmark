@@ -1,8 +1,4 @@
-"""
-Command Line Interface for MLPerf OpenVINO Benchmark.
-
-Supports: ResNet50, BERT, RetinaNet, Whisper, SDXL
-"""
+"""CLI for MLPerf OpenVINO Benchmark."""
 
 import logging
 import sys
@@ -88,8 +84,10 @@ def get_default_config(model: str) -> BenchmarkConfig:
               help='Use NCHW input layout (default is NHWC for ResNet50)')
 @click.option('--performance-hint', type=click.Choice(['THROUGHPUT', 'LATENCY', 'AUTO']),
               default='AUTO', help='Performance hint (AUTO selects based on scenario)')
-@click.option('--duration', type=int, default=60000,
-              help='Minimum test duration in ms')
+@click.option('--duration', type=int, default=None,
+              help='Minimum test duration in ms (default: from config)')
+@click.option('--min-query-count', type=int, default=None,
+              help='Minimum query count (default: from config)')
 @click.option('--target-qps', type=float, default=0,
               help='Target QPS (queries per second)')
 @click.option('--target-latency-ns', type=int, default=0,
@@ -98,24 +96,25 @@ def get_default_config(model: str) -> BenchmarkConfig:
               help='Number of samples to use (0 = all)')
 @click.option('--warmup', type=int, default=10,
               help='Number of warmup iterations')
-@click.option('--nireq-multiplier', type=int, default=2,
-              help='In-flight request multiplier (default: 2 for Server, lower = less latency)')
+@click.option('--nireq-multiplier', type=int, default=None,
+              help='In-flight request multiplier (default: from config, lower = less latency)')
 @click.option('--auto-batch-timeout-ms', type=int, default=0,
               help='AUTO_BATCH timeout in ms (0=disabled, 1=1ms). Enables OpenVINO auto-batching.')
 @click.option('--optimal-batch-size', type=int, default=0,
               help='Optimal batch size for AUTO_BATCH (0=auto, 4=recommended for NPU)')
 @click.option('--explicit-batching', is_flag=True, default=False,
               help='Enable Intel-style explicit batching for Server mode (recommended for NPU)')
-@click.option('--batch-timeout-us', type=int, default=500,
-              help='Explicit batching timeout in microseconds (default 500us)')
+@click.option('--batch-timeout-us', type=int, default=None,
+              help='Explicit batching timeout in microseconds (default: 2000 for explicit batching)')
 @click.option('--verbose', '-v', is_flag=True, help='Enable verbose output')
 def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         data_path: Optional[str], output_dir: str, config: Optional[str],
         device: str, properties: str, num_threads: int, num_streams: str,
-        batch_size: int, nchw: bool, performance_hint: str, duration: int, target_qps: float,
+        batch_size: int, nchw: bool, performance_hint: str, duration: Optional[int],
+        min_query_count: Optional[int], target_qps: float,
         target_latency_ns: int, count: int, warmup: int, nireq_multiplier: int,
         auto_batch_timeout_ms: int, optimal_batch_size: int,
-        explicit_batching: bool, batch_timeout_us: int, verbose: bool):
+        explicit_batching: bool, batch_timeout_us: Optional[int], verbose: bool):
     """
     Run MLPerf benchmark.
 
@@ -140,31 +139,25 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
     click.echo("MLPerf v5.1 OpenVINO Benchmark")
     click.echo(f"{'='*60}\n")
 
-    # Load or create configuration based on model
     if config:
         benchmark_config = BenchmarkConfig.from_yaml(config, model)
+        click.echo(f"Config: {config}")
     else:
+        click.echo("WARNING: No --config specified, using hardcoded defaults (min_duration=600s)")
         benchmark_config = get_default_config(model)
 
-    # Override with CLI options
     benchmark_config.scenario = Scenario(scenario)
     benchmark_config.results_dir = output_dir
-
-    # Set device
     benchmark_config.openvino.device = device.upper() if device else "CPU"
 
-    # Parse and set device properties
     if properties:
         from .backends.device_discovery import parse_device_properties, validate_device_properties
         parsed_props = parse_device_properties(properties)
         benchmark_config.openvino.device_properties = parsed_props
-
-        # Validate properties (silently log warnings)
         is_valid, warnings = validate_device_properties(parsed_props, device)
         for warning in warnings:
             logger.debug(warning)
 
-    # Add AUTO_BATCH settings if specified
     if auto_batch_timeout_ms > 0 or optimal_batch_size > 0:
         if not benchmark_config.openvino.device_properties:
             benchmark_config.openvino.device_properties = {}
@@ -174,50 +167,35 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
             benchmark_config.openvino.device_properties['OPTIMAL_BATCH_SIZE'] = str(optimal_batch_size)
         click.echo(f"AUTO_BATCH: timeout={auto_batch_timeout_ms}ms, optimal_batch={optimal_batch_size}")
 
-    # Validate accelerator device availability if specified
     if benchmark_config.openvino.is_accelerator_device():
         _validate_accelerator_device(benchmark_config.openvino.device)
 
     if num_threads > 0:
         benchmark_config.openvino.num_threads = num_threads
 
-    # Auto-select optimal settings based on scenario
-    # NOTE: AUTO hints are for CPU only, skip for accelerators
     is_accelerator = benchmark_config.openvino.is_accelerator_device()
 
     if performance_hint == 'AUTO':
         if is_accelerator:
-            # Accelerators: don't set performance hint, don't auto-batch
-            actual_hint = None  # Will not be applied
-            # Keep batch_size as user specified (default=1)
+            actual_hint = None
         elif scenario == 'Offline':
-            # CPU Offline: optimize for maximum THROUGHPUT with batching
             actual_hint = 'THROUGHPUT'
-            if batch_size is None:  # User didn't specify batch size
-                batch_size = 32  # Larger batch for throughput
+            if batch_size is None:
+                batch_size = 32
         else:
-            # CPU Server: THROUGHPUT hint for parallelism, batch=1 for low latency
             actual_hint = 'THROUGHPUT'
-            # Keep batch_size=1 for Server (each query = 1 sample)
     else:
         actual_hint = performance_hint
 
-    # Apply default batch_size if not specified
     if batch_size is None:
         batch_size = 1
 
     benchmark_config.openvino.num_streams = num_streams
     benchmark_config.openvino.batch_size = batch_size
 
-    # Set input layout (NHWC is default for ResNet50, --nchw overrides)
     if hasattr(benchmark_config.model, 'preprocessing') and benchmark_config.model.preprocessing:
-        if nchw:
-            benchmark_config.model.preprocessing.output_layout = 'NCHW'
-        else:
-            # Default to NHWC for ResNet50 (optimized preprocessing)
-            benchmark_config.model.preprocessing.output_layout = 'NHWC'
+        benchmark_config.model.preprocessing.output_layout = 'NCHW' if nchw else 'NHWC'
 
-    # Only set performance_hint for CPU devices
     if not is_accelerator and actual_hint:
         benchmark_config.openvino.performance_hint = actual_hint
 
@@ -230,16 +208,17 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
     if count > 0:
         benchmark_config.dataset.num_samples = count
 
-    # Update scenario config
     scenario_config = benchmark_config.get_scenario_config()
-    scenario_config.min_duration_ms = duration
+    if duration is not None:
+        scenario_config.min_duration_ms = duration
+    if min_query_count is not None:
+        scenario_config.min_query_count = min_query_count
     if target_qps > 0:
         scenario_config.target_qps = target_qps
 
-    # Server mode settings
     if scenario == 'Server':
-        scenario_config.nireq_multiplier = nireq_multiplier
-        # Target latency (Open Division allows custom values)
+        if nireq_multiplier is not None:
+            scenario_config.nireq_multiplier = nireq_multiplier
         if target_latency_ns > 0:
             scenario_config.target_latency_ns = target_latency_ns
             click.echo(f"Custom target latency: {target_latency_ns / 1e6:.1f}ms (Open Division)")
@@ -247,13 +226,13 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         # Explicit batching (Intel-style) for Server mode
         if explicit_batching:
             scenario_config.explicit_batching = True
-            # Use optimized defaults for explicit batching
-            timeout = batch_timeout_us if batch_timeout_us != 500 else 2000
-            scenario_config.batch_timeout_us = timeout
-            scenario_config.nireq_multiplier = 6
+            scenario_config.batch_timeout_us = batch_timeout_us if batch_timeout_us is not None else 2000
+            # Use CLI override if specified, otherwise default to 6 for explicit batching
+            if nireq_multiplier is None:
+                scenario_config.nireq_multiplier = 6
             explicit_batch = batch_size if batch_size > 1 else 8
             scenario_config.explicit_batch_size = explicit_batch
-            click.echo(f"Explicit batching: batch={explicit_batch}, timeout={timeout}us, nireq=6")
+            click.echo(f"Explicit batching: batch={explicit_batch}, timeout={scenario_config.batch_timeout_us}us, nireq={scenario_config.nireq_multiplier}")
 
     # Validate configuration
     if not benchmark_config.model.model_path:
@@ -279,19 +258,18 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         click.echo(f"Input layout: {input_layout}")
     click.echo("")
 
-    # Create runner
     runner = BenchmarkRunner(benchmark_config)
 
-    # Warmup
     if warmup > 0:
         click.echo(f"Warming up ({warmup} iterations)...")
         runner.setup()
         if runner.backend is not None:
             runner.backend.warmup(warmup)
+        elif hasattr(runner.sut, 'warmup') and callable(getattr(runner.sut, 'warmup')):
+            runner.sut.warmup(warmup)
         else:
-            click.echo("Skipping warmup (Whisper uses separate encoder/decoder)")
+            click.echo("Skipping warmup (model uses separate components)")
 
-    # Run benchmark
     if mode == 'accuracy':
         click.echo("Running accuracy test...")
         benchmark_config.test_mode = TestMode.ACCURACY_ONLY
@@ -313,10 +291,7 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
 
         results = {**perf_results, "accuracy": acc_results.get("accuracy", {})}
 
-    # Print summary
     runner.print_summary()
-
-    # Save results
     results_path = runner.save_results()
     click.echo(f"Results saved to: {results_path}")
 
@@ -371,17 +346,21 @@ def _print_dataset_help(model: str) -> None:
               default='./models', help='Output directory')
 @click.option('--format', '-f', type=click.Choice(['onnx', 'openvino']),
               default='onnx', help='Model format')
-def download_model_cmd(model: str, output_dir: str, format: str):
+@click.option('--batch-sizes', type=str, default='1,2,4,8',
+              help='Batch sizes for RetinaNet (comma-separated, default: 1,2,4,8)')
+def download_model_cmd(model: str, output_dir: str, format: str, batch_sizes: str):
     """
     Download model files.
 
     Examples:
 
-        mlperf-ov download --model resnet50 --output-dir ./models
+        mlperf-ov download-model --model resnet50 --output-dir ./models
 
-        mlperf-ov download --model bert --format onnx
+        mlperf-ov download-model --model bert --format onnx
 
-        mlperf-ov download --model whisper --format openvino
+        mlperf-ov download-model --model whisper --format openvino
+
+        mlperf-ov download-model --model retinanet --format openvino --batch-sizes 1,2,4,8
     """
     click.echo(f"Downloading {model} model...")
 
@@ -408,6 +387,21 @@ def download_model_cmd(model: str, output_dir: str, format: str):
                 export_to_openvino=export_to_openvino
             )
             click.echo(f"Model downloaded to: {paths['model_path']}")
+        elif model == 'retinanet':
+            from .utils.model_downloader import download_retinanet_model
+            # Parse batch sizes
+            bs_list = [int(x.strip()) for x in batch_sizes.split(',')]
+            convert_to_openvino = (format == 'openvino')
+            paths = download_retinanet_model(
+                str(output_path),
+                batch_sizes=bs_list,
+                convert_to_openvino=convert_to_openvino,
+            )
+            click.echo(f"RetinaNet ONNX model: {paths['onnx_path']}")
+            if 'batch_models' in paths and paths['batch_models']:
+                click.echo("OpenVINO IR models:")
+                for bs, path in sorted(paths['batch_models'].items()):
+                    click.echo(f"  Batch size {bs}: {path}")
         else:
             model_path = download_model(model, str(output_path), format)
             click.echo(f"Model downloaded to: {model_path}")
@@ -581,8 +575,8 @@ def setup_cmd(model: str, output_dir: str, format: str):
         # Set up BERT benchmark
         mlperf-ov setup --model bert
 
-        # Set up RetinaNet benchmark
-        mlperf-ov setup --model retinanet
+        # Set up RetinaNet benchmark (downloads ONNX and creates OpenVINO IR with batch sizes 1,2,4,8)
+        mlperf-ov setup --model retinanet --format openvino
 
         # Set up Whisper benchmark with OpenVINO format
         mlperf-ov setup --model whisper --format openvino
@@ -591,6 +585,7 @@ def setup_cmd(model: str, output_dir: str, format: str):
         mlperf-ov setup --model sdxl --format openvino
     """
     from .utils.model_downloader import download_model, download_whisper_model, download_sdxl_model
+    from .utils.model_downloader import download_retinanet_model
     from .utils.dataset_downloader import download_dataset
 
     output_path = Path(output_dir)
@@ -601,7 +596,6 @@ def setup_cmd(model: str, output_dir: str, format: str):
     click.echo(f"Setting up {model} benchmark")
     click.echo(f"{'='*60}\n")
 
-    # Download model
     click.echo("Step 1: Downloading model...")
     try:
         if model == 'whisper':
@@ -618,6 +612,20 @@ def setup_cmd(model: str, output_dir: str, format: str):
                 export_to_openvino=export_to_openvino
             )
             model_path = model_paths['model_path']
+        elif model == 'retinanet':
+            # RetinaNet: download ONNX and convert to OpenVINO with batch sizes 1, 2, 4, 8
+            convert_to_openvino = (format == 'openvino')
+            model_paths = download_retinanet_model(
+                str(models_dir),
+                batch_sizes=[1, 2, 4, 8],
+                convert_to_openvino=convert_to_openvino,
+            )
+            model_path = model_paths.get('model_path', model_paths['onnx_path'])
+            click.echo(f"  ONNX model: {model_paths['onnx_path']}")
+            if 'batch_models' in model_paths and model_paths['batch_models']:
+                click.echo("  OpenVINO IR models:")
+                for bs, path in sorted(model_paths['batch_models'].items()):
+                    click.echo(f"    Batch size {bs}: {path}")
         else:
             model_path = download_model(model, str(models_dir), format)
         click.echo(f"  Model: {model_path}\n")

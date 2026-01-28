@@ -1,8 +1,4 @@
-"""
-Main benchmark runner for MLPerf OpenVINO Benchmark.
-
-Supports multiple models: ResNet50, BERT, RetinaNet, Whisper, SDXL.
-"""
+"""MLPerf OpenVINO Benchmark runner."""
 
 import json
 import logging
@@ -22,6 +18,7 @@ except ImportError:
 
 from .config import BenchmarkConfig, ModelType, Scenario, TestMode
 from .sut import OpenVINOSUT
+from .sut_factory import SUTFactory
 from ..backends.openvino_backend import OpenVINOBackend
 from ..datasets.base import QuerySampleLibrary
 
@@ -29,30 +26,9 @@ logger = logging.getLogger(__name__)
 
 
 class BenchmarkRunner:
-    """
-    Main class for running MLPerf benchmarks.
-
-    This class orchestrates:
-    - Model loading
-    - Dataset preparation
-    - Benchmark execution
-    - Results collection and reporting
-
-    Supports models:
-    - ResNet50 (Image Classification)
-    - BERT-Large (Question Answering)
-    - RetinaNet (Object Detection)
-    - Whisper (Speech Recognition)
-    - Stable Diffusion XL (Text-to-Image)
-    """
+    """Main class for running MLPerf benchmarks."""
 
     def __init__(self, config: BenchmarkConfig):
-        """
-        Initialize the benchmark runner.
-
-        Args:
-            config: Benchmark configuration
-        """
         if not LOADGEN_AVAILABLE:
             raise ImportError(
                 "MLPerf LoadGen is not installed. Please install with: "
@@ -73,11 +49,13 @@ class BenchmarkRunner:
         Path(self.config.logs_dir).mkdir(parents=True, exist_ok=True)
 
         model_type = self.config.model.model_type
-
-        is_sdxl = (model_type == ModelType.SDXL or
-                   (hasattr(model_type, 'value') and model_type.value == 'sdxl'))
-        is_whisper = (model_type == ModelType.WHISPER or
-                      (hasattr(model_type, 'value') and model_type.value == 'whisper'))
+        is_sdxl = model_type == ModelType.SDXL
+        is_whisper = model_type == ModelType.WHISPER
+        is_accelerator = self.config.openvino.is_accelerator_device()
+        uses_cpp_multi_die_sut = (
+            model_type in (ModelType.RESNET50, ModelType.BERT, ModelType.RETINANET)
+            and is_accelerator
+        )
 
         if is_sdxl:
             self.backend = None
@@ -87,6 +65,9 @@ class BenchmarkRunner:
                 self.backend = None
             else:
                 self.backend = self._create_backend()
+        elif uses_cpp_multi_die_sut:
+            self.backend = None
+            logger.info("Skipping Python backend (C++ SUT will compile model)")
         else:
             self.backend = self._create_backend()
 
@@ -139,31 +120,23 @@ class BenchmarkRunner:
         backend.load()
         return backend
 
-    def _log_available_devices(self) -> None:
-        """Log available OpenVINO devices (debug level only)."""
-        try:
-            from openvino import Core
-            core = Core()
-            logger.debug(f"Available devices: {core.available_devices}")
-        except Exception:
-            pass
-
     def _create_sut_for_backend(
         self,
         qsl: QuerySampleLibrary,
     ) -> Any:
-        """Create appropriate SUT based on backend type.
-
-        For multi-die accelerators, prefer C++ SUT for maximum performance.
-        Falls back to Python SUT if C++ is not available.
-        """
+        """Create appropriate SUT based on backend type."""
         from ..backends.multi_device_backend import MultiDeviceBackend
         from .sut import OpenVINOSUT
 
-        model_type = self.config.model.model_type
-
-        if isinstance(self.backend, MultiDeviceBackend):
-            return self._create_resnet_multi_die_sut(qsl)
+        # For accelerators, use SUTFactory
+        if self.backend is None and self.config.openvino.is_accelerator_device():
+            return SUTFactory.create_multi_die_sut(
+                ModelType.RESNET50, self.config, qsl, self.backend
+            )
+        elif isinstance(self.backend, MultiDeviceBackend):
+            return SUTFactory.create_multi_die_sut(
+                ModelType.RESNET50, self.config, qsl, self.backend
+            )
         else:
             logger.info(f"Using OpenVINOSUT on {self.config.openvino.device}")
             return OpenVINOSUT(
@@ -172,74 +145,6 @@ class BenchmarkRunner:
                 qsl=qsl,
                 scenario=self.config.scenario,
             )
-
-    def _create_resnet_multi_die_sut(self, qsl: QuerySampleLibrary) -> Any:
-        """Create ResNet multi-die SUT."""
-        # Try C++ multi-die SUT first (much faster)
-        try:
-            from .resnet_multi_die_sut import (
-                ResNetMultiDieCppSUTWrapper,
-                is_resnet_multi_die_cpp_available
-            )
-
-            if is_resnet_multi_die_cpp_available():
-                logger.info(f"Using ResNet C++ multi-die SUT ({self.backend.num_dies} dies)")
-                sut = ResNetMultiDieCppSUTWrapper(
-                    config=self.config,
-                    qsl=qsl,
-                    scenario=self.config.scenario,
-                )
-                # Pass accuracy mode flag to optimize for performance
-                is_accuracy_mode = self.config.test_mode == TestMode.ACCURACY_ONLY
-                sut.load(is_accuracy_mode=is_accuracy_mode)
-                return sut
-        except ImportError as e:
-            logger.warning(f"C++ ResNet multi-die SUT not available: {e}")
-        except Exception as e:
-            logger.warning(f"Failed to create C++ ResNet multi-die SUT: {e}, falling back to Python")
-
-        # Fall back to Python multi-device SUT
-        from .resnet_multi_device_sut import ResNetMultiDeviceSUT
-        logger.info(f"Using ResNet Python multi-die SUT ({self.backend.num_dies} dies)")
-        return ResNetMultiDeviceSUT(
-            config=self.config,
-            backend=self.backend,
-            qsl=qsl,
-            scenario=self.config.scenario,
-        )
-
-    def _create_bert_multi_die_sut(self, qsl: QuerySampleLibrary) -> Any:
-        """Create BERT multi-die SUT for accelerators."""
-        is_accuracy_mode = self.config.test_mode == TestMode.ACCURACY_ONLY
-
-        try:
-            from .bert_multi_die_sut import (
-                BertMultiDieSUTWrapper,
-                is_bert_multi_die_cpp_available
-            )
-
-            if is_bert_multi_die_cpp_available():
-                logger.info(f"Using BERT C++ multi-die SUT on {self.config.openvino.device}")
-                sut = BertMultiDieSUTWrapper(
-                    config=self.config,
-                    qsl=qsl,
-                    scenario=self.config.scenario,
-                )
-                sut.load(is_accuracy_mode=is_accuracy_mode)
-                return sut
-        except ImportError as e:
-            logger.warning(f"C++ BERT multi-die SUT not available: {e}")
-        except Exception as e:
-            logger.warning(f"Failed to create C++ BERT multi-die SUT: {e}")
-
-        from .bert_sut import BertSUT
-        logger.info(f"Using BERT Python SUT on {self.config.openvino.device}")
-        return BertSUT(
-            config=self.config,
-            backend=self.backend,
-            qsl=qsl,
-            scenario=self.config.scenario,
-        )
 
     def _setup_resnet50(self) -> None:
         """Set up ResNet50 benchmark."""
@@ -282,7 +187,9 @@ class BenchmarkRunner:
 
         # Use BERT multi-die SUT for accelerator
         if self.config.openvino.is_accelerator_device():
-            self.sut = self._create_bert_multi_die_sut(self.qsl)
+            self.sut = SUTFactory.create_multi_die_sut(
+                ModelType.BERT, self.config, self.qsl, self.backend
+            )
         else:
             # Use create_bert_sut to automatically select C++ or Python SUT for CPU
             self.sut = create_bert_sut(
@@ -310,9 +217,11 @@ class BenchmarkRunner:
         )
         self.qsl.load()
 
-        # Use multi-device SUT for accelerator
+        # Use RetinaNet multi-die SUT for accelerator
         if self.config.openvino.is_accelerator_device():
-            self.sut = self._create_sut_for_backend(self.qsl)
+            self.sut = SUTFactory.create_multi_die_sut(
+                ModelType.RETINANET, self.config, self.qsl, self.backend
+            )
         else:
             # Use create_retinanet_sut to automatically select C++ or Python SUT for CPU
             self.sut = create_retinanet_sut(
@@ -467,7 +376,6 @@ class BenchmarkRunner:
         """Create LoadGen test settings."""
         settings = lg.TestSettings()
 
-        # Set scenario
         if self.config.scenario == Scenario.OFFLINE:
             settings.scenario = lg.TestScenario.Offline
         elif self.config.scenario == Scenario.SERVER:
@@ -475,7 +383,6 @@ class BenchmarkRunner:
         else:
             raise ValueError(f"Unsupported scenario: {self.config.scenario}")
 
-        # Set mode
         if self.config.test_mode == TestMode.ACCURACY_ONLY:
             settings.mode = lg.TestMode.AccuracyOnly
         elif self.config.test_mode == TestMode.PERFORMANCE_ONLY:
@@ -485,20 +392,17 @@ class BenchmarkRunner:
         else:
             settings.mode = lg.TestMode.PerformanceOnly
 
-        # Get scenario-specific config
         scenario_config = self.config.get_scenario_config()
-
-        # Set timing constraints
         settings.min_duration_ms = scenario_config.min_duration_ms
         settings.min_query_count = scenario_config.min_query_count
-
-        # Set MLPerf seeds for reproducibility
         settings.qsl_rng_seed = scenario_config.qsl_rng_seed
         settings.sample_index_rng_seed = scenario_config.sample_index_rng_seed
         settings.schedule_rng_seed = scenario_config.schedule_rng_seed
 
+        # Log LoadGen settings for visibility
+        logger.info(f"LoadGen settings: min_duration={scenario_config.min_duration_ms/1000:.0f}s, min_query_count={scenario_config.min_query_count}")
+
         if self.config.scenario == Scenario.OFFLINE:
-            # LoadGen requires expected_qps for Offline scenario
             expected_qps = scenario_config.target_qps if scenario_config.target_qps > 0 else 1000.0
             settings.offline_expected_qps = expected_qps
             logger.info(f"Offline expected QPS: {expected_qps}")

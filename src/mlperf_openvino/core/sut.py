@@ -1,12 +1,4 @@
-"""
-MLPerf System Under Test (SUT) implementation for OpenVINO.
-
-Optimized for maximum throughput using Intel/NVIDIA MLPerf best practices:
-- AsyncInferQueue for true async inference (releases GIL during inference)
-- Immediate callback response (minimal Python overhead)
-- Pre-cached input data to avoid QSL lookups in hot path
-- Direct QuerySamplesComplete calls without intermediate queues
-"""
+"""MLPerf System Under Test (SUT) implementation for OpenVINO."""
 
 import array
 import logging
@@ -47,15 +39,7 @@ logger = logging.getLogger(__name__)
 
 
 class OpenVINOSUT:
-    """
-    System Under Test implementation using OpenVINO backend.
-
-    This class implements the MLPerf LoadGen interface for inference testing.
-    Optimized for maximum throughput using best practices from Intel/NVIDIA:
-    - Direct AsyncInferQueue usage (true async, GIL released during inference)
-    - Immediate callback response (minimal Python overhead)
-    - No intermediate Python queues or worker threads
-    """
+    """System Under Test implementation using OpenVINO backend."""
 
     def __init__(
         self,

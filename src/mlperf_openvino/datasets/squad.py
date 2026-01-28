@@ -1,9 +1,4 @@
-"""
-SQuAD dataset for BERT Question Answering benchmark.
-
-This module provides dataset handling for the SQuAD v1.1 dataset
-used in MLPerf Inference for BERT model evaluation.
-"""
+"""SQuAD dataset for BERT Question Answering."""
 
 import json
 import logging

@@ -20,6 +20,7 @@
 #include "retinanet_sut_cpp.hpp"
 #include "resnet_multi_die_sut_cpp.hpp"
 #include "bert_multi_die_sut.hpp"
+#include "retinanet_multi_die_sut_cpp.hpp"
 
 namespace py = pybind11;
 
@@ -398,6 +399,11 @@ PYBIND11_MODULE(_cpp_sut, m) {
              py::call_guard<py::gil_scoped_release>(),
              "Load model and compile for all available dies")
 
+        .def("warmup", &mlperf_ov::ResNetMultiDieCppSUT::warmup,
+             py::call_guard<py::gil_scoped_release>(),
+             py::arg("iterations") = 2,
+             "Run warmup inferences on all dies")
+
         .def("set_target_devices", &mlperf_ov::ResNetMultiDieCppSUT::set_target_devices,
              py::arg("devices"),
              "Set specific target devices (call before load())")
@@ -730,6 +736,234 @@ PYBIND11_MODULE(_cpp_sut, m) {
         .def("enable_direct_loadgen", &mlperf_ov::BertMultiDieSUT::enable_direct_loadgen,
              py::arg("enable"),
              "Enable direct LoadGen C++ mode");
+
+    // RetinaNetMultiDieCppSUT - optimized for multi-die accelerators with batching
+    // Note: RetinaNet has larger input (800x800x3=7.7MB vs ResNet 224x224x3=0.6MB)
+    // so we use smaller defaults: nireq_multiplier=2, explicit_batch=2, timeout=1000us
+    py::class_<mlperf_ov::RetinaNetMultiDieCppSUT>(m, "RetinaNetMultiDieCppSUT")
+        .def(py::init<const std::string&, const std::string&, int,
+                      const std::unordered_map<std::string, std::string>&, bool, int>(),
+             py::arg("model_path"),
+             py::arg("device_prefix"),
+             py::arg("batch_size") = 1,
+             py::arg("compile_properties") = std::unordered_map<std::string, std::string>{},
+             py::arg("use_nhwc_input") = true,  // NHWC is default
+             py::arg("nireq_multiplier") = 2,   // Lower than ResNet (4) due to large input
+             "Create multi-die RetinaNet SUT. nireq_multiplier controls queue depth "
+             "(lower = less latency for Server mode, higher = more throughput for Offline)")
+
+        .def("load", &mlperf_ov::RetinaNetMultiDieCppSUT::load,
+             py::call_guard<py::gil_scoped_release>(),
+             "Load model and compile for all available dies")
+
+        .def("warmup", &mlperf_ov::RetinaNetMultiDieCppSUT::warmup,
+             py::call_guard<py::gil_scoped_release>(),
+             py::arg("iterations") = 2,
+             "Run warmup inferences on all dies")
+
+        .def("set_target_devices", &mlperf_ov::RetinaNetMultiDieCppSUT::set_target_devices,
+             py::arg("devices"),
+             "Set specific target devices (call before load())")
+
+        .def("is_loaded", &mlperf_ov::RetinaNetMultiDieCppSUT::is_loaded,
+             "Check if model is loaded")
+
+        .def("get_num_dies", &mlperf_ov::RetinaNetMultiDieCppSUT::get_num_dies,
+             "Get number of active dies")
+
+        .def("get_active_devices", &mlperf_ov::RetinaNetMultiDieCppSUT::get_active_devices,
+             "Get list of active device names")
+
+        .def("get_batch_size", &mlperf_ov::RetinaNetMultiDieCppSUT::get_batch_size,
+             "Get batch size")
+
+        .def("get_total_requests", &mlperf_ov::RetinaNetMultiDieCppSUT::get_total_requests,
+             "Get total number of inference requests across all dies")
+
+        .def("get_input_name", &mlperf_ov::RetinaNetMultiDieCppSUT::get_input_name,
+             "Get input tensor name")
+
+        .def("get_boxes_name", &mlperf_ov::RetinaNetMultiDieCppSUT::get_boxes_name,
+             "Get boxes output name")
+
+        .def("get_scores_name", &mlperf_ov::RetinaNetMultiDieCppSUT::get_scores_name,
+             "Get scores output name")
+
+        .def("get_labels_name", &mlperf_ov::RetinaNetMultiDieCppSUT::get_labels_name,
+             "Get labels output name")
+
+        .def("start_async_batch",
+             [](mlperf_ov::RetinaNetMultiDieCppSUT& self,
+                py::array_t<float, py::array::c_style | py::array::forcecast> input,
+                const std::vector<uint64_t>& query_ids,
+                const std::vector<int>& sample_indices,
+                int actual_batch_size) {
+                 py::buffer_info buf = input.request();
+                 const float* data = static_cast<const float*>(buf.ptr);
+                 size_t size = buf.size * sizeof(float);
+
+                 py::gil_scoped_release release;
+                 self.start_async_batch(data, size, query_ids, sample_indices, actual_batch_size);
+             },
+             py::arg("input"),
+             py::arg("query_ids"),
+             py::arg("sample_indices"),
+             py::arg("actual_batch_size"),
+             "Start async batch inference (GIL released)")
+
+        .def("wait_all", &mlperf_ov::RetinaNetMultiDieCppSUT::wait_all,
+             py::call_guard<py::gil_scoped_release>(),
+             "Wait for all pending inferences")
+
+        .def("get_completed_count", &mlperf_ov::RetinaNetMultiDieCppSUT::get_completed_count,
+             "Get number of completed samples")
+
+        .def("get_issued_count", &mlperf_ov::RetinaNetMultiDieCppSUT::get_issued_count,
+             "Get number of issued samples")
+
+        .def("reset_counters", &mlperf_ov::RetinaNetMultiDieCppSUT::reset_counters,
+             "Reset counters")
+
+        .def("set_store_predictions", &mlperf_ov::RetinaNetMultiDieCppSUT::set_store_predictions,
+             py::arg("store"),
+             "Enable/disable storing predictions")
+
+        .def("get_predictions",
+             [](mlperf_ov::RetinaNetMultiDieCppSUT& self) {
+                 auto cpp_preds = self.get_predictions();
+                 py::dict py_preds;
+
+                 for (const auto& [idx, pred] : cpp_preds) {
+                     py::dict entry;
+
+                     py::array_t<float> boxes_arr(pred.boxes.size());
+                     py::array_t<float> scores_arr(pred.scores.size());
+                     py::array_t<float> labels_arr(pred.labels.size());
+
+                     std::memcpy(boxes_arr.mutable_data(), pred.boxes.data(),
+                                pred.boxes.size() * sizeof(float));
+                     std::memcpy(scores_arr.mutable_data(), pred.scores.data(),
+                                pred.scores.size() * sizeof(float));
+                     if (!pred.labels.empty()) {
+                         std::memcpy(labels_arr.mutable_data(), pred.labels.data(),
+                                    pred.labels.size() * sizeof(float));
+                     }
+
+                     entry["boxes"] = boxes_arr;
+                     entry["scores"] = scores_arr;
+                     entry["labels"] = labels_arr;
+                     entry["num_detections"] = pred.num_detections;
+                     py_preds[py::int_(idx)] = entry;
+                 }
+                 return py_preds;
+             },
+             "Get stored predictions")
+
+        .def("clear_predictions", &mlperf_ov::RetinaNetMultiDieCppSUT::clear_predictions,
+             "Clear stored predictions")
+
+        .def("set_batch_response_callback",
+             [](mlperf_ov::RetinaNetMultiDieCppSUT& self, py::function callback) {
+                 self.set_batch_response_callback(
+                     [callback](const std::vector<uint64_t>& query_ids) {
+                         py::gil_scoped_acquire acquire;
+                         callback(query_ids);
+                     });
+             },
+             py::arg("callback"),
+             "Set batch response callback for Offline mode")
+
+        .def("register_sample_data",
+             [](mlperf_ov::RetinaNetMultiDieCppSUT& self,
+                int sample_idx,
+                py::array_t<float, py::array::c_style | py::array::forcecast> data) {
+                 py::buffer_info buf = data.request();
+                 // Note: data must remain valid until clear_sample_data is called!
+                 self.register_sample_data(
+                     sample_idx,
+                     static_cast<const float*>(buf.ptr),
+                     buf.size * sizeof(float));
+             },
+             py::arg("sample_idx"),
+             py::arg("data"),
+             "Register sample data for fast dispatch (data must remain valid!)")
+
+        .def("clear_sample_data", &mlperf_ov::RetinaNetMultiDieCppSUT::clear_sample_data,
+             "Clear all registered sample data")
+
+        .def("issue_queries_server_fast",
+             [](mlperf_ov::RetinaNetMultiDieCppSUT& self,
+                py::list query_ids,
+                py::list sample_indices) {
+                 // Fast conversion - only integers, no arrays
+                 size_t n = py::len(query_ids);
+                 std::vector<uint64_t> qids(n);
+                 std::vector<int> sidxs(n);
+
+                 for (size_t i = 0; i < n; ++i) {
+                     qids[i] = query_ids[i].cast<uint64_t>();
+                     sidxs[i] = sample_indices[i].cast<int>();
+                 }
+
+                 // Release GIL - all data access is in C++
+                 py::gil_scoped_release release;
+                 self.issue_queries_server_fast(qids, sidxs);
+             },
+             py::arg("query_ids"),
+             py::arg("sample_indices"),
+             "Fast Server mode dispatch - responses go directly to LoadGen C++ (NO GIL)")
+
+        .def("enable_direct_loadgen", &mlperf_ov::RetinaNetMultiDieCppSUT::enable_direct_loadgen,
+             py::arg("enable"),
+             "Enable direct LoadGen C++ mode for Server scenario")
+
+        .def("enable_explicit_batching", &mlperf_ov::RetinaNetMultiDieCppSUT::enable_explicit_batching,
+             py::arg("enable"),
+             py::arg("batch_size") = 2,      // Smaller than ResNet (4) due to 7.7MB input
+             py::arg("timeout_us") = 1000,   // Longer timeout (1ms) for larger data copy
+             "Enable Intel-style explicit batching for Server mode. "
+             "batch_size: target batch size (default 2 for RetinaNet, 4 for ResNet). "
+             "timeout_us: max time to wait for batch fill (default 1000us for RetinaNet)")
+
+        .def("is_explicit_batching_enabled", &mlperf_ov::RetinaNetMultiDieCppSUT::is_explicit_batching_enabled,
+             "Check if explicit batching is enabled")
+
+        .def("run_server_benchmark",
+             [](mlperf_ov::RetinaNetMultiDieCppSUT& self,
+                size_t total_sample_count,
+                size_t performance_sample_count,
+                const std::string& mlperf_conf_path,
+                const std::string& user_conf_path,
+                const std::string& log_output_dir,
+                double target_qps,
+                int64_t target_latency_ns,
+                int64_t min_duration_ms,
+                int64_t min_query_count,
+                bool is_accuracy_mode) {
+                 py::gil_scoped_release release;
+                 self.run_server_benchmark(
+                     total_sample_count,
+                     performance_sample_count,
+                     mlperf_conf_path,
+                     user_conf_path,
+                     log_output_dir,
+                     target_qps,
+                     target_latency_ns,
+                     min_duration_ms,
+                     min_query_count,
+                     is_accuracy_mode);
+             },
+             py::arg("total_sample_count"),
+             py::arg("performance_sample_count"),
+             py::arg("mlperf_conf_path") = "",
+             py::arg("user_conf_path") = "",
+             py::arg("log_output_dir") = ".",
+             py::arg("target_qps") = 0.0,
+             py::arg("target_latency_ns") = 0,
+             py::arg("min_duration_ms") = 0,
+             py::arg("min_query_count") = 0,
+             py::arg("is_accuracy_mode") = false,
+             "Run Server benchmark with pure C++ SUT");
 
     m.attr("__version__") = "1.0.0";
 }

@@ -1,10 +1,4 @@
-"""
-BERT SUT wrapper for multi-die NPU accelerators.
-
-Sequence buckets: [128, 165, 256, 384]
-Offline: batch [4,4,2,2] for throughput
-Server: batch=1 for latency
-"""
+"""BERT SUT wrapper for multi-die NPU accelerators."""
 
 import logging
 import time
@@ -86,7 +80,6 @@ class BertMultiDieSUTWrapper:
 
     def load(self, is_accuracy_mode: bool = False) -> None:
         self._cpp_sut.load()
-        self._cpp_sut.warmup(2)
         self._cpp_sut.set_store_predictions(is_accuracy_mode)
         self._is_accuracy_mode = is_accuracy_mode
         self._is_loaded = True
@@ -94,6 +87,12 @@ class BertMultiDieSUTWrapper:
         configs = self._cpp_sut.get_model_configs()
         logger.info(f"Loaded {len(configs)} models: {configs}")
         logger.info(f"Devices: {self._cpp_sut.get_active_devices()}")
+
+    def warmup(self, iterations: int = 2) -> None:
+        """Run warmup inferences on all dies."""
+        if not self._is_loaded:
+            raise RuntimeError("Model not loaded, call load() first")
+        self._cpp_sut.warmup(iterations)
 
     @property
     def is_loaded(self) -> bool:
@@ -104,13 +103,19 @@ class BertMultiDieSUTWrapper:
         return self._cpp_sut.get_num_dies()
 
     def _register_samples(self) -> None:
+        import sys
+
         if self._samples_registered:
             return
 
         if not hasattr(self.qsl, '_loaded_samples'):
             return
 
+        total = len(self.qsl._loaded_samples)
+        print(f"[Preprocess] ", end="", file=sys.stderr)
+
         count = 0
+        dots_printed = 0
         for idx, data in self.qsl._loaded_samples.items():
             input_ids = data.get('input_ids')
             attention_mask = data.get('attention_mask')
@@ -123,21 +128,47 @@ class BertMultiDieSUTWrapper:
             self._cpp_sut.register_sample(idx, input_ids, attention_mask, token_type_ids, seq_len)
             count += 1
 
+            # Print progress dots
+            if total > 0:
+                progress = int(count * 10 / total)
+                while dots_printed < progress:
+                    print(".", end="", file=sys.stderr, flush=True)
+                    dots_printed += 1
+
+        while dots_printed < 10:
+            print(".", end="", file=sys.stderr, flush=True)
+            dots_printed += 1
+
+        print(f" {count} samples", file=sys.stderr)
         self._samples_registered = True
         logger.debug(f"Registered {count} samples")
 
     def _issue_query_offline(self, query_samples: List) -> None:
+        import sys
+
         self._start_time = time.time()
         self._cpp_sut.reset_counters()
         self._cpp_sut.enable_direct_loadgen(True)
 
         self._register_samples()
 
+        num_samples = len(query_samples)
+        print(f"[Offline] {num_samples} samples, {len(SEQ_BUCKETS)} buckets", file=sys.stderr)
+
+        # Group by bucket
+        print(f"[Bucketing] ", end="", file=sys.stderr)
         buckets: Dict[int, List[Tuple[int, int]]] = {i: [] for i in range(len(SEQ_BUCKETS))}
 
         for qs in query_samples:
             bucket_idx = self.qsl.get_sample_bucket(qs.index)
             buckets[bucket_idx].append((qs.id, qs.index))
+
+        bucket_counts = [len(buckets[i]) for i in range(len(SEQ_BUCKETS))]
+        print(f"{bucket_counts}", file=sys.stderr)
+
+        # Submit batches
+        print(f"[Submit] ", end="", file=sys.stderr)
+        buckets_submitted = 0
 
         for bucket_idx, samples in buckets.items():
             if not samples:
@@ -145,8 +176,42 @@ class BertMultiDieSUTWrapper:
             query_ids = [s[0] for s in samples]
             sample_indices = [s[1] for s in samples]
             self._cpp_sut.submit_batch(bucket_idx, query_ids, sample_indices)
+            buckets_submitted += 1
+            print(".", end="", file=sys.stderr, flush=True)
 
-        self._cpp_sut.wait_all()
+        print(f" {buckets_submitted} buckets", file=sys.stderr)
+
+        # Wait for completion
+        print(f"[Inference] ", end="", file=sys.stderr)
+        last_completed = 0
+        wait_start = time.time()
+        dots_printed = 0
+
+        while True:
+            completed = self._cpp_sut.get_completed_count()
+            if completed >= num_samples:
+                break
+
+            progress = int(completed * 10 / num_samples)
+            while dots_printed < progress:
+                print(".", end="", file=sys.stderr, flush=True)
+                dots_printed += 1
+
+            if completed > last_completed:
+                last_completed = completed
+                wait_start = time.time()
+            elif time.time() - wait_start > 30:
+                print(f"\n[WARN] Stalled at {completed}/{num_samples}", file=sys.stderr)
+                wait_start = time.time()
+
+            time.sleep(0.1)
+
+        while dots_printed < 10:
+            print(".", end="", file=sys.stderr, flush=True)
+            dots_printed += 1
+
+        elapsed = time.time() - self._start_time
+        print(f" {num_samples}/{num_samples} ({elapsed:.1f}s, {num_samples/elapsed:.1f} qps)", file=sys.stderr)
         self._query_count += 1
 
     def _issue_query_server(self, query_samples: List) -> None:

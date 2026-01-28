@@ -276,7 +276,7 @@ class BenchmarkConfig:
             sample_index_rng_seed=server_data.get("sample_index_rng_seed", 198141574272810017),
             schedule_rng_seed=server_data.get("schedule_rng_seed", 7575108116881280410),
             nireq_multiplier=server_data.get("nireq_multiplier", 6),
-            explicit_batching=server_data.get("explicit_batching", True),
+            explicit_batching=server_data.get("explicit_batching", False),
             explicit_batch_size=server_data.get("explicit_batch_size", 8),
             batch_timeout_us=server_data.get("batch_timeout_us", 2000),
         )

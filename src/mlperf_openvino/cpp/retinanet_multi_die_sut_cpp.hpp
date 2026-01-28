@@ -1,5 +1,5 @@
 /**
- * C++ SUT for ResNet50 on multi-die accelerators.
+ * C++ SUT for RetinaNet Object Detection on multi-die accelerators.
  */
 
 #pragma once
@@ -25,10 +25,10 @@
 
 namespace mlperf_ov {
 
-class ResNetMultiDieCppSUT;
+class RetinaNetMultiDieCppSUT;
 
 // Per-die context
-struct DieContext {
+struct RetinaNetDieContext {
     std::string device_name;
     ov::CompiledModel compiled_model;
     int optimal_nireq = 1;
@@ -37,13 +37,21 @@ struct DieContext {
     std::atomic<size_t> pool_search_hint{0};
 };
 
+// RetinaNet prediction result
+struct RetinaNetMultiDiePrediction {
+    std::vector<float> boxes;    // [N, 4] flattened
+    std::vector<float> scores;   // [N]
+    std::vector<float> labels;   // [N]
+    int num_detections = 0;
+};
+
 // Inference request context
-struct ResNetMultiDieInferContext {
+struct RetinaNetMultiDieInferContext {
     ov::InferRequest request;
     ov::Tensor input_tensor;
     std::string die_name;
     size_t pool_id = 0;
-    ResNetMultiDieCppSUT* sut = nullptr;
+    RetinaNetMultiDieCppSUT* sut = nullptr;
 
     static constexpr int MAX_BATCH = 64;
     uint64_t query_ids[MAX_BATCH];
@@ -54,18 +62,20 @@ struct ResNetMultiDieInferContext {
 };
 
 /**
- * Clean SUT implementation for Server mode.
+ * Clean SUT implementation for RetinaNet on multi-die accelerators.
  */
-class ResNetMultiDieCppSUT {
+class RetinaNetMultiDieCppSUT {
 public:
-    ResNetMultiDieCppSUT(const std::string& model_path,
-                         const std::string& device_prefix,
-                         int batch_size = 1,
-                         const std::unordered_map<std::string, std::string>& compile_properties = {},
-                         bool use_nhwc_input = true,  // NHWC is default
-                         int nireq_multiplier = 4);
+    // Note: RetinaNet has much larger input (800x800x3 = 7.7MB vs ResNet 224x224x3 = 0.6MB)
+    // so we use smaller defaults: nireq_multiplier=2 (vs 4 for ResNet)
+    RetinaNetMultiDieCppSUT(const std::string& model_path,
+                            const std::string& device_prefix,
+                            int batch_size = 1,
+                            const std::unordered_map<std::string, std::string>& compile_properties = {},
+                            bool use_nhwc_input = true,  // NHWC is default
+                            int nireq_multiplier = 2);   // Lower for large model (vs 4 for ResNet)
 
-    ~ResNetMultiDieCppSUT();
+    ~RetinaNetMultiDieCppSUT();
 
     void load();
     void warmup(int iterations = 2);  // Warmup inference on all dies
@@ -75,7 +85,9 @@ public:
     int get_batch_size() const { return batch_size_; }
     int get_total_requests() const;
     std::string get_input_name() const { return input_name_; }
-    std::string get_output_name() const { return output_name_; }
+    std::string get_boxes_name() const { return boxes_name_; }
+    std::string get_scores_name() const { return scores_name_; }
+    std::string get_labels_name() const { return labels_name_; }
 
     // Offline mode batch dispatch
     void start_async_batch(const float* input_data,
@@ -91,7 +103,7 @@ public:
 
     // Predictions for accuracy mode
     void set_store_predictions(bool store) { store_predictions_ = store; }
-    std::unordered_map<int, std::vector<float>> get_predictions() const;
+    std::unordered_map<int, RetinaNetMultiDiePrediction> get_predictions() const;
     void clear_predictions();
 
     // Callback for Offline mode
@@ -142,17 +154,18 @@ private:
     // OpenVINO
     ov::Core core_;
     std::shared_ptr<ov::Model> model_;
-    std::vector<std::unique_ptr<DieContext>> die_contexts_;
+    std::vector<std::unique_ptr<RetinaNetDieContext>> die_contexts_;
     std::vector<std::string> active_devices_;
 
-    // Request pool
-    static constexpr int MAX_REQUESTS = 512;
-    std::vector<std::unique_ptr<ResNetMultiDieInferContext>> infer_contexts_;
+    // Request pool - smaller than ResNet due to larger input size (7.7MB vs 0.6MB)
+    // 256 requests × 7.7MB = ~2GB memory for input buffers
+    static constexpr int MAX_REQUESTS = 256;
+    std::vector<std::unique_ptr<RetinaNetMultiDieInferContext>> infer_contexts_;
     std::atomic<int> request_slots_[MAX_REQUESTS];
     std::atomic<size_t> pool_search_hint_{0};
 
-    // Work queue (IssueQuery pushes, issue threads pull)
-    static constexpr int WORK_QUEUE_SIZE = 4096;
+    // Work queue - smaller than ResNet (lower throughput due to larger model)
+    static constexpr int WORK_QUEUE_SIZE = 2048;
     struct WorkItem {
         uint64_t query_id;
         int sample_idx;
@@ -167,15 +180,15 @@ private:
     std::atomic<bool> issue_running_{false};
     void issue_thread_func(size_t die_idx);
 
-    // Explicit batching (Intel-style)
+    // Explicit batching (Intel-style) - smaller batch for large model
     bool use_explicit_batching_ = false;
-    int explicit_batch_size_ = 4;
-    int batch_timeout_us_ = 500;  // 500 microseconds default
+    int explicit_batch_size_ = 2;     // Smaller than ResNet (4) due to 7.7MB input
+    int batch_timeout_us_ = 1000;     // Longer timeout (1ms) for larger data copy
     std::thread batcher_thread_;
     std::atomic<bool> batcher_running_{false};
 
-    // Per-die batch queues (batcher dispatches round-robin, each die has own queue)
-    static constexpr int BATCH_QUEUE_SIZE = 256;
+    // Per-die batch queues - smaller than ResNet due to lower throughput
+    static constexpr int BATCH_QUEUE_SIZE = 128;
     static constexpr int MAX_DIES = 8;
     struct BatchItem {
         uint64_t query_ids[64];
@@ -195,12 +208,14 @@ private:
 
     // Model info
     std::string input_name_;
-    std::string output_name_;
+    std::string boxes_name_;
+    std::string scores_name_;
+    std::string labels_name_;
+    int boxes_idx_ = 0;
+    int scores_idx_ = 1;
+    int labels_idx_ = 2;
     ov::Shape input_shape_;
     ov::element::Type input_type_;
-    ov::element::Type output_type_;
-    size_t output_idx_ = 0;
-    size_t single_output_size_ = 0;
     size_t input_byte_size_ = 0;
 
     // State
@@ -213,7 +228,7 @@ private:
     // Predictions
     bool store_predictions_ = false;
     mutable std::mutex predictions_mutex_;
-    std::unordered_map<int, std::vector<float>> predictions_;
+    std::unordered_map<int, RetinaNetMultiDiePrediction> predictions_;
 
     // Response handling
     BatchResponseCallback batch_response_callback_;
@@ -234,9 +249,10 @@ private:
     size_t acquire_request();
     void release_request(size_t id);
     size_t acquire_request_for_die(size_t die_idx);
-    void on_inference_complete(ResNetMultiDieInferContext* ctx);
+    void on_inference_complete(RetinaNetMultiDieInferContext* ctx);
+    void map_output_names();
 
-    friend class ResNetServerSUT;
+    friend class RetinaNetServerSUT;
 };
 
 // =============================================================================
@@ -247,14 +263,14 @@ private:
  * Pure C++ SUT for Server mode - registered directly with LoadGen.
  * Uses work queue for non-blocking dispatch.
  */
-class ResNetServerSUT : public mlperf::SystemUnderTest {
+class RetinaNetServerSUT : public mlperf::SystemUnderTest {
 public:
-    explicit ResNetServerSUT(ResNetMultiDieCppSUT* backend, const std::string& name = "ResNetServerSUT")
+    explicit RetinaNetServerSUT(RetinaNetMultiDieCppSUT* backend, const std::string& name = "RetinaNetServerSUT")
         : backend_(backend), name_(name) {
         backend_->enable_direct_loadgen(true);
     }
 
-    ~ResNetServerSUT() override = default;
+    ~RetinaNetServerSUT() override = default;
 
     const std::string& Name() override { return name_; }
 
@@ -272,7 +288,7 @@ public:
 private:
     void enqueue_work(uint64_t query_id, int sample_idx) {
         size_t head = backend_->work_head_.fetch_add(1, std::memory_order_acq_rel);
-        size_t idx = head % ResNetMultiDieCppSUT::WORK_QUEUE_SIZE;
+        size_t idx = head % RetinaNetMultiDieCppSUT::WORK_QUEUE_SIZE;
 
         // Brief spin if slot busy (rare)
         while (backend_->work_queue_[idx].valid.load(std::memory_order_acquire)) {
@@ -287,17 +303,17 @@ private:
         backend_->queued_count_.fetch_add(1, std::memory_order_relaxed);
     }
 
-    ResNetMultiDieCppSUT* backend_;
+    RetinaNetMultiDieCppSUT* backend_;
     std::string name_;
 };
 
 /**
  * Pure C++ QSL - samples pre-registered via register_sample_data()
  */
-class ResNetServerQSL : public mlperf::QuerySampleLibrary {
+class RetinaNetServerQSL : public mlperf::QuerySampleLibrary {
 public:
-    ResNetServerQSL(size_t total_count, size_t perf_count)
-        : total_count_(total_count), perf_count_(perf_count), name_("ResNetServerQSL") {}
+    RetinaNetServerQSL(size_t total_count, size_t perf_count)
+        : total_count_(total_count), perf_count_(perf_count), name_("RetinaNetServerQSL") {}
 
     const std::string& Name() override { return name_; }
     size_t TotalSampleCount() override { return total_count_; }
