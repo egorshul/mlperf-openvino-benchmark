@@ -71,7 +71,7 @@ DATASET_REGISTRY: Dict[str, Dict] = {
     "librispeech": {
         "description": "LibriSpeech ASR corpus for Whisper (dev-clean + dev-other)",
         "dev-clean": {
-            "url": "https://www.openslr.org/resources/12/dev-clean.tar.gz",
+            "url": "http://www.openslr.org/resources/12/dev-clean.tar.gz",
             "filename": "dev-clean.tar.gz",
             "extracted_dir": "LibriSpeech/dev-clean",
             "size_mb": 337,
@@ -79,7 +79,7 @@ DATASET_REGISTRY: Dict[str, Dict] = {
             "md5": "42e2234ba48799c1f50f24a7926300a1",
         },
         "dev-other": {
-            "url": "https://www.openslr.org/resources/12/dev-other.tar.gz",
+            "url": "http://www.openslr.org/resources/12/dev-other.tar.gz",
             "filename": "dev-other.tar.gz",
             "extracted_dir": "LibriSpeech/dev-other",
             "size_mb": 314,
@@ -87,7 +87,7 @@ DATASET_REGISTRY: Dict[str, Dict] = {
             "md5": "c8d0bcc9cca99d4f8b62fcc847357931",
         },
         "test-clean": {
-            "url": "https://www.openslr.org/resources/12/test-clean.tar.gz",
+            "url": "http://www.openslr.org/resources/12/test-clean.tar.gz",
             "filename": "test-clean.tar.gz",
             "extracted_dir": "LibriSpeech/test-clean",
             "size_mb": 346,
@@ -95,7 +95,7 @@ DATASET_REGISTRY: Dict[str, Dict] = {
             "md5": "32fa31d27d2e1c7c6744fb7a529f1ab0",
         },
         "test-other": {
-            "url": "https://www.openslr.org/resources/12/test-other.tar.gz",
+            "url": "http://www.openslr.org/resources/12/test-other.tar.gz",
             "filename": "test-other.tar.gz",
             "extracted_dir": "LibriSpeech/test-other",
             "size_mb": 328,
