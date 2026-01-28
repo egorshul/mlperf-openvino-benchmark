@@ -120,6 +120,19 @@ def export_model(model_id: str, output_dir: Path):
             print(f"\n  ✗ Export failed with code {process.returncode}")
             return False
 
+        # Verify files were actually created
+        encoder_file = output_dir / "encoder_model.xml"
+        if not encoder_file.exists():
+            # Try alternative: openvino_encoder_model.xml (newer optimum versions)
+            encoder_file = output_dir / "openvino_encoder_model.xml"
+
+        if not encoder_file.exists():
+            print(f"\n  ✗ Export command succeeded but no model files found!")
+            print(f"  Check if model was downloaded and exported correctly.")
+            print(f"  You may need to run manually:")
+            print(f"    {' '.join(cmd)}")
+            return False
+
         print(f"\n  ✓ Export completed!")
         return True
 
