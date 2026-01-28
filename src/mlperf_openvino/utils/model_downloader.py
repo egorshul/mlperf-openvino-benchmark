@@ -375,6 +375,32 @@ def _download_with_retry(
     raise RuntimeError(f"Download failed after {max_retries + 1} attempts: {last_error}")
 
 
+def _find_openvino_model(model_dir: Path, base_name: str) -> Optional[Path]:
+    """
+    Find OpenVINO model file with either naming convention.
+
+    Optimum-intel may save models with 'openvino_' prefix or without it.
+
+    Args:
+        model_dir: Directory containing model files
+        base_name: Base name without prefix (e.g., 'encoder_model')
+
+    Returns:
+        Path to model file if found, None otherwise
+    """
+    # Try with openvino_ prefix first (newer optimum-intel versions)
+    prefixed = model_dir / f"openvino_{base_name}.xml"
+    if prefixed.exists():
+        return prefixed
+
+    # Try without prefix (older versions or custom exports)
+    unprefixed = model_dir / f"{base_name}.xml"
+    if unprefixed.exists():
+        return unprefixed
+
+    return None
+
+
 def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str]:
     """
     Export Whisper model to OpenVINO IR format with KV-cache support.
@@ -410,12 +436,12 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
 
     # Check if already exported (must have encoder, decoder, and decoder_with_past)
     if ov_model_path.exists():
-        encoder_path = ov_model_path / "encoder_model.xml"
-        decoder_path = ov_model_path / "decoder_model.xml"
-        decoder_with_past_path = ov_model_path / "decoder_with_past_model.xml"
+        encoder_path = _find_openvino_model(ov_model_path, "encoder_model")
+        decoder_path = _find_openvino_model(ov_model_path, "decoder_model")
+        decoder_with_past_path = _find_openvino_model(ov_model_path, "decoder_with_past_model")
 
         # Check for all required models including decoder_with_past
-        if encoder_path.exists() and decoder_path.exists() and decoder_with_past_path.exists():
+        if encoder_path and decoder_path and decoder_with_past_path:
             logger.info(f"OpenVINO model with KV-cache already exists at {ov_model_path}")
             return {
                 "encoder_path": str(encoder_path),
@@ -423,14 +449,13 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
                 "decoder_with_past_path": str(decoder_with_past_path),
                 "model_path": str(ov_model_path),
             }
-        elif encoder_path.exists() and decoder_path.exists():
+        elif encoder_path and decoder_path:
             # Model exists but without decoder_with_past - need to re-export
             logger.warning(
-                f"Found model at {ov_model_path} but missing decoder_with_past_model.xml. "
+                f"Found model at {ov_model_path} but missing decoder_with_past_model. "
                 "Re-exporting for optimal KV-cache performance..."
             )
             # Remove old model to re-export with proper KV-cache support
-            import shutil
             shutil.rmtree(str(ov_model_path))
 
     # Export model with retry logic
@@ -460,25 +485,25 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
     processor = _download_with_retry(do_processor, max_retries=3)
     processor.save_pretrained(str(ov_model_path))
 
-    # Verify all models were created
-    encoder_path = ov_model_path / "encoder_model.xml"
-    decoder_path = ov_model_path / "decoder_model.xml"
-    decoder_with_past_path = ov_model_path / "decoder_with_past_model.xml"
+    # Verify all models were created (check both naming conventions)
+    encoder_path = _find_openvino_model(ov_model_path, "encoder_model")
+    decoder_path = _find_openvino_model(ov_model_path, "decoder_model")
+    decoder_with_past_path = _find_openvino_model(ov_model_path, "decoder_with_past_model")
 
-    if not encoder_path.exists():
+    if not encoder_path:
         raise RuntimeError(f"Export failed: encoder_model.xml not found at {ov_model_path}")
-    if not decoder_path.exists():
+    if not decoder_path:
         raise RuntimeError(f"Export failed: decoder_model.xml not found at {ov_model_path}")
-    if not decoder_with_past_path.exists():
+    if not decoder_with_past_path:
         logger.warning(
-            f"decoder_with_past_model.xml not created. "
+            "decoder_with_past_model.xml not created. "
             "The model will work but may have suboptimal performance without KV-cache."
         )
 
     logger.info(f"OpenVINO model saved to {ov_model_path}")
     logger.info(f"  - Encoder: {encoder_path.name}")
     logger.info(f"  - Decoder: {decoder_path.name}")
-    if decoder_with_past_path.exists():
+    if decoder_with_past_path:
         logger.info(f"  - Decoder with KV-cache: {decoder_with_past_path.name}")
 
     result = {
@@ -487,7 +512,7 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
         "model_path": str(ov_model_path),
     }
 
-    if decoder_with_past_path.exists():
+    if decoder_with_past_path:
         result["decoder_with_past_path"] = str(decoder_with_past_path)
 
     return result
