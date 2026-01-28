@@ -431,22 +431,24 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
     model_name = model_id.split("/")[-1]
     ov_model_path = output_path / f"{model_name}-openvino"
 
-    # Check if already exported
+    # Check if already exported (encoder + decoder is sufficient)
     if ov_model_path.exists():
         encoder_path = _find_openvino_model(ov_model_path, "encoder_model")
         decoder_path = _find_openvino_model(ov_model_path, "decoder_model")
-        decoder_with_past_path = _find_openvino_model(ov_model_path, "decoder_with_past_model")
 
-        if encoder_path and decoder_path and decoder_with_past_path:
+        if encoder_path and decoder_path:
             logger.info(f"Model already exists at {ov_model_path}")
-            return {
+            result = {
                 "encoder_path": str(encoder_path),
                 "decoder_path": str(decoder_path),
-                "decoder_with_past_path": str(decoder_with_past_path),
                 "model_path": str(ov_model_path),
             }
+            # Optional: check for decoder_with_past
+            decoder_with_past = _find_openvino_model(ov_model_path, "decoder_with_past_model")
+            if decoder_with_past:
+                result["decoder_with_past_path"] = str(decoder_with_past)
+            return result
         else:
-            # Incomplete export - remove and re-export
             shutil.rmtree(str(ov_model_path))
 
     logger.info(f"Exporting {model_id} to OpenVINO IR...")
