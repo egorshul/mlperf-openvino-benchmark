@@ -377,26 +377,31 @@ def _download_with_retry(
 
 def _find_openvino_model(model_dir: Path, base_name: str) -> Optional[Path]:
     """
-    Find OpenVINO model file with either naming convention.
-
-    Optimum-intel may save models with 'openvino_' prefix or without it.
+    Find OpenVINO model file with various naming conventions.
 
     Args:
         model_dir: Directory containing model files
-        base_name: Base name without prefix (e.g., 'encoder_model')
+        base_name: Base name (e.g., 'encoder_model', 'decoder_with_past_model')
 
     Returns:
         Path to model file if found, None otherwise
     """
-    # Try with openvino_ prefix first (newer optimum-intel versions)
-    prefixed = model_dir / f"openvino_{base_name}.xml"
-    if prefixed.exists():
-        return prefixed
+    # All possible naming patterns
+    candidates = [
+        model_dir / f"openvino_{base_name}.xml",
+        model_dir / f"{base_name}.xml",
+    ]
 
-    # Try without prefix (older versions or custom exports)
-    unprefixed = model_dir / f"{base_name}.xml"
-    if unprefixed.exists():
-        return unprefixed
+    # For decoder_with_past, also check merged decoder
+    if base_name == "decoder_with_past_model":
+        candidates.extend([
+            model_dir / "openvino_decoder_model_merged.xml",
+            model_dir / "decoder_model_merged.xml",
+        ])
+
+    for path in candidates:
+        if path.exists():
+            return path
 
     return None
 
