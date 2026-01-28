@@ -42,6 +42,8 @@ class SUTFactory:
             return SUTFactory._create_bert_sut(config, qsl, is_accuracy_mode, backend)
         elif model_type == ModelType.RETINANET:
             return SUTFactory._create_retinanet_sut(config, qsl, is_accuracy_mode, backend)
+        elif model_type == ModelType.WHISPER:
+            return SUTFactory._create_whisper_sut(config, qsl, is_accuracy_mode, backend)
         else:
             raise ValueError(f"Multi-die SUT not supported for model type: {model_type}")
 
@@ -163,4 +165,53 @@ class SUTFactory:
             backend=backend,
             qsl=qsl,
             scenario=config.scenario,
+        )
+
+    @staticmethod
+    def _create_whisper_sut(
+        config: BenchmarkConfig,
+        qsl: QuerySampleLibrary,
+        is_accuracy_mode: bool,
+        backend: Optional[Any],
+    ) -> Any:
+        """Create Whisper multi-die SUT."""
+        try:
+            from .whisper_multi_die_sut import (
+                WhisperMultiDieSUT,
+                is_whisper_multi_die_available
+            )
+
+            if is_whisper_multi_die_available():
+                logger.info(f"Using Whisper Python multi-die SUT on {config.openvino.device}")
+                sut = WhisperMultiDieSUT(
+                    config=config,
+                    model_path=config.model.model_path,
+                    qsl=qsl,
+                    scenario=config.scenario,
+                )
+                sut.load(is_accuracy_mode=is_accuracy_mode)
+                return sut
+        except ImportError as e:
+            logger.warning(f"Whisper multi-die SUT not available: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to create Whisper multi-die SUT: {e}")
+
+        # Fallback to standard Whisper SUT
+        try:
+            from .whisper_sut import WhisperOptimumSUT, OPTIMUM_AVAILABLE
+
+            if OPTIMUM_AVAILABLE:
+                logger.info(f"Using Whisper Optimum SUT on {config.openvino.device}")
+                return WhisperOptimumSUT(
+                    config=config,
+                    model_path=config.model.model_path,
+                    qsl=qsl,
+                    scenario=config.scenario,
+                )
+        except Exception as e:
+            logger.warning(f"WhisperOptimumSUT not available: {e}")
+
+        raise RuntimeError(
+            "Neither multi-die SUT nor Optimum SUT available for Whisper. "
+            "Ensure OpenVINO is installed and model path is correct."
         )

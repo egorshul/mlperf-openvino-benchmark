@@ -56,9 +56,13 @@ class BenchmarkRunner:
             model_type in (ModelType.RESNET50, ModelType.BERT, ModelType.RETINANET)
             and is_accelerator
         )
+        uses_whisper_multi_die_sut = is_whisper and is_accelerator
 
         if is_sdxl:
             self.backend = None
+        elif uses_whisper_multi_die_sut:
+            self.backend = None
+            logger.info("Skipping Python backend (Whisper multi-die SUT will compile model)")
         elif is_whisper:
             model_path = Path(self.config.model.model_path) if self.config.model.model_path else None
             if model_path and model_path.is_dir():
@@ -242,6 +246,13 @@ class BenchmarkRunner:
             performance_sample_count=2513,
         )
         self.qsl.load()
+
+        # Use multi-die SUT for accelerator devices (NPU)
+        if self.config.openvino.is_accelerator_device():
+            self.sut = SUTFactory.create_multi_die_sut(
+                ModelType.WHISPER, self.config, self.qsl, self.backend
+            )
+            return
 
         model_path = Path(self.config.model.model_path)
 

@@ -410,13 +410,19 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
     # Check if already exported
     if ov_model_path.exists():
         encoder_path = ov_model_path / "encoder_model.xml"
+        # Prefer decoder_with_past_model (KV-cache enabled) over decoder_model
+        decoder_with_past_path = ov_model_path / "decoder_with_past_model.xml"
         decoder_path = ov_model_path / "decoder_model.xml"
 
-        if encoder_path.exists() and decoder_path.exists():
+        if encoder_path.exists() and (decoder_with_past_path.exists() or decoder_path.exists()):
+            actual_decoder_path = decoder_with_past_path if decoder_with_past_path.exists() else decoder_path
             logger.info(f"OpenVINO model already exists at {ov_model_path}")
+            logger.info(f"  Encoder: {encoder_path.name}")
+            logger.info(f"  Decoder: {actual_decoder_path.name} (with_past: {decoder_with_past_path.exists()})")
             return {
                 "encoder_path": str(encoder_path),
-                "decoder_path": str(decoder_path),
+                "decoder_path": str(actual_decoder_path),
+                "decoder_with_past_path": str(decoder_with_past_path) if decoder_with_past_path.exists() else None,
                 "model_path": str(ov_model_path),
             }
 
@@ -447,9 +453,18 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
 
     logger.info(f"OpenVINO model saved to {ov_model_path}")
 
+    # Determine actual decoder path (prefer with_past version)
+    decoder_with_past_path = ov_model_path / "decoder_with_past_model.xml"
+    decoder_path = ov_model_path / "decoder_model.xml"
+    actual_decoder_path = decoder_with_past_path if decoder_with_past_path.exists() else decoder_path
+
+    logger.info(f"  Encoder: encoder_model.xml")
+    logger.info(f"  Decoder: {actual_decoder_path.name} (with_past: {decoder_with_past_path.exists()})")
+
     return {
         "encoder_path": str(ov_model_path / "encoder_model.xml"),
-        "decoder_path": str(ov_model_path / "decoder_model.xml"),
+        "decoder_path": str(actual_decoder_path),
+        "decoder_with_past_path": str(decoder_with_past_path) if decoder_with_past_path.exists() else None,
         "model_path": str(ov_model_path),
     }
 
