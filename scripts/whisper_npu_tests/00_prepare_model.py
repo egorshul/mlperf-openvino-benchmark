@@ -26,7 +26,11 @@ def check_dependencies():
 
     try:
         import optimum
-        print(f"  ✓ optimum: {optimum.__version__}")
+        try:
+            from optimum.version import __version__ as optimum_version
+        except ImportError:
+            optimum_version = "unknown"
+        print(f"  ✓ optimum: {optimum_version}")
     except ImportError:
         missing.append("optimum[openvino]")
         print("  ✗ optimum not installed")
