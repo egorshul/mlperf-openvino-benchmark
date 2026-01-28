@@ -24,7 +24,11 @@ def check_optimum_installation():
 
     try:
         import optimum
-        print(f"  ✓ optimum version: {optimum.__version__}")
+        try:
+            from optimum.version import __version__ as optimum_version
+        except ImportError:
+            optimum_version = "unknown"
+        print(f"  ✓ optimum version: {optimum_version}")
     except ImportError:
         print("  ✗ optimum not installed")
         print("    Install with: pip install optimum[openvino]")
