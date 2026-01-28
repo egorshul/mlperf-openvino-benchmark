@@ -96,8 +96,8 @@ def get_default_config(model: str) -> BenchmarkConfig:
               help='Number of samples to use (0 = all)')
 @click.option('--warmup', type=int, default=10,
               help='Number of warmup iterations')
-@click.option('--nireq-multiplier', type=int, default=2,
-              help='In-flight request multiplier (default: 2 for Server, lower = less latency)')
+@click.option('--nireq-multiplier', type=int, default=None,
+              help='In-flight request multiplier (default: from config, lower = less latency)')
 @click.option('--auto-batch-timeout-ms', type=int, default=0,
               help='AUTO_BATCH timeout in ms (0=disabled, 1=1ms). Enables OpenVINO auto-batching.')
 @click.option('--optimal-batch-size', type=int, default=0,
@@ -217,7 +217,8 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         scenario_config.target_qps = target_qps
 
     if scenario == 'Server':
-        scenario_config.nireq_multiplier = nireq_multiplier
+        if nireq_multiplier is not None:
+            scenario_config.nireq_multiplier = nireq_multiplier
         if target_latency_ns > 0:
             scenario_config.target_latency_ns = target_latency_ns
             click.echo(f"Custom target latency: {target_latency_ns / 1e6:.1f}ms (Open Division)")
@@ -226,10 +227,12 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         if explicit_batching:
             scenario_config.explicit_batching = True
             scenario_config.batch_timeout_us = batch_timeout_us if batch_timeout_us is not None else 2000
-            scenario_config.nireq_multiplier = 6
+            # Use CLI override if specified, otherwise default to 6 for explicit batching
+            if nireq_multiplier is None:
+                scenario_config.nireq_multiplier = 6
             explicit_batch = batch_size if batch_size > 1 else 8
             scenario_config.explicit_batch_size = explicit_batch
-            click.echo(f"Explicit batching: batch={explicit_batch}, timeout={scenario_config.batch_timeout_us}us, nireq=6")
+            click.echo(f"Explicit batching: batch={explicit_batch}, timeout={scenario_config.batch_timeout_us}us, nireq={scenario_config.nireq_multiplier}")
 
     # Validate configuration
     if not benchmark_config.model.model_path:
