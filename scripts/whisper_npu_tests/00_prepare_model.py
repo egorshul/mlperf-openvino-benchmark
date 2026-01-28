@@ -62,32 +62,42 @@ def export_model(model_id: str, output_dir: Path):
     print(f"\n[2/3] Exporting model: {model_id}")
     print(f"       Output: {output_dir}")
 
-    # Check if optimum-cli is available
+    # Try optimum-cli first, fallback to python -m
+    use_cli = False
     try:
         result = subprocess.run(
             ["optimum-cli", "--version"],
             capture_output=True,
             text=True
         )
-        if result.returncode != 0:
-            raise FileNotFoundError()
-        print(f"  ✓ optimum-cli found")
+        if result.returncode == 0:
+            use_cli = True
+            print("  ✓ optimum-cli found")
     except FileNotFoundError:
-        print("  ✗ optimum-cli not found in PATH")
-        print("  Try: python -m optimum.exporters.openvino ...")
-        return False
+        pass
+
+    if not use_cli:
+        print("  optimum-cli not in PATH, using python -m optimum.exporters.openvino")
 
     # Export command
     # --task automatic-speech-recognition-with-past creates:
     #   - encoder_model.xml
     #   - decoder_model.xml (first step, no cache)
     #   - decoder_with_past_model.xml (subsequent steps, with KV cache)
-    cmd = [
-        "optimum-cli", "export", "openvino",
-        "--model", model_id,
-        "--task", "automatic-speech-recognition-with-past",
-        str(output_dir)
-    ]
+    if use_cli:
+        cmd = [
+            "optimum-cli", "export", "openvino",
+            "--model", model_id,
+            "--task", "automatic-speech-recognition-with-past",
+            str(output_dir)
+        ]
+    else:
+        cmd = [
+            sys.executable, "-m", "optimum.exporters.openvino",
+            "--model", model_id,
+            "--task", "automatic-speech-recognition-with-past",
+            str(output_dir)
+        ]
 
     print(f"\n  Running: {' '.join(cmd)}")
     print("  This may take several minutes...\n")
