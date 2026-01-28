@@ -405,9 +405,10 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
     """
     Export Whisper model to OpenVINO IR format with KV-cache support.
 
-    This creates separate encoder, decoder, and decoder_with_past models
-    for optimal performance with autoregressive decoding.
-    Uses robust download with retry logic and timeout handling.
+    Uses optimum-cli to export the model, which creates:
+    - openvino_encoder_model.xml/bin
+    - openvino_decoder_model.xml/bin
+    - openvino_decoder_with_past_model.xml/bin
 
     Args:
         output_dir: Output directory
@@ -416,19 +417,13 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
     Returns:
         Dictionary with paths to encoder, decoder, and decoder_with_past IR models
     """
-    try:
-        from optimum.intel import OVModelForSpeechSeq2Seq
-        from transformers import WhisperProcessor
-    except ImportError:
-        raise ImportError(
-            "optimum-intel is required for Whisper export to OpenVINO. "
-            "Install with: pip install optimum[openvino]"
-        )
+    import subprocess
+    import sys
 
     # Configure HuggingFace Hub for reliable downloads
     _configure_hf_download()
 
-    logger.info(f"Exporting Whisper model to OpenVINO (with KV-cache): {model_id}")
+    logger.info(f"Exporting Whisper model to OpenVINO IR (with KV-cache): {model_id}")
 
     output_path = Path(output_dir)
     model_name = model_id.split("/")[-1]
@@ -442,7 +437,7 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
 
         # Check for all required models including decoder_with_past
         if encoder_path and decoder_path and decoder_with_past_path:
-            logger.info(f"OpenVINO model with KV-cache already exists at {ov_model_path}")
+            logger.info(f"OpenVINO IR model with KV-cache already exists at {ov_model_path}")
             return {
                 "encoder_path": str(encoder_path),
                 "decoder_path": str(decoder_path),
@@ -458,32 +453,60 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
             # Remove old model to re-export with proper KV-cache support
             shutil.rmtree(str(ov_model_path))
 
-    # Export model with retry logic
-    logger.info("Downloading and exporting model with KV-cache support...")
-    logger.info("This may take several minutes. Large files (3+ GB) - download will resume if interrupted.")
+    # Create output directory
+    ov_model_path.mkdir(parents=True, exist_ok=True)
 
-    def do_export():
-        # OVModelForSpeechSeq2Seq automatically exports with decoder_with_past
-        # when export=True for seq2seq models like Whisper
-        return OVModelForSpeechSeq2Seq.from_pretrained(
-            model_id,
-            export=True,
-            compile=False,
+    # Export using optimum-cli for proper OpenVINO IR conversion
+    logger.info("Exporting model using optimum-cli (this may take several minutes)...")
+    logger.info("Creating OpenVINO IR files with KV-cache support...")
+
+    # Use optimum-cli export openvino command
+    # Task 'automatic-speech-recognition-with-past' creates decoder_with_past model
+    export_cmd = [
+        sys.executable, "-m", "optimum.exporters.openvino",
+        "--model", model_id,
+        "--task", "automatic-speech-recognition-with-past",
+        str(ov_model_path),
+    ]
+
+    logger.info(f"Running: {' '.join(export_cmd)}")
+
+    try:
+        result = subprocess.run(
+            export_cmd,
+            capture_output=True,
+            text=True,
+            timeout=1800,  # 30 minutes timeout for large models
         )
 
-    model = _download_with_retry(do_export, max_retries=3)
+        if result.returncode != 0:
+            logger.error(f"Export stdout: {result.stdout}")
+            logger.error(f"Export stderr: {result.stderr}")
+            raise RuntimeError(f"optimum export failed with code {result.returncode}: {result.stderr}")
 
-    # Save model (this saves encoder, decoder, and decoder_with_past)
-    model.save_pretrained(str(ov_model_path))
+        logger.info("Export completed successfully")
+        if result.stdout:
+            logger.debug(f"Export output: {result.stdout}")
 
-    # Also save processor with retry
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("Export timed out after 30 minutes")
+    except FileNotFoundError:
+        raise RuntimeError(
+            "optimum-cli not found. Install with: pip install optimum[openvino]"
+        )
+
+    # Also save processor
     logger.info("Downloading processor...")
+    try:
+        from transformers import WhisperProcessor
 
-    def do_processor():
-        return WhisperProcessor.from_pretrained(model_id)
+        def do_processor():
+            return WhisperProcessor.from_pretrained(model_id)
 
-    processor = _download_with_retry(do_processor, max_retries=3)
-    processor.save_pretrained(str(ov_model_path))
+        processor = _download_with_retry(do_processor, max_retries=3)
+        processor.save_pretrained(str(ov_model_path))
+    except ImportError:
+        logger.warning("transformers not available, skipping processor download")
 
     # Verify all models were created (check both naming conventions)
     encoder_path = _find_openvino_model(ov_model_path, "encoder_model")
@@ -491,7 +514,12 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
     decoder_with_past_path = _find_openvino_model(ov_model_path, "decoder_with_past_model")
 
     if not encoder_path:
-        raise RuntimeError(f"Export failed: encoder_model.xml not found at {ov_model_path}")
+        # List what files were created for debugging
+        created_files = list(ov_model_path.glob("*.xml"))
+        raise RuntimeError(
+            f"Export failed: encoder_model.xml not found at {ov_model_path}. "
+            f"Created files: {[f.name for f in created_files]}"
+        )
     if not decoder_path:
         raise RuntimeError(f"Export failed: decoder_model.xml not found at {ov_model_path}")
     if not decoder_with_past_path:
@@ -500,7 +528,7 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
             "The model will work but may have suboptimal performance without KV-cache."
         )
 
-    logger.info(f"OpenVINO model saved to {ov_model_path}")
+    logger.info(f"OpenVINO IR model saved to {ov_model_path}")
     logger.info(f"  - Encoder: {encoder_path.name}")
     logger.info(f"  - Decoder: {decoder_path.name}")
     if decoder_with_past_path:
