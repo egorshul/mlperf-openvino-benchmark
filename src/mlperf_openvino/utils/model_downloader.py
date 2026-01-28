@@ -405,11 +405,6 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
     """
     Export Whisper model to OpenVINO IR format with KV-cache support.
 
-    Uses optimum-cli to export the model, which creates:
-    - openvino_encoder_model.xml/bin
-    - openvino_decoder_model.xml/bin
-    - openvino_decoder_with_past_model.xml/bin
-
     Args:
         output_dir: Output directory
         model_id: HuggingFace model ID
@@ -417,129 +412,69 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
     Returns:
         Dictionary with paths to encoder, decoder, and decoder_with_past IR models
     """
-    import subprocess
-    import sys
+    try:
+        from optimum.exporters.openvino import main_export
+        from transformers import WhisperProcessor
+    except ImportError:
+        raise ImportError(
+            "optimum-intel is required. Install with: pip install optimum[openvino]"
+        )
 
-    # Configure HuggingFace Hub for reliable downloads
     _configure_hf_download()
-
-    logger.info(f"Exporting Whisper model to OpenVINO IR (with KV-cache): {model_id}")
 
     output_path = Path(output_dir)
     model_name = model_id.split("/")[-1]
     ov_model_path = output_path / f"{model_name}-openvino"
 
-    # Check if already exported (must have encoder, decoder, and decoder_with_past)
+    # Check if already exported
     if ov_model_path.exists():
         encoder_path = _find_openvino_model(ov_model_path, "encoder_model")
         decoder_path = _find_openvino_model(ov_model_path, "decoder_model")
         decoder_with_past_path = _find_openvino_model(ov_model_path, "decoder_with_past_model")
 
-        # Check for all required models including decoder_with_past
         if encoder_path and decoder_path and decoder_with_past_path:
-            logger.info(f"OpenVINO IR model with KV-cache already exists at {ov_model_path}")
+            logger.info(f"Model already exists at {ov_model_path}")
             return {
                 "encoder_path": str(encoder_path),
                 "decoder_path": str(decoder_path),
                 "decoder_with_past_path": str(decoder_with_past_path),
                 "model_path": str(ov_model_path),
             }
-        elif encoder_path and decoder_path:
-            # Model exists but without decoder_with_past - need to re-export
-            logger.warning(
-                f"Found model at {ov_model_path} but missing decoder_with_past_model. "
-                "Re-exporting for optimal KV-cache performance..."
-            )
-            # Remove old model to re-export with proper KV-cache support
+        else:
+            # Incomplete export - remove and re-export
             shutil.rmtree(str(ov_model_path))
 
-    # Create output directory
-    ov_model_path.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Exporting {model_id} to OpenVINO IR...")
 
-    # Export using optimum-cli for proper OpenVINO IR conversion
-    logger.info("Exporting model using optimum-cli (this may take several minutes)...")
-    logger.info("Creating OpenVINO IR files with KV-cache support...")
+    # Export using optimum Python API
+    main_export(
+        model_name_or_path=model_id,
+        output=str(ov_model_path),
+        task="automatic-speech-recognition-with-past",
+    )
 
-    # Use optimum-cli export openvino command
-    # Task 'automatic-speech-recognition-with-past' creates decoder_with_past model
-    export_cmd = [
-        sys.executable, "-m", "optimum.exporters.openvino",
-        "--model", model_id,
-        "--task", "automatic-speech-recognition-with-past",
-        str(ov_model_path),
-    ]
+    # Save processor
+    processor = WhisperProcessor.from_pretrained(model_id)
+    processor.save_pretrained(str(ov_model_path))
 
-    logger.info(f"Running: {' '.join(export_cmd)}")
-
-    try:
-        result = subprocess.run(
-            export_cmd,
-            capture_output=True,
-            text=True,
-            timeout=1800,  # 30 minutes timeout for large models
-        )
-
-        if result.returncode != 0:
-            logger.error(f"Export stdout: {result.stdout}")
-            logger.error(f"Export stderr: {result.stderr}")
-            raise RuntimeError(f"optimum export failed with code {result.returncode}: {result.stderr}")
-
-        logger.info("Export completed successfully")
-        if result.stdout:
-            logger.debug(f"Export output: {result.stdout}")
-
-    except subprocess.TimeoutExpired:
-        raise RuntimeError("Export timed out after 30 minutes")
-    except FileNotFoundError:
-        raise RuntimeError(
-            "optimum-cli not found. Install with: pip install optimum[openvino]"
-        )
-
-    # Also save processor
-    logger.info("Downloading processor...")
-    try:
-        from transformers import WhisperProcessor
-
-        def do_processor():
-            return WhisperProcessor.from_pretrained(model_id)
-
-        processor = _download_with_retry(do_processor, max_retries=3)
-        processor.save_pretrained(str(ov_model_path))
-    except ImportError:
-        logger.warning("transformers not available, skipping processor download")
-
-    # Verify all models were created (check both naming conventions)
+    # Verify models were created
     encoder_path = _find_openvino_model(ov_model_path, "encoder_model")
     decoder_path = _find_openvino_model(ov_model_path, "decoder_model")
     decoder_with_past_path = _find_openvino_model(ov_model_path, "decoder_with_past_model")
 
-    if not encoder_path:
-        # List what files were created for debugging
+    if not encoder_path or not decoder_path:
         created_files = list(ov_model_path.glob("*.xml"))
         raise RuntimeError(
-            f"Export failed: encoder_model.xml not found at {ov_model_path}. "
-            f"Created files: {[f.name for f in created_files]}"
-        )
-    if not decoder_path:
-        raise RuntimeError(f"Export failed: decoder_model.xml not found at {ov_model_path}")
-    if not decoder_with_past_path:
-        logger.warning(
-            "decoder_with_past_model.xml not created. "
-            "The model will work but may have suboptimal performance without KV-cache."
+            f"Export failed. Created files: {[f.name for f in created_files]}"
         )
 
-    logger.info(f"OpenVINO IR model saved to {ov_model_path}")
-    logger.info(f"  - Encoder: {encoder_path.name}")
-    logger.info(f"  - Decoder: {decoder_path.name}")
-    if decoder_with_past_path:
-        logger.info(f"  - Decoder with KV-cache: {decoder_with_past_path.name}")
+    logger.info(f"Model exported to {ov_model_path}")
 
     result = {
         "encoder_path": str(encoder_path),
         "decoder_path": str(decoder_path),
         "model_path": str(ov_model_path),
     }
-
     if decoder_with_past_path:
         result["decoder_with_past_path"] = str(decoder_with_past_path)
 
