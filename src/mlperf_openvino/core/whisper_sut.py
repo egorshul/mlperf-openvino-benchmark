@@ -990,18 +990,22 @@ class WhisperHybridEncoder:
         # Reshape to static shape for accelerators (NPU, etc.)
         # Whisper encoder expects (batch=1, n_mels=128, time=3000)
         if device != "CPU":
-            logger.info(f"  Reshaping encoder to static shape for {device}...")
+            logger.info(f"  Checking encoder shape for {device}...")
             try:
                 # Get current input shape
                 input_shape = self.model.input(0).get_partial_shape()
-                logger.info(f"  Original shape: {input_shape}")
+                logger.info(f"  Current input shape: {input_shape}")
 
-                # Whisper Large V3: batch=1, n_mels=128, time=3000
-                static_shape = [1, 128, 3000]
-                self.model.reshape({self.main_input_name: static_shape})
-                logger.info(f"  Reshaped to: {static_shape}")
+                # Check if reshape is needed (only if shape is dynamic)
+                if input_shape.is_dynamic:
+                    # Whisper Large V3: batch=1, n_mels=128, time=3000
+                    static_shape = [1, 128, 3000]
+                    self.model.reshape({self.main_input_name: static_shape})
+                    logger.info(f"  Reshaped to static: {static_shape}")
+                else:
+                    logger.info(f"  Shape is already static, no reshape needed")
             except Exception as e:
-                logger.warning(f"  Could not reshape encoder: {e}")
+                logger.warning(f"  Could not check/reshape encoder: {e}")
 
         # Compile model - use provided config for accelerators, minimal for CPU
         logger.info(f"Compiling encoder on {device}...")
@@ -1046,6 +1050,16 @@ class WhisperHybridEncoder:
 
         # Get output
         last_hidden_state = self.request.get_output_tensor(0).data.copy()
+
+        # Log encoder output stats for first call (debugging)
+        if not hasattr(self, '_encoder_logged'):
+            self._encoder_logged = True
+            logger.info(f"Encoder output stats ({self.device}):")
+            logger.info(f"  Shape: {last_hidden_state.shape}")
+            logger.info(f"  Dtype: {last_hidden_state.dtype}")
+            logger.info(f"  Min: {last_hidden_state.min():.6f}, Max: {last_hidden_state.max():.6f}")
+            logger.info(f"  Mean: {last_hidden_state.mean():.6f}, Std: {last_hidden_state.std():.6f}")
+
         last_hidden_state = torch.from_numpy(last_hidden_state)
 
         return BaseModelOutput(last_hidden_state=last_hidden_state)
@@ -1695,11 +1709,13 @@ class WhisperMultiDieSUT:
 
         core = ov.Core()
         devices = core.available_devices
+        logger.info(f"Available OpenVINO devices: {devices}")
 
         # Find dies for this device (format: DEVICE.N where N is a number)
         # Only return dies with numeric suffix (X.0, X.1, etc.)
         pattern = re.compile(rf"^{re.escape(device)}\.(\d+)$")
         device_dies = [d for d in devices if pattern.match(d)]
+        logger.info(f"Matching dies for '{device}': {device_dies}")
 
         return sorted(device_dies)
 
