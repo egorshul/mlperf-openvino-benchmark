@@ -1161,13 +1161,15 @@ class WhisperHybridDecoder:
                 encoder_hidden_states_np = encoder_hidden_states
 
             # Find the correct input name for encoder hidden states
+            encoder_input_found = False
             for name in self.input_names:
                 if "encoder_hidden" in name or "encoder_output" in name:
                     inputs[name] = encoder_hidden_states_np
+                    encoder_input_found = True
                     break
-            else:
-                if "encoder_hidden_states" in self.input_names:
-                    inputs["encoder_hidden_states"] = encoder_hidden_states_np
+
+            if not encoder_input_found:
+                logger.warning(f"Could not find encoder input! Available: {self.input_names}")
 
         # Add attention mask if required
         if attention_mask is not None and "attention_mask" in self.input_names:
@@ -1211,6 +1213,13 @@ class WhisperHybridDecoder:
                     inputs[name] = value.numpy()
                 else:
                     inputs[name] = value
+
+        # Debug: log inputs on first call
+        if self._past_length == 0:
+            logger.info(f"Decoder inputs on first call: {list(inputs.keys())}")
+            for k, v in inputs.items():
+                if hasattr(v, 'shape'):
+                    logger.info(f"  {k}: shape={v.shape}, dtype={v.dtype}")
 
         # Run inference
         self.request.infer(inputs)
@@ -1465,6 +1474,10 @@ class WhisperHybridModel:
 
         # Run encoder
         encoder_outputs = self.encoder(input_features)
+
+        # Debug: log encoder output
+        logger.info(f"Encoder output shape: {encoder_outputs.last_hidden_state.shape}")
+        logger.info(f"Encoder output stats: min={encoder_outputs.last_hidden_state.min():.4f}, max={encoder_outputs.last_hidden_state.max():.4f}, mean={encoder_outputs.last_hidden_state.mean():.4f}")
 
         # Initialize decoder with special tokens
         # [SOT, language, task, no_timestamps]
