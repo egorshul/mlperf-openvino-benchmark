@@ -1523,7 +1523,7 @@ class WhisperHybridModel:
 
         # Generate tokens
         generated_ids = decoder_input_ids.clone()
-        past_key_values = None
+        past_key_values = None  # None = reset state, non-None = continue
 
         # Debug: log first few steps
         debug_tokens = []
@@ -1554,13 +1554,20 @@ class WhisperHybridModel:
                     # Non-stateful: just for current input
                     decoder_attention_mask = torch.ones_like(input_ids)
 
+            # For stateful models: pass None only on first step to reset state,
+            # then pass empty tuple to signal "continue with existing state"
+            if self.decoder.stateful:
+                pkv_to_pass = None if step == 0 else ((),)
+            else:
+                pkv_to_pass = past_key_values
+
             # Run decoder
             outputs = self.decoder(
                 input_ids=input_ids,
                 encoder_hidden_states=encoder_hidden_states,
                 encoder_attention_mask=encoder_attention_mask,
                 attention_mask=decoder_attention_mask,
-                past_key_values=past_key_values if not self.decoder.stateful else None,
+                past_key_values=pkv_to_pass,
             )
 
             # Get next token (greedy)
