@@ -1446,17 +1446,19 @@ class WhisperHybridModel:
         past_key_values = None
 
         for step in range(max_new_tokens):
-            # Prepare inputs - only use last token if we have cache
-            if past_key_values is not None and self.decoder.stateful:
-                input_ids = generated_ids[:, -1:]
-            else:
+            # Prepare inputs:
+            # - First step: pass all initial tokens
+            # - Subsequent steps: pass only last token (KV-cache has previous context)
+            if step == 0:
                 input_ids = generated_ids
+            else:
+                input_ids = generated_ids[:, -1:]
 
             # Run decoder
             outputs = self.decoder(
                 input_ids=input_ids,
                 encoder_hidden_states=encoder_outputs.last_hidden_state,
-                past_key_values=past_key_values,
+                past_key_values=past_key_values if not self.decoder.stateful else None,
             )
 
             # Get next token (greedy)
@@ -1471,8 +1473,9 @@ class WhisperHybridModel:
             # Append to generated
             generated_ids = torch.cat([generated_ids, next_tokens.unsqueeze(-1)], dim=-1)
 
-            # Update past key values
-            past_key_values = outputs.past_key_values
+            # Update past key values (for non-stateful models)
+            if not self.decoder.stateful:
+                past_key_values = outputs.past_key_values
 
             # Check for EOT
             if (next_tokens == EOT_TOKEN).all():
@@ -1550,32 +1553,43 @@ class WhisperMultiDieSUT:
         # Setup models
         self._setup_models()
 
-    def _discover_npu_dies(self) -> List[str]:
-        """Discover available NPU dies."""
+    def _discover_device_dies(self, device: str) -> List[str]:
+        """Discover available dies for the specified device.
+
+        Args:
+            device: Base device name (e.g., "NPU", "GPU")
+
+        Returns:
+            List of device dies (e.g., ["NPU.0", "NPU.1"]) or [device] if no dies found
+        """
         import openvino as ov
 
         core = ov.Core()
         devices = core.available_devices
 
-        # Find NPU dies (format: NPU.X)
-        npu_dies = [d for d in devices if d.startswith("NPU.")]
+        # Find dies for this device (format: DEVICE.X)
+        device_dies = [d for d in devices if d.startswith(f"{device}.")]
 
-        if not npu_dies:
-            # Try generic NPU
-            if "NPU" in devices:
-                return ["NPU"]
-            return []
+        if device_dies:
+            return sorted(device_dies)
 
-        return sorted(npu_dies)
+        # Check if base device exists
+        if device in devices:
+            return [device]
+
+        return []
 
     def _setup_models(self) -> None:
-        """Setup hybrid models with encoder on NPU and decoder on CPU.
+        """Setup hybrid models with encoder on accelerator and decoder on CPU.
 
-        Creates one encoder per NPU die, sharing a single CPU decoder.
+        Creates one encoder per device die, sharing a single CPU decoder.
         """
         from transformers import AutoProcessor, WhisperConfig
 
-        logger.info("Setting up Whisper hybrid model (encoder=NPU, decoder=CPU)")
+        # Get target device from config
+        target_device = self.config.openvino.device if hasattr(self.config, 'openvino') else "CPU"
+
+        logger.info(f"Setting up Whisper hybrid model (encoder={target_device}, decoder=CPU)")
 
         # Load processor
         try:
@@ -1590,9 +1604,6 @@ class WhisperMultiDieSUT:
         except Exception:
             logger.info("Loading config from openai/whisper-large-v3")
             self.whisper_config = WhisperConfig.from_pretrained("openai/whisper-large-v3")
-
-        # Discover NPU dies
-        npu_dies = self._discover_npu_dies()
 
         # Build OV config for compilation - use accelerator properties from config
         if hasattr(self.config, 'openvino'):
@@ -1615,9 +1626,15 @@ class WhisperMultiDieSUT:
             ov_config={"CACHE_DIR": ""},
         )
 
-        if npu_dies:
-            # Create one encoder per NPU die
-            for die in npu_dies:
+        # Log decoder info for debugging
+        logger.info(f"  Decoder inputs: {cpu_decoder.input_names}")
+        logger.info(f"  Decoder stateful: {cpu_decoder.stateful}, use_past: {cpu_decoder.use_past}")
+
+        # Discover device dies
+        device_dies = self._discover_device_dies(target_device)
+
+        if device_dies:
+            for die in device_dies:
                 logger.info(f"Creating encoder on {die}...")
                 try:
                     encoder = WhisperHybridEncoder(
@@ -1638,9 +1655,9 @@ class WhisperMultiDieSUT:
                 except Exception as e:
                     logger.warning(f"Failed to create model on {die}: {e}")
         else:
-            logger.warning("No NPU dies found, using CPU for encoder")
+            logger.warning(f"No {target_device} devices found")
 
-        # Fallback to CPU if no NPU models created
+        # Fallback to CPU if no models created
         if not self._models:
             logger.info("Creating CPU encoder as fallback...")
             cpu_encoder = WhisperHybridEncoder(
