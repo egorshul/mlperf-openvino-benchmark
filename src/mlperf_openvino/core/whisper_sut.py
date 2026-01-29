@@ -978,12 +978,31 @@ class WhisperHybridEncoder:
                 self.main_input_name = name
                 break
 
+        # Reshape to static shape for accelerators (NPU, etc.)
+        # Whisper encoder expects (batch=1, n_mels=128, time=3000)
+        if device != "CPU":
+            logger.info(f"  Reshaping encoder to static shape for {device}...")
+            try:
+                # Get current input shape
+                input_shape = self.model.input(0).get_partial_shape()
+                logger.info(f"  Original shape: {input_shape}")
+
+                # Whisper Large V3: batch=1, n_mels=128, time=3000
+                static_shape = [1, 128, 3000]
+                self.model.reshape({self.main_input_name: static_shape})
+                logger.info(f"  Reshaped to: {static_shape}")
+            except Exception as e:
+                logger.warning(f"  Could not reshape encoder: {e}")
+
         # Compile model
         logger.info(f"Compiling encoder on {device}...")
-        self.compiled_model = core.compile_model(self.model, device, self.ov_config)
-        self.request = self.compiled_model.create_infer_request()
-
-        logger.info(f"Encoder compiled on {device}")
+        try:
+            self.compiled_model = core.compile_model(self.model, device, self.ov_config)
+            self.request = self.compiled_model.create_infer_request()
+            logger.info(f"Encoder compiled on {device}")
+        except Exception as e:
+            logger.error(f"Failed to compile encoder on {device}: {e}")
+            raise
 
     def __call__(self, input_features, **kwargs):
         """
