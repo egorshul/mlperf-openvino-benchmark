@@ -1493,24 +1493,10 @@ class WhisperHybridModel:
             "it": 50274, "id": 50275, "hi": 50276, "fi": 50277, "vi": 50278,
         }
 
-        # Suppress tokens from Whisper generation_config.json
-        # These are non-speech tokens that should never appear in transcription
-        # IMPORTANT: This list does NOT include timestamp tokens (50364+)
-        # The <|notimestamps|> token in prompt guides model to avoid timestamps
-        SUPPRESS_TOKENS = [
-            1, 2, 7, 8, 9, 10, 14, 25, 26, 27, 28, 29, 31, 58, 59, 60, 61, 62,
-            63, 90, 91, 92, 93, 359, 503, 522, 542, 873, 893, 902, 918, 922,
-            931, 1350, 1853, 1982, 2460, 2627, 3246, 3253, 3268, 3536, 3846,
-            3961, 4183, 4667, 6585, 6647, 7273, 9061, 9383, 10428, 10929,
-            11938, 12033, 12331, 12562, 13793, 14157, 14635, 15265, 15618,
-            16553, 16604, 18362, 18956, 20075, 21675, 22520, 26130, 26161,
-            26435, 28279, 29464, 31650, 32302, 32470, 36865, 42863, 47425,
-            49870, 50254, 50258, 50360, 50361, 50362
-        ]
-
-        # Begin suppress tokens - suppress at first generated position only
-        # 220 = space, 50257 = EOT (prevent empty transcriptions)
-        BEGIN_SUPPRESS_TOKENS = [220, 50257]
+        # Load suppress tokens from generation_config (matches optimum-intel behavior)
+        gc = self.generation_config
+        SUPPRESS_TOKENS = getattr(gc, 'suppress_tokens', None) or []
+        BEGIN_SUPPRESS_TOKENS = getattr(gc, 'begin_suppress_tokens', None) or [220, 50257]
 
         # Log generation config once
         if not self._generation_logged:
@@ -1523,7 +1509,7 @@ class WhisperHybridModel:
             logger.info(f"  Task: {task}")
             logger.info(f"  Max new tokens: {max_new_tokens}")
             logger.info(f"  Decoding: greedy (temperature=0)")
-            logger.info(f"  suppress_tokens: {len(SUPPRESS_TOKENS)} tokens")
+            logger.info(f"  suppress_tokens: {len(SUPPRESS_TOKENS)} tokens (from generation_config)")
             logger.info(f"  begin_suppress_tokens: {BEGIN_SUPPRESS_TOKENS}")
             logger.info(f"  Initial tokens: [SOT={SOT_TOKEN}, lang={LANGUAGE_TOKENS.get(language)}, "
                        f"task={TRANSCRIBE_TOKEN if task == 'transcribe' else TRANSLATE_TOKEN}, "
@@ -1754,6 +1740,19 @@ class WhisperMultiDieSUT:
             logger.info("Loading config from openai/whisper-large-v3")
             self.whisper_config = WhisperConfig.from_pretrained("openai/whisper-large-v3")
 
+        # Load generation config (has suppress_tokens, begin_suppress_tokens, etc.)
+        from transformers import GenerationConfig
+        try:
+            self.generation_config = GenerationConfig.from_pretrained(self.model_path)
+            logger.info(f"Loaded generation_config from {self.model_path}")
+        except Exception:
+            try:
+                self.generation_config = GenerationConfig.from_pretrained("openai/whisper-large-v3")
+                logger.info("Loaded generation_config from openai/whisper-large-v3")
+            except Exception:
+                self.generation_config = None
+                logger.warning("Could not load generation_config")
+
         # Build OV config for accelerator - use device_properties from -p options
         # Note: to_properties() returns CPU or accelerator props based on device,
         # but we need accelerator props specifically for encoder
@@ -1812,6 +1811,7 @@ class WhisperMultiDieSUT:
                     encoder=encoder,
                     decoder=cpu_decoder,
                     config=self.whisper_config,
+                    generation_config=self.generation_config,
                 )
                 self._models.append((die, model))
                 logger.info(f"  Model ready on {die}")
@@ -1831,6 +1831,7 @@ class WhisperMultiDieSUT:
                 encoder=cpu_encoder,
                 decoder=cpu_decoder,
                 config=self.whisper_config,
+                generation_config=self.generation_config,
             )
             self._models.append(("CPU", model))
 
