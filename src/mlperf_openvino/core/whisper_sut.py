@@ -1103,21 +1103,6 @@ class WhisperHybridDecoder:
         self.next_beam_idx = None
         self._past_length = 0
 
-        # Log all model inputs with details
-        logger.info(f"Decoder model inputs ({len(self.model.inputs)}):")
-        for inp in self.model.inputs:
-            name = inp.get_any_name()
-            shape = inp.get_partial_shape()
-            dtype = inp.get_element_type()
-            logger.info(f"  {name}: shape={shape}, dtype={dtype}")
-
-        logger.info(f"Decoder model outputs ({len(self.model.outputs)}):")
-        for out in self.model.outputs:
-            name = out.get_any_name()
-            shape = out.get_partial_shape()
-            dtype = out.get_element_type()
-            logger.info(f"  {name}: shape={shape}, dtype={dtype}")
-
         # Compile model
         logger.info(f"Compiling decoder on {device}...")
         self.compiled_model = core.compile_model(self.model, device, self.ov_config)
@@ -1158,9 +1143,9 @@ class WhisperHybridDecoder:
         else:
             input_ids_np = input_ids
 
-        # Ensure correct dtype for input_ids (model may expect int32)
-        if input_ids_np.dtype == np.int64:
-            input_ids_np = input_ids_np.astype(np.int32)
+        # Ensure int64 dtype (model expects int64_t)
+        if input_ids_np.dtype != np.int64:
+            input_ids_np = input_ids_np.astype(np.int64)
 
         # Reset state for first token (when no past)
         if self.stateful and past_key_values is None:
@@ -1233,35 +1218,11 @@ class WhisperHybridDecoder:
                 else:
                     inputs[name] = value
 
-        # Debug: log inputs on first call
-        if self._past_length == 0:
-            logger.info(f"=== Decoder first call debug ===")
-            logger.info(f"Model expects inputs: {self.input_names}")
-            logger.info(f"We are providing: {list(inputs.keys())}")
-            missing = set(self.input_names) - set(inputs.keys())
-            if missing:
-                logger.warning(f"MISSING INPUTS: {missing}")
-            for k, v in inputs.items():
-                if hasattr(v, 'shape'):
-                    if k == "input_ids":
-                        logger.info(f"  {k}: shape={v.shape}, dtype={v.dtype}, values={v.tolist()}")
-                    else:
-                        logger.info(f"  {k}: shape={v.shape}, dtype={v.dtype}")
-
         # Run inference
         self.request.infer(inputs)
 
         # Get logits
         logits = torch.from_numpy(self.request.get_tensor("logits").data.copy())
-
-        # Debug: log logits on first call
-        if self._past_length == 0:
-            logger.info(f"Logits shape: {logits.shape}")
-            # Get top 5 tokens for last position
-            last_logits = logits[0, -1] if logits.dim() == 3 else logits[0]
-            top5_values, top5_indices = torch.topk(last_logits, 5)
-            logger.info(f"Top 5 tokens: {top5_indices.tolist()} with logits {top5_values.tolist()}")
-
         self._past_length += input_ids_np.shape[1]
 
         # Get output past_key_values (for non-stateful models)
@@ -1512,26 +1473,15 @@ class WhisperHybridModel:
         encoder_outputs = self.encoder(input_features)
         encoder_hidden_states = encoder_outputs.last_hidden_state
 
-        # Debug: log encoder output
-        logger.info(f"Encoder output shape: {encoder_hidden_states.shape}")
-        logger.info(f"Encoder output stats: min={encoder_hidden_states.min():.4f}, max={encoder_hidden_states.max():.4f}, mean={encoder_hidden_states.mean():.4f}")
-
         # Create encoder_attention_mask if required by decoder
-        # Shape: (batch_size, encoder_sequence_length) - all ones
         encoder_attention_mask = None
         if "encoder_attention_mask" in self.decoder.input_names:
-            encoder_seq_len = encoder_hidden_states.shape[1]  # Usually 1500 for Whisper
+            encoder_seq_len = encoder_hidden_states.shape[1]
             encoder_attention_mask = torch.ones(
                 (batch_size, encoder_seq_len),
                 dtype=torch.long,
                 device=device,
             )
-            logger.info(f"Created encoder_attention_mask with shape {encoder_attention_mask.shape}")
-
-        # Debug: compare with CPU encoder on first call (if available)
-        if hasattr(self, '_cpu_test_encoder') and self._cpu_test_encoder is not None:
-            # This is set by WhisperMultiDieSUT
-            pass  # Comparison will be done in _process_sample
 
         # Initialize decoder with special tokens
         # [SOT, language, task, no_timestamps]
@@ -1547,9 +1497,6 @@ class WhisperHybridModel:
         # Generate tokens
         generated_ids = decoder_input_ids.clone()
         past_key_values = None  # None = reset state, non-None = continue
-
-        # Debug: log first few steps
-        debug_tokens = []
 
         for step in range(max_new_tokens):
             # Prepare inputs:
@@ -1616,15 +1563,8 @@ class WhisperHybridModel:
                 for token_id in begin_suppress_tokens:
                     if token_id < next_token_logits.shape[-1]:
                         next_token_logits[:, token_id] = float('-inf')
-                # Debug: show top tokens after suppression
-                top5_after = torch.topk(next_token_logits[0], 5)
-                logger.info(f"After suppression - Top 5: {top5_after.indices.tolist()} logits: {top5_after.values.tolist()}")
 
             next_tokens = next_token_logits.argmax(dim=-1)
-
-            # Debug: collect first 10 tokens
-            if step < 10:
-                debug_tokens.append(next_tokens.item())
 
             # Append to generated
             generated_ids = torch.cat([generated_ids, next_tokens.unsqueeze(-1)], dim=-1)
@@ -1636,10 +1576,6 @@ class WhisperHybridModel:
             # Check for EOT
             if (next_tokens == EOT_TOKEN).all():
                 break
-
-        # Debug: log generated tokens for first sample
-        if debug_tokens:
-            logger.info(f"First 10 generated tokens: {debug_tokens}")
 
         return generated_ids
 
@@ -1770,25 +1706,16 @@ class WhisperMultiDieSUT:
             # Add user-specified device properties (-p options) for accelerator only
             for key, value in self.config.openvino.device_properties.items():
                 accelerator_config[key] = value
-        logger.info(f"Accelerator config: {accelerator_config}")
-
         # Find decoder path (prefer decoder_with_past if exists)
         decoder_with_past = self.model_path / "decoder_with_past_model.xml"
         decoder_model_path = decoder_with_past if decoder_with_past.exists() else self.decoder_path
 
-        logger.info(f"Using decoder: {decoder_model_path}")
-
         # Create shared decoder on CPU (one instance)
-        logger.info("Creating CPU decoder...")
         cpu_decoder = WhisperHybridDecoder(
             model_path=decoder_model_path,
             device="CPU",
             ov_config={"CACHE_DIR": ""},
         )
-
-        # Log decoder info for debugging
-        logger.info(f"  Decoder inputs: {cpu_decoder.input_names}")
-        logger.info(f"  Decoder stateful: {cpu_decoder.stateful}, use_past: {cpu_decoder.use_past}")
 
         # Discover device dies
         device_dies = self._discover_device_dies(target_device)
@@ -1832,23 +1759,6 @@ class WhisperMultiDieSUT:
             )
             self._models.append(("CPU", model))
 
-        # Debug: compare with CPU encoder output for first sample
-        if self._sample_count == 0 and target_device != "CPU":
-            logger.info("Running CPU encoder for comparison...")
-            try:
-                cpu_test_encoder = WhisperHybridEncoder(
-                    model_path=self.encoder_path,
-                    device="CPU",
-                    ov_config={"CACHE_DIR": ""},
-                )
-                self._cpu_test_encoder = cpu_test_encoder
-                logger.info("CPU test encoder ready for comparison")
-            except Exception as e:
-                logger.warning(f"Could not create CPU test encoder: {e}")
-                self._cpu_test_encoder = None
-        else:
-            self._cpu_test_encoder = None
-
         logger.info(f"Whisper Multi-Die SUT ready with {len(self._models)} model(s)")
 
     def _get_next_model(self) -> Tuple[str, Any]:
@@ -1873,60 +1783,7 @@ class WhisperMultiDieSUT:
         if input_features.dim() == 2:
             input_features = input_features.unsqueeze(0)
 
-        # Debug: Compare X encoder vs CPU encoder on first sample
-        if self._sample_count == 0 and hasattr(self, '_cpu_test_encoder') and self._cpu_test_encoder is not None:
-            logger.info("=== Comparing X encoder vs CPU encoder ===")
-
-            # Run X encoder
-            x_output = model.encoder(input_features)
-            x_hidden = x_output.last_hidden_state
-
-            # Run CPU encoder
-            cpu_output = self._cpu_test_encoder(input_features)
-            cpu_hidden = cpu_output.last_hidden_state
-
-            # Compare
-            diff = (x_hidden - cpu_hidden).abs()
-            logger.info(f"X encoder stats: min={x_hidden.min():.4f}, max={x_hidden.max():.4f}, mean={x_hidden.mean():.4f}")
-            logger.info(f"CPU encoder stats: min={cpu_hidden.min():.4f}, max={cpu_hidden.max():.4f}, mean={cpu_hidden.mean():.4f}")
-            logger.info(f"Difference stats: min={diff.min():.4f}, max={diff.max():.4f}, mean={diff.mean():.4f}")
-
-            # Test decoder with CPU encoder output
-            logger.info("Testing decoder with CPU encoder output...")
-            cpu_decoder_input = cpu_hidden.numpy().astype(np.float32)
-
-            # Reset decoder state
-            model.decoder.request.reset_state()
-            model.decoder._past_length = 0
-            model.decoder.next_beam_idx = np.arange(1, dtype=np.int32)
-
-            # Run decoder with CPU encoder output
-            test_input_ids = np.array([[50258, 50259, 50359, 50363]], dtype=np.int32)
-            test_inputs = {
-                "input_ids": test_input_ids,
-                "encoder_hidden_states": cpu_decoder_input,
-                "beam_idx": np.array([0], dtype=np.int32),
-            }
-            # Add encoder_attention_mask if required
-            if "encoder_attention_mask" in model.decoder.input_names:
-                encoder_seq_len = cpu_decoder_input.shape[1]
-                test_inputs["encoder_attention_mask"] = np.ones((1, encoder_seq_len), dtype=np.int64)
-                logger.info(f"Added encoder_attention_mask with shape (1, {encoder_seq_len})")
-            # Add decoder attention_mask if required
-            if "attention_mask" in model.decoder.input_names:
-                test_inputs["attention_mask"] = np.ones((1, 4), dtype=np.int64)  # 4 initial tokens
-                logger.info(f"Added decoder attention_mask with shape (1, 4)")
-
-            model.decoder.request.infer(test_inputs)
-            cpu_logits = model.decoder.request.get_tensor("logits").data.copy()
-            cpu_last_logits = torch.from_numpy(cpu_logits[0, -1])
-            top5_values, top5_indices = torch.topk(cpu_last_logits, 5)
-            logger.info(f"With CPU encoder - Top 5 tokens: {top5_indices.tolist()} with logits {top5_values.tolist()}")
-
-            # Clear test encoder to free memory
-            self._cpu_test_encoder = None
-
-        # Generate transcription using model.generate() - handles KV-cache automatically
+        # Generate transcription
         generated_ids = model.generate(
             input_features,
             max_new_tokens=self.max_new_tokens,
@@ -1936,12 +1793,6 @@ class WhisperMultiDieSUT:
 
         # Decode tokens to text
         text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-
-        # Debug: log first sample's output
-        if self._sample_count == 0:
-            logger.info(f"First sample output: '{text[:100]}...' (len={len(text)})")
-            logger.info(f"Generated IDs shape: {generated_ids.shape}, first tokens: {generated_ids[0, :15].tolist()}")
-
         return text
 
     def _start_progress(self, total: int, desc: str = "Processing") -> None:
