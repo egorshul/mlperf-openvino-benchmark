@@ -1257,7 +1257,7 @@ class WhisperMultiDieSUT:
             inputs[self._decoder_input_names['encoder_hidden_states']] = encoder_hidden_states
         # beam_idx is required for KV-cache attention - use [0] for greedy decoding
         if 'beam_idx' in self._decoder_input_names:
-            inputs[self._decoder_input_names['beam_idx']] = np.array([0], dtype=np.int64)
+            inputs[self._decoder_input_names['beam_idx']] = np.array([0], dtype=np.int32)
 
         # Set inputs and infer
         for name, data in inputs.items():
