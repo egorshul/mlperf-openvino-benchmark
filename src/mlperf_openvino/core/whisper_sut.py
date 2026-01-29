@@ -1478,23 +1478,30 @@ class WhisperHybridModel:
         """
         import torch
 
-        # Whisper special tokens (from WhisperTokenizer)
-        SOT_TOKEN = 50258  # Start of transcript
-        EOT_TOKEN = 50257  # End of transcript
-        TRANSCRIBE_TOKEN = 50359  # Transcribe task
-        TRANSLATE_TOKEN = 50358  # Translate task
-        NO_TIMESTAMPS_TOKEN = 50363  # No timestamps
-
-        # Language tokens (EN = 50259)
-        LANGUAGE_TOKENS = {
-            "en": 50259, "zh": 50260, "de": 50261, "es": 50262, "ru": 50263,
-            "ko": 50264, "fr": 50265, "ja": 50266, "pt": 50267, "tr": 50268,
-            "pl": 50269, "ca": 50270, "nl": 50271, "ar": 50272, "sv": 50273,
-            "it": 50274, "id": 50275, "hi": 50276, "fi": 50277, "vi": 50278,
-        }
-
-        # Load suppress tokens from generation_config (matches optimum-intel behavior)
+        # Load ALL special tokens from generation_config (model-specific).
+        # Whisper v2 and v3 have DIFFERENT token IDs — must not hardcode!
         gc = self.generation_config
+
+        SOT_TOKEN = getattr(gc, 'decoder_start_token_id', 50258)
+        EOT_TOKEN = getattr(gc, 'eos_token_id', 50257)
+        NO_TIMESTAMPS_TOKEN = getattr(gc, 'no_timestamps_token_id', 50364)
+
+        # Task tokens from generation_config.task_to_id
+        task_to_id = getattr(gc, 'task_to_id', {})
+        TRANSCRIBE_TOKEN = task_to_id.get("transcribe", 50360)
+        TRANSLATE_TOKEN = task_to_id.get("translate", 50359)
+
+        # Language tokens from generation_config.lang_to_id
+        lang_to_id = getattr(gc, 'lang_to_id', {})
+        LANGUAGE_TOKENS = {}
+        for lang_tag, token_id in lang_to_id.items():
+            # "<|en|>" -> "en"
+            lang_code = lang_tag.strip("<|>")
+            LANGUAGE_TOKENS[lang_code] = token_id
+        if not LANGUAGE_TOKENS:
+            # Fallback for v3 if lang_to_id missing
+            LANGUAGE_TOKENS = {"en": 50259}
+
         SUPPRESS_TOKENS = getattr(gc, 'suppress_tokens', None) or []
         BEGIN_SUPPRESS_TOKENS = getattr(gc, 'begin_suppress_tokens', None) or [220, 50257]
 
@@ -1511,9 +1518,13 @@ class WhisperHybridModel:
             logger.info(f"  Decoding: greedy (temperature=0)")
             logger.info(f"  suppress_tokens: {len(SUPPRESS_TOKENS)} tokens (from generation_config)")
             logger.info(f"  begin_suppress_tokens: {BEGIN_SUPPRESS_TOKENS}")
-            logger.info(f"  Initial tokens: [SOT={SOT_TOKEN}, lang={LANGUAGE_TOKENS.get(language)}, "
-                       f"task={TRANSCRIBE_TOKEN if task == 'transcribe' else TRANSLATE_TOKEN}, "
-                       f"no_ts={NO_TIMESTAMPS_TOKEN}]")
+            logger.info(f"  Token IDs: SOT={SOT_TOKEN}, EOT={EOT_TOKEN}, "
+                       f"transcribe={TRANSCRIBE_TOKEN}, translate={TRANSLATE_TOKEN}, "
+                       f"no_timestamps={NO_TIMESTAMPS_TOKEN}")
+            task_token_val = TRANSCRIBE_TOKEN if task == 'transcribe' else TRANSLATE_TOKEN
+            lang_token_val = LANGUAGE_TOKENS.get(language, '?')
+            logger.info(f"  Initial tokens: [{SOT_TOKEN}, {lang_token_val}, "
+                       f"{task_token_val}, {NO_TIMESTAMPS_TOKEN}]")
             logger.info("=" * 60)
             self._generation_logged = True
 
