@@ -1649,12 +1649,15 @@ class WhisperMultiDieSUT:
             logger.info("Loading config from openai/whisper-large-v3")
             self.whisper_config = WhisperConfig.from_pretrained("openai/whisper-large-v3")
 
-        # Build OV config for compilation - use accelerator properties from config
-        if hasattr(self.config, 'openvino'):
-            ov_config = self.config.openvino.to_properties()
-            ov_config["CACHE_DIR"] = ""
-        else:
-            ov_config = {"CACHE_DIR": ""}
+        # Build OV config for accelerator - use device_properties from -p options
+        # Note: to_properties() returns CPU or accelerator props based on device,
+        # but we need accelerator props specifically for encoder
+        accelerator_config = {"CACHE_DIR": ""}
+        if hasattr(self.config, 'openvino') and hasattr(self.config.openvino, 'device_properties'):
+            # Add user-specified device properties (-p options) for accelerator only
+            for key, value in self.config.openvino.device_properties.items():
+                accelerator_config[key] = value
+        logger.info(f"Accelerator config: {accelerator_config}")
 
         # Find decoder path (prefer decoder_with_past if exists)
         decoder_with_past = self.model_path / "decoder_with_past_model.xml"
@@ -1684,7 +1687,7 @@ class WhisperMultiDieSUT:
                     encoder = WhisperHybridEncoder(
                         model_path=self.encoder_path,
                         device=die,
-                        ov_config=ov_config,
+                        ov_config=accelerator_config,
                     )
 
                     # Create hybrid model
