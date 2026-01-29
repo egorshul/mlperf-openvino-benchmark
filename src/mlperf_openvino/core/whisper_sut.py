@@ -1468,6 +1468,8 @@ class WhisperHybridModel:
 
         # Suppress tokens from Whisper generation_config.json
         # These are non-speech tokens that should never appear in transcription
+        # IMPORTANT: This list does NOT include timestamp tokens (50364+)
+        # The <|notimestamps|> token in prompt guides model to avoid timestamps
         SUPPRESS_TOKENS = [
             1, 2, 7, 8, 9, 10, 14, 25, 26, 27, 28, 29, 31, 58, 59, 60, 61, 62,
             63, 90, 91, 92, 93, 359, 503, 522, 542, 873, 893, 902, 918, 922,
@@ -1478,14 +1480,6 @@ class WhisperHybridModel:
             26435, 28279, 29464, 31650, 32302, 32470, 36865, 42863, 47425,
             49870, 50254, 50258, 50360, 50361, 50362
         ]
-
-        # Add ALL timestamp tokens (50364 onwards) - these must be suppressed
-        # in no_timestamps mode. Whisper has timestamp tokens from 50364 to ~51865
-        # (1500 tokens for 30-second audio at 20ms resolution, plus special ones)
-        TIMESTAMP_TOKENS = list(range(50364, 51865))
-
-        # Combine suppress lists
-        ALL_SUPPRESS_TOKENS = set(SUPPRESS_TOKENS + TIMESTAMP_TOKENS)
 
         # Begin suppress tokens - suppress at first generated position only
         # 220 = space, 50257 = EOT (prevent empty transcriptions)
@@ -1573,12 +1567,12 @@ class WhisperHybridModel:
                 next_token_logits = logits
 
             # Suppress tokens based on Whisper's generation_config.json:
-            # 1. ALL_SUPPRESS_TOKENS: always suppress (non-speech + timestamp tokens)
+            # 1. SUPPRESS_TOKENS: always suppress (non-speech tokens only)
             # 2. BEGIN_SUPPRESS_TOKENS: suppress only at first generated position
 
-            # Always suppress non-speech and timestamp tokens
+            # Always suppress non-speech tokens
             vocab_size = next_token_logits.shape[-1]
-            for token_id in ALL_SUPPRESS_TOKENS:
+            for token_id in SUPPRESS_TOKENS:
                 if token_id < vocab_size:
                     next_token_logits[:, token_id] = float('-inf')
 
