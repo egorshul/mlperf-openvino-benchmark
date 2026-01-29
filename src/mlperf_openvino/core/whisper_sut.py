@@ -1034,20 +1034,99 @@ class WhisperMultiDieSUT:
 
         logger.info(f"Setting up Whisper on {len(self._active_dies)} dies: {self._active_dies}")
 
-        # Build compile properties
+        # Build compile properties - only use user-specified properties from -p flag
         compile_props = {}
         if hasattr(self.config.openvino, 'device_properties') and self.config.openvino.device_properties:
             compile_props.update(self.config.openvino.device_properties)
+
+        logger.info(f"Compile properties: {compile_props if compile_props else '(empty)'}")
+        logger.info(f"Encoder model: {self.encoder_path}")
+        logger.info(f"Decoder model: {self.decoder_path}")
 
         # Read models once
         encoder_model = core.read_model(str(self.encoder_path))
         decoder_model = core.read_model(str(self.decoder_path))
 
+        # Log model info
+        logger.info(f"Encoder inputs: {[(inp.any_name, inp.partial_shape) for inp in encoder_model.inputs]}")
+        logger.info(f"Decoder inputs: {[(inp.any_name, inp.partial_shape) for inp in decoder_model.inputs]}")
+
+        # NPU requires static shapes - reshape encoder model if needed
+        encoder_shapes = {}
+        for inp in encoder_model.inputs:
+            shape = inp.partial_shape
+            name = inp.any_name
+            static_shape = []
+            for i, dim in enumerate(shape):
+                if dim.is_dynamic:
+                    # input_features: (batch, num_mel_bins=128, seq_len=3000)
+                    if i == 0:
+                        static_shape.append(1)  # batch
+                    elif i == 1:
+                        static_shape.append(128)  # num_mel_bins for whisper-large-v3
+                    elif i == 2:
+                        static_shape.append(3000)  # max audio length (30 seconds)
+                    else:
+                        static_shape.append(1)
+                else:
+                    static_shape.append(dim.get_length())
+            if any(d.is_dynamic for d in shape):
+                encoder_shapes[name] = static_shape
+                logger.info(f"  Reshaping encoder {name}: {shape} -> {static_shape}")
+
+        if encoder_shapes:
+            logger.info("Reshaping encoder model to static shapes for NPU...")
+            encoder_model.reshape(encoder_shapes)
+
+        # NPU requires static shapes - reshape decoder model if needed
+        decoder_shapes = {}
+        for inp in decoder_model.inputs:
+            shape = inp.partial_shape
+            name = inp.any_name
+            # Convert dynamic dimensions to static for NPU
+            static_shape = []
+            for i, dim in enumerate(shape):
+                if dim.is_dynamic:
+                    # Use reasonable defaults for Whisper
+                    if 'input_id' in name.lower():
+                        # Decoder input_ids: batch=1, seq_len=1 (autoregressive)
+                        static_shape.append(1)
+                    elif 'encoder_hidden' in name.lower() or 'encoder_output' in name.lower():
+                        # Encoder output: batch=1, seq_len=1500, hidden=1280 (whisper-large-v3)
+                        if i == 0:
+                            static_shape.append(1)  # batch
+                        elif i == 1:
+                            static_shape.append(1500)  # encoder sequence length
+                        else:
+                            static_shape.append(dim.get_length() if not dim.is_dynamic else 1280)
+                    elif 'attention_mask' in name.lower():
+                        static_shape.append(1)  # batch or seq_len=1
+                    elif 'past_key' in name.lower() or 'past_value' in name.lower():
+                        # KV cache: batch=1, num_heads, seq_len, head_dim
+                        if i == 0:
+                            static_shape.append(1)  # batch
+                        elif i == 2:
+                            static_shape.append(self.max_new_tokens)  # max sequence length
+                        else:
+                            static_shape.append(dim.get_length() if not dim.is_dynamic else 20)
+                    else:
+                        static_shape.append(1)
+                else:
+                    static_shape.append(dim.get_length())
+            if any(d.is_dynamic for d in shape):
+                decoder_shapes[name] = static_shape
+                logger.info(f"  Reshaping {name}: {shape} -> {static_shape}")
+
+        if decoder_shapes:
+            logger.info("Reshaping decoder model to static shapes for NPU...")
+            decoder_model.reshape(decoder_shapes)
+
         # Compile on each die
         for die_name in self._active_dies:
-            logger.info(f"  Compiling models on {die_name}...")
-
+            logger.info(f"  Compiling encoder on {die_name}...")
             compiled_encoder = core.compile_model(encoder_model, die_name, compile_props)
+
+            logger.info(f"  Compiling decoder on {die_name}...")
             compiled_decoder = core.compile_model(decoder_model, die_name, compile_props)
 
             # Get optimal number of inference requests
