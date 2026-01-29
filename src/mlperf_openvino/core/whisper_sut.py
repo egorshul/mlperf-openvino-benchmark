@@ -1143,6 +1143,10 @@ class WhisperHybridDecoder:
         else:
             input_ids_np = input_ids
 
+        # Ensure correct dtype for input_ids (model may expect int32)
+        if input_ids_np.dtype == np.int64:
+            input_ids_np = input_ids_np.astype(np.int32)
+
         # Reset state for first token (when no past)
         if self.stateful and past_key_values is None:
             self.request.reset_state()
@@ -1226,6 +1230,15 @@ class WhisperHybridDecoder:
 
         # Get logits
         logits = torch.from_numpy(self.request.get_tensor("logits").data.copy())
+
+        # Debug: log logits on first call
+        if self._past_length == 0:
+            logger.info(f"Logits shape: {logits.shape}")
+            # Get top 5 tokens for last position
+            last_logits = logits[0, -1] if logits.dim() == 3 else logits[0]
+            top5_values, top5_indices = torch.topk(last_logits, 5)
+            logger.info(f"Top 5 tokens: {top5_indices.tolist()} with logits {top5_values.tolist()}")
+
         self._past_length += input_ids_np.shape[1]
 
         # Get output past_key_values (for non-stateful models)
