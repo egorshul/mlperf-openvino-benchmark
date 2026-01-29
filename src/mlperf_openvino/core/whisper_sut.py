@@ -1137,8 +1137,9 @@ class WhisperMultiDieSUT:
                 if not self._decoder_on_cpu:
                     logger.warning(f"  Decoder compilation failed on {die_name}: {e}")
                     logger.warning("  Falling back to CPU for decoder (encoder stays on NPU)")
-                    # Compile decoder on CPU once (shared between all dies)
-                    cpu_decoder = core.compile_model(decoder_model, "CPU", {})
+                    # Re-read decoder model fresh for CPU (without reshape)
+                    decoder_model_cpu = core.read_model(str(self.decoder_path))
+                    cpu_decoder = core.compile_model(decoder_model_cpu, "CPU", {})
                     self._decoder_on_cpu = True
                 compiled_decoder = cpu_decoder
 
@@ -1270,32 +1271,48 @@ class WhisperMultiDieSUT:
 
     def _generate_on_die(self, die_name: str, mel_features: np.ndarray) -> str:
         """Generate transcription on specific die."""
+        ctx = self._die_contexts[die_name]
+        decoder_request = ctx["decoder_request"]
+
+        # Reset decoder state for new sample (for stateful KV-cache models)
+        try:
+            decoder_request.reset_state()
+        except Exception:
+            pass  # Model may not be stateful
+
         # Encode
         encoder_output = self._encode_on_die(die_name, mel_features)
 
-        # Initial decoder input
-        decoder_input = np.array([[
+        # Initial prompt tokens
+        prompt_tokens = [
             self.SOT_TOKEN,
             self.EN_TOKEN,
             self.TRANSCRIBE_TOKEN,
             self.NO_TIMESTAMPS_TOKEN
-        ]], dtype=np.int64)
+        ]
 
         generated_tokens = []
 
-        # Autoregressive generation
-        for _ in range(self.max_new_tokens):
+        # Process prompt tokens one by one (for stateful KV-cache)
+        for token in prompt_tokens:
+            decoder_input = np.array([[token]], dtype=np.int64)
             logits = self._decode_step_on_die(die_name, decoder_input, encoder_output)
 
-            # Get last token logits and argmax
-            next_token_logits = logits[0, -1, :]
-            next_token = int(np.argmax(next_token_logits))
+        # Continue autoregressive generation from last prompt token's output
+        next_token_logits = logits[0, -1, :]
+        next_token = int(np.argmax(next_token_logits))
 
+        # Autoregressive generation
+        for _ in range(self.max_new_tokens):
             if next_token == self.EOT_TOKEN:
                 break
 
             generated_tokens.append(next_token)
             decoder_input = np.array([[next_token]], dtype=np.int64)
+            logits = self._decode_step_on_die(die_name, decoder_input, encoder_output)
+
+            next_token_logits = logits[0, -1, :]
+            next_token = int(np.argmax(next_token_logits))
 
         return self._decode_tokens(generated_tokens)
 
