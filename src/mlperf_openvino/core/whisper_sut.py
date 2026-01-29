@@ -965,11 +965,14 @@ class WhisperHybridEncoder:
 
         # Load model
         core = ov.Core()
+        logger.info(f"  Loading encoder model from {model_path}")
         self.model = core.read_model(str(model_path))
 
         # Get input/output names
         self.input_names = [inp.get_any_name() for inp in self.model.inputs]
         self.output_names = [out.get_any_name() for out in self.model.outputs]
+        logger.info(f"  Encoder inputs: {self.input_names}")
+        logger.info(f"  Encoder outputs: {self.output_names}")
 
         # Find main input name
         self.main_input_name = "input_features"
@@ -977,6 +980,12 @@ class WhisperHybridEncoder:
             if "input_features" in name or "input" in name.lower():
                 self.main_input_name = name
                 break
+
+        # Check device availability
+        available_devices = core.available_devices
+        logger.info(f"  Available devices: {available_devices}")
+        if device not in available_devices and not any(d.startswith(device) for d in available_devices):
+            raise RuntimeError(f"Device {device} not available. Available: {available_devices}")
 
         # Reshape to static shape for accelerators (NPU, etc.)
         # Whisper encoder expects (batch=1, n_mels=128, time=3000)
@@ -994,10 +1003,17 @@ class WhisperHybridEncoder:
             except Exception as e:
                 logger.warning(f"  Could not reshape encoder: {e}")
 
-        # Compile model
+        # Compile model - for non-CPU devices, use minimal config to avoid crashes
         logger.info(f"Compiling encoder on {device}...")
+        if device != "CPU":
+            # Use minimal config for accelerators - only CACHE_DIR
+            compile_config = {"CACHE_DIR": self.ov_config.get("CACHE_DIR", "")}
+            logger.info(f"  Using minimal config for accelerator: {compile_config}")
+        else:
+            compile_config = self.ov_config
+
         try:
-            self.compiled_model = core.compile_model(self.model, device, self.ov_config)
+            self.compiled_model = core.compile_model(self.model, device, compile_config)
             self.request = self.compiled_model.create_infer_request()
             logger.info(f"Encoder compiled on {device}")
         except Exception as e:
