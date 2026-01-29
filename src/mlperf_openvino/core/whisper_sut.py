@@ -1003,14 +1003,15 @@ class WhisperHybridEncoder:
             except Exception as e:
                 logger.warning(f"  Could not reshape encoder: {e}")
 
-        # Compile model - for non-CPU devices, use minimal config to avoid crashes
+        # Compile model - use provided config for accelerators, minimal for CPU
         logger.info(f"Compiling encoder on {device}...")
-        if device != "CPU":
-            # Use minimal config for accelerators - only CACHE_DIR
-            compile_config = {"CACHE_DIR": self.ov_config.get("CACHE_DIR", "")}
-            logger.info(f"  Using minimal config for accelerator: {compile_config}")
+        if device == "CPU":
+            # Use minimal config for CPU
+            compile_config = {"CACHE_DIR": ""}
         else:
+            # Use user-provided config (-p options) for accelerators
             compile_config = self.ov_config
+            logger.info(f"  Using config for accelerator: {compile_config}")
 
         try:
             self.compiled_model = core.compile_model(self.model, device, compile_config)
@@ -1480,6 +1481,9 @@ class WhisperHybridModel:
         generated_ids = decoder_input_ids.clone()
         past_key_values = None
 
+        # Debug: log first few steps
+        debug_tokens = []
+
         for step in range(max_new_tokens):
             # Prepare inputs:
             # - First step: pass all initial tokens
@@ -1505,6 +1509,10 @@ class WhisperHybridModel:
 
             next_tokens = next_token_logits.argmax(dim=-1)
 
+            # Debug: collect first 10 tokens
+            if step < 10:
+                debug_tokens.append(next_tokens.item())
+
             # Append to generated
             generated_ids = torch.cat([generated_ids, next_tokens.unsqueeze(-1)], dim=-1)
 
@@ -1515,6 +1523,10 @@ class WhisperHybridModel:
             # Check for EOT
             if (next_tokens == EOT_TOKEN).all():
                 break
+
+        # Debug: log generated tokens for first sample
+        if debug_tokens:
+            logger.info(f"First 10 generated tokens: {debug_tokens}")
 
         return generated_ids
 
@@ -1592,27 +1604,24 @@ class WhisperMultiDieSUT:
         """Discover available dies for the specified device.
 
         Args:
-            device: Base device name (e.g., "NPU", "GPU")
+            device: Base device name (e.g., "NPU", "GPU", "X")
 
         Returns:
-            List of device dies (e.g., ["NPU.0", "NPU.1"]) or [device] if no dies found
+            List of device dies with numbers only (e.g., ["X.0", "X.1"])
+            Returns empty list if no numbered dies found.
         """
         import openvino as ov
+        import re
 
         core = ov.Core()
         devices = core.available_devices
 
-        # Find dies for this device (format: DEVICE.X)
-        device_dies = [d for d in devices if d.startswith(f"{device}.")]
+        # Find dies for this device (format: DEVICE.N where N is a number)
+        # Only return dies with numeric suffix (X.0, X.1, etc.)
+        pattern = re.compile(rf"^{re.escape(device)}\.(\d+)$")
+        device_dies = [d for d in devices if pattern.match(d)]
 
-        if device_dies:
-            return sorted(device_dies)
-
-        # Check if base device exists
-        if device in devices:
-            return [device]
-
-        return []
+        return sorted(device_dies)
 
     def _setup_models(self) -> None:
         """Setup hybrid models with encoder on accelerator and decoder on CPU.
@@ -1741,6 +1750,12 @@ class WhisperMultiDieSUT:
 
         # Decode tokens to text
         text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+
+        # Debug: log first sample's output
+        if self._sample_count == 0:
+            logger.info(f"First sample output: '{text[:100]}...' (len={len(text)})")
+            logger.info(f"Generated IDs shape: {generated_ids.shape}, first tokens: {generated_ids[0, :15].tolist()}")
+
         return text
 
     def _start_progress(self, total: int, desc: str = "Processing") -> None:
