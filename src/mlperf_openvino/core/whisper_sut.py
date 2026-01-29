@@ -1559,36 +1559,25 @@ class WhisperHybridModel:
         generated_ids = decoder_input_ids.clone()
         past_key_values = None
 
-        # Phase 1: Feed forced tokens ONE AT A TIME to build decoder state.
-        # HF generate() feeds tokens individually (forced_decoder_ids mechanism).
-        # Stateful OpenVINO models expect single-token input for correct
-        # KV-cache accumulation — feeding multiple tokens at once breaks state.
-        forced_tokens = [SOT_TOKEN, language_token, task_token, NO_TIMESTAMPS_TOKEN]
-        for i, token_id in enumerate(forced_tokens):
-            token_input = torch.tensor(
-                [[token_id]], dtype=torch.long, device=device,
-            ).expand(batch_size, -1)
+        # === Prefill: feed ALL forced tokens at once (matches optimum-intel _prefill) ===
+        # optimum-intel sends the full init_tokens [SOT, lang, task, no_ts] in one call.
+        outputs = self.decoder(
+            input_ids=decoder_input_ids,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=encoder_attention_mask,
+            past_key_values=None,  # None → reset_state() for stateful
+        )
+        if not self.decoder.stateful:
+            past_key_values = outputs.past_key_values
 
-            pkv = None if i == 0 else ((),) if self.decoder.stateful else past_key_values
-            outputs = self.decoder(
-                input_ids=token_input,
-                encoder_hidden_states=encoder_hidden_states,
-                encoder_attention_mask=encoder_attention_mask,
-                past_key_values=pkv,
-            )
-            if not self.decoder.stateful:
-                past_key_values = outputs.past_key_values
-
-        # Phase 2: Free generation — first real prediction from last forced token
+        # First free prediction from prefill logits
         logits = outputs.logits
         next_token_logits = logits[:, -1, :] if logits.dim() == 3 else logits
 
         vocab_size = next_token_logits.shape[-1]
-        # Suppress non-speech tokens
         for token_id in SUPPRESS_TOKENS:
             if token_id < vocab_size:
                 next_token_logits[:, token_id] = float('-inf')
-        # Suppress begin tokens at first generated position
         for token_id in BEGIN_SUPPRESS_TOKENS:
             if token_id < vocab_size:
                 next_token_logits[:, token_id] = float('-inf')
@@ -1599,7 +1588,7 @@ class WhisperHybridModel:
         if (next_tokens == EOT_TOKEN).all():
             return generated_ids
 
-        # Continue generating freely (one token at a time)
+        # === Auto-regressive generation: one token at a time ===
         for step in range(1, max_new_tokens):
             input_ids = generated_ids[:, -1:]
 
@@ -1614,7 +1603,6 @@ class WhisperHybridModel:
             logits = outputs.logits
             next_token_logits = logits[:, -1, :] if logits.dim() == 3 else logits
 
-            # Suppress non-speech tokens (always)
             for token_id in SUPPRESS_TOKENS:
                 if token_id < vocab_size:
                     next_token_logits[:, token_id] = float('-inf')
