@@ -1123,6 +1123,12 @@ class WhisperHybridDecoder:
         self.request = self.compiled_model.create_infer_request()
 
         logger.info(f"Decoder compiled on {device} (stateful={self.stateful}, use_past={self.use_past})")
+        logger.info(f"  Decoder input names: {self.input_names}")
+        logger.info(f"  Decoder output names: {self.output_names}")
+        if self.key_value_input_names:
+            logger.info(f"  KV-cache inputs: {self.key_value_input_names}")
+        if self.key_value_output_names:
+            logger.info(f"  KV-cache outputs: {self.key_value_output_names}")
 
     def __call__(
         self,
@@ -1557,6 +1563,16 @@ class WhisperHybridModel:
         generated_ids = decoder_input_ids.clone()
         past_key_values = None  # None = reset state, non-None = continue
 
+        # Initialize decoder attention mask (grows each step like HF generate())
+        # Must represent full sequence length including cached positions
+        decoder_attention_mask = None
+        if "attention_mask" in self.decoder.input_names:
+            decoder_attention_mask = torch.ones(
+                (batch_size, generated_ids.shape[1]),
+                dtype=torch.long,
+                device=device,
+            )
+
         for step in range(max_new_tokens):
             # Prepare inputs:
             # - First step: pass all initial tokens
@@ -1565,14 +1581,12 @@ class WhisperHybridModel:
                 input_ids = generated_ids
             else:
                 input_ids = generated_ids[:, -1:]
-
-            # Create decoder attention mask if required
-            # For KV-cache models, attention_mask should match input_ids shape
-            decoder_attention_mask = None
-            if "attention_mask" in self.decoder.input_names:
-                # Attention mask must match input_ids shape (not full sequence)
-                # KV-cache handles the "memory" of previous tokens
-                decoder_attention_mask = torch.ones_like(input_ids)
+                # Grow attention mask by one position (match HF generate behavior)
+                if decoder_attention_mask is not None:
+                    decoder_attention_mask = torch.cat([
+                        decoder_attention_mask,
+                        decoder_attention_mask.new_ones((batch_size, 1)),
+                    ], dim=-1)
 
             # For stateful models: pass None only on first step to reset state,
             # then pass empty tuple to signal "continue with existing state"
