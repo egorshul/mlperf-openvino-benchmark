@@ -1757,10 +1757,19 @@ class WhisperMultiDieSUT:
             # Add user-specified device properties (-p options) for accelerator only
             for key, value in self.config.openvino.device_properties.items():
                 accelerator_config[key] = value
-        # Find decoder path (prefer decoder_with_past if exists)
-        decoder_with_past = self.model_path / "decoder_with_past_model.xml"
-        decoder_model_path = decoder_with_past if decoder_with_past.exists() else self.decoder_path
-
+        # Find decoder path (prefer decoder_with_past for stateful KV-cache)
+        # Check multiple naming conventions (optimum-cli uses openvino_ prefix)
+        decoder_candidates = [
+            self.model_path / "decoder_with_past_model.xml",
+            self.model_path / "openvino_decoder_with_past_model.xml",
+            self.model_path / "decoder_model_merged.xml",
+            self.model_path / "openvino_decoder_model_merged.xml",
+        ]
+        decoder_model_path = self.decoder_path  # fallback to decoder without past
+        for candidate in decoder_candidates:
+            if candidate.exists():
+                decoder_model_path = candidate
+                break
         # Create shared decoder on CPU (one instance)
         cpu_decoder = WhisperHybridDecoder(
             model_path=decoder_model_path,
