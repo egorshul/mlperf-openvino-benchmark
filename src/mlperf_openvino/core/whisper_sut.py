@@ -1466,6 +1466,23 @@ class WhisperHybridModel:
             "it": 50274, "id": 50275, "hi": 50276, "fi": 50277, "vi": 50278,
         }
 
+        # Suppress tokens from Whisper generation_config.json
+        # These are non-speech tokens that should never appear in transcription
+        SUPPRESS_TOKENS = [
+            1, 2, 7, 8, 9, 10, 14, 25, 26, 27, 28, 29, 31, 58, 59, 60, 61, 62,
+            63, 90, 91, 92, 93, 359, 503, 522, 542, 873, 893, 902, 918, 922,
+            931, 1350, 1853, 1982, 2460, 2627, 3246, 3253, 3268, 3536, 3846,
+            3961, 4183, 4667, 6585, 6647, 7273, 9061, 9383, 10428, 10929,
+            11938, 12033, 12331, 12562, 13793, 14157, 14635, 15265, 15618,
+            16553, 16604, 18362, 18956, 20075, 21675, 22520, 26130, 26161,
+            26435, 28279, 29464, 31650, 32302, 32470, 36865, 42863, 47425,
+            49870, 50254, 50258, 50360, 50361, 50362
+        ]
+
+        # Begin suppress tokens - suppress at first generated position only
+        # 220 = space, 50257 = EOT (prevent empty transcriptions)
+        BEGIN_SUPPRESS_TOKENS = [220, 50257]
+
         batch_size = input_features.shape[0]
         device = input_features.device if hasattr(input_features, 'device') else 'cpu'
 
@@ -1547,20 +1564,18 @@ class WhisperHybridModel:
             else:
                 next_token_logits = logits
 
-            # Suppress tokens that shouldn't appear at certain positions
-            # This is critical for Whisper - without suppression, model outputs EOT immediately
-            # Based on Whisper's generation_config.json:
-            # - begin_suppress_tokens: suppress at the very first generated token
-            # - suppress_tokens: suppress always (non-speech tokens)
+            # Suppress tokens based on Whisper's generation_config.json:
+            # 1. SUPPRESS_TOKENS: always suppress (non-speech tokens)
+            # 2. BEGIN_SUPPRESS_TOKENS: suppress only at first generated position
 
-            # Begin suppress tokens - only suppress at first generated position (step 0)
-            # Most importantly: suppress EOT (50257) to prevent empty transcriptions
-            # Also suppress leading space (220)
-            begin_suppress_tokens = [220, 50257]  # 220 = space, 50257 = EOT
+            # Always suppress non-speech tokens
+            for token_id in SUPPRESS_TOKENS:
+                if token_id < next_token_logits.shape[-1]:
+                    next_token_logits[:, token_id] = float('-inf')
 
-            # Apply suppression only on first step
+            # On first step, also suppress begin tokens (space, EOT)
             if step == 0:
-                for token_id in begin_suppress_tokens:
+                for token_id in BEGIN_SUPPRESS_TOKENS:
                     if token_id < next_token_logits.shape[-1]:
                         next_token_logits[:, token_id] = float('-inf')
 
