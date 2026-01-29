@@ -1166,7 +1166,8 @@ class WhisperHybridDecoder:
             self.request.reset_state()
             self._past_length = 0
             batch_size = input_ids_np.shape[0]
-            self.next_beam_idx = np.arange(batch_size, dtype=np.int32)
+            # Use int (int64 on 64-bit) to match optimum-intel
+            self.next_beam_idx = np.arange(batch_size, dtype=int)
 
         # Prepare inputs
         inputs = {"input_ids": input_ids_np}
@@ -1218,7 +1219,8 @@ class WhisperHybridDecoder:
             if self.next_beam_idx is not None:
                 inputs["beam_idx"] = self.next_beam_idx
             else:
-                inputs["beam_idx"] = np.arange(batch_size, dtype=np.int32)
+                # Use int (int64) to match optimum-intel
+                inputs["beam_idx"] = np.arange(batch_size, dtype=int)
 
         # Add past key values for non-stateful models
         if past_key_values is not None and not self.stateful:
@@ -1232,11 +1234,12 @@ class WhisperHybridDecoder:
                 else:
                     inputs[name] = value
 
-        # Run inference
-        self.request.infer(inputs)
+        # Run inference (use start_async + wait like optimum-intel)
+        self.request.start_async(inputs, share_inputs=True)
+        self.request.wait()
 
-        # Get logits
-        logits = torch.from_numpy(self.request.get_tensor("logits").data.copy())
+        # Get logits (clone to ensure we own the data, like optimum-intel)
+        logits = torch.from_numpy(self.request.get_tensor("logits").data).clone()
         self._past_length += input_ids_np.shape[1]
 
         # Get output past_key_values (for non-stateful models)
@@ -1258,7 +1261,8 @@ class WhisperHybridDecoder:
     def _reorder_cache(self, past_key_values, beam_idx):
         """Reorder cache for beam search."""
         if self.stateful:
-            self.next_beam_idx = np.array(beam_idx, dtype=np.int32)
+            # Use int (int64) to match optimum-intel
+            self.next_beam_idx = np.array(beam_idx, dtype=int)
             return past_key_values
         else:
             reordered = ()
