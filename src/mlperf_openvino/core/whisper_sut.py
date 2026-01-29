@@ -1492,6 +1492,11 @@ class WhisperHybridModel:
         logger.info(f"Encoder output shape: {encoder_outputs.last_hidden_state.shape}")
         logger.info(f"Encoder output stats: min={encoder_outputs.last_hidden_state.min():.4f}, max={encoder_outputs.last_hidden_state.max():.4f}, mean={encoder_outputs.last_hidden_state.mean():.4f}")
 
+        # Debug: compare with CPU encoder on first call (if available)
+        if hasattr(self, '_cpu_test_encoder') and self._cpu_test_encoder is not None:
+            # This is set by WhisperMultiDieSUT
+            pass  # Comparison will be done in _process_sample
+
         # Initialize decoder with special tokens
         # [SOT, language, task, no_timestamps]
         task_token = TRANSCRIBE_TOKEN if task == "transcribe" else TRANSLATE_TOKEN
@@ -1745,6 +1750,23 @@ class WhisperMultiDieSUT:
             )
             self._models.append(("CPU", model))
 
+        # Debug: compare with CPU encoder output for first sample
+        if self._sample_count == 0 and target_device != "CPU":
+            logger.info("Running CPU encoder for comparison...")
+            try:
+                cpu_test_encoder = WhisperHybridEncoder(
+                    model_path=self.encoder_path,
+                    device="CPU",
+                    ov_config={"CACHE_DIR": ""},
+                )
+                self._cpu_test_encoder = cpu_test_encoder
+                logger.info("CPU test encoder ready for comparison")
+            except Exception as e:
+                logger.warning(f"Could not create CPU test encoder: {e}")
+                self._cpu_test_encoder = None
+        else:
+            self._cpu_test_encoder = None
+
         logger.info(f"Whisper Multi-Die SUT ready with {len(self._models)} model(s)")
 
     def _get_next_model(self) -> Tuple[str, Any]:
@@ -1768,6 +1790,49 @@ class WhisperMultiDieSUT:
         # Ensure correct shape (batch, n_mels, time)
         if input_features.dim() == 2:
             input_features = input_features.unsqueeze(0)
+
+        # Debug: Compare X encoder vs CPU encoder on first sample
+        if self._sample_count == 0 and hasattr(self, '_cpu_test_encoder') and self._cpu_test_encoder is not None:
+            logger.info("=== Comparing X encoder vs CPU encoder ===")
+
+            # Run X encoder
+            x_output = model.encoder(input_features)
+            x_hidden = x_output.last_hidden_state
+
+            # Run CPU encoder
+            cpu_output = self._cpu_test_encoder(input_features)
+            cpu_hidden = cpu_output.last_hidden_state
+
+            # Compare
+            diff = (x_hidden - cpu_hidden).abs()
+            logger.info(f"X encoder stats: min={x_hidden.min():.4f}, max={x_hidden.max():.4f}, mean={x_hidden.mean():.4f}")
+            logger.info(f"CPU encoder stats: min={cpu_hidden.min():.4f}, max={cpu_hidden.max():.4f}, mean={cpu_hidden.mean():.4f}")
+            logger.info(f"Difference stats: min={diff.min():.4f}, max={diff.max():.4f}, mean={diff.mean():.4f}")
+
+            # Test decoder with CPU encoder output
+            logger.info("Testing decoder with CPU encoder output...")
+            cpu_decoder_input = cpu_hidden.numpy().astype(np.float32)
+
+            # Reset decoder state
+            model.decoder.request.reset_state()
+            model.decoder._past_length = 0
+            model.decoder.next_beam_idx = np.arange(1, dtype=np.int32)
+
+            # Run decoder with CPU encoder output
+            test_input_ids = np.array([[50258, 50259, 50359, 50363]], dtype=np.int32)
+            test_inputs = {
+                "input_ids": test_input_ids,
+                "encoder_hidden_states": cpu_decoder_input,
+                "beam_idx": np.array([0], dtype=np.int32),
+            }
+            model.decoder.request.infer(test_inputs)
+            cpu_logits = model.decoder.request.get_tensor("logits").data.copy()
+            cpu_last_logits = torch.from_numpy(cpu_logits[0, -1])
+            top5_values, top5_indices = torch.topk(cpu_last_logits, 5)
+            logger.info(f"With CPU encoder - Top 5 tokens: {top5_indices.tolist()} with logits {top5_values.tolist()}")
+
+            # Clear test encoder to free memory
+            self._cpu_test_encoder = None
 
         # Generate transcription using model.generate() - handles KV-cache automatically
         generated_ids = model.generate(
