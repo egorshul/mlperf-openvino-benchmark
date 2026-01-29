@@ -1121,13 +1121,26 @@ class WhisperMultiDieSUT:
             logger.info("Reshaping decoder model to static shapes for NPU...")
             decoder_model.reshape(decoder_shapes)
 
+        # Track if decoder needs CPU fallback
+        self._decoder_on_cpu = False
+        cpu_decoder = None
+
         # Compile on each die
         for die_name in self._active_dies:
             logger.info(f"  Compiling encoder on {die_name}...")
             compiled_encoder = core.compile_model(encoder_model, die_name, compile_props)
 
             logger.info(f"  Compiling decoder on {die_name}...")
-            compiled_decoder = core.compile_model(decoder_model, die_name, compile_props)
+            try:
+                compiled_decoder = core.compile_model(decoder_model, die_name, compile_props)
+            except Exception as e:
+                if not self._decoder_on_cpu:
+                    logger.warning(f"  Decoder compilation failed on {die_name}: {e}")
+                    logger.warning("  Falling back to CPU for decoder (encoder stays on NPU)")
+                    # Compile decoder on CPU once (shared between all dies)
+                    cpu_decoder = core.compile_model(decoder_model, "CPU", {})
+                    self._decoder_on_cpu = True
+                compiled_decoder = cpu_decoder
 
             # Get optimal number of inference requests
             try:
@@ -1135,6 +1148,7 @@ class WhisperMultiDieSUT:
             except Exception:
                 optimal_nireq = 4
 
+            # Each die gets its own infer request (even when decoder is on CPU)
             self._die_contexts[die_name] = {
                 "encoder": compiled_encoder,
                 "decoder": compiled_decoder,
@@ -1142,6 +1156,9 @@ class WhisperMultiDieSUT:
                 "decoder_request": compiled_decoder.create_infer_request(),
                 "optimal_nireq": optimal_nireq,
             }
+
+        if self._decoder_on_cpu:
+            logger.info("Note: Decoder running on CPU, encoder on NPU dies")
 
         # Discover decoder input names from first die
         self._decoder_input_names = self._discover_decoder_inputs()
