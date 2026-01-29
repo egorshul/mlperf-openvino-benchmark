@@ -937,12 +937,558 @@ class WhisperEncoderOnlySUT:
         self._sample_count = 0
 
 
+class WhisperHybridEncoder:
+    """
+    OpenVINO Encoder wrapper for hybrid NPU+CPU inference.
+
+    Based on optimum-intel OVEncoder, but allows separate device compilation.
+    """
+
+    def __init__(
+        self,
+        model_path: Union[str, Path],
+        device: str = "NPU",
+        ov_config: Optional[Dict[str, str]] = None,
+    ):
+        """
+        Initialize encoder.
+
+        Args:
+            model_path: Path to encoder_model.xml
+            device: Device to compile on (NPU, CPU)
+            ov_config: OpenVINO configuration
+        """
+        import openvino as ov
+
+        self.device = device
+        self.ov_config = ov_config or {}
+
+        # Load model
+        core = ov.Core()
+        self.model = core.read_model(str(model_path))
+
+        # Get input/output names
+        self.input_names = [inp.get_any_name() for inp in self.model.inputs]
+        self.output_names = [out.get_any_name() for out in self.model.outputs]
+
+        # Find main input name
+        self.main_input_name = "input_features"
+        for name in self.input_names:
+            if "input_features" in name or "input" in name.lower():
+                self.main_input_name = name
+                break
+
+        # Compile model
+        logger.info(f"Compiling encoder on {device}...")
+        self.compiled_model = core.compile_model(self.model, device, self.ov_config)
+        self.request = self.compiled_model.create_infer_request()
+
+        logger.info(f"Encoder compiled on {device}")
+
+    def __call__(self, input_features, **kwargs):
+        """
+        Run encoder inference.
+
+        Args:
+            input_features: Mel spectrogram tensor (batch, n_mels, time)
+
+        Returns:
+            BaseModelOutput with last_hidden_state
+        """
+        import torch
+        from transformers.modeling_outputs import BaseModelOutput
+
+        # Convert to numpy if tensor
+        if hasattr(input_features, 'numpy'):
+            input_features_np = input_features.numpy()
+        else:
+            input_features_np = input_features
+
+        # Run inference
+        inputs = {self.main_input_name: input_features_np}
+        self.request.infer(inputs)
+
+        # Get output
+        last_hidden_state = self.request.get_output_tensor(0).data.copy()
+        last_hidden_state = torch.from_numpy(last_hidden_state)
+
+        return BaseModelOutput(last_hidden_state=last_hidden_state)
+
+
+class WhisperHybridDecoder:
+    """
+    OpenVINO Decoder wrapper with stateful KV-cache support.
+
+    Based on optimum-intel OVDecoder, but allows separate device compilation.
+    Supports both stateful (with internal KV-cache) and stateless models.
+    """
+
+    def __init__(
+        self,
+        model_path: Union[str, Path],
+        device: str = "CPU",
+        ov_config: Optional[Dict[str, str]] = None,
+    ):
+        """
+        Initialize decoder.
+
+        Args:
+            model_path: Path to decoder_model.xml or decoder_with_past_model.xml
+            device: Device to compile on (CPU recommended for decoder)
+            ov_config: OpenVINO configuration
+        """
+        import openvino as ov
+
+        self.device = device
+        self.ov_config = ov_config or {}
+
+        # Load model
+        core = ov.Core()
+        self.model = core.read_model(str(model_path))
+
+        # Get input/output names
+        self.input_names = [inp.get_any_name() for inp in self.model.inputs]
+        self.output_names = [out.get_any_name() for out in self.model.outputs]
+
+        # Detect KV-cache inputs/outputs
+        self.key_value_input_names = [k for k in self.input_names if "key_values" in k or "past_key" in k]
+        self.key_value_output_names = [k for k in self.output_names if "key_values" in k or "present" in k]
+
+        # Check if model is stateful (has internal state for KV-cache)
+        self.stateful = any(self.model.get_variable_state(state.name) is not None
+                          for state in self.model.outputs if hasattr(state, 'name'))
+        try:
+            # Actually check for state variables
+            self.stateful = len(self.model.get_variables()) > 0
+        except Exception:
+            self.stateful = False
+
+        self.use_past = len(self.key_value_input_names) > 0 or self.stateful
+        self.next_beam_idx = None
+        self._past_length = 0
+
+        # Compile model
+        logger.info(f"Compiling decoder on {device}...")
+        self.compiled_model = core.compile_model(self.model, device, self.ov_config)
+        self.request = self.compiled_model.create_infer_request()
+
+        logger.info(f"Decoder compiled on {device} (stateful={self.stateful}, use_past={self.use_past})")
+
+    def __call__(
+        self,
+        input_ids,
+        encoder_hidden_states=None,
+        attention_mask=None,
+        encoder_attention_mask=None,
+        past_key_values=None,
+        cache_position=None,
+        **kwargs,
+    ):
+        """
+        Run decoder inference step.
+
+        Args:
+            input_ids: Current decoder input IDs
+            encoder_hidden_states: Encoder output
+            attention_mask: Decoder attention mask
+            encoder_attention_mask: Encoder attention mask
+            past_key_values: Previous KV-cache (for non-stateful models)
+            cache_position: Position in sequence
+
+        Returns:
+            Seq2SeqLMOutput with logits and past_key_values
+        """
+        import torch
+        from transformers.modeling_outputs import Seq2SeqLMOutput
+
+        # Convert tensors to numpy
+        if hasattr(input_ids, 'numpy'):
+            input_ids_np = input_ids.numpy()
+        else:
+            input_ids_np = input_ids
+
+        # Reset state for first token (when no past)
+        if self.stateful and past_key_values is None:
+            self.request.reset_state()
+            self._past_length = 0
+            batch_size = input_ids_np.shape[0]
+            self.next_beam_idx = np.arange(batch_size, dtype=np.int32)
+
+        # Prepare inputs
+        inputs = {"input_ids": input_ids_np}
+
+        # Add encoder hidden states
+        if encoder_hidden_states is not None:
+            if hasattr(encoder_hidden_states, 'numpy'):
+                encoder_hidden_states_np = encoder_hidden_states.numpy()
+            else:
+                encoder_hidden_states_np = encoder_hidden_states
+
+            # Find the correct input name for encoder hidden states
+            for name in self.input_names:
+                if "encoder_hidden" in name or "encoder_output" in name:
+                    inputs[name] = encoder_hidden_states_np
+                    break
+            else:
+                if "encoder_hidden_states" in self.input_names:
+                    inputs["encoder_hidden_states"] = encoder_hidden_states_np
+
+        # Add attention mask if required
+        if attention_mask is not None and "attention_mask" in self.input_names:
+            if hasattr(attention_mask, 'numpy'):
+                inputs["attention_mask"] = attention_mask.numpy()
+            else:
+                inputs["attention_mask"] = attention_mask
+
+        # Add encoder attention mask if required
+        if encoder_attention_mask is not None and "encoder_attention_mask" in self.input_names:
+            if hasattr(encoder_attention_mask, 'numpy'):
+                inputs["encoder_attention_mask"] = encoder_attention_mask.numpy()
+            else:
+                inputs["encoder_attention_mask"] = encoder_attention_mask
+
+        # Add cache position if required
+        if "cache_position" in self.input_names:
+            if cache_position is None:
+                past_len = self._past_length if self.stateful else 0
+                cache_position = np.arange(past_len, past_len + input_ids_np.shape[1])
+            elif hasattr(cache_position, 'numpy'):
+                cache_position = cache_position.numpy()
+            inputs["cache_position"] = cache_position
+
+        # Add beam_idx for stateful models
+        if "beam_idx" in self.input_names:
+            batch_size = input_ids_np.shape[0]
+            if self.next_beam_idx is not None:
+                inputs["beam_idx"] = self.next_beam_idx
+            else:
+                inputs["beam_idx"] = np.arange(batch_size, dtype=np.int32)
+
+        # Add past key values for non-stateful models
+        if past_key_values is not None and not self.stateful:
+            # Flatten past_key_values
+            flat_past = tuple(
+                past_kv for layer_past in past_key_values for past_kv in layer_past
+            )
+            for name, value in zip(self.key_value_input_names, flat_past):
+                if hasattr(value, 'numpy'):
+                    inputs[name] = value.numpy()
+                else:
+                    inputs[name] = value
+
+        # Run inference
+        self.request.infer(inputs)
+
+        # Get logits
+        logits = torch.from_numpy(self.request.get_tensor("logits").data.copy())
+        self._past_length += input_ids_np.shape[1]
+
+        # Get output past_key_values (for non-stateful models)
+        out_past_key_values = ((),)
+        if not self.stateful and self.key_value_output_names:
+            out_past = tuple(
+                np.copy(self.request.get_tensor(key).data)
+                for key in self.key_value_output_names
+            )
+            # Reshape into layers format (2 tensors per layer: key, value)
+            num_per_layer = 2
+            out_past_key_values = tuple(
+                out_past[i:i + num_per_layer]
+                for i in range(0, len(out_past), num_per_layer)
+            )
+
+        return Seq2SeqLMOutput(logits=logits, past_key_values=out_past_key_values)
+
+    def _reorder_cache(self, past_key_values, beam_idx):
+        """Reorder cache for beam search."""
+        if self.stateful:
+            self.next_beam_idx = np.array(beam_idx, dtype=np.int32)
+            return past_key_values
+        else:
+            reordered = ()
+            for layer_past in past_key_values:
+                reordered += (
+                    tuple(np.take(past_state, beam_idx, 0) for past_state in layer_past[:2])
+                    + layer_past[2:],
+                )
+            return reordered
+
+    def _get_past_length(self, past_key_values=None):
+        """Get length of past cache."""
+        if self.stateful:
+            return self._past_length
+        if past_key_values is None or len(past_key_values) == 0:
+            return 0
+        return past_key_values[0][0].shape[-2]
+
+
+class WhisperHybridModel:
+    """
+    Whisper model with hybrid NPU+CPU execution.
+
+    Encoder runs on NPU for fast feature processing.
+    Decoder runs on CPU (NPU doesn't support all decoder ops).
+    Uses WhisperForConditionalGeneration.generate() for proper generation.
+    """
+
+    # Required attributes for WhisperForConditionalGeneration.generate()
+    main_input_name = "input_features"
+
+    def __init__(
+        self,
+        encoder: WhisperHybridEncoder,
+        decoder: WhisperHybridDecoder,
+        config,
+        generation_config=None,
+    ):
+        """
+        Initialize hybrid model.
+
+        Args:
+            encoder: WhisperHybridEncoder instance (on NPU)
+            decoder: WhisperHybridDecoder instance (on CPU)
+            config: WhisperConfig
+            generation_config: GenerationConfig
+        """
+        from transformers import GenerationConfig
+
+        self.encoder = encoder
+        self.decoder = decoder
+        self.config = config
+        self.generation_config = generation_config or GenerationConfig.from_model_config(config)
+
+        # Required attributes for generate()
+        self.device = "cpu"  # Outputs on CPU
+
+        # Dummy model attribute for Whisper generate() stride calculation
+        class DummyEncoder:
+            class Conv:
+                def __init__(self, stride):
+                    self.stride = stride
+            conv1 = Conv(stride=(1,))
+            conv2 = Conv(stride=(2,))
+
+        class DummyModel:
+            encoder = DummyEncoder()
+
+        self.model = DummyModel()
+
+    def get_encoder(self):
+        """Return encoder for generate()."""
+        return self.encoder
+
+    def get_decoder(self):
+        """Return decoder for generate()."""
+        return self.decoder
+
+    def can_generate(self):
+        """Model can generate text."""
+        return True
+
+    def forward(
+        self,
+        input_features=None,
+        decoder_input_ids=None,
+        encoder_outputs=None,
+        past_key_values=None,
+        attention_mask=None,
+        decoder_attention_mask=None,
+        cache_position=None,
+        **kwargs,
+    ):
+        """
+        Forward pass for generation.
+
+        Args:
+            input_features: Mel spectrogram (optional if encoder_outputs provided)
+            decoder_input_ids: Current decoder tokens
+            encoder_outputs: Pre-computed encoder outputs
+            past_key_values: KV-cache
+            attention_mask: Encoder attention mask
+            decoder_attention_mask: Decoder attention mask
+            cache_position: Position in cache
+
+        Returns:
+            Seq2SeqLMOutput with logits
+        """
+        # Run encoder if needed
+        if encoder_outputs is None:
+            encoder_outputs = self.encoder(input_features)
+
+        encoder_hidden_states = encoder_outputs.last_hidden_state
+
+        # Run decoder
+        decoder_outputs = self.decoder(
+            input_ids=decoder_input_ids,
+            encoder_hidden_states=encoder_hidden_states,
+            attention_mask=decoder_attention_mask,
+            past_key_values=past_key_values,
+            cache_position=cache_position,
+        )
+
+        return decoder_outputs
+
+    def __call__(self, *args, **kwargs):
+        """Make model callable."""
+        return self.forward(*args, **kwargs)
+
+    def prepare_inputs_for_generation(
+        self,
+        decoder_input_ids,
+        past_key_values=None,
+        use_cache=None,
+        encoder_outputs=None,
+        attention_mask=None,
+        decoder_attention_mask=None,
+        cache_position=None,
+        **kwargs,
+    ):
+        """Prepare inputs for generation step (from _OVModelForWhisper)."""
+        import torch
+
+        decoder_position_ids = None
+        if decoder_attention_mask is not None:
+            decoder_position_ids = (decoder_attention_mask.cumsum(-1) - 1).clamp(min=0)
+
+        past_length = 0
+        if past_key_values is not None:
+            past_length = self.decoder._get_past_length(past_key_values)
+            if decoder_input_ids.shape[1] > past_length:
+                remove_prefix_length = past_length
+            else:
+                remove_prefix_length = decoder_input_ids.shape[1] - 1
+            decoder_input_ids = decoder_input_ids[:, remove_prefix_length:]
+            if decoder_position_ids is not None:
+                decoder_position_ids = decoder_position_ids[:, remove_prefix_length:]
+                decoder_position_ids = decoder_position_ids.clone(memory_format=torch.contiguous_format)
+
+        if cache_position is None:
+            cache_position = torch.arange(
+                past_length, past_length + decoder_input_ids.shape[1], device=decoder_input_ids.device
+            )
+        elif use_cache:
+            cache_position = cache_position[-decoder_input_ids.shape[1]:]
+
+        decoder_input_ids = decoder_input_ids.contiguous()
+
+        return {
+            "encoder_outputs": encoder_outputs,
+            "past_key_values": past_key_values,
+            "decoder_input_ids": decoder_input_ids,
+            "use_cache": use_cache,
+            "decoder_attention_mask": decoder_attention_mask,
+            "decoder_position_ids": decoder_position_ids,
+            "cache_position": cache_position,
+        }
+
+    def _reorder_cache(self, past_key_values, beam_idx):
+        """Reorder cache for beam search."""
+        return self.decoder._reorder_cache(past_key_values, beam_idx)
+
+    def generate(
+        self,
+        input_features,
+        max_new_tokens: int = 440,
+        language: str = "en",
+        task: str = "transcribe",
+        **kwargs,
+    ):
+        """
+        Generate transcription tokens from mel spectrogram.
+
+        Uses greedy decoding with KV-cache for efficiency.
+
+        Args:
+            input_features: Mel spectrogram tensor (batch, n_mels, time)
+            max_new_tokens: Maximum tokens to generate
+            language: Language code
+            task: Task type ("transcribe" or "translate")
+
+        Returns:
+            Generated token IDs tensor
+        """
+        import torch
+
+        # Whisper special tokens (from WhisperTokenizer)
+        SOT_TOKEN = 50258  # Start of transcript
+        EOT_TOKEN = 50257  # End of transcript
+        TRANSCRIBE_TOKEN = 50359  # Transcribe task
+        TRANSLATE_TOKEN = 50358  # Translate task
+        NO_TIMESTAMPS_TOKEN = 50363  # No timestamps
+
+        # Language tokens (EN = 50259)
+        LANGUAGE_TOKENS = {
+            "en": 50259, "zh": 50260, "de": 50261, "es": 50262, "ru": 50263,
+            "ko": 50264, "fr": 50265, "ja": 50266, "pt": 50267, "tr": 50268,
+            "pl": 50269, "ca": 50270, "nl": 50271, "ar": 50272, "sv": 50273,
+            "it": 50274, "id": 50275, "hi": 50276, "fi": 50277, "vi": 50278,
+        }
+
+        batch_size = input_features.shape[0]
+        device = input_features.device if hasattr(input_features, 'device') else 'cpu'
+
+        # Run encoder
+        encoder_outputs = self.encoder(input_features)
+
+        # Initialize decoder with special tokens
+        # [SOT, language, task, no_timestamps]
+        task_token = TRANSCRIBE_TOKEN if task == "transcribe" else TRANSLATE_TOKEN
+        language_token = LANGUAGE_TOKENS.get(language, LANGUAGE_TOKENS["en"])
+
+        decoder_input_ids = torch.tensor(
+            [[SOT_TOKEN, language_token, task_token, NO_TIMESTAMPS_TOKEN]],
+            dtype=torch.long,
+            device=device,
+        ).expand(batch_size, -1)
+
+        # Generate tokens
+        generated_ids = decoder_input_ids.clone()
+        past_key_values = None
+
+        for step in range(max_new_tokens):
+            # Prepare inputs - only use last token if we have cache
+            if past_key_values is not None and self.decoder.stateful:
+                input_ids = generated_ids[:, -1:]
+            else:
+                input_ids = generated_ids
+
+            # Run decoder
+            outputs = self.decoder(
+                input_ids=input_ids,
+                encoder_hidden_states=encoder_outputs.last_hidden_state,
+                past_key_values=past_key_values,
+            )
+
+            # Get next token (greedy)
+            logits = outputs.logits
+            if logits.dim() == 3:
+                next_token_logits = logits[:, -1, :]
+            else:
+                next_token_logits = logits
+
+            next_tokens = next_token_logits.argmax(dim=-1)
+
+            # Append to generated
+            generated_ids = torch.cat([generated_ids, next_tokens.unsqueeze(-1)], dim=-1)
+
+            # Update past key values
+            past_key_values = outputs.past_key_values
+
+            # Check for EOT
+            if (next_tokens == EOT_TOKEN).all():
+                break
+
+        return generated_ids
+
+
 class WhisperMultiDieSUT:
     """
     System Under Test for Whisper ASR on multi-die NPU.
 
-    Uses OVModelForSpeechSeq2Seq from optimum-intel for correct generation.
-    Distributes inference across multiple NPU dies (or falls back to CPU).
+    Uses custom hybrid implementation:
+    - Encoder runs on NPU dies for fast mel spectrogram processing
+    - Decoder runs on CPU (NPU doesn't support all required ops)
+    - Uses WhisperForConditionalGeneration.generate() for correct token generation
     """
 
     def __init__(
@@ -959,7 +1505,7 @@ class WhisperMultiDieSUT:
 
         Args:
             config: Benchmark configuration
-            encoder_path: Path to encoder OpenVINO model (used to find model dir)
+            encoder_path: Path to encoder OpenVINO model
             decoder_path: Path to decoder OpenVINO model
             qsl: Query Sample Library
             scenario: MLPerf scenario
@@ -968,13 +1514,10 @@ class WhisperMultiDieSUT:
         if not LOADGEN_AVAILABLE:
             raise ImportError("MLPerf LoadGen is not installed")
 
-        if not OPTIMUM_AVAILABLE:
-            raise ImportError(
-                "Optimum-Intel is required. Install with: pip install optimum[openvino]"
-            )
-
         self.config = config
-        self.model_path = Path(encoder_path).parent  # Model directory
+        self.encoder_path = Path(encoder_path)
+        self.decoder_path = Path(decoder_path)
+        self.model_path = self.encoder_path.parent  # Model directory
         self.qsl = qsl
         self.scenario = scenario
         self.max_new_tokens = max_new_tokens
@@ -994,25 +1537,45 @@ class WhisperMultiDieSUT:
         self._sut_handle = None
         self._qsl_handle = None
 
-        # Multi-die models: list of (die_name, model) tuples
-        self._models: List[Tuple[str, Any]] = []
+        # Multi-die models: list of (die_name, WhisperHybridModel) tuples
+        self._models: List[Tuple[str, WhisperHybridModel]] = []
         self._model_index = 0
 
         # Processor (shared)
         self.processor = None
 
+        # Whisper config
+        self.whisper_config = None
+
         # Setup models
         self._setup_models()
 
+    def _discover_npu_dies(self) -> List[str]:
+        """Discover available NPU dies."""
+        import openvino as ov
+
+        core = ov.Core()
+        devices = core.available_devices
+
+        # Find NPU dies (format: NPU.X)
+        npu_dies = [d for d in devices if d.startswith("NPU.")]
+
+        if not npu_dies:
+            # Try generic NPU
+            if "NPU" in devices:
+                return ["NPU"]
+            return []
+
+        return sorted(npu_dies)
+
     def _setup_models(self) -> None:
-        """Setup OVModelForSpeechSeq2Seq on CPU.
+        """Setup hybrid models with encoder on NPU and decoder on CPU.
 
-        Note: NPU compilation of Whisper decoder fails due to unsupported ops.
-        Using CPU with optimum-intel ensures correct generation and accuracy.
+        Creates one encoder per NPU die, sharing a single CPU decoder.
         """
-        from transformers import AutoProcessor
+        from transformers import AutoProcessor, WhisperConfig
 
-        logger.info("Setting up Whisper model on CPU (decoder not supported on NPU)")
+        logger.info("Setting up Whisper hybrid model (encoder=NPU, decoder=CPU)")
 
         # Load processor
         try:
@@ -1021,17 +1584,78 @@ class WhisperMultiDieSUT:
             logger.info("Loading processor from openai/whisper-large-v3")
             self.processor = AutoProcessor.from_pretrained("openai/whisper-large-v3")
 
-        # Load model on CPU
-        logger.info("  Loading model...")
-        model = OVModelForSpeechSeq2Seq.from_pretrained(
-            self.model_path,
+        # Load Whisper config
+        try:
+            self.whisper_config = WhisperConfig.from_pretrained(self.model_path)
+        except Exception:
+            logger.info("Loading config from openai/whisper-large-v3")
+            self.whisper_config = WhisperConfig.from_pretrained("openai/whisper-large-v3")
+
+        # Discover NPU dies
+        npu_dies = self._discover_npu_dies()
+
+        # Build OV config for compilation
+        ov_config = {"CACHE_DIR": ""}
+        # Add user-specified properties
+        if hasattr(self.config, 'openvino') and self.config.openvino.properties:
+            for key, value in self.config.openvino.properties.items():
+                ov_config[key] = value
+
+        # Find decoder path (prefer decoder_with_past if exists)
+        decoder_with_past = self.model_path / "decoder_with_past_model.xml"
+        decoder_model_path = decoder_with_past if decoder_with_past.exists() else self.decoder_path
+
+        logger.info(f"Using decoder: {decoder_model_path}")
+
+        # Create shared decoder on CPU (one instance)
+        logger.info("Creating CPU decoder...")
+        cpu_decoder = WhisperHybridDecoder(
+            model_path=decoder_model_path,
             device="CPU",
             ov_config={"CACHE_DIR": ""},
-            compile=True,
         )
-        self._models.append(("CPU", model))
 
-        logger.info("Whisper SUT ready (CPU)")
+        if npu_dies:
+            # Create one encoder per NPU die
+            for die in npu_dies:
+                logger.info(f"Creating encoder on {die}...")
+                try:
+                    encoder = WhisperHybridEncoder(
+                        model_path=self.encoder_path,
+                        device=die,
+                        ov_config=ov_config,
+                    )
+
+                    # Create hybrid model
+                    model = WhisperHybridModel(
+                        encoder=encoder,
+                        decoder=cpu_decoder,
+                        config=self.whisper_config,
+                    )
+                    self._models.append((die, model))
+                    logger.info(f"  Model ready on {die}")
+
+                except Exception as e:
+                    logger.warning(f"Failed to create model on {die}: {e}")
+        else:
+            logger.warning("No NPU dies found, using CPU for encoder")
+
+        # Fallback to CPU if no NPU models created
+        if not self._models:
+            logger.info("Creating CPU encoder as fallback...")
+            cpu_encoder = WhisperHybridEncoder(
+                model_path=self.encoder_path,
+                device="CPU",
+                ov_config={"CACHE_DIR": ""},
+            )
+            model = WhisperHybridModel(
+                encoder=cpu_encoder,
+                decoder=cpu_decoder,
+                config=self.whisper_config,
+            )
+            self._models.append(("CPU", model))
+
+        logger.info(f"Whisper Multi-Die SUT ready with {len(self._models)} model(s)")
 
     def _get_next_model(self) -> Tuple[str, Any]:
         """Get next model in round-robin fashion."""
@@ -1201,4 +1825,4 @@ class WhisperMultiDieSUT:
         self._predictions.clear()
         self._query_count = 0
         self._sample_count = 0
-        self._die_index = 0
+        self._model_index = 0
