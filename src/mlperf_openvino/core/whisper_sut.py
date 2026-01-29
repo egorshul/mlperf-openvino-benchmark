@@ -1302,6 +1302,9 @@ class WhisperHybridModel:
         # Required attributes for generate()
         self.device = "cpu"  # Outputs on CPU
 
+        # Flag for one-time generation info logging
+        self._generation_logged = False
+
         # Dummy model attribute for Whisper generate() stride calculation
         class DummyEncoder:
             class Conv:
@@ -1485,6 +1488,25 @@ class WhisperHybridModel:
         # 220 = space, 50257 = EOT (prevent empty transcriptions)
         BEGIN_SUPPRESS_TOKENS = [220, 50257]
 
+        # Log generation config once
+        if not self._generation_logged:
+            logger.info("=" * 60)
+            logger.info("Whisper Generation Configuration:")
+            logger.info(f"  Encoder device: {self.encoder.device}")
+            logger.info(f"  Decoder device: {self.decoder.device}")
+            logger.info(f"  Decoder stateful: {self.decoder.stateful}")
+            logger.info(f"  Language: {language} (token {LANGUAGE_TOKENS.get(language, 'unknown')})")
+            logger.info(f"  Task: {task}")
+            logger.info(f"  Max new tokens: {max_new_tokens}")
+            logger.info(f"  Decoding: greedy (temperature=0)")
+            logger.info(f"  suppress_tokens: {len(SUPPRESS_TOKENS)} tokens")
+            logger.info(f"  begin_suppress_tokens: {BEGIN_SUPPRESS_TOKENS}")
+            logger.info(f"  Initial tokens: [SOT={SOT_TOKEN}, lang={LANGUAGE_TOKENS.get(language)}, "
+                       f"task={TRANSCRIBE_TOKEN if task == 'transcribe' else TRANSLATE_TOKEN}, "
+                       f"no_ts={NO_TIMESTAMPS_TOKEN}]")
+            logger.info("=" * 60)
+            self._generation_logged = True
+
         batch_size = input_features.shape[0]
         device = input_features.device if hasattr(input_features, 'device') else 'cpu'
 
@@ -1527,21 +1549,12 @@ class WhisperHybridModel:
                 input_ids = generated_ids[:, -1:]
 
             # Create decoder attention mask if required
-            # This tells the decoder which positions in the sequence are valid
+            # For KV-cache models, attention_mask should match input_ids shape
             decoder_attention_mask = None
             if "attention_mask" in self.decoder.input_names:
-                # For stateful models: full sequence length for first step, single token after
-                if self.decoder.stateful:
-                    # Current total sequence length (initial prompt + generated so far)
-                    seq_len = generated_ids.shape[1]
-                    decoder_attention_mask = torch.ones(
-                        (batch_size, seq_len),
-                        dtype=torch.long,
-                        device=device,
-                    )
-                else:
-                    # Non-stateful: just for current input
-                    decoder_attention_mask = torch.ones_like(input_ids)
+                # Attention mask must match input_ids shape (not full sequence)
+                # KV-cache handles the "memory" of previous tokens
+                decoder_attention_mask = torch.ones_like(input_ids)
 
             # For stateful models: pass None only on first step to reset state,
             # then pass empty tuple to signal "continue with existing state"
@@ -1777,7 +1790,18 @@ class WhisperMultiDieSUT:
             )
             self._models.append(("CPU", model))
 
-        logger.info(f"Whisper Multi-Die SUT ready with {len(self._models)} model(s)")
+        # Log configuration summary
+        encoder_devices = [die for die, _ in self._models]
+        logger.info("=" * 60)
+        logger.info("Whisper Multi-Die SUT Configuration:")
+        logger.info(f"  Encoder device(s): {encoder_devices}")
+        logger.info(f"  Decoder device: CPU")
+        logger.info(f"  Decoder model: {decoder_model_path.name}")
+        logger.info(f"  Stateful decoder: {cpu_decoder.stateful}")
+        logger.info(f"  Max new tokens: {self.max_new_tokens}")
+        logger.info(f"  Scenario: {self.scenario}")
+        logger.info(f"  Total models: {len(self._models)}")
+        logger.info("=" * 60)
 
     def _get_next_model(self) -> Tuple[str, Any]:
         """Get next model in round-robin fashion."""
