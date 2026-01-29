@@ -1479,6 +1479,14 @@ class WhisperHybridModel:
             49870, 50254, 50258, 50360, 50361, 50362
         ]
 
+        # Add ALL timestamp tokens (50364 onwards) - these must be suppressed
+        # in no_timestamps mode. Whisper has timestamp tokens from 50364 to ~51865
+        # (1500 tokens for 30-second audio at 20ms resolution, plus special ones)
+        TIMESTAMP_TOKENS = list(range(50364, 51865))
+
+        # Combine suppress lists
+        ALL_SUPPRESS_TOKENS = set(SUPPRESS_TOKENS + TIMESTAMP_TOKENS)
+
         # Begin suppress tokens - suppress at first generated position only
         # 220 = space, 50257 = EOT (prevent empty transcriptions)
         BEGIN_SUPPRESS_TOKENS = [220, 50257]
@@ -1565,18 +1573,19 @@ class WhisperHybridModel:
                 next_token_logits = logits
 
             # Suppress tokens based on Whisper's generation_config.json:
-            # 1. SUPPRESS_TOKENS: always suppress (non-speech tokens)
+            # 1. ALL_SUPPRESS_TOKENS: always suppress (non-speech + timestamp tokens)
             # 2. BEGIN_SUPPRESS_TOKENS: suppress only at first generated position
 
-            # Always suppress non-speech tokens
-            for token_id in SUPPRESS_TOKENS:
-                if token_id < next_token_logits.shape[-1]:
+            # Always suppress non-speech and timestamp tokens
+            vocab_size = next_token_logits.shape[-1]
+            for token_id in ALL_SUPPRESS_TOKENS:
+                if token_id < vocab_size:
                     next_token_logits[:, token_id] = float('-inf')
 
             # On first step, also suppress begin tokens (space, EOT)
             if step == 0:
                 for token_id in BEGIN_SUPPRESS_TOKENS:
-                    if token_id < next_token_logits.shape[-1]:
+                    if token_id < vocab_size:
                         next_token_logits[:, token_id] = float('-inf')
 
             next_tokens = next_token_logits.argmax(dim=-1)
