@@ -1182,6 +1182,8 @@ class WhisperMultiDieSUT:
                 result['attention_mask'] = name
             elif 'encoder_attention_mask' in name_lower:
                 result['encoder_attention_mask'] = name
+            elif 'beam_idx' in name_lower or 'beam_index' in name_lower:
+                result['beam_idx'] = name
 
         # Fallbacks
         if 'input_ids' not in result:
@@ -1196,6 +1198,7 @@ class WhisperMultiDieSUT:
                     result['encoder_hidden_states'] = name
                     break
 
+        logger.info(f"Decoder input mapping: {result}")
         return result
 
     def _load_tokenizer(self):
@@ -1252,6 +1255,9 @@ class WhisperMultiDieSUT:
             inputs[self._decoder_input_names['input_ids']] = input_ids
         if 'encoder_hidden_states' in self._decoder_input_names:
             inputs[self._decoder_input_names['encoder_hidden_states']] = encoder_hidden_states
+        # beam_idx is required for KV-cache attention - use [0] for greedy decoding
+        if 'beam_idx' in self._decoder_input_names:
+            inputs[self._decoder_input_names['beam_idx']] = np.array([0], dtype=np.int64)
 
         # Set inputs and infer
         for name, data in inputs.items():
