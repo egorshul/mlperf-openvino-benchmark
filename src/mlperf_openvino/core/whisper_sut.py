@@ -1748,32 +1748,42 @@ class WhisperMultiDieSUT:
             ov_config={"CACHE_DIR": ""},
         )
 
-        # Discover device dies
-        device_dies = self._discover_device_dies(target_device)
-
-        if device_dies:
-            for die in device_dies:
-                logger.info(f"Creating encoder on {die}...")
-                try:
-                    encoder = WhisperHybridEncoder(
-                        model_path=self.encoder_path,
-                        device=die,
-                        ov_config=accelerator_config,
-                    )
-
-                    # Create hybrid model
-                    model = WhisperHybridModel(
-                        encoder=encoder,
-                        decoder=cpu_decoder,
-                        config=self.whisper_config,
-                    )
-                    self._models.append((die, model))
-                    logger.info(f"  Model ready on {die}")
-
-                except Exception as e:
-                    logger.warning(f"Failed to create model on {die}: {e}")
+        # Determine which devices to use for encoders
+        # If device has die suffix (e.g., "X.0"), use it directly
+        # If device has no suffix (e.g., "X"), discover all dies
+        import re
+        if re.match(r"^.+\.\d+$", target_device):
+            # Specific die requested (e.g., "X.0") - use directly
+            device_dies = [target_device]
+            logger.info(f"Using specified device die: {target_device}")
         else:
-            logger.warning(f"No {target_device} devices found")
+            # No die suffix (e.g., "X") - discover all dies
+            device_dies = self._discover_device_dies(target_device)
+            if device_dies:
+                logger.info(f"Discovered {len(device_dies)} device dies: {device_dies}")
+            else:
+                logger.warning(f"No {target_device} dies found, will use CPU fallback")
+
+        for die in device_dies:
+            logger.info(f"Creating encoder on {die}...")
+            try:
+                encoder = WhisperHybridEncoder(
+                    model_path=self.encoder_path,
+                    device=die,
+                    ov_config=accelerator_config,
+                )
+
+                # Create hybrid model
+                model = WhisperHybridModel(
+                    encoder=encoder,
+                    decoder=cpu_decoder,
+                    config=self.whisper_config,
+                )
+                self._models.append((die, model))
+                logger.info(f"  Model ready on {die}")
+
+            except Exception as e:
+                logger.warning(f"Failed to create model on {die}: {e}")
 
         # Fallback to CPU if no models created
         if not self._models:
