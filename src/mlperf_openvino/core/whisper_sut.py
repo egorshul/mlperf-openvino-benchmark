@@ -1103,6 +1103,21 @@ class WhisperHybridDecoder:
         self.next_beam_idx = None
         self._past_length = 0
 
+        # Log all model inputs with details
+        logger.info(f"Decoder model inputs ({len(self.model.inputs)}):")
+        for inp in self.model.inputs:
+            name = inp.get_any_name()
+            shape = inp.get_partial_shape()
+            dtype = inp.get_element_type()
+            logger.info(f"  {name}: shape={shape}, dtype={dtype}")
+
+        logger.info(f"Decoder model outputs ({len(self.model.outputs)}):")
+        for out in self.model.outputs:
+            name = out.get_any_name()
+            shape = out.get_partial_shape()
+            dtype = out.get_element_type()
+            logger.info(f"  {name}: shape={shape}, dtype={dtype}")
+
         # Compile model
         logger.info(f"Compiling decoder on {device}...")
         self.compiled_model = core.compile_model(self.model, device, self.ov_config)
@@ -1220,10 +1235,18 @@ class WhisperHybridDecoder:
 
         # Debug: log inputs on first call
         if self._past_length == 0:
-            logger.info(f"Decoder inputs on first call: {list(inputs.keys())}")
+            logger.info(f"=== Decoder first call debug ===")
+            logger.info(f"Model expects inputs: {self.input_names}")
+            logger.info(f"We are providing: {list(inputs.keys())}")
+            missing = set(self.input_names) - set(inputs.keys())
+            if missing:
+                logger.warning(f"MISSING INPUTS: {missing}")
             for k, v in inputs.items():
                 if hasattr(v, 'shape'):
-                    logger.info(f"  {k}: shape={v.shape}, dtype={v.dtype}")
+                    if k == "input_ids":
+                        logger.info(f"  {k}: shape={v.shape}, dtype={v.dtype}, values={v.tolist()}")
+                    else:
+                        logger.info(f"  {k}: shape={v.shape}, dtype={v.dtype}")
 
         # Run inference
         self.request.infer(inputs)
