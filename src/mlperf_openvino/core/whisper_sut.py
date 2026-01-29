@@ -1487,10 +1487,23 @@ class WhisperHybridModel:
 
         # Run encoder
         encoder_outputs = self.encoder(input_features)
+        encoder_hidden_states = encoder_outputs.last_hidden_state
 
         # Debug: log encoder output
-        logger.info(f"Encoder output shape: {encoder_outputs.last_hidden_state.shape}")
-        logger.info(f"Encoder output stats: min={encoder_outputs.last_hidden_state.min():.4f}, max={encoder_outputs.last_hidden_state.max():.4f}, mean={encoder_outputs.last_hidden_state.mean():.4f}")
+        logger.info(f"Encoder output shape: {encoder_hidden_states.shape}")
+        logger.info(f"Encoder output stats: min={encoder_hidden_states.min():.4f}, max={encoder_hidden_states.max():.4f}, mean={encoder_hidden_states.mean():.4f}")
+
+        # Create encoder_attention_mask if required by decoder
+        # Shape: (batch_size, encoder_sequence_length) - all ones
+        encoder_attention_mask = None
+        if "encoder_attention_mask" in self.decoder.input_names:
+            encoder_seq_len = encoder_hidden_states.shape[1]  # Usually 1500 for Whisper
+            encoder_attention_mask = torch.ones(
+                (batch_size, encoder_seq_len),
+                dtype=torch.long,
+                device=device,
+            )
+            logger.info(f"Created encoder_attention_mask with shape {encoder_attention_mask.shape}")
 
         # Debug: compare with CPU encoder on first call (if available)
         if hasattr(self, '_cpu_test_encoder') and self._cpu_test_encoder is not None:
@@ -1524,10 +1537,29 @@ class WhisperHybridModel:
             else:
                 input_ids = generated_ids[:, -1:]
 
+            # Create decoder attention mask if required
+            # This tells the decoder which positions in the sequence are valid
+            decoder_attention_mask = None
+            if "attention_mask" in self.decoder.input_names:
+                # For stateful models: full sequence length for first step, single token after
+                if self.decoder.stateful:
+                    # Current total sequence length (initial prompt + generated so far)
+                    seq_len = generated_ids.shape[1]
+                    decoder_attention_mask = torch.ones(
+                        (batch_size, seq_len),
+                        dtype=torch.long,
+                        device=device,
+                    )
+                else:
+                    # Non-stateful: just for current input
+                    decoder_attention_mask = torch.ones_like(input_ids)
+
             # Run decoder
             outputs = self.decoder(
                 input_ids=input_ids,
-                encoder_hidden_states=encoder_outputs.last_hidden_state,
+                encoder_hidden_states=encoder_hidden_states,
+                encoder_attention_mask=encoder_attention_mask,
+                attention_mask=decoder_attention_mask,
                 past_key_values=past_key_values if not self.decoder.stateful else None,
             )
 
@@ -1825,6 +1857,16 @@ class WhisperMultiDieSUT:
                 "encoder_hidden_states": cpu_decoder_input,
                 "beam_idx": np.array([0], dtype=np.int32),
             }
+            # Add encoder_attention_mask if required
+            if "encoder_attention_mask" in model.decoder.input_names:
+                encoder_seq_len = cpu_decoder_input.shape[1]
+                test_inputs["encoder_attention_mask"] = np.ones((1, encoder_seq_len), dtype=np.int64)
+                logger.info(f"Added encoder_attention_mask with shape (1, {encoder_seq_len})")
+            # Add decoder attention_mask if required
+            if "attention_mask" in model.decoder.input_names:
+                test_inputs["attention_mask"] = np.ones((1, 4), dtype=np.int64)  # 4 initial tokens
+                logger.info(f"Added decoder attention_mask with shape (1, 4)")
+
             model.decoder.request.infer(test_inputs)
             cpu_logits = model.decoder.request.get_tensor("logits").data.copy()
             cpu_last_logits = torch.from_numpy(cpu_logits[0, -1])
