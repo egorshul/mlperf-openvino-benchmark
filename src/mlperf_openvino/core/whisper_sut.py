@@ -1594,12 +1594,12 @@ class WhisperMultiDieSUT:
         # Discover NPU dies
         npu_dies = self._discover_npu_dies()
 
-        # Build OV config for compilation
-        ov_config = {"CACHE_DIR": ""}
-        # Add user-specified properties
-        if hasattr(self.config, 'openvino') and self.config.openvino.properties:
-            for key, value in self.config.openvino.properties.items():
-                ov_config[key] = value
+        # Build OV config for compilation - use accelerator properties from config
+        if hasattr(self.config, 'openvino'):
+            ov_config = self.config.openvino.to_properties()
+            ov_config["CACHE_DIR"] = ""
+        else:
+            ov_config = {"CACHE_DIR": ""}
 
         # Find decoder path (prefer decoder_with_past if exists)
         decoder_with_past = self.model_path / "decoder_with_past_model.xml"
