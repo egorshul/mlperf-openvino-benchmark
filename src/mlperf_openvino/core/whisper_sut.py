@@ -1005,7 +1005,7 @@ class WhisperMultiDieSUT:
         self._setup_models()
 
     def _setup_models(self) -> None:
-        """Setup OVModelForSpeechSeq2Seq instances for each die."""
+        """Setup OVModelForSpeechSeq2Seq with encoder on NPU, decoder on CPU."""
         from ..backends.device_discovery import discover_accelerator_devices
         from transformers import AutoProcessor
         import openvino as ov
@@ -1039,37 +1039,69 @@ class WhisperMultiDieSUT:
 
         logger.info(f"OV config: {ov_config}")
 
-        # Try to load model on each die
+        # First, load model on CPU (always works)
+        logger.info("  Loading base model on CPU...")
+        cpu_model = OVModelForSpeechSeq2Seq.from_pretrained(
+            self.model_path,
+            device="CPU",
+            ov_config={"CACHE_DIR": ""},
+            compile=True,
+        )
+
+        # Try to create hybrid models with encoder on NPU
         for die_name in active_dies:
-            logger.info(f"  Loading model on {die_name}...")
+            if die_name == "CPU":
+                self._models.append(("CPU", cpu_model))
+                logger.info("  Using CPU model")
+                continue
+
+            logger.info(f"  Trying to compile encoder on {die_name}...")
             try:
+                # Load a fresh model and try to compile encoder on NPU
                 model = OVModelForSpeechSeq2Seq.from_pretrained(
                     self.model_path,
-                    device=die_name,
-                    ov_config=ov_config,
-                    compile=True,
+                    device="CPU",  # Load on CPU first
+                    ov_config={"CACHE_DIR": ""},
+                    compile=False,  # Don't compile yet
                 )
-                self._models.append((die_name, model))
-                logger.info(f"  Model loaded on {die_name}")
+
+                # Try to compile encoder on NPU
+                model.encoder.model = core.compile_model(
+                    model.encoder.model.get_runtime_model(),
+                    die_name,
+                    ov_config
+                )
+                model.encoder.request = model.encoder.model.create_infer_request()
+
+                # Decoder stays on CPU (compile it)
+                model.decoder.model = core.compile_model(
+                    model.decoder.model.get_runtime_model(),
+                    "CPU",
+                    {"CACHE_DIR": ""}
+                )
+                model.decoder.request = model.decoder.model.create_infer_request()
+
+                # Decoder with past if exists
+                if hasattr(model, 'decoder_with_past') and model.decoder_with_past is not None:
+                    model.decoder_with_past.model = core.compile_model(
+                        model.decoder_with_past.model.get_runtime_model(),
+                        "CPU",
+                        {"CACHE_DIR": ""}
+                    )
+                    model.decoder_with_past.request = model.decoder_with_past.model.create_infer_request()
+
+                self._models.append((f"{die_name}+CPU", model))
+                logger.info(f"  Hybrid model ready: encoder on {die_name}, decoder on CPU")
+
             except Exception as e:
-                logger.warning(f"  Failed to load on {die_name}: {e}")
-                # Try CPU fallback if this is the first model
+                logger.warning(f"  Failed to setup hybrid on {die_name}: {e}")
+                # Use CPU model as fallback
                 if not self._models:
-                    logger.info("  Trying CPU fallback...")
-                    try:
-                        model = OVModelForSpeechSeq2Seq.from_pretrained(
-                            self.model_path,
-                            device="CPU",
-                            ov_config={"CACHE_DIR": ""},
-                            compile=True,
-                        )
-                        self._models.append(("CPU", model))
-                        logger.info("  Model loaded on CPU (fallback)")
-                    except Exception as e2:
-                        logger.error(f"  CPU fallback also failed: {e2}")
+                    self._models.append(("CPU", cpu_model))
+                    logger.info("  Using CPU fallback")
 
         if not self._models:
-            raise RuntimeError("Failed to load model on any device")
+            self._models.append(("CPU", cpu_model))
 
         logger.info(f"Whisper Multi-Die SUT ready: {len(self._models)} model(s)")
 
