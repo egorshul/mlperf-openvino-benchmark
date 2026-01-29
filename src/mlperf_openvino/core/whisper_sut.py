@@ -1600,6 +1600,26 @@ class WhisperHybridModel:
             else:
                 next_token_logits = logits
 
+            # Suppress tokens that shouldn't appear at certain positions
+            # This is critical for Whisper - without suppression, model outputs EOT immediately
+            # Based on Whisper's generation_config.json:
+            # - begin_suppress_tokens: suppress at the very first generated token
+            # - suppress_tokens: suppress always (non-speech tokens)
+
+            # Begin suppress tokens - only suppress at first generated position (step 0)
+            # Most importantly: suppress EOT (50257) to prevent empty transcriptions
+            # Also suppress leading space (220)
+            begin_suppress_tokens = [220, 50257]  # 220 = space, 50257 = EOT
+
+            # Apply suppression only on first step
+            if step == 0:
+                for token_id in begin_suppress_tokens:
+                    if token_id < next_token_logits.shape[-1]:
+                        next_token_logits[:, token_id] = float('-inf')
+                # Debug: show top tokens after suppression
+                top5_after = torch.topk(next_token_logits[0], 5)
+                logger.info(f"After suppression - Top 5: {top5_after.indices.tolist()} logits: {top5_after.values.tolist()}")
+
             next_tokens = next_token_logits.argmax(dim=-1)
 
             # Debug: collect first 10 tokens
