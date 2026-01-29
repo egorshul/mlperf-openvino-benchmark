@@ -935,3 +935,419 @@ class WhisperEncoderOnlySUT:
         self._predictions.clear()
         self._query_count = 0
         self._sample_count = 0
+
+
+class WhisperMultiDieSUT:
+    """
+    System Under Test for Whisper ASR on multi-die NPU.
+
+    Distributes inference across multiple NPU dies for maximum throughput.
+    Each die has its own compiled encoder and decoder models.
+    """
+
+    # Whisper special tokens
+    SOT_TOKEN = 50258  # Start of transcript
+    EOT_TOKEN = 50257  # End of transcript
+    TRANSCRIBE_TOKEN = 50359  # Transcribe task
+    NO_TIMESTAMPS_TOKEN = 50363  # No timestamps
+    EN_TOKEN = 50259  # English language
+
+    def __init__(
+        self,
+        config: BenchmarkConfig,
+        encoder_path: Union[str, Path],
+        decoder_path: Union[str, Path],
+        qsl: LibriSpeechQSL,
+        scenario: Scenario = Scenario.OFFLINE,
+        max_new_tokens: int = 440,
+    ):
+        """
+        Initialize Whisper Multi-Die SUT.
+
+        Args:
+            config: Benchmark configuration
+            encoder_path: Path to encoder OpenVINO model
+            decoder_path: Path to decoder OpenVINO model
+            qsl: Query Sample Library
+            scenario: MLPerf scenario
+            max_new_tokens: Maximum tokens to generate
+        """
+        if not LOADGEN_AVAILABLE:
+            raise ImportError("MLPerf LoadGen is not installed")
+
+        try:
+            import openvino as ov
+            self._ov = ov
+        except ImportError:
+            raise ImportError("OpenVINO is required for multi-die inference")
+
+        self.config = config
+        self.encoder_path = Path(encoder_path)
+        self.decoder_path = Path(decoder_path)
+        self.qsl = qsl
+        self.scenario = scenario
+        self.max_new_tokens = max_new_tokens
+
+        # Results storage
+        self._predictions: Dict[int, str] = {}
+        self._query_count = 0
+        self._sample_count = 0
+
+        # Progress tracking
+        self._progress_bar: Optional[Any] = None
+        self._start_time = 0.0
+        self._last_progress_update = 0.0
+        self._progress_update_interval = 0.5
+
+        # LoadGen handles
+        self._sut_handle = None
+        self._qsl_handle = None
+
+        # Multi-die contexts
+        self._die_contexts: Dict[str, Dict[str, Any]] = {}
+        self._active_dies: List[str] = []
+        self._die_index = 0
+
+        # Tokenizer (lazy loaded)
+        self._tokenizer = None
+
+        # Setup dies
+        self._setup_dies()
+
+    def _setup_dies(self) -> None:
+        """Discover and setup all NPU dies."""
+        from ..backends.device_discovery import discover_accelerator_devices
+
+        core = self._ov.Core()
+        device_prefix = self.config.openvino.get_device_prefix()
+
+        # Discover dies
+        if self.config.openvino.is_specific_die():
+            # Use specific die only
+            self._active_dies = [self.config.openvino.device]
+        else:
+            # Discover all dies
+            self._active_dies = discover_accelerator_devices(core, device_prefix)
+
+        if not self._active_dies:
+            raise RuntimeError(f"No {device_prefix} dies found")
+
+        logger.info(f"Setting up Whisper on {len(self._active_dies)} dies: {self._active_dies}")
+
+        # Build compile properties
+        compile_props = {}
+        if hasattr(self.config.openvino, 'device_properties') and self.config.openvino.device_properties:
+            compile_props.update(self.config.openvino.device_properties)
+
+        # Read models once
+        encoder_model = core.read_model(str(self.encoder_path))
+        decoder_model = core.read_model(str(self.decoder_path))
+
+        # Compile on each die
+        for die_name in self._active_dies:
+            logger.info(f"  Compiling models on {die_name}...")
+
+            compiled_encoder = core.compile_model(encoder_model, die_name, compile_props)
+            compiled_decoder = core.compile_model(decoder_model, die_name, compile_props)
+
+            # Get optimal number of inference requests
+            try:
+                optimal_nireq = compiled_encoder.get_property("OPTIMAL_NUMBER_OF_INFER_REQUESTS")
+            except Exception:
+                optimal_nireq = 4
+
+            self._die_contexts[die_name] = {
+                "encoder": compiled_encoder,
+                "decoder": compiled_decoder,
+                "encoder_request": compiled_encoder.create_infer_request(),
+                "decoder_request": compiled_decoder.create_infer_request(),
+                "optimal_nireq": optimal_nireq,
+            }
+
+        # Discover decoder input names from first die
+        self._decoder_input_names = self._discover_decoder_inputs()
+
+        logger.info(f"Whisper Multi-Die SUT ready: {len(self._active_dies)} dies")
+
+    def _discover_decoder_inputs(self) -> Dict[str, str]:
+        """Discover decoder input names from the model."""
+        first_die = self._active_dies[0]
+        decoder = self._die_contexts[first_die]["decoder"]
+        input_names = [inp.any_name for inp in decoder.inputs]
+
+        result = {}
+        for name in input_names:
+            name_lower = name.lower()
+            if 'input_id' in name_lower or 'decoder_input' in name_lower:
+                result['input_ids'] = name
+            elif 'encoder_hidden' in name_lower or 'encoder_output' in name_lower:
+                result['encoder_hidden_states'] = name
+            elif 'attention_mask' in name_lower and 'encoder' not in name_lower:
+                result['attention_mask'] = name
+            elif 'encoder_attention_mask' in name_lower:
+                result['encoder_attention_mask'] = name
+
+        # Fallbacks
+        if 'input_ids' not in result:
+            for name in input_names:
+                if 'id' in name.lower():
+                    result['input_ids'] = name
+                    break
+
+        if 'encoder_hidden_states' not in result:
+            for name in input_names:
+                if 'encoder' in name.lower() and 'mask' not in name.lower():
+                    result['encoder_hidden_states'] = name
+                    break
+
+        return result
+
+    def _load_tokenizer(self):
+        """Load Whisper tokenizer."""
+        if self._tokenizer is not None:
+            return
+
+        try:
+            from transformers import WhisperTokenizer
+            self._tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-large-v3")
+        except ImportError:
+            self._tokenizer = None
+
+    def _decode_tokens(self, token_ids: List[int]) -> str:
+        """Decode token IDs to text."""
+        self._load_tokenizer()
+
+        if self._tokenizer is not None:
+            filtered = [t for t in token_ids if t < 50257]
+            return self._tokenizer.decode(filtered, skip_special_tokens=True)
+        return f"[tokens: {len(token_ids)}]"
+
+    def _get_next_die(self) -> str:
+        """Get next die in round-robin fashion."""
+        die = self._active_dies[self._die_index]
+        self._die_index = (self._die_index + 1) % len(self._active_dies)
+        return die
+
+    def _encode_on_die(self, die_name: str, mel_features: np.ndarray) -> np.ndarray:
+        """Run encoder on specific die."""
+        ctx = self._die_contexts[die_name]
+        request = ctx["encoder_request"]
+
+        # Set input
+        request.set_input_tensor(self._ov.Tensor(mel_features))
+        request.infer()
+
+        # Get output
+        return request.get_output_tensor().data.copy()
+
+    def _decode_step_on_die(
+        self,
+        die_name: str,
+        input_ids: np.ndarray,
+        encoder_hidden_states: np.ndarray
+    ) -> np.ndarray:
+        """Run single decoder step on specific die."""
+        ctx = self._die_contexts[die_name]
+        request = ctx["decoder_request"]
+
+        # Build inputs
+        inputs = {}
+        if 'input_ids' in self._decoder_input_names:
+            inputs[self._decoder_input_names['input_ids']] = input_ids
+        if 'encoder_hidden_states' in self._decoder_input_names:
+            inputs[self._decoder_input_names['encoder_hidden_states']] = encoder_hidden_states
+
+        # Set inputs and infer
+        for name, data in inputs.items():
+            request.set_tensor(name, self._ov.Tensor(data))
+
+        request.infer()
+
+        # Get logits from first output
+        return request.get_output_tensor().data.copy()
+
+    def _generate_on_die(self, die_name: str, mel_features: np.ndarray) -> str:
+        """Generate transcription on specific die."""
+        # Encode
+        encoder_output = self._encode_on_die(die_name, mel_features)
+
+        # Initial decoder input
+        decoder_input = np.array([[
+            self.SOT_TOKEN,
+            self.EN_TOKEN,
+            self.TRANSCRIBE_TOKEN,
+            self.NO_TIMESTAMPS_TOKEN
+        ]], dtype=np.int64)
+
+        generated_tokens = []
+
+        # Autoregressive generation
+        for _ in range(self.max_new_tokens):
+            logits = self._decode_step_on_die(die_name, decoder_input, encoder_output)
+
+            # Get last token logits and argmax
+            next_token_logits = logits[0, -1, :]
+            next_token = int(np.argmax(next_token_logits))
+
+            if next_token == self.EOT_TOKEN:
+                break
+
+            generated_tokens.append(next_token)
+            decoder_input = np.array([[next_token]], dtype=np.int64)
+
+        return self._decode_tokens(generated_tokens)
+
+    def _start_progress(self, total: int, desc: str = "Processing") -> None:
+        """Start progress tracking."""
+        self._start_time = time.time()
+        if TQDM_AVAILABLE:
+            self._progress_bar = tqdm(
+                total=total,
+                desc=desc,
+                unit="samples",
+                file=sys.stderr,
+                dynamic_ncols=True,
+            )
+        else:
+            logger.info(f"Starting: {desc} ({total} samples)")
+            self._last_progress_update = time.time()
+
+    def _update_progress(self, n: int = 1) -> None:
+        """Update progress."""
+        self._sample_count += n
+        if TQDM_AVAILABLE and self._progress_bar is not None:
+            self._progress_bar.update(n)
+        else:
+            current_time = time.time()
+            if current_time - self._last_progress_update >= self._progress_update_interval:
+                elapsed = current_time - self._start_time
+                throughput = self._sample_count / elapsed if elapsed > 0 else 0
+                logger.info(f"Progress: {self._sample_count} samples, {throughput:.1f} samples/sec")
+                self._last_progress_update = current_time
+
+    def _close_progress(self) -> None:
+        """Close progress tracking."""
+        if TQDM_AVAILABLE and self._progress_bar is not None:
+            self._progress_bar.close()
+            self._progress_bar = None
+        else:
+            elapsed = time.time() - self._start_time
+            throughput = self._sample_count / elapsed if elapsed > 0 else 0
+            logger.info(f"Completed: {self._sample_count} samples in {elapsed:.1f}s ({throughput:.1f} samples/sec)")
+
+    def issue_queries(self, query_samples: List[Any]) -> None:
+        """Process queries from LoadGen."""
+        self._query_count += 1
+
+        if self.scenario == Scenario.OFFLINE:
+            self._issue_queries_offline(query_samples)
+        else:
+            self._issue_queries_server(query_samples)
+
+    def _issue_queries_offline(self, query_samples: List[Any]) -> None:
+        """Process all samples in Offline mode."""
+        total = len(query_samples)
+        self._start_progress(total, "Whisper Multi-Die Offline")
+
+        responses = []
+        response_arrays = []
+
+        for sample in query_samples:
+            sample_idx = sample.index
+
+            # Get features
+            features = self.qsl.get_features(sample_idx)
+            mel_features = features["input_features"]
+
+            if mel_features.ndim == 2:
+                mel_features = mel_features[np.newaxis, ...]
+
+            mel_features = mel_features.astype(np.float32)
+
+            # Select die (round-robin)
+            die_name = self._get_next_die()
+
+            # Generate transcription
+            text = self._generate_on_die(die_name, mel_features)
+            self._predictions[sample_idx] = text
+
+            # Create response
+            text_bytes = text.encode('utf-8')
+            response_array = array.array('B', text_bytes)
+            response_arrays.append(response_array)
+            bi = response_array.buffer_info()
+
+            response = lg.QuerySampleResponse(sample.id, bi[0], bi[1])
+            responses.append(response)
+
+            self._update_progress(1)
+
+        self._close_progress()
+        lg.QuerySamplesComplete(responses)
+
+    def _issue_queries_server(self, query_samples: List[Any]) -> None:
+        """Process samples in Server mode (one at a time)."""
+        for sample in query_samples:
+            sample_idx = sample.index
+
+            # Get features
+            features = self.qsl.get_features(sample_idx)
+            mel_features = features["input_features"]
+
+            if mel_features.ndim == 2:
+                mel_features = mel_features[np.newaxis, ...]
+
+            mel_features = mel_features.astype(np.float32)
+
+            # Select die
+            die_name = self._get_next_die()
+
+            # Generate transcription
+            text = self._generate_on_die(die_name, mel_features)
+            self._predictions[sample_idx] = text
+
+            # Respond immediately
+            text_bytes = text.encode('utf-8')
+            response_array = array.array('B', text_bytes)
+            bi = response_array.buffer_info()
+
+            response = lg.QuerySampleResponse(sample.id, bi[0], bi[1])
+            lg.QuerySamplesComplete([response])
+
+            self._sample_count += 1
+
+    def flush_queries(self) -> None:
+        """Flush pending queries."""
+        if self._progress_bar is not None:
+            self._close_progress()
+
+    def get_sut(self) -> Any:
+        """Get LoadGen SUT handle."""
+        if self._sut_handle is None:
+            self._sut_handle = lg.ConstructSUT(
+                self.issue_queries,
+                self.flush_queries
+            )
+        return self._sut_handle
+
+    def get_qsl(self) -> Any:
+        """Get LoadGen QSL handle."""
+        if self._qsl_handle is None:
+            self._qsl_handle = lg.ConstructQSL(
+                self.qsl.total_sample_count,
+                self.qsl.performance_sample_count,
+                self.qsl.load_query_samples,
+                self.qsl.unload_query_samples
+            )
+        return self._qsl_handle
+
+    def get_predictions(self) -> Dict[int, str]:
+        """Get all predictions."""
+        return self._predictions.copy()
+
+    def reset(self) -> None:
+        """Reset state for new run."""
+        self._predictions.clear()
+        self._query_count = 0
+        self._sample_count = 0
+        self._die_index = 0

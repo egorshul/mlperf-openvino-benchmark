@@ -18,14 +18,18 @@ class SUTFactory:
         config: BenchmarkConfig,
         qsl: QuerySampleLibrary,
         backend: Optional[Any] = None,
+        encoder_path: Optional[str] = None,
+        decoder_path: Optional[str] = None,
     ) -> Any:
         """Create the appropriate multi-die SUT for the given model type.
 
         Args:
-            model_type: Type of model (RESNET50, BERT, RETINANET)
+            model_type: Type of model (RESNET50, BERT, RETINANET, WHISPER)
             config: Benchmark configuration
             qsl: Query Sample Library
             backend: Optional backend for fallback (Python SUTs)
+            encoder_path: Path to encoder model (for Whisper)
+            decoder_path: Path to decoder model (for Whisper)
 
         Returns:
             Configured SUT instance
@@ -42,6 +46,8 @@ class SUTFactory:
             return SUTFactory._create_bert_sut(config, qsl, is_accuracy_mode, backend)
         elif model_type == ModelType.RETINANET:
             return SUTFactory._create_retinanet_sut(config, qsl, is_accuracy_mode, backend)
+        elif model_type == ModelType.WHISPER:
+            return SUTFactory._create_whisper_sut(config, qsl, encoder_path, decoder_path)
         else:
             raise ValueError(f"Multi-die SUT not supported for model type: {model_type}")
 
@@ -161,6 +167,29 @@ class SUTFactory:
         return RetinaNetSUT(
             config=config,
             backend=backend,
+            qsl=qsl,
+            scenario=config.scenario,
+        )
+
+    @staticmethod
+    def _create_whisper_sut(
+        config: BenchmarkConfig,
+        qsl: QuerySampleLibrary,
+        encoder_path: Optional[str],
+        decoder_path: Optional[str],
+    ) -> Any:
+        """Create Whisper multi-die SUT (Python only, no C++ implementation)."""
+        if not encoder_path or not decoder_path:
+            raise ValueError(
+                "Whisper multi-die SUT requires encoder_path and decoder_path"
+            )
+
+        from .whisper_sut import WhisperMultiDieSUT
+        logger.info(f"Using Whisper Python multi-die SUT on {config.openvino.device}")
+        return WhisperMultiDieSUT(
+            config=config,
+            encoder_path=encoder_path,
+            decoder_path=decoder_path,
             qsl=qsl,
             scenario=config.scenario,
         )

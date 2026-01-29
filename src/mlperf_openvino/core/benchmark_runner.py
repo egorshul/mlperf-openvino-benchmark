@@ -275,6 +275,25 @@ class BenchmarkRunner:
                     decoder_path = dp
                     break
 
+        # Use multi-die SUT for NPU accelerators
+        if self.config.openvino.is_accelerator_device():
+            if encoder_path and decoder_path:
+                from .whisper_sut import WhisperMultiDieSUT
+                logger.info(f"Using Whisper multi-die SUT on {self.config.openvino.device}")
+                self.sut = WhisperMultiDieSUT(
+                    config=self.config,
+                    encoder_path=encoder_path,
+                    decoder_path=decoder_path,
+                    qsl=self.qsl,
+                    scenario=self.config.scenario,
+                )
+                return
+            else:
+                raise ValueError(
+                    f"Whisper multi-die SUT requires encoder and decoder models. "
+                    f"Found encoder: {encoder_path}, decoder: {decoder_path}"
+                )
+
         try:
             from .whisper_sut import WhisperOptimumSUT, OPTIMUM_AVAILABLE
 
