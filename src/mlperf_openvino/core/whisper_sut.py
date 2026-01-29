@@ -1559,84 +1559,75 @@ class WhisperHybridModel:
             device=device,
         ).expand(batch_size, -1)
 
-        # Generate tokens
         generated_ids = decoder_input_ids.clone()
-        past_key_values = None  # None = reset state, non-None = continue
+        past_key_values = None
 
-        # Initialize decoder attention mask (grows each step like HF generate())
-        # Must represent full sequence length including cached positions
-        decoder_attention_mask = None
-        if "attention_mask" in self.decoder.input_names:
-            decoder_attention_mask = torch.ones(
-                (batch_size, generated_ids.shape[1]),
-                dtype=torch.long,
-                device=device,
+        # Phase 1: Feed forced tokens ONE AT A TIME to build decoder state.
+        # HF generate() feeds tokens individually (forced_decoder_ids mechanism).
+        # Stateful OpenVINO models expect single-token input for correct
+        # KV-cache accumulation — feeding multiple tokens at once breaks state.
+        forced_tokens = [SOT_TOKEN, language_token, task_token, NO_TIMESTAMPS_TOKEN]
+        for i, token_id in enumerate(forced_tokens):
+            token_input = torch.tensor(
+                [[token_id]], dtype=torch.long, device=device,
+            ).expand(batch_size, -1)
+
+            pkv = None if i == 0 else ((),) if self.decoder.stateful else past_key_values
+            outputs = self.decoder(
+                input_ids=token_input,
+                encoder_hidden_states=encoder_hidden_states,
+                encoder_attention_mask=encoder_attention_mask,
+                past_key_values=pkv,
             )
+            if not self.decoder.stateful:
+                past_key_values = outputs.past_key_values
 
-        for step in range(max_new_tokens):
-            # Prepare inputs:
-            # - First step: pass all initial tokens
-            # - Subsequent steps: pass only last token (KV-cache has previous context)
-            if step == 0:
-                input_ids = generated_ids
-            else:
-                input_ids = generated_ids[:, -1:]
-                # Grow attention mask by one position (match HF generate behavior)
-                if decoder_attention_mask is not None:
-                    decoder_attention_mask = torch.cat([
-                        decoder_attention_mask,
-                        decoder_attention_mask.new_ones((batch_size, 1)),
-                    ], dim=-1)
+        # Phase 2: Free generation — first real prediction from last forced token
+        logits = outputs.logits
+        next_token_logits = logits[:, -1, :] if logits.dim() == 3 else logits
 
-            # For stateful models: pass None only on first step to reset state,
-            # then pass empty tuple to signal "continue with existing state"
-            if self.decoder.stateful:
-                pkv_to_pass = None if step == 0 else ((),)
-            else:
-                pkv_to_pass = past_key_values
+        vocab_size = next_token_logits.shape[-1]
+        # Suppress non-speech tokens
+        for token_id in SUPPRESS_TOKENS:
+            if token_id < vocab_size:
+                next_token_logits[:, token_id] = float('-inf')
+        # Suppress begin tokens at first generated position
+        for token_id in BEGIN_SUPPRESS_TOKENS:
+            if token_id < vocab_size:
+                next_token_logits[:, token_id] = float('-inf')
 
-            # Run decoder
+        next_tokens = next_token_logits.argmax(dim=-1)
+        generated_ids = torch.cat([generated_ids, next_tokens.unsqueeze(-1)], dim=-1)
+
+        if (next_tokens == EOT_TOKEN).all():
+            return generated_ids
+
+        # Continue generating freely (one token at a time)
+        for step in range(1, max_new_tokens):
+            input_ids = generated_ids[:, -1:]
+
+            pkv = ((),) if self.decoder.stateful else past_key_values
             outputs = self.decoder(
                 input_ids=input_ids,
                 encoder_hidden_states=encoder_hidden_states,
                 encoder_attention_mask=encoder_attention_mask,
-                attention_mask=decoder_attention_mask,
-                past_key_values=pkv_to_pass,
+                past_key_values=pkv,
             )
 
-            # Get next token (greedy)
             logits = outputs.logits
-            if logits.dim() == 3:
-                next_token_logits = logits[:, -1, :]
-            else:
-                next_token_logits = logits
+            next_token_logits = logits[:, -1, :] if logits.dim() == 3 else logits
 
-            # Suppress tokens based on Whisper's generation_config.json:
-            # 1. SUPPRESS_TOKENS: always suppress (non-speech tokens only)
-            # 2. BEGIN_SUPPRESS_TOKENS: suppress only at first generated position
-
-            # Always suppress non-speech tokens
-            vocab_size = next_token_logits.shape[-1]
+            # Suppress non-speech tokens (always)
             for token_id in SUPPRESS_TOKENS:
                 if token_id < vocab_size:
                     next_token_logits[:, token_id] = float('-inf')
 
-            # On first step, also suppress begin tokens (space, EOT)
-            if step == 0:
-                for token_id in BEGIN_SUPPRESS_TOKENS:
-                    if token_id < vocab_size:
-                        next_token_logits[:, token_id] = float('-inf')
-
             next_tokens = next_token_logits.argmax(dim=-1)
-
-            # Append to generated
             generated_ids = torch.cat([generated_ids, next_tokens.unsqueeze(-1)], dim=-1)
 
-            # Update past key values (for non-stateful models)
             if not self.decoder.stateful:
                 past_key_values = outputs.past_key_values
 
-            # Check for EOT
             if (next_tokens == EOT_TOKEN).all():
                 break
 
