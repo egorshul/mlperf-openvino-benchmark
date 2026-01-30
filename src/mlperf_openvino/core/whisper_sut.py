@@ -1803,6 +1803,15 @@ class WhisperMultiDieSUT:
             model = self._load_optimum_model()
             self._models.append(("CPU", model))
 
+        # Verify actual execution devices for each model
+        verified_devices = []
+        for die_name, mdl in self._models:
+            try:
+                exec_devs = mdl.encoder.request.get_property("EXECUTION_DEVICES")
+                verified_devices.append((die_name, exec_devs))
+            except Exception:
+                verified_devices.append((die_name, ["unknown"]))
+
         # Log summary
         encoder_devices = [die for die, _ in self._models]
         logger.info("=" * 60)
@@ -1813,6 +1822,12 @@ class WhisperMultiDieSUT:
         logger.info(f"  Max new tokens: {self.max_new_tokens}")
         logger.info(f"  Scenario: {self.scenario}")
         logger.info(f"  Total models: {len(self._models)}")
+        logger.info("  Verified encoder placement:")
+        for die_name, exec_devs in verified_devices:
+            status = "[OK]" if die_name == "CPU" or any(
+                die_name.split(".")[0] in d for d in exec_devs
+            ) else "[WARN]"
+            logger.info(f"    {die_name} -> EXECUTION_DEVICES={exec_devs} {status}")
         logger.info("=" * 60)
 
     def _load_optimum_model(self):
@@ -1886,6 +1901,24 @@ class WhisperMultiDieSUT:
         # Compile encoder on accelerator die
         logger.info(f"  Compiling encoder on {die} with config: {ov_config}")
         compiled_encoder = core.compile_model(encoder_model, die, ov_config)
+
+        # Verify the encoder is actually placed on the requested device.
+        # EXECUTION_DEVICES returns the real hardware the model was compiled for.
+        try:
+            exec_devices = compiled_encoder.get_property("EXECUTION_DEVICES")
+            logger.info(f"  Encoder EXECUTION_DEVICES: {exec_devices}")
+            # exec_devices is a list of device strings, e.g. ["X.0"] or ["CPU"]
+            device_prefix = die.split(".")[0]
+            on_target = any(device_prefix in d for d in exec_devices)
+            if on_target:
+                logger.info(f"  [OK] Encoder confirmed on {die}")
+            else:
+                logger.warning(
+                    f"  [WARN] Encoder requested {die} but EXECUTION_DEVICES={exec_devices}. "
+                    f"Model may have fallen back to CPU!"
+                )
+        except Exception as e:
+            logger.warning(f"  Could not query EXECUTION_DEVICES: {e}")
 
         # Replace encoder's request with accelerator-compiled version.
         # OVEncoder.forward() calls self.request(inputs, share_inputs=True, share_outputs=True)
