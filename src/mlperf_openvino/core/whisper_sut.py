@@ -2157,6 +2157,11 @@ class WhisperMultiDieSUT:
             shape = info.data_shape
             logger.info(f"    Variable '{vid}': {shape}, {info.data_type}")
 
+            # Guard: skip Variables with dynamic rank (unknown # of dims)
+            if shape.rank.is_dynamic:
+                logger.warning(f"      -> SKIPPED (dynamic rank)")
+                continue
+
             # Build fully-static shape: replace every dynamic dim
             dims = list(shape)
             static_dims = []
@@ -2191,10 +2196,12 @@ class WhisperMultiDieSUT:
         dec_model = core.read_model(str(self.decoder_path))
         input_shape_map = self._build_decoder_shape_map(dec_model, seq_len=1)
         logger.info(f"  Test reshape: inputs={input_shape_map}")
-        logger.info(f"  Test reshape: variables_shapes=<{len(var_shapes)} vars>")
+        logger.info(f"  Setting static shapes on {len(var_shapes)} state Variables ...")
 
         try:
-            dec_model.reshape(input_shape_map, variables_shapes=var_shapes)
+            n_updated = self._apply_static_var_shapes(dec_model, var_shapes)
+            logger.info(f"  Updated {n_updated}/{len(var_shapes)} Variable shapes")
+            dec_model.reshape(input_shape_map)
         except Exception as e:
             logger.warning(f"  Decoder reshape failed: {e}")
             logger.warning("  Keeping decoder on CPU.")
@@ -2215,7 +2222,8 @@ class WhisperMultiDieSUT:
         for seq_len in seq_len_buckets:
             bm = core.read_model(str(self.decoder_path))
             sm = self._build_decoder_shape_map(bm, seq_len)
-            bm.reshape(sm, variables_shapes=var_shapes)
+            self._apply_static_var_shapes(bm, var_shapes)
+            bm.reshape(sm)
             logger.info(f"  Bucket seq_len={seq_len}: reshaped, compiling on {die} ...")
             compiled = core.compile_model(bm, die, ov_config)
             buckets[seq_len] = compiled
@@ -2280,6 +2288,33 @@ class WhisperMultiDieSUT:
             else:
                 shape_map[name] = [_dim_val(d) for d in dims]
         return shape_map
+
+    @staticmethod
+    def _apply_static_var_shapes(model, var_shapes: Dict[str, list]) -> int:
+        """Set static shapes on all state Variables in an ov.Model.
+
+        Calls ``Variable.update_data_shape()`` directly on each Variable
+        object **before** ``model.reshape()`` is invoked.  This works on
+        all OpenVINO versions, unlike the ``variables_shapes`` keyword
+        argument of ``model.reshape()`` which was added in OV 2025.0.
+
+        Args:
+            model: ``ov.Model`` instance (read from disk, not yet compiled)
+            var_shapes: mapping ``variable_id → [static dims]``
+
+        Returns:
+            Number of Variables whose shapes were updated.
+        """
+        import openvino as ov
+
+        updated = 0
+        for var in model.get_variables():
+            info = var.get_info()
+            vid = info.variable_id
+            if vid in var_shapes:
+                var.update_data_shape(ov.PartialShape(var_shapes[vid]))
+                updated += 1
+        return updated
 
     def _get_next_model(self) -> Tuple[str, Any]:
         """Get next model in round-robin fashion."""
