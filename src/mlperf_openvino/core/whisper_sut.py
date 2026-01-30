@@ -1029,6 +1029,11 @@ class WhisperHybridEncoder:
         """
         Run encoder inference.
 
+        Matches optimum-intel OVEncoder.forward() exactly:
+        - Uses start_async(share_inputs=True) + wait() instead of infer()
+        - Passes input tensor directly (torch or numpy)
+        - Gets output by name, clones to own the data
+
         Args:
             input_features: Mel spectrogram tensor (batch, n_mels, time)
 
@@ -1038,29 +1043,29 @@ class WhisperHybridEncoder:
         import torch
         from transformers.modeling_outputs import BaseModelOutput
 
-        # Convert to numpy if tensor
-        if hasattr(input_features, 'numpy'):
-            input_features_np = input_features.numpy()
-        else:
-            input_features_np = input_features
+        # Pass input directly (match optimum-intel: no numpy conversion)
+        inputs = {self.main_input_name: input_features}
 
-        # Run inference
-        inputs = {self.main_input_name: input_features_np}
-        self.request.infer(inputs)
+        # Run inference (match optimum-intel: start_async + wait with share_inputs)
+        self.request.start_async(inputs, share_inputs=True)
+        self.request.wait()
 
-        # Get output
-        last_hidden_state = self.request.get_output_tensor(0).data.copy()
+        # Get output by name and clone (match optimum-intel exactly)
+        last_hidden_state_data = self.request.get_tensor("last_hidden_state").data
 
         # Log encoder output stats for first call (debugging)
         if not hasattr(self, '_encoder_logged'):
             self._encoder_logged = True
             logger.info(f"Encoder output stats ({self.device}):")
-            logger.info(f"  Shape: {last_hidden_state.shape}")
-            logger.info(f"  Dtype: {last_hidden_state.dtype}")
-            logger.info(f"  Min: {last_hidden_state.min():.6f}, Max: {last_hidden_state.max():.6f}")
-            logger.info(f"  Mean: {last_hidden_state.mean():.6f}, Std: {last_hidden_state.std():.6f}")
+            logger.info(f"  Shape: {last_hidden_state_data.shape}")
+            logger.info(f"  Dtype: {last_hidden_state_data.dtype}")
+            logger.info(f"  Min: {last_hidden_state_data.min():.6f}, Max: {last_hidden_state_data.max():.6f}")
+            logger.info(f"  Mean: {last_hidden_state_data.mean():.6f}, Std: {last_hidden_state_data.std():.6f}")
+            logger.info(f"  First values [0,0,:5]: {last_hidden_state_data[0, 0, :5]}")
+            logger.info(f"  First values [0,:5,0]: {last_hidden_state_data[0, :5, 0]}")
 
-        last_hidden_state = torch.from_numpy(last_hidden_state)
+        # Clone to own the data (match optimum-intel: .clone())
+        last_hidden_state = torch.from_numpy(last_hidden_state_data).clone()
 
         return BaseModelOutput(last_hidden_state=last_hidden_state)
 
@@ -1125,6 +1130,15 @@ class WhisperHybridDecoder:
         logger.info(f"Decoder compiled on {device} (stateful={self.stateful}, use_past={self.use_past})")
         logger.info(f"  Decoder input names: {self.input_names}")
         logger.info(f"  Decoder output names: {self.output_names}")
+        # Log expected input shapes (critical for diagnosing prefill vs one-at-a-time)
+        for inp in self.model.inputs:
+            name = inp.get_any_name()
+            pshape = inp.get_partial_shape()
+            logger.info(f"  Input '{name}': shape={pshape}, type={inp.get_element_type()}")
+        for out in self.model.outputs:
+            name = out.get_any_name()
+            pshape = out.get_partial_shape()
+            logger.info(f"  Output '{name}': shape={pshape}, type={out.get_element_type()}")
         if self.key_value_input_names:
             logger.info(f"  KV-cache inputs: {self.key_value_input_names}")
         if self.key_value_output_names:
@@ -1143,110 +1157,67 @@ class WhisperHybridDecoder:
         """
         Run decoder inference step.
 
-        Args:
-            input_ids: Current decoder input IDs
-            encoder_hidden_states: Encoder output
-            attention_mask: Decoder attention mask
-            encoder_attention_mask: Encoder attention mask
-            past_key_values: Previous KV-cache (for non-stateful models)
-            cache_position: Position in sequence
-
-        Returns:
-            Seq2SeqLMOutput with logits and past_key_values
+        Matches optimum-intel OVDecoder.forward() exactly:
+        - Passes torch tensors directly (no numpy conversion)
+        - Same input ordering and conditional logic
+        - Same start_async(share_inputs=True) pattern
         """
         import torch
         from transformers.modeling_outputs import Seq2SeqLMOutput
 
-        # Convert tensors to numpy
-        if hasattr(input_ids, 'numpy'):
-            input_ids_np = input_ids.numpy()
-        else:
-            input_ids_np = input_ids
+        # Model inputs dict — match optimum-intel OVDecoder.forward() exactly
+        inputs = {}
 
-        # Ensure int64 dtype (model expects int64_t)
-        if input_ids_np.dtype != np.int64:
-            input_ids_np = input_ids_np.astype(np.int64)
-
-        # Reset state for first token (when no past)
+        # Reset state for first token (match optimum-intel)
         if self.stateful and past_key_values is None:
             self.request.reset_state()
             self._past_length = 0
-            batch_size = input_ids_np.shape[0]
-            # Use int (int64 on 64-bit) to match optimum-intel
-            self.next_beam_idx = np.arange(batch_size, dtype=int)
+            self.next_beam_idx = np.arange(input_ids.shape[0], dtype=int)
 
-        # Prepare inputs
-        inputs = {"input_ids": input_ids_np}
+        # Add past_key_values for non-stateful models (match optimum-intel order: before input_ids)
+        if past_key_values is not None and not self.stateful:
+            past_key_values = tuple(
+                past_key_value for pkv_per_layer in past_key_values for past_key_value in pkv_per_layer
+            )
+            inputs = dict(zip(self.key_value_input_names, past_key_values))
 
-        # Add encoder hidden states
-        if encoder_hidden_states is not None:
-            if hasattr(encoder_hidden_states, 'numpy'):
-                encoder_hidden_states_np = encoder_hidden_states.numpy()
-            else:
-                encoder_hidden_states_np = encoder_hidden_states
+        # Pass input_ids directly as torch tensor (match optimum-intel: no numpy conversion)
+        inputs["input_ids"] = input_ids
 
-            # Find the correct input name for encoder hidden states
-            encoder_input_found = False
-            for name in self.input_names:
-                if "encoder_hidden" in name or "encoder_output" in name:
-                    inputs[name] = encoder_hidden_states_np
-                    encoder_input_found = True
-                    break
+        # Add attention mask (match optimum-intel conditional)
+        if "attention_mask" in self.input_names and attention_mask is not None:
+            inputs["attention_mask"] = attention_mask
 
-            if not encoder_input_found:
-                logger.warning(f"Could not find encoder input! Available: {self.input_names}")
+        # Add encoder attention mask (match optimum-intel conditional)
+        if "encoder_attention_mask" in self.input_names and encoder_attention_mask is not None:
+            inputs["encoder_attention_mask"] = encoder_attention_mask
 
-        # Add attention mask if required
-        if attention_mask is not None and "attention_mask" in self.input_names:
-            if hasattr(attention_mask, 'numpy'):
-                inputs["attention_mask"] = attention_mask.numpy()
-            else:
-                inputs["attention_mask"] = attention_mask
+        # Add encoder hidden states (match optimum-intel conditional)
+        if "encoder_hidden_states" in self.input_names and encoder_hidden_states is not None:
+            inputs["encoder_hidden_states"] = encoder_hidden_states
 
-        # Add encoder attention mask if required
-        if encoder_attention_mask is not None and "encoder_attention_mask" in self.input_names:
-            if hasattr(encoder_attention_mask, 'numpy'):
-                inputs["encoder_attention_mask"] = encoder_attention_mask.numpy()
-            else:
-                inputs["encoder_attention_mask"] = encoder_attention_mask
-
-        # Add cache position if required
+        # Add cache position (match optimum-intel)
         if "cache_position" in self.input_names:
             if cache_position is None:
                 past_len = self._past_length if self.stateful else 0
-                cache_position = np.arange(past_len, past_len + input_ids_np.shape[1])
-            elif hasattr(cache_position, 'numpy'):
-                cache_position = cache_position.numpy()
+                cache_position = np.arange(past_len, past_len + input_ids.shape[1])
             inputs["cache_position"] = cache_position
 
-        # Add beam_idx for stateful models
+        # Add beam_idx (match optimum-intel)
         if "beam_idx" in self.input_names:
-            batch_size = input_ids_np.shape[0]
-            if self.next_beam_idx is not None:
-                inputs["beam_idx"] = self.next_beam_idx
-            else:
-                # Use int (int64) to match optimum-intel
-                inputs["beam_idx"] = np.arange(batch_size, dtype=int)
-
-        # Add past key values for non-stateful models
-        if past_key_values is not None and not self.stateful:
-            # Flatten past_key_values
-            flat_past = tuple(
-                past_kv for layer_past in past_key_values for past_kv in layer_past
+            batch_size = input_ids.shape[0]
+            inputs["beam_idx"] = (
+                self.next_beam_idx if self.next_beam_idx is not None
+                else np.arange(batch_size, dtype=int)
             )
-            for name, value in zip(self.key_value_input_names, flat_past):
-                if hasattr(value, 'numpy'):
-                    inputs[name] = value.numpy()
-                else:
-                    inputs[name] = value
 
-        # Run inference (use start_async + wait like optimum-intel)
+        # Run inference (match optimum-intel: start_async + wait with share_inputs)
         self.request.start_async(inputs, share_inputs=True)
         self.request.wait()
 
-        # Get logits (clone to ensure we own the data, like optimum-intel)
+        # Get logits — clone to own the data (match optimum-intel exactly)
         logits = torch.from_numpy(self.request.get_tensor("logits").data).clone()
-        self._past_length += input_ids_np.shape[1]
+        self._past_length += input_ids.shape[1]
 
         # Get output past_key_values (for non-stateful models)
         out_past_key_values = ((),)
@@ -1255,7 +1226,6 @@ class WhisperHybridDecoder:
                 np.copy(self.request.get_tensor(key).data)
                 for key in self.key_value_output_names
             )
-            # Reshape into layers format (2 tensors per layer: key, value)
             num_per_layer = 2
             out_past_key_values = tuple(
                 out_past[i:i + num_per_layer]
@@ -1465,7 +1435,10 @@ class WhisperHybridModel:
         """
         Generate transcription tokens from mel spectrogram.
 
-        Uses greedy decoding with KV-cache for efficiency.
+        Matches HF WhisperForConditionalGeneration.generate() behavior:
+        - Feeds forced tokens ONE AT A TIME (not all-at-once prefill)
+        - Uses suppress_tokens and begin_suppress_tokens from generation_config
+        - Greedy decoding (temperature=0)
 
         Args:
             input_features: Mel spectrogram tensor (batch, n_mels, time)
@@ -1505,8 +1478,11 @@ class WhisperHybridModel:
         SUPPRESS_TOKENS = getattr(gc, 'suppress_tokens', None) or []
         BEGIN_SUPPRESS_TOKENS = getattr(gc, 'begin_suppress_tokens', None) or [220, 50257]
 
+        # Diagnostic: first sample flag
+        is_first_sample = not self._generation_logged
+
         # Log generation config once
-        if not self._generation_logged:
+        if is_first_sample:
             logger.info("=" * 60)
             logger.info("Whisper Generation Configuration:")
             logger.info(f"  Encoder device: {self.encoder.device}")
@@ -1523,8 +1499,9 @@ class WhisperHybridModel:
                        f"no_timestamps={NO_TIMESTAMPS_TOKEN}")
             task_token_val = TRANSCRIBE_TOKEN if task == 'transcribe' else TRANSLATE_TOKEN
             lang_token_val = LANGUAGE_TOKENS.get(language, '?')
-            logger.info(f"  Initial tokens: [{SOT_TOKEN}, {lang_token_val}, "
+            logger.info(f"  Forced init tokens: [{SOT_TOKEN}, {lang_token_val}, "
                        f"{task_token_val}, {NO_TIMESTAMPS_TOKEN}]")
+            logger.info(f"  Feeding: ONE token at a time (matches HF generate)")
             logger.info("=" * 60)
             self._generation_logged = True
 
@@ -1545,36 +1522,56 @@ class WhisperHybridModel:
                 device=device,
             )
 
-        # Initialize decoder with special tokens
-        # [SOT, language, task, no_timestamps]
+        # Build forced token sequence: [SOT, language, task, no_timestamps]
         task_token = TRANSCRIBE_TOKEN if task == "transcribe" else TRANSLATE_TOKEN
         language_token = LANGUAGE_TOKENS.get(language, LANGUAGE_TOKENS["en"])
+        forced_tokens = [SOT_TOKEN, language_token, task_token, NO_TIMESTAMPS_TOKEN]
 
-        decoder_input_ids = torch.tensor(
-            [[SOT_TOKEN, language_token, task_token, NO_TIMESTAMPS_TOKEN]],
-            dtype=torch.long,
-            device=device,
-        ).expand(batch_size, -1)
-
-        generated_ids = decoder_input_ids.clone()
+        # === Feed forced tokens ONE AT A TIME ===
+        # This matches HF WhisperForConditionalGeneration.generate() which uses
+        # prepare_inputs_for_generation() to strip prefix and feed one token per step.
+        # The stateful decoder accumulates KV-cache internally.
+        generated_ids = torch.zeros((batch_size, 0), dtype=torch.long, device=device)
         past_key_values = None
 
-        # === Prefill: feed ALL forced tokens at once (matches optimum-intel _prefill) ===
-        # optimum-intel sends the full init_tokens [SOT, lang, task, no_ts] in one call.
-        outputs = self.decoder(
-            input_ids=decoder_input_ids,
-            encoder_hidden_states=encoder_hidden_states,
-            encoder_attention_mask=encoder_attention_mask,
-            past_key_values=None,  # None → reset_state() for stateful
-        )
-        if not self.decoder.stateful:
-            past_key_values = outputs.past_key_values
+        for i, token_id in enumerate(forced_tokens):
+            input_token = torch.tensor(
+                [[token_id]], dtype=torch.long, device=device
+            ).expand(batch_size, -1)
 
-        # First free prediction from prefill logits
+            # First token: reset state; subsequent tokens: continue state
+            if i == 0:
+                pkv = None  # → reset_state() in decoder
+            else:
+                pkv = ((),) if self.decoder.stateful else past_key_values
+
+            outputs = self.decoder(
+                input_ids=input_token,
+                encoder_hidden_states=encoder_hidden_states,
+                encoder_attention_mask=encoder_attention_mask,
+                past_key_values=pkv,
+            )
+
+            if not self.decoder.stateful:
+                past_key_values = outputs.past_key_values
+
+            generated_ids = torch.cat([generated_ids, input_token], dim=-1)
+
+            if is_first_sample:
+                logits_diag = outputs.logits
+                top_logits = logits_diag[0, -1, :] if logits_diag.dim() == 3 else logits_diag[0, :]
+                top5_vals, top5_ids = torch.topk(top_logits, 5)
+                logger.info(f"  Forced[{i}] input={token_id}, logits top5: "
+                           f"{list(zip(top5_ids.tolist(), [f'{v:.2f}' for v in top5_vals.tolist()]))}")
+
+        # === First free generation step ===
+        # Get logits from last forced token's output
         logits = outputs.logits
-        next_token_logits = logits[:, -1, :] if logits.dim() == 3 else logits
+        next_token_logits = logits[:, -1, :].clone() if logits.dim() == 3 else logits.clone()
 
         vocab_size = next_token_logits.shape[-1]
+
+        # Apply suppress_tokens (always) + begin_suppress_tokens (first free position only)
         for token_id in SUPPRESS_TOKENS:
             if token_id < vocab_size:
                 next_token_logits[:, token_id] = float('-inf')
@@ -1585,7 +1582,14 @@ class WhisperHybridModel:
         next_tokens = next_token_logits.argmax(dim=-1)
         generated_ids = torch.cat([generated_ids, next_tokens.unsqueeze(-1)], dim=-1)
 
+        if is_first_sample:
+            top5_vals, top5_ids = torch.topk(next_token_logits[0], 5)
+            logger.info(f"  Free[0] (after suppress): token={next_tokens[0].item()}, top5: "
+                       f"{list(zip(top5_ids.tolist(), [f'{v:.2f}' for v in top5_vals.tolist()]))}")
+
         if (next_tokens == EOT_TOKEN).all():
+            if is_first_sample:
+                logger.info(f"  EOT at step 0, total tokens: {generated_ids.shape[1]}")
             return generated_ids
 
         # === Auto-regressive generation: one token at a time ===
@@ -1601,8 +1605,9 @@ class WhisperHybridModel:
             )
 
             logits = outputs.logits
-            next_token_logits = logits[:, -1, :] if logits.dim() == 3 else logits
+            next_token_logits = logits[:, -1, :].clone() if logits.dim() == 3 else logits.clone()
 
+            # Apply suppress_tokens (not begin_suppress_tokens — only at first position)
             for token_id in SUPPRESS_TOKENS:
                 if token_id < vocab_size:
                     next_token_logits[:, token_id] = float('-inf')
@@ -1613,8 +1618,21 @@ class WhisperHybridModel:
             if not self.decoder.stateful:
                 past_key_values = outputs.past_key_values
 
+            # Diagnostic: log first 10 generated tokens
+            if is_first_sample and step <= 10:
+                top5_vals, top5_ids = torch.topk(next_token_logits[0], 5)
+                logger.info(f"  Free[{step}]: token={next_tokens[0].item()}, top5: "
+                           f"{list(zip(top5_ids.tolist(), [f'{v:.2f}' for v in top5_vals.tolist()]))}")
+
             if (next_tokens == EOT_TOKEN).all():
+                if is_first_sample:
+                    logger.info(f"  EOT at step {step}, total tokens: {generated_ids.shape[1]}")
                 break
+
+        if is_first_sample:
+            logger.info(f"  Generation done: {generated_ids.shape[1]} tokens "
+                       f"(forced={len(forced_tokens)}, generated={generated_ids.shape[1] - len(forced_tokens)})")
+            logger.info(f"  First 20 token IDs: {generated_ids[0, :20].tolist()}")
 
         return generated_ids
 
