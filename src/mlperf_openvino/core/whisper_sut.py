@@ -2068,20 +2068,24 @@ class WhisperMultiDieSUT:
     def _patch_decoder_device(self, model, die: str) -> None:
         """Re-compile model's decoder on the specified accelerator device.
 
-        The X accelerator does not support dynamic shapes, so we compile
-        several copies of the decoder IR – one per *sequence-length bucket*
-        – and swap in a thin proxy that picks the right compiled model at
-        inference time.
+        The X accelerator does not support dynamic shapes, so we must make
+        *every* dimension static — both the explicit inputs and the internal
+        state Variables that hold the KV cache.
 
-        Whisper autoregressive generation calls the decoder with
-        ``input_ids`` of shape ``(1, seq_len)`` where ``seq_len`` is almost
-        always 1.  On the first call, ``seq_len`` may equal the number of
-        forced decoder tokens (typically 1–4).  We cover both cases with a
-        small set of buckets.
+        A stateful decoder stores its KV cache as ReadValue/Assign pairs.
+        Each Variable has shape ``(batch, num_heads, ?, head_dim)`` where
+        the third dimension (sequence length) is dynamic.  We fix it to a
+        static maximum via ``model.reshape(inputs, variables_shapes=…)``,
+        which propagates the new shapes through the entire graph.
+
+        We compile several copies of the decoder IR — one per
+        *input-sequence-length bucket* (the ``input_ids`` dimension) — and
+        install a thin proxy that picks the right compiled model at
+        inference time.  All buckets share the same KV cache size.
 
         Args:
             model: OVModelForSpeechSeq2Seq instance (loaded on CPU)
-            die: Target device (e.g. "X.0")
+            die: Target device (e.g. ``"X.0"``)
         """
         import openvino as ov
 
@@ -2115,11 +2119,10 @@ class WhisperMultiDieSUT:
         for op_name in sorted(op_types):
             logger.info(f"    {op_name}: {op_types[op_name]}")
 
-        # --- detect which dims are dynamic --------------------------------
+        # --- guard: non-stateful with explicit KV inputs -------------------
         has_kv_inputs = any(
             "key_values" in n or "past_key" in n for n in input_info
         )
-
         if has_kv_inputs and not is_stateful:
             logger.warning(
                 "  Decoder has explicit past_key_values inputs and is not "
@@ -2128,9 +2131,55 @@ class WhisperMultiDieSUT:
             )
             return
 
+        if not is_stateful:
+            logger.warning(
+                "  Decoder is not stateful – no KV cache Variables found. "
+                "Cannot fix dynamic cache shapes. Keeping decoder on CPU."
+            )
+            return
+
+        # --- enumerate state Variables (KV cache) --------------------------
+        # Whisper decoder KV cache Variables have shape
+        #   (batch, num_heads, seq_len, head_dim)
+        # The seq_len dimension is dynamic and must be fixed.
+        #   - self-attention cache: grows up to max_new_tokens (+ margin)
+        #   - cross-attention cache: holds encoder output (1500 frames)
+        max_kv_len = self.max_new_tokens + 8  # small margin for forced tokens
+        encoder_kv_len = 1500                  # Whisper encoder: 1500 frames
+
+        variables = decoder_ir.get_variables()
+        logger.info(f"  Decoder has {len(variables)} state Variables:")
+
+        var_shapes: Dict[str, list] = {}
+        for var in variables:
+            info = var.get_info()
+            vid = info.variable_id
+            shape = info.data_shape
+            logger.info(f"    Variable '{vid}': {shape}, {info.data_type}")
+
+            # Build fully-static shape: replace every dynamic dim
+            dims = list(shape)
+            static_dims = []
+            for i, d in enumerate(dims):
+                if d.is_static:
+                    static_dims.append(d.get_length())
+                elif len(dims) == 4 and i == 2:
+                    # 4-D KV cache tensor, dim 2 is the sequence axis.
+                    # Cross-attention caches hold encoder output (1500);
+                    # self-attention caches grow up to max_kv_len.
+                    is_cross = ("encoder" in vid or "cross" in vid
+                                or "encoder_attn" in vid)
+                    static_dims.append(encoder_kv_len if is_cross else max_kv_len)
+                else:
+                    static_dims.append(1)
+
+            var_shapes[vid] = static_dims
+            logger.info(f"      -> static: {static_dims}")
+
         # --- define sequence-length buckets --------------------------------
         seq_len_buckets = [1, 2, 4]
         logger.info(f"  Decoder seq_len buckets: {seq_len_buckets}")
+        logger.info(f"  KV cache sizes: self_attn={max_kv_len}, cross_attn={encoder_kv_len}")
 
         # --- build accelerator config (same as encoder) --------------------
         ov_config: Dict[str, str] = {"CACHE_DIR": ""}
@@ -2138,45 +2187,37 @@ class WhisperMultiDieSUT:
             for key, value in self.config.openvino.device_properties.items():
                 ov_config[key] = value
 
-        # --- reshape first, then attempt compilation -----------------------
+        # --- test compile with seq_len=1 bucket ----------------------------
         dec_model = core.read_model(str(self.decoder_path))
-        shape_map = self._build_decoder_shape_map(dec_model, seq_len=1)
-        if shape_map:
-            dec_model.reshape(shape_map)
-            logger.info(f"  Test reshape seq_len=1: {shape_map}")
+        input_shape_map = self._build_decoder_shape_map(dec_model, seq_len=1)
+        logger.info(f"  Test reshape: inputs={input_shape_map}")
+        logger.info(f"  Test reshape: variables_shapes=<{len(var_shapes)} vars>")
 
-        # Try direct compilation on the die first.
-        # If that fails, try HETERO:<die>,CPU which routes unsupported ops
-        # to CPU automatically.
-        compile_device = die
         try:
-            logger.info(f"  Compiling test decoder on {compile_device} ...")
-            test_compiled = core.compile_model(dec_model, compile_device, ov_config)
-            logger.info(f"  Direct compilation on {compile_device} succeeded")
+            dec_model.reshape(input_shape_map, variables_shapes=var_shapes)
         except Exception as e:
-            logger.warning(f"  Direct compilation on {compile_device} failed: {e}")
-            hetero_device = f"HETERO:{die},CPU"
-            try:
-                logger.info(f"  Trying HETERO fallback: {hetero_device} ...")
-                test_compiled = core.compile_model(dec_model, hetero_device, ov_config)
-                compile_device = hetero_device
-                logger.info(f"  HETERO compilation succeeded")
-            except Exception as e2:
-                logger.warning(f"  HETERO compilation also failed: {e2}")
-                logger.warning("  Decoder cannot be compiled for accelerator. "
-                               "Keeping on CPU.")
-                return
+            logger.warning(f"  Decoder reshape failed: {e}")
+            logger.warning("  Keeping decoder on CPU.")
+            return
 
-        # --- compile all buckets on the working device ---------------------
+        try:
+            logger.info(f"  Compiling test decoder on {die} ...")
+            core.compile_model(dec_model, die, ov_config)
+            logger.info(f"  Compilation on {die} succeeded")
+        except Exception as e:
+            logger.warning(f"  Compilation on {die} failed: {e}")
+            logger.warning("  Decoder cannot be compiled for accelerator. "
+                           "Keeping on CPU.")
+            return
+
+        # --- compile all buckets ------------------------------------------
         buckets: Dict[int, Any] = {}
         for seq_len in seq_len_buckets:
             bm = core.read_model(str(self.decoder_path))
             sm = self._build_decoder_shape_map(bm, seq_len)
-            if sm:
-                bm.reshape(sm)
-                logger.info(f"  Bucket seq_len={seq_len}: reshaped {sm}")
-            logger.info(f"  Compiling decoder bucket seq_len={seq_len} on {compile_device} ...")
-            compiled = core.compile_model(bm, compile_device, ov_config)
+            bm.reshape(sm, variables_shapes=var_shapes)
+            logger.info(f"  Bucket seq_len={seq_len}: reshaped, compiling on {die} ...")
+            compiled = core.compile_model(bm, die, ov_config)
             buckets[seq_len] = compiled
 
         # --- verify execution devices on first bucket ----------------------
@@ -2191,7 +2232,7 @@ class WhisperMultiDieSUT:
                 logger.info(f"  [OK] Decoder fully on {die}")
             elif on_target and has_cpu:
                 logger.info(
-                    f"  [OK] Decoder on {die} (heterogeneous: some ops fall back to CPU)"
+                    f"  [OK] Decoder on {die} (some ops fall back to CPU)"
                 )
             else:
                 logger.warning(
@@ -2207,7 +2248,8 @@ class WhisperMultiDieSUT:
         model.decoder.request = _DecoderBucketDispatch(
             buckets, original_request
         )
-        logger.info(f"  Decoder patched to {compile_device} ({len(buckets)} buckets)")
+        logger.info(f"  Decoder patched to {die} ({len(buckets)} buckets, "
+                    f"KV cache: self_attn={max_kv_len}, cross_attn={encoder_kv_len})")
 
     @staticmethod
     def _build_decoder_shape_map(dec_model, seq_len: int) -> Dict[str, list]:
