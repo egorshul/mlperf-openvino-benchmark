@@ -1172,7 +1172,7 @@ class WhisperHybridDecoder:
         if self.stateful and past_key_values is None:
             self.request.reset_state()
             self._past_length = 0
-            self.next_beam_idx = np.arange(input_ids.shape[0], dtype=int)
+            self.next_beam_idx = np.arange(input_ids.shape[0], dtype=np.int32)
 
         # Add past_key_values for non-stateful models (match optimum-intel order: before input_ids)
         if past_key_values is not None and not self.stateful:
@@ -1208,7 +1208,7 @@ class WhisperHybridDecoder:
             batch_size = input_ids.shape[0]
             inputs["beam_idx"] = (
                 self.next_beam_idx if self.next_beam_idx is not None
-                else np.arange(batch_size, dtype=int)
+                else np.arange(batch_size, dtype=np.int32)
             )
 
         # Run inference (match optimum-intel: start_async + wait with share_inputs)
@@ -1237,8 +1237,8 @@ class WhisperHybridDecoder:
     def _reorder_cache(self, past_key_values, beam_idx):
         """Reorder cache for beam search."""
         if self.stateful:
-            # Use int (int64) to match optimum-intel
-            self.next_beam_idx = np.array(beam_idx, dtype=int)
+            # Use int32 to match model's expected beam_idx type (int32_t)
+            self.next_beam_idx = np.array(beam_idx, dtype=np.int32)
             return past_key_values
         else:
             reordered = ()
@@ -1741,6 +1741,14 @@ class WhisperMultiDieSUT:
         # Get target device from config
         target_device = self.config.openvino.device if hasattr(self.config, 'openvino') else "CPU"
 
+        # Allow overriding encoder device via environment variable for diagnostics.
+        # Set WHISPER_ENCODER_DEVICE=CPU to run encoder on CPU (isolates encoder vs generate bugs).
+        import os
+        encoder_device_override = os.environ.get("WHISPER_ENCODER_DEVICE", "").strip()
+        if encoder_device_override:
+            logger.info(f"WHISPER_ENCODER_DEVICE override: {encoder_device_override} (was {target_device})")
+            target_device = encoder_device_override
+
         logger.info(f"Setting up Whisper hybrid model (encoder={target_device}, decoder=CPU)")
 
         # Load processor
@@ -1799,10 +1807,14 @@ class WhisperMultiDieSUT:
         )
 
         # Determine which devices to use for encoders
-        # If device has die suffix (e.g., "X.0"), use it directly
-        # If device has no suffix (e.g., "X"), discover all dies
+        # CPU: use directly (no die discovery)
+        # Die suffix (e.g., "X.0"): use it directly
+        # No suffix (e.g., "X"): discover all dies
         import re
-        if re.match(r"^.+\.\d+$", target_device):
+        if target_device == "CPU":
+            device_dies = ["CPU"]
+            logger.info("Using CPU encoder (no die discovery)")
+        elif re.match(r"^.+\.\d+$", target_device):
             # Specific die requested (e.g., "X.0") - use directly
             device_dies = [target_device]
             logger.info(f"Using specified device die: {target_device}")
