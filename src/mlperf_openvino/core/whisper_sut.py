@@ -43,6 +43,35 @@ from ..datasets.librispeech import LibriSpeechQSL
 logger = logging.getLogger(__name__)
 
 
+def _generate_quiet(model, input_features, **kwargs):
+    """Call model.generate() while suppressing known-benign HF warnings.
+
+    Transformers emits several noisy warnings through the ``logging``
+    module (not ``warnings``), so we temporarily raise the log level of
+    the ``transformers`` logger to ERROR for the duration of the call.
+
+    Suppressed messages (all benign, do not affect accuracy):
+      - "attention mask is not set … pad token is same as eos token"
+      - "SuppressTokensLogitsProcessor … has been passed … also created"
+      - "generation_config default values have been modified"
+    """
+    import warnings
+
+    tf_logger = logging.getLogger("transformers")
+    prev_level = tf_logger.level
+
+    tf_logger.setLevel(logging.ERROR)
+    # Also suppress any warnings.warn() variants (older transformers).
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=r".*attention.mask.*pad token.*")
+        warnings.filterwarnings("ignore", message=r".*LogitsProcessor.*has been passed.*")
+        warnings.filterwarnings("ignore", message=r".*generation_config.*default values.*modified.*")
+        try:
+            return model.generate(input_features, **kwargs)
+        finally:
+            tf_logger.setLevel(prev_level)
+
+
 class WhisperOptimumSUT:
     """
     System Under Test for Whisper ASR using Optimum-Intel.
@@ -179,7 +208,6 @@ class WhisperOptimumSUT:
             Transcribed text
         """
         import torch
-        import warnings
 
         # Get preprocessed mel features from QSL
         features = self.qsl.get_features(sample_idx)
@@ -194,17 +222,12 @@ class WhisperOptimumSUT:
             input_features = input_features.unsqueeze(0)
 
         # Generate transcription using model with KV-cache support
-        # Suppress known-benign transformers warnings (see WhisperMultiDieSUT for details)
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", message=r".*attention.mask.*pad token.*")
-            warnings.filterwarnings("ignore", message=r".*LogitsProcessor.*has been passed.*")
-            warnings.filterwarnings("ignore", message=r".*generation_config.*default values.*modified.*")
-            generated_ids = self.model.generate(
-                input_features,
-                max_new_tokens=self.max_new_tokens,
-                language="en",
-                task="transcribe",
-            )
+        generated_ids = _generate_quiet(
+            self.model, input_features,
+            max_new_tokens=self.max_new_tokens,
+            language="en",
+            task="transcribe",
+        )
 
         # Decode tokens to text
         text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
@@ -2128,11 +2151,17 @@ class WhisperMultiDieSUT:
                     continue
                 dims = list(ps)
 
+                def _dim_val(d, fallback=1):
+                    """Extract int from openvino.Dimension (static) or return fallback."""
+                    if d.is_static:
+                        return d.get_length()
+                    return fallback
+
                 if "input_ids" in name:
                     shape_map[name] = [1, seq_len]
                 elif "encoder_hidden_states" in name:
                     # Whisper Large V3 encoder output: (1, 1500, 1280)
-                    shape_map[name] = [1, 1500, int(dims[2]) if dims[2].is_static else 1280]
+                    shape_map[name] = [1, 1500, _dim_val(dims[2], 1280)]
                 elif "beam_idx" in name:
                     shape_map[name] = [1]
                 elif "cache_position" in name:
@@ -2143,9 +2172,7 @@ class WhisperMultiDieSUT:
                     shape_map[name] = [1, 1500]
                 else:
                     # Unknown dynamic input – use dim=1 per axis as fallback
-                    shape_map[name] = [
-                        int(d) if d.is_static else 1 for d in dims
-                    ]
+                    shape_map[name] = [_dim_val(d) for d in dims]
 
             if shape_map:
                 dec_model.reshape(shape_map)
@@ -2197,7 +2224,6 @@ class WhisperMultiDieSUT:
     def _process_sample(self, sample_idx: int, model: Any) -> str:
         """Process a single sample using OVModelForSpeechSeq2Seq.generate()."""
         import torch
-        import warnings
 
         # Get preprocessed mel features from QSL
         features = self.qsl.get_features(sample_idx)
@@ -2214,25 +2240,12 @@ class WhisperMultiDieSUT:
         # Generate transcription using optimum-intel's proven generate()
         # (WhisperForConditionalGeneration.generate → handles forced_decoder_ids,
         #  suppress_tokens, KV-cache, etc. correctly)
-        #
-        # Suppress known-benign transformers warnings:
-        #   - "attention mask is not set … pad token is same as eos token"
-        #     (Whisper batch=1, no padding — attention_mask has no effect)
-        #   - "SuppressTokens(AtBegin)LogitsProcessor … has been passed … but also created"
-        #     (Whisper's generate creates these AND base generate creates them from
-        #      generation_config; duplicate is harmless, custom takes precedence)
-        #   - "generation_config default values have been modified"
-        #     (informational: model-specific suppress_tokens loaded into config)
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", message=r".*attention.mask.*pad token.*")
-            warnings.filterwarnings("ignore", message=r".*LogitsProcessor.*has been passed.*")
-            warnings.filterwarnings("ignore", message=r".*generation_config.*default values.*modified.*")
-            generated_ids = model.generate(
-                input_features,
-                max_new_tokens=self.max_new_tokens,
-                language="en",
-                task="transcribe",
-            )
+        generated_ids = _generate_quiet(
+            model, input_features,
+            max_new_tokens=self.max_new_tokens,
+            language="en",
+            task="transcribe",
+        )
 
         # Decode tokens to text
         text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
