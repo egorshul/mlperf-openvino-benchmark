@@ -2069,12 +2069,14 @@ class WhisperMultiDieSUT:
     def _patch_decoder_device(self, model, die: str) -> None:
         """Re-compile model's decoder on the specified accelerator device.
 
-        The accelerator requires every dimension to be static — both the
-        explicit model inputs and the internal state Variables (KV cache
-        stored as ReadValue/Assign pairs).
+        The stateful decoder uses Concat-based KV cache growth — the
+        sequence dimension increases by ``seq_len`` on every step, making
+        it impossible to assign fully-static shapes to state Variables.
 
-        We use ``model.reshape(inputs, variables_shapes=…)`` (OV 2025.0+)
-        to fix **all** shapes in a single atomic call, then compile.
+        Strategy: reshape only the explicit model **inputs** to static
+        shapes and leave state Variables dynamic.  This lets the
+        accelerator compiler handle the fixed-shape inputs while the
+        runtime manages the growing KV cache state internally.
 
         Several copies of the decoder IR are compiled — one per
         *input-sequence-length bucket* — and a thin proxy selects the
@@ -2124,48 +2126,19 @@ class WhisperMultiDieSUT:
             )
             return
 
-        # --- enumerate ALL state Variables ---------------------------------
-        max_kv_len = self.max_new_tokens + 8   # self-attention cache ceiling
-        encoder_kv_len = 1500                   # cross-attention (encoder output)
-
+        # --- log state Variables for diagnostics ---------------------------
         variables = decoder_ir.get_variables()
-        logger.info(f"  Found {len(variables)} state Variables. "
-                    f"Target KV sizes: self_attn={max_kv_len}, cross_attn={encoder_kv_len}")
-
-        var_shapes: Dict[str, list] = {}
-        skipped = 0
+        logger.info(f"  Found {len(variables)} state Variables "
+                    "(KV cache uses Concat-based growth → Variables stay dynamic)")
 
         for var in variables:
             info = var.get_info()
             vid = info.variable_id
             shape = info.data_shape
             rank = shape.rank
-
-            logger.info(f"    '{vid}': shape={shape}, rank={'dynamic' if rank.is_dynamic else rank.get_length()}, "
+            logger.info(f"    '{vid}': shape={shape}, "
+                        f"rank={'dynamic' if rank.is_dynamic else rank.get_length()}, "
                         f"type={info.data_type}")
-
-            if rank.is_dynamic:
-                # Cross-attention KV cache: fully-dynamic Variable.
-                # These hold encoder key/value projections: (1, 20, 1500, 64).
-                static_dims = [1, 20, encoder_kv_len, 64]
-            else:
-                ndims = rank.get_length()
-                dims = list(shape)
-                static_dims = []
-                for i, d in enumerate(dims):
-                    if d.is_static:
-                        static_dims.append(d.get_length())
-                    elif ndims == 4 and i == 2:
-                        is_cross = any(tag in vid for tag in ("encoder", "cross", "encoder_attn"))
-                        val = encoder_kv_len if is_cross else max_kv_len
-                        static_dims.append(val)
-                    else:
-                        static_dims.append(1)
-
-            var_shapes[vid] = static_dims
-            logger.info(f"      -> {static_dims}")
-
-        logger.info(f"  Total Variables with static shapes: {len(var_shapes)}")
 
         # --- build input shape map helper ----------------------------------
         def _input_shape_map(dec_model, seq_len: int) -> Dict[str, list]:
@@ -2196,32 +2169,6 @@ class WhisperMultiDieSUT:
                     shape_map[name] = [_dv(d) for d in dims]
             return shape_map
 
-        # --- helper: patch ReadValue init subgraphs -------------------------
-        # ReadValue v6 validates: Variable shape must extend init shape.
-        # Init is typically zeros(1,20,0,64) (empty cache at start).
-        # A static Variable [1,20,448,64] does NOT extend [1,20,0,64]
-        # because 448 ≠ 0.  Fix: replace init with zeros of the target
-        # shape so that Variable == init → validation passes.
-        def _patch_readvalue_inits(mdl):
-            patched = 0
-            for op in mdl.get_ordered_ops():
-                if op.get_type_name() != "ReadValue":
-                    continue
-                # ReadValue attribute "variable_id" links to a Variable
-                attrs = op.get_attributes()
-                var_id = attrs.get("variable_id", "")
-                if var_id not in var_shapes:
-                    continue
-                target = var_shapes[var_id]
-                # Replace init input (port 0) with a zero Constant of
-                # the target shape so the compatibility check passes.
-                new_init = ov.op.Constant(
-                    np.zeros(target, dtype=np.float32)
-                )
-                op.input(0).replace_source_output(new_init.output(0))
-                patched += 1
-            return patched
-
         # --- test reshape + compile with seq_len=1 -------------------------
         seq_len_buckets = [1, 2, 4]
 
@@ -2231,15 +2178,11 @@ class WhisperMultiDieSUT:
                 ov_config[key] = value
 
         test_model = core.read_model(str(self.decoder_path))
-        n_patched = _patch_readvalue_inits(test_model)
-        logger.info(f"  Patched {n_patched} ReadValue init tensors")
-
         test_inputs = _input_shape_map(test_model, seq_len=1)
-        logger.info(f"  Test reshape: inputs={test_inputs}, "
-                    f"variables_shapes=<{len(var_shapes)} entries>")
+        logger.info(f"  Test reshape (inputs only, no variables_shapes): {test_inputs}")
 
         try:
-            test_model.reshape(test_inputs, variables_shapes=var_shapes)
+            test_model.reshape(test_inputs)
         except Exception as e:
             logger.warning(f"  Decoder reshape FAILED: {e}")
             import traceback; traceback.print_exc()
@@ -2258,9 +2201,8 @@ class WhisperMultiDieSUT:
         buckets: Dict[int, Any] = {}
         for seq_len in seq_len_buckets:
             bm = core.read_model(str(self.decoder_path))
-            _patch_readvalue_inits(bm)
             sm = _input_shape_map(bm, seq_len)
-            bm.reshape(sm, variables_shapes=var_shapes)
+            bm.reshape(sm)
             logger.info(f"  Compiling bucket seq_len={seq_len} on {die} ...")
             buckets[seq_len] = core.compile_model(bm, die, ov_config)
 
@@ -2286,7 +2228,7 @@ class WhisperMultiDieSUT:
         original_request = model.decoder.request
         model.decoder.request = _DecoderBucketDispatch(buckets, original_request)
         logger.info(f"  Decoder patched to {die} ({len(buckets)} buckets, "
-                    f"KV cache: self_attn={max_kv_len}, cross_attn={encoder_kv_len})")
+                    f"inputs-only reshape, KV cache state remains dynamic)")
 
     def _get_next_model(self) -> Tuple[str, Any]:
         """Get next model in round-robin fashion."""
