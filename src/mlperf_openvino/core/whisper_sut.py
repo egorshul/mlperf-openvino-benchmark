@@ -179,6 +179,7 @@ class WhisperOptimumSUT:
             Transcribed text
         """
         import torch
+        import warnings
 
         # Get preprocessed mel features from QSL
         features = self.qsl.get_features(sample_idx)
@@ -193,12 +194,17 @@ class WhisperOptimumSUT:
             input_features = input_features.unsqueeze(0)
 
         # Generate transcription using model with KV-cache support
-        generated_ids = self.model.generate(
-            input_features,
-            max_new_tokens=self.max_new_tokens,
-            language="en",
-            task="transcribe",
-        )
+        # Suppress known-benign transformers warnings (see WhisperMultiDieSUT for details)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=r".*attention.mask.*pad token.*")
+            warnings.filterwarnings("ignore", message=r".*LogitsProcessor.*has been passed.*")
+            warnings.filterwarnings("ignore", message=r".*generation_config.*default values.*modified.*")
+            generated_ids = self.model.generate(
+                input_features,
+                max_new_tokens=self.max_new_tokens,
+                language="en",
+                task="transcribe",
+            )
 
         # Decode tokens to text
         text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
@@ -1824,9 +1830,16 @@ class WhisperMultiDieSUT:
         logger.info(f"  Total models: {len(self._models)}")
         logger.info("  Verified encoder placement:")
         for die_name, exec_devs in verified_devices:
-            status = "[OK]" if die_name == "CPU" or any(
+            on_target = die_name == "CPU" or any(
                 die_name.split(".")[0] in d for d in exec_devs
-            ) else "[WARN]"
+            )
+            has_cpu = any("CPU" in d for d in exec_devs)
+            if not on_target:
+                status = "[WARN] fallback to CPU!"
+            elif die_name != "CPU" and has_cpu:
+                status = "[OK, heterogeneous]"
+            else:
+                status = "[OK]"
             logger.info(f"    {die_name} -> EXECUTION_DEVICES={exec_devs} {status}")
         logger.info("=" * 60)
 
@@ -1907,11 +1920,15 @@ class WhisperMultiDieSUT:
         try:
             exec_devices = compiled_encoder.get_property("EXECUTION_DEVICES")
             logger.info(f"  Encoder EXECUTION_DEVICES: {exec_devices}")
-            # exec_devices is a list of device strings, e.g. ["X.0"] or ["CPU"]
             device_prefix = die.split(".")[0]
             on_target = any(device_prefix in d for d in exec_devices)
-            if on_target:
-                logger.info(f"  [OK] Encoder confirmed on {die}")
+            has_cpu = any("CPU" in d for d in exec_devices)
+            if on_target and not has_cpu:
+                logger.info(f"  [OK] Encoder fully on {die}")
+            elif on_target and has_cpu:
+                logger.info(
+                    f"  [OK] Encoder on {die} (heterogeneous: some ops fall back to CPU)"
+                )
             else:
                 logger.warning(
                     f"  [WARN] Encoder requested {die} but EXECUTION_DEVICES={exec_devices}. "
@@ -1935,6 +1952,7 @@ class WhisperMultiDieSUT:
     def _process_sample(self, sample_idx: int, model: Any) -> str:
         """Process a single sample using OVModelForSpeechSeq2Seq.generate()."""
         import torch
+        import warnings
 
         # Get preprocessed mel features from QSL
         features = self.qsl.get_features(sample_idx)
@@ -1951,12 +1969,25 @@ class WhisperMultiDieSUT:
         # Generate transcription using optimum-intel's proven generate()
         # (WhisperForConditionalGeneration.generate → handles forced_decoder_ids,
         #  suppress_tokens, KV-cache, etc. correctly)
-        generated_ids = model.generate(
-            input_features,
-            max_new_tokens=self.max_new_tokens,
-            language="en",
-            task="transcribe",
-        )
+        #
+        # Suppress known-benign transformers warnings:
+        #   - "attention mask is not set … pad token is same as eos token"
+        #     (Whisper batch=1, no padding — attention_mask has no effect)
+        #   - "SuppressTokens(AtBegin)LogitsProcessor … has been passed … but also created"
+        #     (Whisper's generate creates these AND base generate creates them from
+        #      generation_config; duplicate is harmless, custom takes precedence)
+        #   - "generation_config default values have been modified"
+        #     (informational: model-specific suppress_tokens loaded into config)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=r".*attention.mask.*pad token.*")
+            warnings.filterwarnings("ignore", message=r".*LogitsProcessor.*has been passed.*")
+            warnings.filterwarnings("ignore", message=r".*generation_config.*default values.*modified.*")
+            generated_ids = model.generate(
+                input_features,
+                max_new_tokens=self.max_new_tokens,
+                language="en",
+                task="transcribe",
+            )
 
         # Decode tokens to text
         text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
