@@ -1643,6 +1643,70 @@ class WhisperHybridModel:
         return generated_ids
 
 
+class _DecoderBucketDispatch:
+    """Proxy that sits in place of ``model.decoder.request`` (CompiledModel).
+
+    Optimum-intel's OVDecoder calls ``self.request(inputs, …)`` which
+    invokes ``CompiledModel.__call__``.  This proxy intercepts the call,
+    inspects ``input_ids`` to determine the current sequence length, finds
+    the pre-compiled bucket whose shape matches, and dispatches inference
+    to that bucket.
+
+    If no bucket matches (e.g. an unexpectedly long sequence), the proxy
+    falls back to the original CPU request.
+    """
+
+    def __init__(self, buckets: Dict[int, Any], fallback: Any):
+        self._buckets = buckets                  # seq_len → CompiledModel
+        self._fallback = fallback                # original CPU request
+        self._sorted_lens = sorted(buckets.keys())
+        self._miss_warned = False
+        # Copy properties from first bucket so code that reads model
+        # metadata still works (e.g. get_property, inputs, outputs).
+        first = next(iter(buckets.values()))
+        self.inputs = first.inputs
+        self.outputs = first.outputs
+
+    # --- primary call path ------------------------------------------------
+    def __call__(self, inputs, **kwargs):
+        compiled = self._select(inputs)
+        return compiled(inputs, **kwargs)
+
+    # --- fallback start_async path (some OVDecoder versions) ---------------
+    def start_async(self, inputs, **kwargs):
+        compiled = self._select(inputs)
+        return compiled.create_infer_request().start_async(inputs, **kwargs)
+
+    # --- helpers ----------------------------------------------------------
+    def get_property(self, name):
+        return next(iter(self._buckets.values())).get_property(name)
+
+    def create_infer_request(self):
+        return next(iter(self._buckets.values())).create_infer_request()
+
+    def _select(self, inputs):
+        """Pick the compiled model whose seq_len bucket fits ``input_ids``."""
+        input_ids = inputs.get("input_ids")
+        if input_ids is None:
+            return self._fallback
+
+        seq_len = input_ids.shape[-1] if hasattr(input_ids, 'shape') else 1
+
+        # Find smallest bucket >= seq_len
+        for blen in self._sorted_lens:
+            if blen >= seq_len:
+                return self._buckets[blen]
+
+        # No bucket large enough – fall back to CPU
+        if not self._miss_warned:
+            logger.warning(
+                f"Decoder bucket miss: seq_len={seq_len}, "
+                f"max_bucket={self._sorted_lens[-1]}. Falling back to CPU."
+            )
+            self._miss_warned = True
+        return self._fallback
+
+
 class WhisperMultiDieSUT:
     """
     System Under Test for Whisper ASR on multi-die NPU.
@@ -1761,7 +1825,15 @@ class WhisperMultiDieSUT:
             logger.info(f"WHISPER_ENCODER_DEVICE override: {encoder_device_override} (was {target_device})")
             target_device = encoder_device_override
 
-        logger.info(f"Setting up Whisper Multi-Die SUT (encoder={target_device}, decoder=CPU)")
+        # Decoder device: same accelerator by default, override with env var.
+        # Set WHISPER_DECODER_DEVICE=CPU to keep decoder on CPU.
+        decoder_device = target_device
+        decoder_device_override = os.environ.get("WHISPER_DECODER_DEVICE", "").strip()
+        if decoder_device_override:
+            logger.info(f"WHISPER_DECODER_DEVICE override: {decoder_device_override} (was {decoder_device})")
+            decoder_device = decoder_device_override
+
+        logger.info(f"Setting up Whisper Multi-Die SUT (encoder={target_device}, decoder={decoder_device})")
 
         # Load processor
         try:
@@ -1796,6 +1868,17 @@ class WhisperMultiDieSUT:
                 if die != "CPU":
                     self._patch_encoder_device(model, die)
 
+                # Optionally compile decoder on accelerator too.
+                # Decoder die matches the encoder die unless overridden.
+                dec_die = die if decoder_device == target_device else decoder_device
+                if dec_die != "CPU":
+                    try:
+                        self._patch_decoder_device(model, dec_die)
+                    except Exception as e:
+                        logger.warning(f"  Decoder patch failed for {dec_die}, keeping CPU: {e}")
+                        import traceback
+                        traceback.print_exc()
+
                 self._models.append((die, model))
                 logger.info(f"  Model ready on {die}")
             except Exception as e:
@@ -1809,14 +1892,33 @@ class WhisperMultiDieSUT:
             model = self._load_optimum_model()
             self._models.append(("CPU", model))
 
-        # Verify actual execution devices for each model
-        verified_devices = []
+        # Verify actual execution devices for each model (encoder + decoder)
+        verified_enc = []
+        verified_dec = []
         for die_name, mdl in self._models:
+            # encoder
             try:
                 exec_devs = mdl.encoder.request.get_property("EXECUTION_DEVICES")
-                verified_devices.append((die_name, exec_devs))
+                verified_enc.append((die_name, exec_devs))
             except Exception:
-                verified_devices.append((die_name, ["unknown"]))
+                verified_enc.append((die_name, ["unknown"]))
+            # decoder
+            try:
+                exec_devs = mdl.decoder.request.get_property("EXECUTION_DEVICES")
+                verified_dec.append((die_name, exec_devs))
+            except Exception:
+                verified_dec.append((die_name, ["CPU"]))
+
+        def _placement_tag(die_name, exec_devs):
+            on_target = die_name == "CPU" or any(
+                die_name.split(".")[0] in d for d in exec_devs
+            )
+            has_cpu = any("CPU" in d for d in exec_devs)
+            if not on_target:
+                return "[WARN] fallback to CPU!"
+            if die_name != "CPU" and has_cpu:
+                return "[OK, heterogeneous]"
+            return "[OK]"
 
         # Log summary
         encoder_devices = [die for die, _ in self._models]
@@ -1824,23 +1926,17 @@ class WhisperMultiDieSUT:
         logger.info("Whisper Multi-Die SUT Configuration:")
         logger.info(f"  Backend: OVModelForSpeechSeq2Seq (optimum-intel)")
         logger.info(f"  Encoder device(s): {encoder_devices}")
-        logger.info(f"  Decoder device: CPU")
+        logger.info(f"  Decoder device config: {decoder_device}")
         logger.info(f"  Max new tokens: {self.max_new_tokens}")
         logger.info(f"  Scenario: {self.scenario}")
         logger.info(f"  Total models: {len(self._models)}")
+        logger.info(f"  Multi-die parallelism: {'ThreadPool' if len(self._models) > 1 else 'sequential'}")
         logger.info("  Verified encoder placement:")
-        for die_name, exec_devs in verified_devices:
-            on_target = die_name == "CPU" or any(
-                die_name.split(".")[0] in d for d in exec_devs
-            )
-            has_cpu = any("CPU" in d for d in exec_devs)
-            if not on_target:
-                status = "[WARN] fallback to CPU!"
-            elif die_name != "CPU" and has_cpu:
-                status = "[OK, heterogeneous]"
-            else:
-                status = "[OK]"
-            logger.info(f"    {die_name} -> EXECUTION_DEVICES={exec_devs} {status}")
+        for die_name, exec_devs in verified_enc:
+            logger.info(f"    {die_name} -> EXECUTION_DEVICES={exec_devs} {_placement_tag(die_name, exec_devs)}")
+        logger.info("  Verified decoder placement:")
+        for die_name, exec_devs in verified_dec:
+            logger.info(f"    {die_name} -> EXECUTION_DEVICES={exec_devs} {_placement_tag(die_name, exec_devs)}")
         logger.info("=" * 60)
 
     def _load_optimum_model(self):
@@ -1943,6 +2039,155 @@ class WhisperMultiDieSUT:
         model.encoder.request = compiled_encoder
         logger.info(f"  Encoder patched to {die}")
 
+    # ------------------------------------------------------------------
+    # Decoder on accelerator
+    # ------------------------------------------------------------------
+    def _patch_decoder_device(self, model, die: str) -> None:
+        """Re-compile model's decoder on the specified accelerator device.
+
+        The X accelerator does not support dynamic shapes, so we compile
+        several copies of the decoder IR – one per *sequence-length bucket*
+        – and swap in a thin proxy that picks the right compiled model at
+        inference time.
+
+        Whisper autoregressive generation calls the decoder with
+        ``input_ids`` of shape ``(1, seq_len)`` where ``seq_len`` is almost
+        always 1.  On the first call, ``seq_len`` may equal the number of
+        forced decoder tokens (typically 1–4).  We cover both cases with a
+        small set of buckets.
+
+        Args:
+            model: OVModelForSpeechSeq2Seq instance (loaded on CPU)
+            die: Target device (e.g. "X.0")
+        """
+        import openvino as ov
+
+        core = ov.Core()
+
+        # Read decoder IR from disk
+        decoder_ir = core.read_model(str(self.decoder_path))
+
+        # --- discover input layout & dynamic dims -------------------------
+        input_info: Dict[str, Any] = {}
+        for inp in decoder_ir.inputs:
+            name = inp.get_any_name()
+            pshape = inp.get_partial_shape()
+            input_info[name] = pshape
+            logger.info(f"  Decoder input '{name}': {pshape}, {inp.get_element_type()}")
+
+        is_stateful = False
+        try:
+            is_stateful = len(decoder_ir.get_variables()) > 0
+        except Exception:
+            pass
+        logger.info(f"  Decoder stateful={is_stateful}")
+
+        # --- detect which dims are dynamic --------------------------------
+        has_kv_inputs = any(
+            "key_values" in n or "past_key" in n for n in input_info
+        )
+
+        # For non-stateful decoders with explicit past_key_values the KV
+        # sequence length grows every step, making bucketing impractical.
+        # Only patch when the model is stateful (KV cache is internal).
+        if has_kv_inputs and not is_stateful:
+            logger.warning(
+                "  Decoder has explicit past_key_values inputs and is not "
+                "stateful – cannot move to accelerator (variable KV dims). "
+                "Keeping decoder on CPU."
+            )
+            return
+
+        # --- define sequence-length buckets --------------------------------
+        # Bucket seq_len values that may appear during generate().
+        # Modern transformers feeds one token at a time (seq_len=1) for all
+        # steps; older versions may feed up to 4 forced decoder tokens in
+        # the first call.
+        seq_len_buckets = [1, 2, 4]
+        logger.info(f"  Decoder seq_len buckets: {seq_len_buckets}")
+
+        # --- build accelerator config (same as encoder) --------------------
+        ov_config: Dict[str, str] = {"CACHE_DIR": ""}
+        if hasattr(self.config, 'openvino') and hasattr(self.config.openvino, 'device_properties'):
+            for key, value in self.config.openvino.device_properties.items():
+                ov_config[key] = value
+
+        # --- compile one model per bucket ----------------------------------
+        #     bucket_key  → (CompiledModel, {input_name: static_shape})
+        buckets: Dict[int, Any] = {}
+
+        for seq_len in seq_len_buckets:
+            dec_model = core.read_model(str(self.decoder_path))
+
+            # Build static shape map for this bucket
+            shape_map: Dict[str, list] = {}
+            for inp in dec_model.inputs:
+                name = inp.get_any_name()
+                ps = inp.get_partial_shape()
+                if not ps.is_dynamic:
+                    continue
+                dims = list(ps)
+
+                if "input_ids" in name:
+                    shape_map[name] = [1, seq_len]
+                elif "encoder_hidden_states" in name:
+                    # Whisper Large V3 encoder output: (1, 1500, 1280)
+                    shape_map[name] = [1, 1500, int(dims[2]) if dims[2].is_static else 1280]
+                elif "beam_idx" in name:
+                    shape_map[name] = [1]
+                elif "cache_position" in name:
+                    shape_map[name] = [seq_len]
+                elif "attention_mask" in name and "encoder" not in name:
+                    shape_map[name] = [1, seq_len]
+                elif "encoder_attention_mask" in name:
+                    shape_map[name] = [1, 1500]
+                else:
+                    # Unknown dynamic input – use dim=1 per axis as fallback
+                    shape_map[name] = [
+                        int(d) if d.is_static else 1 for d in dims
+                    ]
+
+            if shape_map:
+                dec_model.reshape(shape_map)
+                logger.info(f"  Bucket seq_len={seq_len}: reshaped {shape_map}")
+
+            logger.info(f"  Compiling decoder bucket seq_len={seq_len} on {die} ...")
+            compiled = core.compile_model(dec_model, die, ov_config)
+            buckets[seq_len] = compiled
+
+        # --- verify execution devices on first bucket ----------------------
+        try:
+            sample_compiled = next(iter(buckets.values()))
+            exec_devs = sample_compiled.get_property("EXECUTION_DEVICES")
+            logger.info(f"  Decoder EXECUTION_DEVICES: {exec_devs}")
+            device_prefix = die.split(".")[0]
+            on_target = any(device_prefix in d for d in exec_devs)
+            has_cpu = any("CPU" in d for d in exec_devs)
+            if on_target and not has_cpu:
+                logger.info(f"  [OK] Decoder fully on {die}")
+            elif on_target and has_cpu:
+                logger.info(
+                    f"  [OK] Decoder on {die} (heterogeneous: some ops fall back to CPU)"
+                )
+            else:
+                logger.warning(
+                    f"  [WARN] Decoder requested {die} but "
+                    f"EXECUTION_DEVICES={exec_devs}. Keeping CPU decoder."
+                )
+                return
+        except Exception as e:
+            logger.warning(f"  Could not query decoder EXECUTION_DEVICES: {e}")
+
+        # --- install proxy on model.decoder --------------------------------
+        # OVDecoder.forward() calls self.request(inputs, share_inputs=…)
+        # where self.request is a CompiledModel.  We replace it with a thin
+        # proxy that selects the right bucket.
+        original_request = model.decoder.request
+        model.decoder.request = _DecoderBucketDispatch(
+            buckets, original_request
+        )
+        logger.info(f"  Decoder patched to {die} ({len(buckets)} buckets)")
+
     def _get_next_model(self) -> Tuple[str, Any]:
         """Get next model in round-robin fashion."""
         die_name, model = self._models[self._model_index]
@@ -2040,33 +2285,92 @@ class WhisperMultiDieSUT:
             self._issue_queries_server(query_samples)
 
     def _issue_queries_offline(self, query_samples: List[Any]) -> None:
-        """Process all samples in Offline mode."""
+        """Process all samples in Offline mode.
+
+        When multiple dies are available, samples are processed in parallel
+        using a thread pool (one worker per die).  Each worker owns its
+        model instance so there is no lock contention.
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
         total = len(query_samples)
         self._start_progress(total, "Whisper Multi-Die Offline")
 
+        num_dies = len(self._models)
+
+        if num_dies <= 1:
+            # Single die – keep the simple sequential path
+            self._issue_queries_offline_sequential(query_samples)
+            return
+
+        # --- parallel path ---------------------------------------------------
+        # Partition samples round-robin across dies so each worker processes
+        # a contiguous slice with its own model – no shared state.
+        die_batches: List[List[Tuple[Any, int]]] = [[] for _ in range(num_dies)]
+        for i, sample in enumerate(query_samples):
+            die_batches[i % num_dies].append((sample, sample.index))
+
+        logger.info(
+            f"Parallel offline: {num_dies} dies, "
+            f"{[len(b) for b in die_batches]} samples each"
+        )
+
+        # Each worker processes its batch and returns a list of
+        # (sample, sample_idx, text) tuples.
+        def _worker(die_idx: int, batch):
+            _, model = self._models[die_idx]
+            results = []
+            for sample, sample_idx in batch:
+                text = self._process_sample(sample_idx, model)
+                results.append((sample, sample_idx, text))
+            return results
+
+        all_results: List[Tuple[Any, int, str]] = []
+        with ThreadPoolExecutor(max_workers=num_dies) as pool:
+            futures = {
+                pool.submit(_worker, die_idx, batch): die_idx
+                for die_idx, batch in enumerate(die_batches)
+                if batch  # skip empty batches
+            }
+            for future in as_completed(futures):
+                for sample, sample_idx, text in future.result():
+                    self._predictions[sample_idx] = text
+                    self._sample_count += 1
+                    self._update_progress(1)
+                all_results.extend(future.result())
+
+        # Build LoadGen responses preserving original sample order.
+        responses = []
+        response_arrays = []
+        for sample, _idx, text in sorted(all_results, key=lambda r: r[1]):
+            text_bytes = text.encode('utf-8')
+            response_array = array.array('B', text_bytes)
+            response_arrays.append(response_array)
+            bi = response_array.buffer_info()
+            responses.append(lg.QuerySampleResponse(sample.id, bi[0], bi[1]))
+
+        self._close_progress()
+        lg.QuerySamplesComplete(responses)
+
+    def _issue_queries_offline_sequential(self, query_samples: List[Any]) -> None:
+        """Sequential offline processing (single-die fast path)."""
         responses = []
         response_arrays = []
 
         for sample in query_samples:
             sample_idx = sample.index
-
-            # Select model (round-robin across dies)
             die_name, model = self._get_next_model()
 
-            # Generate transcription using model.generate()
             text = self._process_sample(sample_idx, model)
             self._predictions[sample_idx] = text
             self._sample_count += 1
 
-            # Create response
             text_bytes = text.encode('utf-8')
             response_array = array.array('B', text_bytes)
             response_arrays.append(response_array)
             bi = response_array.buffer_info()
 
-            response = lg.QuerySampleResponse(sample.id, bi[0], bi[1])
-            responses.append(response)
-
+            responses.append(lg.QuerySampleResponse(sample.id, bi[0], bi[1]))
             self._update_progress(1)
 
         self._close_progress()
