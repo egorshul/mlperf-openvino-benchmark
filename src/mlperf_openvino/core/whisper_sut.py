@@ -2144,34 +2144,26 @@ class WhisperMultiDieSUT:
             logger.info(f"    '{vid}': shape={shape}, rank={'dynamic' if rank.is_dynamic else rank.get_length()}, "
                         f"type={info.data_type}")
 
-            # Skip Variables with unknown rank — we cannot infer the layout
             if rank.is_dynamic:
-                logger.warning(f"      -> SKIP (dynamic rank)")
-                skipped += 1
-                continue
-
-            ndims = rank.get_length()
-            dims = list(shape)
-
-            static_dims = []
-            for i, d in enumerate(dims):
-                if d.is_static:
-                    static_dims.append(d.get_length())
-                elif ndims == 4 and i == 2:
-                    # KV cache layout: (batch, heads, seq, head_dim)
-                    is_cross = any(tag in vid for tag in ("encoder", "cross", "encoder_attn"))
-                    val = encoder_kv_len if is_cross else max_kv_len
-                    static_dims.append(val)
-                else:
-                    # Fallback for any other dynamic dim
-                    static_dims.append(1)
+                # Cross-attention KV cache: fully-dynamic Variable.
+                # These hold encoder key/value projections: (1, 20, 1500, 64).
+                static_dims = [1, 20, encoder_kv_len, 64]
+            else:
+                ndims = rank.get_length()
+                dims = list(shape)
+                static_dims = []
+                for i, d in enumerate(dims):
+                    if d.is_static:
+                        static_dims.append(d.get_length())
+                    elif ndims == 4 and i == 2:
+                        is_cross = any(tag in vid for tag in ("encoder", "cross", "encoder_attn"))
+                        val = encoder_kv_len if is_cross else max_kv_len
+                        static_dims.append(val)
+                    else:
+                        static_dims.append(1)
 
             var_shapes[vid] = static_dims
             logger.info(f"      -> {static_dims}")
-
-        if skipped:
-            logger.warning(f"  {skipped} Variables skipped (dynamic rank). "
-                           "They will remain dynamic — compilation may fail.")
 
         logger.info(f"  Total Variables with static shapes: {len(var_shapes)}")
 
@@ -2204,6 +2196,32 @@ class WhisperMultiDieSUT:
                     shape_map[name] = [_dv(d) for d in dims]
             return shape_map
 
+        # --- helper: patch ReadValue init subgraphs -------------------------
+        # ReadValue v6 validates: Variable shape must extend init shape.
+        # Init is typically zeros(1,20,0,64) (empty cache at start).
+        # A static Variable [1,20,448,64] does NOT extend [1,20,0,64]
+        # because 448 ≠ 0.  Fix: replace init with zeros of the target
+        # shape so that Variable == init → validation passes.
+        def _patch_readvalue_inits(mdl):
+            patched = 0
+            for op in mdl.get_ordered_ops():
+                if op.get_type_name() != "ReadValue":
+                    continue
+                # ReadValue attribute "variable_id" links to a Variable
+                attrs = op.get_attributes()
+                var_id = attrs.get("variable_id", "")
+                if var_id not in var_shapes:
+                    continue
+                target = var_shapes[var_id]
+                # Replace init input (port 0) with a zero Constant of
+                # the target shape so the compatibility check passes.
+                new_init = ov.op.Constant(
+                    np.zeros(target, dtype=np.float32)
+                )
+                op.input(0).replace_source_output(new_init.output(0))
+                patched += 1
+            return patched
+
         # --- test reshape + compile with seq_len=1 -------------------------
         seq_len_buckets = [1, 2, 4]
 
@@ -2213,6 +2231,9 @@ class WhisperMultiDieSUT:
                 ov_config[key] = value
 
         test_model = core.read_model(str(self.decoder_path))
+        n_patched = _patch_readvalue_inits(test_model)
+        logger.info(f"  Patched {n_patched} ReadValue init tensors")
+
         test_inputs = _input_shape_map(test_model, seq_len=1)
         logger.info(f"  Test reshape: inputs={test_inputs}, "
                     f"variables_shapes=<{len(var_shapes)} entries>")
@@ -2237,6 +2258,7 @@ class WhisperMultiDieSUT:
         buckets: Dict[int, Any] = {}
         for seq_len in seq_len_buckets:
             bm = core.read_model(str(self.decoder_path))
+            _patch_readvalue_inits(bm)
             sm = _input_shape_map(bm, seq_len)
             bm.reshape(sm, variables_shapes=var_shapes)
             logger.info(f"  Compiling bucket seq_len={seq_len} on {die} ...")
