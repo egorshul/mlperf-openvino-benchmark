@@ -1774,12 +1774,7 @@ class WhisperMultiDieSUT:
         self._predictions: Dict[int, str] = {}
         self._query_count = 0
         self._sample_count = 0
-
-        # Progress tracking
-        self._progress_bar: Optional[Any] = None
         self._start_time = 0.0
-        self._last_progress_update = 0.0
-        self._progress_update_interval = 0.5
 
         # LoadGen handles
         self._sut_handle = None
@@ -1916,52 +1911,26 @@ class WhisperMultiDieSUT:
             model = self._load_optimum_model()
             self._models.append(("CPU", model))
 
-        # Verify actual execution devices for each model (encoder + decoder)
-        verified_enc = []
-        verified_dec = []
+        # Verify actual execution devices
+        encoder_devices = [die for die, _ in self._models]
+        print(f"[Setup] {len(self._models)} die(s), encoder={encoder_devices}, "
+              f"decoder={decoder_device}", file=sys.stderr)
+
         for die_name, mdl in self._models:
-            # encoder
+            enc_tag = dec_tag = "?"
             try:
                 exec_devs = mdl.encoder.request.get_property("EXECUTION_DEVICES")
-                verified_enc.append((die_name, exec_devs))
+                on_target = any(die_name.split(".")[0] in d for d in exec_devs)
+                enc_tag = "OK" if on_target else f"WARN:CPU ({exec_devs})"
             except Exception:
-                verified_enc.append((die_name, ["unknown"]))
-            # decoder
+                enc_tag = "unknown"
             try:
                 exec_devs = mdl.decoder.request.get_property("EXECUTION_DEVICES")
-                verified_dec.append((die_name, exec_devs))
+                dec_tag = ",".join(exec_devs) if exec_devs else "unknown"
             except Exception:
-                verified_dec.append((die_name, ["CPU"]))
-
-        def _placement_tag(die_name, exec_devs):
-            on_target = die_name == "CPU" or any(
-                die_name.split(".")[0] in d for d in exec_devs
-            )
-            has_cpu = any("CPU" in d for d in exec_devs)
-            if not on_target:
-                return "[WARN] fallback to CPU!"
-            if die_name != "CPU" and has_cpu:
-                return "[OK, heterogeneous]"
-            return "[OK]"
-
-        # Log summary
-        encoder_devices = [die for die, _ in self._models]
-        logger.info("=" * 60)
-        logger.info("Whisper Multi-Die SUT Configuration:")
-        logger.info(f"  Backend: OVModelForSpeechSeq2Seq (optimum-intel)")
-        logger.info(f"  Encoder device(s): {encoder_devices}")
-        logger.info(f"  Decoder device config: {decoder_device}")
-        logger.info(f"  Max new tokens: {self.max_new_tokens}")
-        logger.info(f"  Scenario: {self.scenario}")
-        logger.info(f"  Total models: {len(self._models)}")
-        logger.info(f"  Multi-die parallelism: {'ThreadPool' if len(self._models) > 1 else 'sequential'}")
-        logger.info("  Verified encoder placement:")
-        for die_name, exec_devs in verified_enc:
-            logger.info(f"    {die_name} -> EXECUTION_DEVICES={exec_devs} {_placement_tag(die_name, exec_devs)}")
-        logger.info("  Verified decoder placement:")
-        for die_name, exec_devs in verified_dec:
-            logger.info(f"    {die_name} -> EXECUTION_DEVICES={exec_devs} {_placement_tag(die_name, exec_devs)}")
-        logger.info("=" * 60)
+                dec_tag = "CPU"
+            print(f"  {die_name}: encoder=[{enc_tag}] decoder=[{dec_tag}]",
+                  file=sys.stderr)
 
     def _load_optimum_model(self):
         """Load OVModelForSpeechSeq2Seq on CPU.
@@ -2252,43 +2221,6 @@ class WhisperMultiDieSUT:
         text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
         return text
 
-    def _start_progress(self, total: int, desc: str = "Processing") -> None:
-        """Start progress tracking."""
-        self._start_time = time.time()
-        if TQDM_AVAILABLE:
-            self._progress_bar = tqdm(
-                total=total,
-                desc=desc,
-                unit="samples",
-                file=sys.stderr,
-                dynamic_ncols=True,
-            )
-        else:
-            logger.info(f"Starting: {desc} ({total} samples)")
-            self._last_progress_update = time.time()
-
-    def _update_progress(self, n: int = 1) -> None:
-        """Update progress."""
-        if TQDM_AVAILABLE and self._progress_bar is not None:
-            self._progress_bar.update(n)
-        else:
-            current_time = time.time()
-            if current_time - self._last_progress_update >= self._progress_update_interval:
-                elapsed = current_time - self._start_time
-                throughput = self._sample_count / elapsed if elapsed > 0 else 0
-                logger.info(f"Progress: {self._sample_count} samples, {throughput:.1f} samples/sec")
-                self._last_progress_update = current_time
-
-    def _close_progress(self) -> None:
-        """Close progress tracking."""
-        if TQDM_AVAILABLE and self._progress_bar is not None:
-            self._progress_bar.close()
-            self._progress_bar = None
-        else:
-            elapsed = time.time() - self._start_time
-            throughput = self._sample_count / elapsed if elapsed > 0 else 0
-            logger.info(f"Completed: {self._sample_count} samples in {elapsed:.1f}s ({throughput:.1f} samples/sec)")
-
     def issue_queries(self, query_samples: List[Any]) -> None:
         """Process queries from LoadGen."""
         self._query_count += len(query_samples)
@@ -2308,29 +2240,23 @@ class WhisperMultiDieSUT:
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         total = len(query_samples)
-        self._start_progress(total, "Whisper Multi-Die Offline")
-
         num_dies = len(self._models)
+        self._start_time = time.time()
+
+        print(f"[Offline] {total} samples, {num_dies} die(s)", file=sys.stderr)
 
         if num_dies <= 1:
-            # Single die – keep the simple sequential path
             self._issue_queries_offline_sequential(query_samples)
             return
 
         # --- parallel path ---------------------------------------------------
-        # Partition samples round-robin across dies so each worker processes
-        # a contiguous slice with its own model – no shared state.
         die_batches: List[List[Tuple[Any, int]]] = [[] for _ in range(num_dies)]
         for i, sample in enumerate(query_samples):
             die_batches[i % num_dies].append((sample, sample.index))
 
-        logger.info(
-            f"Parallel offline: {num_dies} dies, "
-            f"{[len(b) for b in die_batches]} samples each"
-        )
+        batch_counts = [len(b) for b in die_batches]
+        print(f"[Distribute] {batch_counts} samples per die", file=sys.stderr)
 
-        # Each worker processes its batch and returns a list of
-        # (sample, sample_idx, text) tuples.
         def _worker(die_idx: int, batch):
             _, model = self._models[die_idx]
             results = []
@@ -2340,18 +2266,34 @@ class WhisperMultiDieSUT:
             return results
 
         all_results: List[Tuple[Any, int, str]] = []
+        print(f"[Inference] ", end="", file=sys.stderr)
+        dots_printed = 0
+
         with ThreadPoolExecutor(max_workers=num_dies) as pool:
             futures = {
                 pool.submit(_worker, die_idx, batch): die_idx
                 for die_idx, batch in enumerate(die_batches)
-                if batch  # skip empty batches
+                if batch
             }
             for future in as_completed(futures):
                 for sample, sample_idx, text in future.result():
                     self._predictions[sample_idx] = text
                     self._sample_count += 1
-                    self._update_progress(1)
+
+                    progress = int(self._sample_count * 10 / total)
+                    while dots_printed < progress:
+                        print(".", end="", file=sys.stderr, flush=True)
+                        dots_printed += 1
+
                 all_results.extend(future.result())
+
+        while dots_printed < 10:
+            print(".", end="", file=sys.stderr, flush=True)
+            dots_printed += 1
+
+        elapsed = time.time() - self._start_time
+        print(f" {total}/{total} ({elapsed:.1f}s, {total/elapsed:.1f} qps)",
+              file=sys.stderr)
 
         # Build LoadGen responses preserving original sample order.
         responses = []
@@ -2363,13 +2305,18 @@ class WhisperMultiDieSUT:
             bi = response_array.buffer_info()
             responses.append(lg.QuerySampleResponse(sample.id, bi[0], bi[1]))
 
-        self._close_progress()
         lg.QuerySamplesComplete(responses)
 
     def _issue_queries_offline_sequential(self, query_samples: List[Any]) -> None:
         """Sequential offline processing (single-die fast path)."""
+        total = len(query_samples)
         responses = []
         response_arrays = []
+
+        print(f"[Inference] ", end="", file=sys.stderr)
+        dots_printed = 0
+        last_completed = 0
+        wait_start = time.time()
 
         for sample in query_samples:
             sample_idx = sample.index
@@ -2383,11 +2330,30 @@ class WhisperMultiDieSUT:
             response_array = array.array('B', text_bytes)
             response_arrays.append(response_array)
             bi = response_array.buffer_info()
-
             responses.append(lg.QuerySampleResponse(sample.id, bi[0], bi[1]))
-            self._update_progress(1)
 
-        self._close_progress()
+            if total > 0:
+                progress = int(self._sample_count * 10 / total)
+                while dots_printed < progress:
+                    print(".", end="", file=sys.stderr, flush=True)
+                    dots_printed += 1
+
+            if self._sample_count > last_completed:
+                last_completed = self._sample_count
+                wait_start = time.time()
+            elif time.time() - wait_start > 30:
+                print(f"\n[WARN] Stalled at {self._sample_count}/{total}",
+                      file=sys.stderr)
+                wait_start = time.time()
+
+        while dots_printed < 10:
+            print(".", end="", file=sys.stderr, flush=True)
+            dots_printed += 1
+
+        elapsed = time.time() - self._start_time
+        print(f" {total}/{total} ({elapsed:.1f}s, {total/elapsed:.1f} qps)",
+              file=sys.stderr)
+
         lg.QuerySamplesComplete(responses)
 
     def _issue_queries_server(self, query_samples: List[Any]) -> None:
@@ -2413,35 +2379,27 @@ class WhisperMultiDieSUT:
 
     def flush_queries(self) -> None:
         """Flush pending queries."""
-        if self._progress_bar is not None:
-            self._close_progress()
+        pass
 
     def get_sut(self) -> Any:
-        """Get LoadGen SUT handle."""
         if self._sut_handle is None:
             self._sut_handle = lg.ConstructSUT(
-                self.issue_queries,
-                self.flush_queries
-            )
+                self.issue_queries, self.flush_queries)
         return self._sut_handle
 
     def get_qsl(self) -> Any:
-        """Get LoadGen QSL handle."""
         if self._qsl_handle is None:
             self._qsl_handle = lg.ConstructQSL(
                 self.qsl.total_sample_count,
                 self.qsl.performance_sample_count,
                 self.qsl.load_query_samples,
-                self.qsl.unload_query_samples
-            )
+                self.qsl.unload_query_samples)
         return self._qsl_handle
 
     def get_predictions(self) -> Dict[int, str]:
-        """Get all predictions."""
         return self._predictions.copy()
 
     def reset(self) -> None:
-        """Reset state for new run."""
         self._predictions.clear()
         self._query_count = 0
         self._sample_count = 0
