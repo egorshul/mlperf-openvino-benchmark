@@ -1,9 +1,4 @@
-"""
-Whisper-specific System Under Test implementation.
-
-This module provides SUT implementation optimized for Whisper ASR model,
-using optimum-intel OVModelForSpeechSeq2Seq for proper encoder-decoder inference.
-"""
+"""Whisper ASR System Under Test implementations."""
 
 import array
 import logging
@@ -28,7 +23,6 @@ except ImportError:
     LOADGEN_AVAILABLE = False
     lg = None
 
-# Optimum-Intel for proper Whisper inference
 try:
     from optimum.intel.openvino import OVModelForSpeechSeq2Seq
     OPTIMUM_AVAILABLE = True
@@ -44,24 +38,13 @@ logger = logging.getLogger(__name__)
 
 
 def _generate_quiet(model, input_features, **kwargs):
-    """Call model.generate() while suppressing known-benign HF warnings.
-
-    Transformers emits several noisy warnings through the ``logging``
-    module (not ``warnings``), so we temporarily raise the log level of
-    the ``transformers`` logger to ERROR for the duration of the call.
-
-    Suppressed messages (all benign, do not affect accuracy):
-      - "attention mask is not set … pad token is same as eos token"
-      - "SuppressTokensLogitsProcessor … has been passed … also created"
-      - "generation_config default values have been modified"
-    """
+    """Call model.generate() suppressing benign HF warnings."""
     import warnings
 
     tf_logger = logging.getLogger("transformers")
     prev_level = tf_logger.level
 
     tf_logger.setLevel(logging.ERROR)
-    # Also suppress any warnings.warn() variants (older transformers).
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message=r".*attention.mask.*pad token.*")
         warnings.filterwarnings("ignore", message=r".*LogitsProcessor.*has been passed.*")
@@ -73,12 +56,7 @@ def _generate_quiet(model, input_features, **kwargs):
 
 
 class WhisperOptimumSUT:
-    """
-    System Under Test for Whisper ASR using Optimum-Intel.
-
-    Uses OVModelForSpeechSeq2Seq for proper encoder-decoder inference
-    with correct KV-cache handling and token generation.
-    """
+    """Whisper ASR SUT using Optimum-Intel OVModelForSpeechSeq2Seq."""
 
     def __init__(
         self,
@@ -86,18 +64,8 @@ class WhisperOptimumSUT:
         model_path: Union[str, Path],
         qsl: LibriSpeechQSL,
         scenario: Scenario = Scenario.OFFLINE,
-        max_new_tokens: int = 440,  # Leave room for special tokens (448 - 8)
+        max_new_tokens: int = 440,
     ):
-        """
-        Initialize Whisper SUT using Optimum-Intel.
-
-        Args:
-            config: Benchmark configuration
-            model_path: Path to OpenVINO Whisper model directory
-            qsl: Query Sample Library
-            scenario: MLPerf scenario
-            max_new_tokens: Maximum tokens to generate
-        """
         if not LOADGEN_AVAILABLE:
             raise ImportError("MLPerf LoadGen is not installed")
 
@@ -113,31 +81,25 @@ class WhisperOptimumSUT:
         self.scenario = scenario
         self.max_new_tokens = max_new_tokens
 
-        # Results storage
         self._predictions: Dict[int, str] = {}
         self._query_count = 0
         self._sample_count = 0
 
-        # Progress tracking
         self._progress_bar: Optional[Any] = None
         self._start_time = 0.0
         self._last_progress_update = 0.0
-        self._progress_update_interval = 0.5  # seconds
+        self._progress_update_interval = 0.5
 
-        # Create LoadGen handles
         self._sut_handle = None
         self._qsl_handle = None
 
-        # Load model and processor
         self._load_model()
 
     def _load_model(self) -> None:
-        """Load Whisper model using Optimum-Intel."""
         from transformers import AutoProcessor
 
         logger.info(f"Loading Whisper model from {self.model_path}")
 
-        # Load processor (tokenizer + feature extractor)
         try:
             self.processor = AutoProcessor.from_pretrained(self.model_path)
         except Exception as e:
@@ -145,18 +107,15 @@ class WhisperOptimumSUT:
             logger.info("Falling back to openai/whisper-large-v3 processor")
             self.processor = AutoProcessor.from_pretrained("openai/whisper-large-v3")
 
-        # Load OpenVINO model (exported with --task automatic-speech-recognition-with-past)
-        ov_config = {"CACHE_DIR": ""}
         self.model = OVModelForSpeechSeq2Seq.from_pretrained(
             self.model_path,
-            ov_config=ov_config,
+            ov_config={"CACHE_DIR": ""},
             compile=True,
         )
 
         logger.info("Whisper model loaded successfully")
 
     def _start_progress(self, total: int, desc: str = "Processing") -> None:
-        """Start progress tracking."""
         self._start_time = time.time()
         if TQDM_AVAILABLE:
             self._progress_bar = tqdm(
@@ -171,7 +130,6 @@ class WhisperOptimumSUT:
             self._last_progress_update = time.time()
 
     def _update_progress(self, n: int = 1) -> None:
-        """Update progress by n samples."""
         if TQDM_AVAILABLE and self._progress_bar is not None:
             self._progress_bar.update(n)
         else:
@@ -183,7 +141,6 @@ class WhisperOptimumSUT:
                 self._last_progress_update = current_time
 
     def _close_progress(self) -> None:
-        """Close progress tracking."""
         if TQDM_AVAILABLE and self._progress_bar is not None:
             self._progress_bar.close()
             self._progress_bar = None
@@ -193,35 +150,21 @@ class WhisperOptimumSUT:
             logger.info(f"Completed: {self._sample_count} samples in {elapsed:.1f}s ({throughput:.1f} samples/sec)")
 
     def flush_queries(self) -> None:
-        """Flush any pending queries."""
         if self._progress_bar is not None:
             self._close_progress()
 
     def _process_sample(self, sample_idx: int) -> str:
-        """
-        Process a single audio sample.
-
-        Args:
-            sample_idx: Sample index
-
-        Returns:
-            Transcribed text
-        """
         import torch
 
-        # Get preprocessed mel features from QSL
         features = self.qsl.get_features(sample_idx)
         input_features = features["input_features"]
 
-        # Convert to tensor
         if isinstance(input_features, np.ndarray):
             input_features = torch.from_numpy(input_features)
 
-        # Ensure correct shape (batch, n_mels, time)
         if input_features.dim() == 2:
             input_features = input_features.unsqueeze(0)
 
-        # Generate transcription using model with KV-cache support
         generated_ids = _generate_quiet(
             self.model, input_features,
             max_new_tokens=self.max_new_tokens,
@@ -229,13 +172,10 @@ class WhisperOptimumSUT:
             task="transcribe",
         )
 
-        # Decode tokens to text
         text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-
         return text
 
     def issue_queries(self, query_samples: List[Any]) -> None:
-        """Process queries from LoadGen."""
         self._query_count += len(query_samples)
 
         if self.scenario == Scenario.OFFLINE:
@@ -246,7 +186,6 @@ class WhisperOptimumSUT:
             raise ValueError(f"Unsupported scenario: {self.scenario}")
 
     def _issue_query_offline(self, query_samples: List[Any]) -> None:
-        """Process queries for Offline scenario."""
         responses = []
         response_arrays = []
 
@@ -274,7 +213,6 @@ class WhisperOptimumSUT:
         lg.QuerySamplesComplete(responses)
 
     def _issue_query_server(self, query_samples: List[Any]) -> None:
-        """Process queries for Server scenario."""
         responses = []
         response_arrays = []
 
@@ -301,21 +239,11 @@ class WhisperOptimumSUT:
         lg.QuerySamplesComplete(responses)
 
     def get_sut(self) -> Any:
-        """Get LoadGen SUT handle.
-
-        Returns:
-            LoadGen SUT handle for benchmark execution.
-        """
         if self._sut_handle is None:
             self._sut_handle = lg.ConstructSUT(self.issue_queries, self.flush_queries)
         return self._sut_handle
 
     def get_qsl(self) -> Any:
-        """Get LoadGen QSL handle.
-
-        Returns:
-            LoadGen QSL handle for sample management.
-        """
         if self._qsl_handle is None:
             self._qsl_handle = lg.ConstructQSL(
                 self.qsl.total_sample_count,
@@ -326,30 +254,22 @@ class WhisperOptimumSUT:
         return self._qsl_handle
 
     def get_predictions(self) -> Dict[int, str]:
-        """Get all predictions."""
         return self._predictions.copy()
 
     def reset(self) -> None:
-        """Reset state for new run."""
         self._predictions.clear()
         self._query_count = 0
         self._sample_count = 0
 
 
 class WhisperSUT:
-    """
-    System Under Test for Whisper ASR model (fallback implementation).
+    """Whisper ASR SUT with manual encoder-decoder inference (fallback)."""
 
-    Uses manual encoder-decoder inference when optimum-intel is not available.
-    Prefer WhisperOptimumSUT when possible.
-    """
-
-    # Whisper special tokens
-    SOT_TOKEN = 50258  # Start of transcript
-    EOT_TOKEN = 50257  # End of transcript
-    TRANSCRIBE_TOKEN = 50359  # Transcribe task
-    NO_TIMESTAMPS_TOKEN = 50363  # No timestamps
-    EN_TOKEN = 50259  # English language
+    SOT_TOKEN = 50258
+    EOT_TOKEN = 50257
+    TRANSCRIBE_TOKEN = 50359
+    NO_TIMESTAMPS_TOKEN = 50363
+    EN_TOKEN = 50259
 
     def __init__(
         self,
@@ -358,19 +278,8 @@ class WhisperSUT:
         decoder_backend: BaseBackend,
         qsl: LibriSpeechQSL,
         scenario: Scenario = Scenario.OFFLINE,
-        max_new_tokens: int = 440,  # Leave room for special tokens (448 - 8)
+        max_new_tokens: int = 440,
     ):
-        """
-        Initialize Whisper SUT.
-
-        Args:
-            config: Benchmark configuration
-            encoder_backend: OpenVINO backend for encoder
-            decoder_backend: OpenVINO backend for decoder
-            qsl: Query Sample Library
-            scenario: MLPerf scenario
-            max_new_tokens: Maximum tokens to generate
-        """
         if not LOADGEN_AVAILABLE:
             raise ImportError("MLPerf LoadGen is not installed")
 
@@ -381,29 +290,23 @@ class WhisperSUT:
         self.scenario = scenario
         self.max_new_tokens = max_new_tokens
 
-        # Discover decoder input names
         self._decoder_input_names = self._discover_decoder_inputs()
 
-        # Results storage
         self._predictions: Dict[int, str] = {}
         self._query_count = 0
         self._sample_count = 0
 
-        # Progress tracking
         self._progress_bar: Optional[Any] = None
         self._start_time = 0.0
         self._last_progress_update = 0.0
-        self._progress_update_interval = 0.5  # seconds
+        self._progress_update_interval = 0.5
 
-        # Create LoadGen handles
         self._sut_handle = None
         self._qsl_handle = None
 
-        # Tokenizer for decoding (lazy loaded)
         self._tokenizer = None
-    
+
     def _start_progress(self, total: int, desc: str = "Processing") -> None:
-        """Start progress tracking."""
         self._start_time = time.time()
         if TQDM_AVAILABLE:
             self._progress_bar = tqdm(
@@ -418,11 +321,9 @@ class WhisperSUT:
             self._last_progress_update = time.time()
 
     def _update_progress(self, n: int = 1) -> None:
-        """Update progress by n samples."""
         if TQDM_AVAILABLE and self._progress_bar is not None:
             self._progress_bar.update(n)
         else:
-            # Simple text-based progress update
             current_time = time.time()
             if current_time - self._last_progress_update >= self._progress_update_interval:
                 elapsed = current_time - self._start_time
@@ -431,7 +332,6 @@ class WhisperSUT:
                 self._last_progress_update = current_time
 
     def _close_progress(self) -> None:
-        """Close progress tracking."""
         if TQDM_AVAILABLE and self._progress_bar is not None:
             self._progress_bar.close()
             self._progress_bar = None
@@ -441,25 +341,13 @@ class WhisperSUT:
             logger.info(f"Completed: {self._sample_count} samples in {elapsed:.1f}s ({throughput:.1f} samples/sec)")
 
     def flush_queries(self) -> None:
-        """Flush any pending queries."""
-        # Close progress bar if still open (for Server mode)
         if self._progress_bar is not None:
             self._close_progress()
 
     def _discover_decoder_inputs(self) -> Dict[str, str]:
-        """
-        Discover decoder input names from the model.
-
-        Returns:
-            Dictionary mapping semantic names to actual input names:
-            - 'input_ids': name for decoder input IDs
-            - 'encoder_hidden_states': name for encoder output
-            - 'attention_mask': name for attention mask (optional)
-        """
         input_names = self.decoder.input_names
         result = {}
 
-        # Find input_ids (decoder_input_ids or input_ids)
         for name in input_names:
             name_lower = name.lower()
             if 'input_id' in name_lower or 'decoder_input' in name_lower:
@@ -471,16 +359,13 @@ class WhisperSUT:
             elif 'encoder_attention_mask' in name_lower:
                 result['encoder_attention_mask'] = name
 
-        # Fallback if not found
         if 'input_ids' not in result:
-            # Try first input that looks like IDs
             for name in input_names:
                 if 'id' in name.lower():
                     result['input_ids'] = name
                     break
 
         if 'encoder_hidden_states' not in result:
-            # Try to find encoder output
             for name in input_names:
                 if 'encoder' in name.lower() and 'mask' not in name.lower():
                     result['encoder_hidden_states'] = name
@@ -489,7 +374,6 @@ class WhisperSUT:
         return result
 
     def _load_tokenizer(self):
-        """Load Whisper tokenizer."""
         if self._tokenizer is not None:
             return
 
@@ -498,64 +382,30 @@ class WhisperSUT:
             self._tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-large-v3")
             logger.info("Loaded Whisper tokenizer")
         except ImportError:
-            logger.warning(
-                "transformers not installed, using basic token decoding. "
-                "Install with: pip install transformers"
-            )
+            logger.warning("transformers not installed, using basic token decoding")
             self._tokenizer = None
-    
+
     def _decode_tokens(self, token_ids: List[int]) -> str:
-        """
-        Decode token IDs to text.
-        
-        Args:
-            token_ids: List of token IDs
-            
-        Returns:
-            Decoded text
-        """
         self._load_tokenizer()
-        
+
         if self._tokenizer is not None:
-            # Filter special tokens
             filtered = [t for t in token_ids if t < 50257]
             return self._tokenizer.decode(filtered, skip_special_tokens=True)
         else:
-            # Basic fallback - just return token IDs as string
             return f"[tokens: {len(token_ids)}]"
-    
+
     def _encode(self, mel_features: np.ndarray) -> np.ndarray:
-        """
-        Run encoder on mel spectrogram.
-        
-        Args:
-            mel_features: Mel spectrogram of shape (batch, n_mels, time)
-            
-        Returns:
-            Encoder hidden states
-        """
         inputs = {self.encoder.input_names[0]: mel_features}
         outputs = self.encoder.predict(inputs)
         return list(outputs.values())[0]
-    
+
     def _decode_step(
         self,
         encoder_hidden_states: np.ndarray,
         decoder_input_ids: np.ndarray,
     ) -> np.ndarray:
-        """
-        Run one decoder step.
-
-        Args:
-            encoder_hidden_states: Encoder output
-            decoder_input_ids: Current token sequence
-
-        Returns:
-            Logits for next token
-        """
         inputs = {}
 
-        # Use discovered input names
         if 'input_ids' in self._decoder_input_names:
             inputs[self._decoder_input_names['input_ids']] = decoder_input_ids
         else:
@@ -566,14 +416,11 @@ class WhisperSUT:
         else:
             inputs['encoder_hidden_states'] = encoder_hidden_states
 
-        # Add attention masks if required by model
         if 'attention_mask' in self._decoder_input_names:
-            # Create attention mask (all ones for valid tokens)
             attn_mask = np.ones(decoder_input_ids.shape, dtype=np.int64)
             inputs[self._decoder_input_names['attention_mask']] = attn_mask
 
         if 'encoder_attention_mask' in self._decoder_input_names:
-            # Create encoder attention mask
             batch_size = encoder_hidden_states.shape[0]
             seq_len = encoder_hidden_states.shape[1]
             enc_attn_mask = np.ones((batch_size, seq_len), dtype=np.int64)
@@ -581,27 +428,14 @@ class WhisperSUT:
 
         outputs = self.decoder.predict(inputs)
         return list(outputs.values())[0]
-    
+
     def _generate(
         self,
         mel_features: np.ndarray,
         temperature: float = 0.0,
     ) -> Tuple[List[int], str]:
-        """
-        Generate transcript from mel spectrogram.
-
-        Args:
-            mel_features: Mel spectrogram
-            temperature: Sampling temperature (0 = greedy)
-
-        Returns:
-            Tuple of (token_ids, decoded_text)
-        """
-        # Encode audio
         encoder_hidden_states = self._encode(mel_features)
 
-        # Initialize decoder input with special tokens
-        # [SOT, language, task, no_timestamps]
         decoder_input = [
             self.SOT_TOKEN,
             self.EN_TOKEN,
@@ -612,18 +446,12 @@ class WhisperSUT:
         generated_tokens = []
 
         for step in range(self.max_new_tokens):
-            # Prepare decoder input
             decoder_input_ids = np.array([decoder_input], dtype=np.int64)
-
-            # Get logits
             logits = self._decode_step(encoder_hidden_states, decoder_input_ids)
 
-            # Get next token (greedy or sampling)
-            # Logits shape should be (batch, seq_len, vocab_size)
             if logits.ndim == 3:
                 next_token_logits = logits[0, -1, :]
             elif logits.ndim == 2:
-                # Shape might be (batch, vocab_size) for last token only
                 next_token_logits = logits[0, :]
             else:
                 break
@@ -631,60 +459,39 @@ class WhisperSUT:
             if temperature == 0.0:
                 next_token = int(np.argmax(next_token_logits))
             else:
-                # Softmax with temperature
                 probs = np.exp(next_token_logits / temperature)
                 probs = probs / probs.sum()
                 next_token = int(np.random.choice(len(probs), p=probs))
 
-            # Check for end of transcript
             if next_token == self.EOT_TOKEN:
                 break
 
             generated_tokens.append(next_token)
             decoder_input.append(next_token)
 
-        # Decode tokens to text
         text = self._decode_tokens(generated_tokens)
-
         return generated_tokens, text
-    
+
     def _process_sample(self, sample_idx: int) -> str:
-        """
-        Process a single audio sample.
-
-        Args:
-            sample_idx: Sample index
-
-        Returns:
-            Transcribed text
-        """
         features = self.qsl.get_features(sample_idx)
         mel_features = features["input_features"]
         tokens, text = self._generate(mel_features)
         return text
-    
+
     def issue_queries(self, query_samples: List[Any]) -> None:
-        """
-        Process queries from LoadGen.
-        
-        Args:
-            query_samples: List of QuerySample objects
-        """
         self._query_count += len(query_samples)
-        
+
         if self.scenario == Scenario.OFFLINE:
             self._issue_query_offline(query_samples)
         elif self.scenario == Scenario.SERVER:
             self._issue_query_server(query_samples)
         else:
             raise ValueError(f"Unsupported scenario: {self.scenario}")
-    
-    def _issue_query_offline(self, query_samples: List[Any]) -> None:
-        """Process queries for Offline scenario."""
-        responses = []
-        response_arrays = []  # Keep arrays alive until QuerySamplesComplete!
 
-        # Start progress tracking
+    def _issue_query_offline(self, query_samples: List[Any]) -> None:
+        responses = []
+        response_arrays = []
+
         total_samples = len(query_samples)
         self._start_progress(total_samples, desc="Whisper Offline inference")
 
@@ -692,37 +499,26 @@ class WhisperSUT:
             sample_idx = sample.index
             self._sample_count += 1
 
-            # Process sample
             text = self._process_sample(sample_idx)
             self._predictions[sample_idx] = text
 
-            # Create response (using dummy data for LoadGen)
             response_data = np.array([len(text)], dtype=np.int64)
             response_array = array.array('B', response_data.tobytes())
-            response_arrays.append(response_array)  # Keep alive!
+            response_arrays.append(response_array)
             bi = response_array.buffer_info()
 
-            response = lg.QuerySampleResponse(
-                sample.id,
-                bi[0],
-                bi[1]
-            )
+            response = lg.QuerySampleResponse(sample.id, bi[0], bi[1])
             responses.append(response)
 
-            # Update progress
             self._update_progress(1)
 
-        # Close progress
         self._close_progress()
-
         lg.QuerySamplesComplete(responses)
-    
-    def _issue_query_server(self, query_samples: List[Any]) -> None:
-        """Process queries for Server scenario."""
-        responses = []
-        response_arrays = []  # Keep arrays alive until QuerySamplesComplete!
 
-        # Start progress tracking if first query
+    def _issue_query_server(self, query_samples: List[Any]) -> None:
+        responses = []
+        response_arrays = []
+
         if self._sample_count == 0:
             self._start_progress(0, desc="Whisper Server inference")
 
@@ -730,47 +526,27 @@ class WhisperSUT:
             sample_idx = sample.index
             self._sample_count += 1
 
-            # Process sample
             text = self._process_sample(sample_idx)
             self._predictions[sample_idx] = text
 
-            # Create response
             response_data = np.array([len(text)], dtype=np.int64)
             response_array = array.array('B', response_data.tobytes())
-            response_arrays.append(response_array)  # Keep alive!
+            response_arrays.append(response_array)
             bi = response_array.buffer_info()
 
-            response = lg.QuerySampleResponse(
-                sample.id,
-                bi[0],
-                bi[1]
-            )
+            response = lg.QuerySampleResponse(sample.id, bi[0], bi[1])
             responses.append(response)
 
-            # Update progress
             self._update_progress(1)
 
         lg.QuerySamplesComplete(responses)
-    
-    def get_sut(self) -> Any:
-        """Get LoadGen SUT handle.
 
-        Returns:
-            LoadGen SUT handle for benchmark execution.
-        """
+    def get_sut(self) -> Any:
         if self._sut_handle is None:
-            self._sut_handle = lg.ConstructSUT(
-                self.issue_queries,
-                self.flush_queries
-            )
+            self._sut_handle = lg.ConstructSUT(self.issue_queries, self.flush_queries)
         return self._sut_handle
 
     def get_qsl(self) -> Any:
-        """Get LoadGen QSL handle.
-
-        Returns:
-            LoadGen QSL handle for sample management.
-        """
         if self._qsl_handle is None:
             self._qsl_handle = lg.ConstructQSL(
                 self.qsl.total_sample_count,
@@ -781,24 +557,17 @@ class WhisperSUT:
         return self._qsl_handle
 
     def get_predictions(self) -> Dict[int, str]:
-        """Get all predictions."""
         return self._predictions.copy()
 
     def reset(self) -> None:
-        """Reset state for new run."""
         self._predictions.clear()
         self._query_count = 0
         self._sample_count = 0
 
 
 class WhisperEncoderOnlySUT:
-    """
-    Simplified SUT that only runs the Whisper encoder.
-    
-    Useful for benchmarking encoder performance separately,
-    or when using external decoder/beam search.
-    """
-    
+    """Whisper encoder-only SUT for benchmarking encoder performance."""
+
     def __init__(
         self,
         config: BenchmarkConfig,
@@ -806,39 +575,27 @@ class WhisperEncoderOnlySUT:
         qsl: LibriSpeechQSL,
         scenario: Scenario = Scenario.OFFLINE,
     ):
-        """
-        Initialize encoder-only SUT.
-        
-        Args:
-            config: Benchmark configuration
-            backend: OpenVINO backend for encoder
-            qsl: Query Sample Library
-            scenario: MLPerf scenario
-        """
         if not LOADGEN_AVAILABLE:
             raise ImportError("MLPerf LoadGen is not installed")
-        
+
         self.config = config
         self.backend = backend
         self.qsl = qsl
         self.scenario = scenario
-        
+
         self._predictions: Dict[int, np.ndarray] = {}
         self._query_count = 0
         self._sample_count = 0
 
-        # Progress tracking
         self._progress_bar: Optional[Any] = None
         self._start_time = 0.0
         self._last_progress_update = 0.0
-        self._progress_update_interval = 0.5  # seconds
+        self._progress_update_interval = 0.5
 
-        # Create LoadGen handles
         self._sut_handle = None
         self._qsl_handle = None
 
     def _start_progress(self, total: int, desc: str = "Processing") -> None:
-        """Start progress tracking."""
         self._start_time = time.time()
         if TQDM_AVAILABLE:
             self._progress_bar = tqdm(
@@ -853,11 +610,9 @@ class WhisperEncoderOnlySUT:
             self._last_progress_update = time.time()
 
     def _update_progress(self, n: int = 1) -> None:
-        """Update progress by n samples."""
         if TQDM_AVAILABLE and self._progress_bar is not None:
             self._progress_bar.update(n)
         else:
-            # Simple text-based progress update
             current_time = time.time()
             if current_time - self._last_progress_update >= self._progress_update_interval:
                 elapsed = current_time - self._start_time
@@ -866,7 +621,6 @@ class WhisperEncoderOnlySUT:
                 self._last_progress_update = current_time
 
     def _close_progress(self) -> None:
-        """Close progress tracking."""
         if TQDM_AVAILABLE and self._progress_bar is not None:
             self._progress_bar.close()
             self._progress_bar = None
@@ -876,76 +630,49 @@ class WhisperEncoderOnlySUT:
             logger.info(f"Completed: {self._sample_count} samples in {elapsed:.1f}s ({throughput:.1f} samples/sec)")
 
     def flush_queries(self) -> None:
-        """Flush any pending queries."""
-        # Close progress bar if still open
         if self._progress_bar is not None:
             self._close_progress()
 
     def issue_queries(self, query_samples: List[Any]) -> None:
-        """Process queries from LoadGen."""
         self._query_count += len(query_samples)
 
-        # Start progress tracking
         total_samples = len(query_samples)
         self._start_progress(total_samples, desc="Whisper encoder inference")
 
         responses = []
-        response_arrays = []  # Keep arrays alive until QuerySamplesComplete!
+        response_arrays = []
 
         for sample in query_samples:
             sample_idx = sample.index
             self._sample_count += 1
 
-            # Get input features
             features = self.qsl.get_features(sample_idx)
             mel_features = features["input_features"]
 
-            # Run encoder
             inputs = {self.backend.input_names[0]: mel_features}
             outputs = self.backend.predict(inputs)
             encoder_output = list(outputs.values())[0]
 
             self._predictions[sample_idx] = encoder_output
 
-            # Create response - use array.array for safe memory handling
             response_array = array.array('B', encoder_output.tobytes())
-            response_arrays.append(response_array)  # Keep alive!
+            response_arrays.append(response_array)
             bi = response_array.buffer_info()
 
-            response = lg.QuerySampleResponse(
-                sample.id,
-                bi[0],
-                bi[1]
-            )
+            response = lg.QuerySampleResponse(sample.id, bi[0], bi[1])
             responses.append(response)
 
-            # Update progress
             self._update_progress(1)
 
-        # Close progress
         self._close_progress()
-
         lg.QuerySamplesComplete(responses)
 
     def get_sut(self) -> Any:
-        """Get LoadGen SUT handle.
-
-        Returns:
-            LoadGen SUT handle for benchmark execution.
-        """
         if self._sut_handle is None:
-            self._sut_handle = lg.ConstructSUT(
-                self.issue_queries,
-                self.flush_queries
-            )
+            self._sut_handle = lg.ConstructSUT(self.issue_queries, self.flush_queries)
         return self._sut_handle
 
     def get_qsl(self) -> Any:
-        """Get LoadGen QSL handle.
-
-        Returns:
-            LoadGen QSL handle for sample management.
-        """
         if self._qsl_handle is None:
             self._qsl_handle = lg.ConstructQSL(
                 self.qsl.total_sample_count,
@@ -956,788 +683,16 @@ class WhisperEncoderOnlySUT:
         return self._qsl_handle
 
     def get_predictions(self) -> Dict[int, np.ndarray]:
-        """Get all encoder outputs."""
         return self._predictions.copy()
 
     def reset(self) -> None:
-        """Reset state for new run."""
         self._predictions.clear()
         self._query_count = 0
         self._sample_count = 0
 
 
-class WhisperHybridEncoder:
-    """
-    OpenVINO Encoder wrapper for hybrid NPU+CPU inference.
-
-    Based on optimum-intel OVEncoder, but allows separate device compilation.
-    """
-
-    def __init__(
-        self,
-        model_path: Union[str, Path],
-        device: str = "NPU",
-        ov_config: Optional[Dict[str, str]] = None,
-    ):
-        """
-        Initialize encoder.
-
-        Args:
-            model_path: Path to encoder_model.xml
-            device: Device to compile on (NPU, CPU)
-            ov_config: OpenVINO configuration
-        """
-        import openvino as ov
-
-        self.device = device
-        self.ov_config = ov_config or {}
-
-        # Load model
-        core = ov.Core()
-        logger.info(f"  Loading encoder model from {model_path}")
-        self.model = core.read_model(str(model_path))
-
-        # Get input/output names
-        self.input_names = [inp.get_any_name() for inp in self.model.inputs]
-        self.output_names = [out.get_any_name() for out in self.model.outputs]
-        logger.info(f"  Encoder inputs: {self.input_names}")
-        logger.info(f"  Encoder outputs: {self.output_names}")
-
-        # Find main input name
-        self.main_input_name = "input_features"
-        for name in self.input_names:
-            if "input_features" in name or "input" in name.lower():
-                self.main_input_name = name
-                break
-
-        # Check device availability
-        available_devices = core.available_devices
-        logger.info(f"  Available devices: {available_devices}")
-        if device not in available_devices and not any(d.startswith(device) for d in available_devices):
-            raise RuntimeError(f"Device {device} not available. Available: {available_devices}")
-
-        # Reshape to static shape for accelerators (NPU, etc.)
-        # Whisper encoder expects (batch=1, n_mels=128, time=3000)
-        if device != "CPU":
-            logger.info(f"  Checking encoder shape for {device}...")
-            try:
-                # Get current input shape
-                input_shape = self.model.input(0).get_partial_shape()
-                logger.info(f"  Current input shape: {input_shape}")
-
-                # Check if reshape is needed (only if shape is dynamic)
-                if input_shape.is_dynamic:
-                    # Whisper Large V3: batch=1, n_mels=128, time=3000
-                    static_shape = [1, 128, 3000]
-                    self.model.reshape({self.main_input_name: static_shape})
-                    logger.info(f"  Reshaped to static: {static_shape}")
-                else:
-                    logger.info(f"  Shape is already static, no reshape needed")
-            except Exception as e:
-                logger.warning(f"  Could not check/reshape encoder: {e}")
-
-        # Compile model - use provided config for accelerators, minimal for CPU
-        logger.info(f"Compiling encoder on {device}...")
-        if device == "CPU":
-            # Use minimal config for CPU
-            compile_config = {"CACHE_DIR": ""}
-        else:
-            # Use user-provided config (-p options) for accelerators
-            compile_config = self.ov_config
-            logger.info(f"  Using config for accelerator: {compile_config}")
-
-        try:
-            self.compiled_model = core.compile_model(self.model, device, compile_config)
-            self.request = self.compiled_model.create_infer_request()
-            logger.info(f"Encoder compiled on {device}")
-        except Exception as e:
-            logger.error(f"Failed to compile encoder on {device}: {e}")
-            raise
-
-    def __call__(self, input_features, **kwargs):
-        """
-        Run encoder inference.
-
-        Matches optimum-intel OVEncoder.forward() exactly:
-        - Uses start_async(share_inputs=True) + wait() instead of infer()
-        - Passes input tensor directly (torch or numpy)
-        - Gets output by name, clones to own the data
-
-        Args:
-            input_features: Mel spectrogram tensor (batch, n_mels, time)
-
-        Returns:
-            BaseModelOutput with last_hidden_state
-        """
-        import torch
-        from transformers.modeling_outputs import BaseModelOutput
-
-        # Pass input directly (match optimum-intel: no numpy conversion)
-        inputs = {self.main_input_name: input_features}
-
-        # Run inference (match optimum-intel: start_async + wait with share_inputs)
-        self.request.start_async(inputs, share_inputs=True)
-        self.request.wait()
-
-        # Get output by name and clone (match optimum-intel exactly)
-        last_hidden_state_data = self.request.get_tensor("last_hidden_state").data
-
-        # Log encoder output stats for first call (debugging)
-        if not hasattr(self, '_encoder_logged'):
-            self._encoder_logged = True
-            logger.info(f"Encoder output stats ({self.device}):")
-            logger.info(f"  Shape: {last_hidden_state_data.shape}")
-            logger.info(f"  Dtype: {last_hidden_state_data.dtype}")
-            logger.info(f"  Min: {last_hidden_state_data.min():.6f}, Max: {last_hidden_state_data.max():.6f}")
-            logger.info(f"  Mean: {last_hidden_state_data.mean():.6f}, Std: {last_hidden_state_data.std():.6f}")
-            logger.info(f"  First values [0,0,:5]: {last_hidden_state_data[0, 0, :5]}")
-            logger.info(f"  First values [0,:5,0]: {last_hidden_state_data[0, :5, 0]}")
-
-        # Clone to own the data (match optimum-intel: .clone())
-        last_hidden_state = torch.from_numpy(last_hidden_state_data).clone()
-
-        return BaseModelOutput(last_hidden_state=last_hidden_state)
-
-
-class WhisperHybridDecoder:
-    """
-    OpenVINO Decoder wrapper with stateful KV-cache support.
-
-    Based on optimum-intel OVDecoder, but allows separate device compilation.
-    Supports both stateful (with internal KV-cache) and stateless models.
-    """
-
-    def __init__(
-        self,
-        model_path: Union[str, Path],
-        device: str = "CPU",
-        ov_config: Optional[Dict[str, str]] = None,
-    ):
-        """
-        Initialize decoder.
-
-        Args:
-            model_path: Path to decoder_model.xml or decoder_with_past_model.xml
-            device: Device to compile on (CPU recommended for decoder)
-            ov_config: OpenVINO configuration
-        """
-        import openvino as ov
-
-        self.device = device
-        self.ov_config = ov_config or {}
-
-        # Load model
-        core = ov.Core()
-        self.model = core.read_model(str(model_path))
-
-        # Get input/output names
-        self.input_names = [inp.get_any_name() for inp in self.model.inputs]
-        self.output_names = [out.get_any_name() for out in self.model.outputs]
-
-        # Detect KV-cache inputs/outputs
-        self.key_value_input_names = [k for k in self.input_names if "key_values" in k or "past_key" in k]
-        self.key_value_output_names = [k for k in self.output_names if "key_values" in k or "present" in k]
-
-        # Check if model is stateful (has internal state for KV-cache)
-        self.stateful = any(self.model.get_variable_state(state.name) is not None
-                          for state in self.model.outputs if hasattr(state, 'name'))
-        try:
-            # Actually check for state variables
-            self.stateful = len(self.model.get_variables()) > 0
-        except Exception:
-            self.stateful = False
-
-        self.use_past = len(self.key_value_input_names) > 0 or self.stateful
-        self.next_beam_idx = None
-        self._past_length = 0
-
-        # Compile model
-        logger.info(f"Compiling decoder on {device}...")
-        self.compiled_model = core.compile_model(self.model, device, self.ov_config)
-        self.request = self.compiled_model.create_infer_request()
-
-        logger.info(f"Decoder compiled on {device} (stateful={self.stateful}, use_past={self.use_past})")
-        logger.info(f"  Decoder input names: {self.input_names}")
-        logger.info(f"  Decoder output names: {self.output_names}")
-        # Log expected input shapes (critical for diagnosing prefill vs one-at-a-time)
-        for inp in self.model.inputs:
-            name = inp.get_any_name()
-            pshape = inp.get_partial_shape()
-            logger.info(f"  Input '{name}': shape={pshape}, type={inp.get_element_type()}")
-        for out in self.model.outputs:
-            name = out.get_any_name()
-            pshape = out.get_partial_shape()
-            logger.info(f"  Output '{name}': shape={pshape}, type={out.get_element_type()}")
-        if self.key_value_input_names:
-            logger.info(f"  KV-cache inputs: {self.key_value_input_names}")
-        if self.key_value_output_names:
-            logger.info(f"  KV-cache outputs: {self.key_value_output_names}")
-
-    def __call__(
-        self,
-        input_ids,
-        encoder_hidden_states=None,
-        attention_mask=None,
-        encoder_attention_mask=None,
-        past_key_values=None,
-        cache_position=None,
-        **kwargs,
-    ):
-        """
-        Run decoder inference step.
-
-        Matches optimum-intel OVDecoder.forward() exactly:
-        - Passes torch tensors directly (no numpy conversion)
-        - Same input ordering and conditional logic
-        - Same start_async(share_inputs=True) pattern
-        """
-        import torch
-        from transformers.modeling_outputs import Seq2SeqLMOutput
-
-        # Model inputs dict — match optimum-intel OVDecoder.forward() exactly
-        inputs = {}
-
-        # Reset state for first token (match optimum-intel)
-        if self.stateful and past_key_values is None:
-            self.request.reset_state()
-            self._past_length = 0
-            self.next_beam_idx = np.arange(input_ids.shape[0], dtype=np.int32)
-
-        # Add past_key_values for non-stateful models (match optimum-intel order: before input_ids)
-        if past_key_values is not None and not self.stateful:
-            past_key_values = tuple(
-                past_key_value for pkv_per_layer in past_key_values for past_key_value in pkv_per_layer
-            )
-            inputs = dict(zip(self.key_value_input_names, past_key_values))
-
-        # Pass input_ids directly as torch tensor (match optimum-intel: no numpy conversion)
-        inputs["input_ids"] = input_ids
-
-        # Add attention mask (match optimum-intel conditional)
-        if "attention_mask" in self.input_names and attention_mask is not None:
-            inputs["attention_mask"] = attention_mask
-
-        # Add encoder attention mask (match optimum-intel conditional)
-        if "encoder_attention_mask" in self.input_names and encoder_attention_mask is not None:
-            inputs["encoder_attention_mask"] = encoder_attention_mask
-
-        # Add encoder hidden states (match optimum-intel conditional)
-        if "encoder_hidden_states" in self.input_names and encoder_hidden_states is not None:
-            inputs["encoder_hidden_states"] = encoder_hidden_states
-
-        # Add cache position (match optimum-intel)
-        if "cache_position" in self.input_names:
-            if cache_position is None:
-                past_len = self._past_length if self.stateful else 0
-                cache_position = np.arange(past_len, past_len + input_ids.shape[1])
-            inputs["cache_position"] = cache_position
-
-        # Add beam_idx (match optimum-intel)
-        if "beam_idx" in self.input_names:
-            batch_size = input_ids.shape[0]
-            inputs["beam_idx"] = (
-                self.next_beam_idx if self.next_beam_idx is not None
-                else np.arange(batch_size, dtype=np.int32)
-            )
-
-        # Run inference (match optimum-intel: start_async + wait with share_inputs)
-        self.request.start_async(inputs, share_inputs=True)
-        self.request.wait()
-
-        # Get logits — clone to own the data (match optimum-intel exactly)
-        logits = torch.from_numpy(self.request.get_tensor("logits").data).clone()
-        self._past_length += input_ids.shape[1]
-
-        # Get output past_key_values (for non-stateful models)
-        out_past_key_values = ((),)
-        if not self.stateful and self.key_value_output_names:
-            out_past = tuple(
-                np.copy(self.request.get_tensor(key).data)
-                for key in self.key_value_output_names
-            )
-            num_per_layer = 2
-            out_past_key_values = tuple(
-                out_past[i:i + num_per_layer]
-                for i in range(0, len(out_past), num_per_layer)
-            )
-
-        return Seq2SeqLMOutput(logits=logits, past_key_values=out_past_key_values)
-
-    def _reorder_cache(self, past_key_values, beam_idx):
-        """Reorder cache for beam search."""
-        if self.stateful:
-            # Use int32 to match model's expected beam_idx type (int32_t)
-            self.next_beam_idx = np.array(beam_idx, dtype=np.int32)
-            return past_key_values
-        else:
-            reordered = ()
-            for layer_past in past_key_values:
-                reordered += (
-                    tuple(np.take(past_state, beam_idx, 0) for past_state in layer_past[:2])
-                    + layer_past[2:],
-                )
-            return reordered
-
-    def _get_past_length(self, past_key_values=None):
-        """Get length of past cache."""
-        if self.stateful:
-            return self._past_length
-        if past_key_values is None or len(past_key_values) == 0:
-            return 0
-        return past_key_values[0][0].shape[-2]
-
-
-class WhisperHybridModel:
-    """
-    Whisper model with hybrid NPU+CPU execution.
-
-    Encoder runs on NPU for fast feature processing.
-    Decoder runs on CPU (NPU doesn't support all decoder ops).
-    Uses WhisperForConditionalGeneration.generate() for proper generation.
-    """
-
-    # Required attributes for WhisperForConditionalGeneration.generate()
-    main_input_name = "input_features"
-
-    def __init__(
-        self,
-        encoder: WhisperHybridEncoder,
-        decoder: WhisperHybridDecoder,
-        config,
-        generation_config=None,
-    ):
-        """
-        Initialize hybrid model.
-
-        Args:
-            encoder: WhisperHybridEncoder instance (on NPU)
-            decoder: WhisperHybridDecoder instance (on CPU)
-            config: WhisperConfig
-            generation_config: GenerationConfig
-        """
-        from transformers import GenerationConfig
-
-        self.encoder = encoder
-        self.decoder = decoder
-        self.config = config
-        self.generation_config = generation_config or GenerationConfig.from_model_config(config)
-
-        # Required attributes for generate()
-        self.device = "cpu"  # Outputs on CPU
-
-        # Flag for one-time generation info logging
-        self._generation_logged = False
-
-        # Dummy model attribute for Whisper generate() stride calculation
-        class DummyEncoder:
-            class Conv:
-                def __init__(self, stride):
-                    self.stride = stride
-            conv1 = Conv(stride=(1,))
-            conv2 = Conv(stride=(2,))
-
-        class DummyModel:
-            encoder = DummyEncoder()
-
-        self.model = DummyModel()
-
-    def get_encoder(self):
-        """Return encoder for generate()."""
-        return self.encoder
-
-    def get_decoder(self):
-        """Return decoder for generate()."""
-        return self.decoder
-
-    def can_generate(self):
-        """Model can generate text."""
-        return True
-
-    def forward(
-        self,
-        input_features=None,
-        decoder_input_ids=None,
-        encoder_outputs=None,
-        past_key_values=None,
-        attention_mask=None,
-        decoder_attention_mask=None,
-        cache_position=None,
-        **kwargs,
-    ):
-        """
-        Forward pass for generation.
-
-        Args:
-            input_features: Mel spectrogram (optional if encoder_outputs provided)
-            decoder_input_ids: Current decoder tokens
-            encoder_outputs: Pre-computed encoder outputs
-            past_key_values: KV-cache
-            attention_mask: Encoder attention mask
-            decoder_attention_mask: Decoder attention mask
-            cache_position: Position in cache
-
-        Returns:
-            Seq2SeqLMOutput with logits
-        """
-        # Run encoder if needed
-        if encoder_outputs is None:
-            encoder_outputs = self.encoder(input_features)
-
-        encoder_hidden_states = encoder_outputs.last_hidden_state
-
-        # Run decoder
-        decoder_outputs = self.decoder(
-            input_ids=decoder_input_ids,
-            encoder_hidden_states=encoder_hidden_states,
-            attention_mask=decoder_attention_mask,
-            past_key_values=past_key_values,
-            cache_position=cache_position,
-        )
-
-        return decoder_outputs
-
-    def __call__(self, *args, **kwargs):
-        """Make model callable."""
-        return self.forward(*args, **kwargs)
-
-    def prepare_inputs_for_generation(
-        self,
-        decoder_input_ids,
-        past_key_values=None,
-        use_cache=None,
-        encoder_outputs=None,
-        attention_mask=None,
-        decoder_attention_mask=None,
-        cache_position=None,
-        **kwargs,
-    ):
-        """Prepare inputs for generation step (from _OVModelForWhisper)."""
-        import torch
-
-        decoder_position_ids = None
-        if decoder_attention_mask is not None:
-            decoder_position_ids = (decoder_attention_mask.cumsum(-1) - 1).clamp(min=0)
-
-        past_length = 0
-        if past_key_values is not None:
-            past_length = self.decoder._get_past_length(past_key_values)
-            if decoder_input_ids.shape[1] > past_length:
-                remove_prefix_length = past_length
-            else:
-                remove_prefix_length = decoder_input_ids.shape[1] - 1
-            decoder_input_ids = decoder_input_ids[:, remove_prefix_length:]
-            if decoder_position_ids is not None:
-                decoder_position_ids = decoder_position_ids[:, remove_prefix_length:]
-                decoder_position_ids = decoder_position_ids.clone(memory_format=torch.contiguous_format)
-
-        if cache_position is None:
-            cache_position = torch.arange(
-                past_length, past_length + decoder_input_ids.shape[1], device=decoder_input_ids.device
-            )
-        elif use_cache:
-            cache_position = cache_position[-decoder_input_ids.shape[1]:]
-
-        decoder_input_ids = decoder_input_ids.contiguous()
-
-        return {
-            "encoder_outputs": encoder_outputs,
-            "past_key_values": past_key_values,
-            "decoder_input_ids": decoder_input_ids,
-            "use_cache": use_cache,
-            "decoder_attention_mask": decoder_attention_mask,
-            "decoder_position_ids": decoder_position_ids,
-            "cache_position": cache_position,
-        }
-
-    def _reorder_cache(self, past_key_values, beam_idx):
-        """Reorder cache for beam search."""
-        return self.decoder._reorder_cache(past_key_values, beam_idx)
-
-    def generate(
-        self,
-        input_features,
-        max_new_tokens: int = 440,
-        language: str = "en",
-        task: str = "transcribe",
-        **kwargs,
-    ):
-        """
-        Generate transcription tokens from mel spectrogram.
-
-        Matches HF WhisperForConditionalGeneration.generate() behavior:
-        - Feeds forced tokens ONE AT A TIME (not all-at-once prefill)
-        - Uses suppress_tokens and begin_suppress_tokens from generation_config
-        - Greedy decoding (temperature=0)
-
-        Args:
-            input_features: Mel spectrogram tensor (batch, n_mels, time)
-            max_new_tokens: Maximum tokens to generate
-            language: Language code
-            task: Task type ("transcribe" or "translate")
-
-        Returns:
-            Generated token IDs tensor
-        """
-        import torch
-
-        # Load ALL special tokens from generation_config (model-specific).
-        # Whisper v2 and v3 have DIFFERENT token IDs — must not hardcode!
-        gc = self.generation_config
-
-        SOT_TOKEN = getattr(gc, 'decoder_start_token_id', 50258)
-        EOT_TOKEN = getattr(gc, 'eos_token_id', 50257)
-        NO_TIMESTAMPS_TOKEN = getattr(gc, 'no_timestamps_token_id', 50364)
-
-        # Task tokens from generation_config.task_to_id
-        task_to_id = getattr(gc, 'task_to_id', {})
-        TRANSCRIBE_TOKEN = task_to_id.get("transcribe", 50360)
-        TRANSLATE_TOKEN = task_to_id.get("translate", 50359)
-
-        # Language tokens from generation_config.lang_to_id
-        lang_to_id = getattr(gc, 'lang_to_id', {})
-        LANGUAGE_TOKENS = {}
-        for lang_tag, token_id in lang_to_id.items():
-            # "<|en|>" -> "en"
-            lang_code = lang_tag.strip("<|>")
-            LANGUAGE_TOKENS[lang_code] = token_id
-        if not LANGUAGE_TOKENS:
-            # Fallback for v3 if lang_to_id missing
-            LANGUAGE_TOKENS = {"en": 50259}
-
-        SUPPRESS_TOKENS = getattr(gc, 'suppress_tokens', None) or []
-        BEGIN_SUPPRESS_TOKENS = getattr(gc, 'begin_suppress_tokens', None) or [220, 50257]
-
-        # Diagnostic: first sample flag
-        is_first_sample = not self._generation_logged
-
-        # Log generation config once
-        if is_first_sample:
-            logger.info("=" * 60)
-            logger.info("Whisper Generation Configuration:")
-            logger.info(f"  Encoder device: {self.encoder.device}")
-            logger.info(f"  Decoder device: {self.decoder.device}")
-            logger.info(f"  Decoder stateful: {self.decoder.stateful}")
-            logger.info(f"  Language: {language} (token {LANGUAGE_TOKENS.get(language, 'unknown')})")
-            logger.info(f"  Task: {task}")
-            logger.info(f"  Max new tokens: {max_new_tokens}")
-            logger.info(f"  Decoding: greedy (temperature=0)")
-            logger.info(f"  suppress_tokens: {len(SUPPRESS_TOKENS)} tokens (from generation_config)")
-            logger.info(f"  begin_suppress_tokens: {BEGIN_SUPPRESS_TOKENS}")
-            logger.info(f"  Token IDs: SOT={SOT_TOKEN}, EOT={EOT_TOKEN}, "
-                       f"transcribe={TRANSCRIBE_TOKEN}, translate={TRANSLATE_TOKEN}, "
-                       f"no_timestamps={NO_TIMESTAMPS_TOKEN}")
-            task_token_val = TRANSCRIBE_TOKEN if task == 'transcribe' else TRANSLATE_TOKEN
-            lang_token_val = LANGUAGE_TOKENS.get(language, '?')
-            logger.info(f"  Forced init tokens: [{SOT_TOKEN}, {lang_token_val}, "
-                       f"{task_token_val}, {NO_TIMESTAMPS_TOKEN}]")
-            logger.info(f"  Feeding: ONE token at a time (matches HF generate)")
-            logger.info("=" * 60)
-            self._generation_logged = True
-
-        batch_size = input_features.shape[0]
-        device = input_features.device if hasattr(input_features, 'device') else 'cpu'
-
-        # Run encoder
-        encoder_outputs = self.encoder(input_features)
-        encoder_hidden_states = encoder_outputs.last_hidden_state
-
-        # Create encoder_attention_mask if required by decoder
-        encoder_attention_mask = None
-        if "encoder_attention_mask" in self.decoder.input_names:
-            encoder_seq_len = encoder_hidden_states.shape[1]
-            encoder_attention_mask = torch.ones(
-                (batch_size, encoder_seq_len),
-                dtype=torch.long,
-                device=device,
-            )
-
-        # Build forced token sequence: [SOT, language, task, no_timestamps]
-        task_token = TRANSCRIBE_TOKEN if task == "transcribe" else TRANSLATE_TOKEN
-        language_token = LANGUAGE_TOKENS.get(language, LANGUAGE_TOKENS["en"])
-        forced_tokens = [SOT_TOKEN, language_token, task_token, NO_TIMESTAMPS_TOKEN]
-
-        # === Feed forced tokens ONE AT A TIME ===
-        # This matches HF WhisperForConditionalGeneration.generate() which uses
-        # prepare_inputs_for_generation() to strip prefix and feed one token per step.
-        # The stateful decoder accumulates KV-cache internally.
-        generated_ids = torch.zeros((batch_size, 0), dtype=torch.long, device=device)
-        past_key_values = None
-
-        for i, token_id in enumerate(forced_tokens):
-            input_token = torch.tensor(
-                [[token_id]], dtype=torch.long, device=device
-            ).expand(batch_size, -1)
-
-            # First token: reset state; subsequent tokens: continue state
-            if i == 0:
-                pkv = None  # → reset_state() in decoder
-            else:
-                pkv = ((),) if self.decoder.stateful else past_key_values
-
-            outputs = self.decoder(
-                input_ids=input_token,
-                encoder_hidden_states=encoder_hidden_states,
-                encoder_attention_mask=encoder_attention_mask,
-                past_key_values=pkv,
-            )
-
-            if not self.decoder.stateful:
-                past_key_values = outputs.past_key_values
-
-            generated_ids = torch.cat([generated_ids, input_token], dim=-1)
-
-            if is_first_sample:
-                logits_diag = outputs.logits
-                top_logits = logits_diag[0, -1, :] if logits_diag.dim() == 3 else logits_diag[0, :]
-                top5_vals, top5_ids = torch.topk(top_logits, 5)
-                logger.info(f"  Forced[{i}] input={token_id}, logits top5: "
-                           f"{list(zip(top5_ids.tolist(), [f'{v:.2f}' for v in top5_vals.tolist()]))}")
-
-        # === First free generation step ===
-        # Get logits from last forced token's output
-        logits = outputs.logits
-        next_token_logits = logits[:, -1, :].clone() if logits.dim() == 3 else logits.clone()
-
-        vocab_size = next_token_logits.shape[-1]
-
-        # Apply suppress_tokens (always) + begin_suppress_tokens (first free position only)
-        for token_id in SUPPRESS_TOKENS:
-            if token_id < vocab_size:
-                next_token_logits[:, token_id] = float('-inf')
-        for token_id in BEGIN_SUPPRESS_TOKENS:
-            if token_id < vocab_size:
-                next_token_logits[:, token_id] = float('-inf')
-
-        next_tokens = next_token_logits.argmax(dim=-1)
-        generated_ids = torch.cat([generated_ids, next_tokens.unsqueeze(-1)], dim=-1)
-
-        if is_first_sample:
-            top5_vals, top5_ids = torch.topk(next_token_logits[0], 5)
-            logger.info(f"  Free[0] (after suppress): token={next_tokens[0].item()}, top5: "
-                       f"{list(zip(top5_ids.tolist(), [f'{v:.2f}' for v in top5_vals.tolist()]))}")
-
-        if (next_tokens == EOT_TOKEN).all():
-            if is_first_sample:
-                logger.info(f"  EOT at step 0, total tokens: {generated_ids.shape[1]}")
-            return generated_ids
-
-        # === Auto-regressive generation: one token at a time ===
-        for step in range(1, max_new_tokens):
-            input_ids = generated_ids[:, -1:]
-
-            pkv = ((),) if self.decoder.stateful else past_key_values
-            outputs = self.decoder(
-                input_ids=input_ids,
-                encoder_hidden_states=encoder_hidden_states,
-                encoder_attention_mask=encoder_attention_mask,
-                past_key_values=pkv,
-            )
-
-            logits = outputs.logits
-            next_token_logits = logits[:, -1, :].clone() if logits.dim() == 3 else logits.clone()
-
-            # Apply suppress_tokens (not begin_suppress_tokens — only at first position)
-            for token_id in SUPPRESS_TOKENS:
-                if token_id < vocab_size:
-                    next_token_logits[:, token_id] = float('-inf')
-
-            next_tokens = next_token_logits.argmax(dim=-1)
-            generated_ids = torch.cat([generated_ids, next_tokens.unsqueeze(-1)], dim=-1)
-
-            if not self.decoder.stateful:
-                past_key_values = outputs.past_key_values
-
-            # Diagnostic: log first 10 generated tokens
-            if is_first_sample and step <= 10:
-                top5_vals, top5_ids = torch.topk(next_token_logits[0], 5)
-                logger.info(f"  Free[{step}]: token={next_tokens[0].item()}, top5: "
-                           f"{list(zip(top5_ids.tolist(), [f'{v:.2f}' for v in top5_vals.tolist()]))}")
-
-            if (next_tokens == EOT_TOKEN).all():
-                if is_first_sample:
-                    logger.info(f"  EOT at step {step}, total tokens: {generated_ids.shape[1]}")
-                break
-
-        if is_first_sample:
-            logger.info(f"  Generation done: {generated_ids.shape[1]} tokens "
-                       f"(forced={len(forced_tokens)}, generated={generated_ids.shape[1] - len(forced_tokens)})")
-            logger.info(f"  First 20 token IDs: {generated_ids[0, :20].tolist()}")
-
-        return generated_ids
-
-
-class _DecoderBucketDispatch:
-    """Proxy that sits in place of ``model.decoder.request`` (CompiledModel).
-
-    Optimum-intel's OVDecoder calls ``self.request(inputs, …)`` which
-    invokes ``CompiledModel.__call__``.  This proxy intercepts the call,
-    inspects ``input_ids`` to determine the current sequence length, finds
-    the pre-compiled bucket whose shape matches, and dispatches inference
-    to that bucket.
-
-    If no bucket matches (e.g. an unexpectedly long sequence), the proxy
-    falls back to the original CPU request.
-    """
-
-    def __init__(self, buckets: Dict[int, Any], fallback: Any):
-        self._buckets = buckets                  # seq_len → CompiledModel
-        self._fallback = fallback                # original CPU request
-        self._sorted_lens = sorted(buckets.keys())
-        self._miss_warned = False
-        # Copy properties from first bucket so code that reads model
-        # metadata still works (e.g. get_property, inputs, outputs).
-        first = next(iter(buckets.values()))
-        self.inputs = first.inputs
-        self.outputs = first.outputs
-
-    # --- primary call path ------------------------------------------------
-    def __call__(self, inputs, **kwargs):
-        compiled = self._select(inputs)
-        return compiled(inputs, **kwargs)
-
-    # --- fallback start_async path (some OVDecoder versions) ---------------
-    def start_async(self, inputs, **kwargs):
-        compiled = self._select(inputs)
-        return compiled.create_infer_request().start_async(inputs, **kwargs)
-
-    # --- helpers ----------------------------------------------------------
-    def get_property(self, name):
-        return next(iter(self._buckets.values())).get_property(name)
-
-    def create_infer_request(self):
-        return next(iter(self._buckets.values())).create_infer_request()
-
-    def _select(self, inputs):
-        """Pick the compiled model whose seq_len bucket fits ``input_ids``."""
-        input_ids = inputs.get("input_ids")
-        if input_ids is None:
-            return self._fallback
-
-        seq_len = input_ids.shape[-1] if hasattr(input_ids, 'shape') else 1
-
-        # Find smallest bucket >= seq_len
-        for blen in self._sorted_lens:
-            if blen >= seq_len:
-                return self._buckets[blen]
-
-        # No bucket large enough – fall back to CPU
-        if not self._miss_warned:
-            logger.warning(
-                f"Decoder bucket miss: seq_len={seq_len}, "
-                f"max_bucket={self._sorted_lens[-1]}. Falling back to CPU."
-            )
-            self._miss_warned = True
-        return self._fallback
-
-
 class WhisperMultiDieSUT:
-    """
-    System Under Test for Whisper ASR on multi-die NPU.
-
-    Uses OVModelForSpeechSeq2Seq from optimum-intel for correct generation,
-    with encoder re-compiled on accelerator dies for hardware acceleration.
-    This guarantees the same accuracy as the CPU reference (~98%).
-    """
+    """Whisper ASR SUT for multi-die accelerators."""
 
     def __init__(
         self,
@@ -1748,58 +703,33 @@ class WhisperMultiDieSUT:
         scenario: Scenario = Scenario.OFFLINE,
         max_new_tokens: int = 440,
     ):
-        """
-        Initialize Whisper Multi-Die SUT.
-
-        Args:
-            config: Benchmark configuration
-            encoder_path: Path to encoder OpenVINO model
-            decoder_path: Path to decoder OpenVINO model
-            qsl: Query Sample Library
-            scenario: MLPerf scenario
-            max_new_tokens: Maximum tokens to generate
-        """
         if not LOADGEN_AVAILABLE:
             raise ImportError("MLPerf LoadGen is not installed")
 
         self.config = config
         self.encoder_path = Path(encoder_path)
         self.decoder_path = Path(decoder_path)
-        self.model_path = self.encoder_path.parent  # Model directory
+        self.model_path = self.encoder_path.parent
         self.qsl = qsl
         self.scenario = scenario
         self.max_new_tokens = max_new_tokens
 
-        # Results storage
         self._predictions: Dict[int, str] = {}
         self._query_count = 0
         self._sample_count = 0
         self._start_time = 0.0
 
-        # LoadGen handles
         self._sut_handle = None
         self._qsl_handle = None
 
-        # Multi-die models: list of (die_name, OVModelForSpeechSeq2Seq) tuples
         self._models: List[Tuple[str, Any]] = []
         self._model_index = 0
 
-        # Processor (shared)
         self.processor = None
 
-        # Setup models
         self._setup_models()
 
     def _discover_device_dies(self, device: str) -> List[str]:
-        """Discover available dies for the specified device.
-
-        Args:
-            device: Base device name (e.g., "NPU", "GPU", "X")
-
-        Returns:
-            List of device dies with numbers only (e.g., ["X.0", "X.1"])
-            Returns empty list if no numbered dies found.
-        """
         import openvino as ov
         import re
 
@@ -1807,23 +737,11 @@ class WhisperMultiDieSUT:
         devices = core.available_devices
         logger.info(f"Available OpenVINO devices: {devices}")
 
-        # Find dies for this device (format: DEVICE.N where N is a number)
-        # Only return dies with numeric suffix (X.0, X.1, etc.)
         pattern = re.compile(rf"^{re.escape(device)}\.(\d+)$")
         device_dies = [d for d in devices if pattern.match(d)]
-        logger.info(f"Matching dies for '{device}': {device_dies}")
-
         return sorted(device_dies)
 
     def _setup_models(self) -> None:
-        """Setup models using OVModelForSpeechSeq2Seq with encoder on accelerator.
-
-        Loads the proven-correct optimum-intel model on CPU, then re-compiles
-        the encoder on each accelerator die for hardware acceleration.
-        This uses HF's WhisperForConditionalGeneration.generate() internally,
-        which correctly handles forced_decoder_ids, suppress_tokens, KV-cache, etc.
-        """
-        import os
         import re
         from transformers import AutoProcessor
 
@@ -1833,88 +751,46 @@ class WhisperMultiDieSUT:
                 "Install with: pip install optimum[openvino]"
             )
 
-        # Get target device from config
         target_device = self.config.openvino.device if hasattr(self.config, 'openvino') else "CPU"
 
-        # Allow overriding encoder device via environment variable for diagnostics.
-        # Set WHISPER_ENCODER_DEVICE=CPU to run encoder on CPU (isolates encoder vs generate bugs).
-        encoder_device_override = os.environ.get("WHISPER_ENCODER_DEVICE", "").strip()
-        if encoder_device_override:
-            logger.info(f"WHISPER_ENCODER_DEVICE override: {encoder_device_override} (was {target_device})")
-            target_device = encoder_device_override
+        logger.info(f"Setting up Whisper Multi-Die SUT (encoder={target_device}, decoder=CPU)")
 
-        # Decoder device: CPU by default (accelerator compilation of the
-        # stateful decoder is not yet supported).
-        # Set WHISPER_DECODER_DEVICE=X.0 to attempt accelerator placement.
-        decoder_device = "CPU"
-        decoder_device_override = os.environ.get("WHISPER_DECODER_DEVICE", "").strip()
-        if decoder_device_override:
-            logger.info(f"WHISPER_DECODER_DEVICE override: {decoder_device_override} (was {decoder_device})")
-            decoder_device = decoder_device_override
-
-        logger.info(f"Setting up Whisper Multi-Die SUT (encoder={target_device}, decoder={decoder_device})")
-
-        # Load processor
         try:
             self.processor = AutoProcessor.from_pretrained(self.model_path)
         except Exception:
             logger.info("Loading processor from openai/whisper-large-v3")
             self.processor = AutoProcessor.from_pretrained("openai/whisper-large-v3")
 
-        # Determine which devices to use for encoders
         if target_device == "CPU":
             device_dies = ["CPU"]
-            logger.info("Using CPU encoder (no die discovery)")
         elif re.match(r"^.+\.\d+$", target_device):
             device_dies = [target_device]
-            logger.info(f"Using specified device die: {target_device}")
         else:
             device_dies = self._discover_device_dies(target_device)
-            if device_dies:
-                logger.info(f"Discovered {len(device_dies)} device dies: {device_dies}")
-            else:
+            if not device_dies:
                 logger.warning(f"No {target_device} dies found, falling back to CPU")
                 device_dies = ["CPU"]
 
-        # Create one OVModelForSpeechSeq2Seq per die.
-        # Uses optimum-intel's proven generate() (same code as CPU SUT ~98% accuracy).
         for die in device_dies:
-            logger.info(f"Loading OVModelForSpeechSeq2Seq for {die}...")
+            logger.info(f"Loading OVModelForSpeechSeq2Seq for {die}")
             try:
                 model = self._load_optimum_model()
 
-                # If die is not CPU, re-compile encoder on accelerator
                 if die != "CPU":
                     self._patch_encoder_device(model, die)
 
-                # Optionally compile decoder on accelerator too.
-                # Decoder die matches the encoder die unless overridden.
-                dec_die = die if decoder_device == target_device else decoder_device
-                if dec_die != "CPU":
-                    try:
-                        self._patch_decoder_device(model, dec_die)
-                    except Exception as e:
-                        logger.warning(f"  Decoder patch failed for {dec_die}, keeping CPU: {e}")
-                        import traceback
-                        traceback.print_exc()
-
                 self._models.append((die, model))
-                logger.info(f"  Model ready on {die}")
             except Exception as e:
                 logger.warning(f"Failed to create model for {die}: {e}")
-                import traceback
-                traceback.print_exc()
 
-        # Fallback to pure CPU if no models created
         if not self._models:
-            logger.info("Creating CPU fallback model...")
+            logger.info("Creating CPU fallback model")
             model = self._load_optimum_model()
             self._models.append(("CPU", model))
 
-        # Verify actual execution devices
         encoder_devices = [die for die, _ in self._models]
-        print(f"[Setup] {len(self._models)} die(s), encoder={encoder_devices}, "
-              f"decoder={decoder_device}", file=sys.stderr)
+        print(f"[Setup] {len(self._models)} die(s), encoder={encoder_devices}, decoder=CPU",
+              file=sys.stderr)
 
         for die_name, mdl in self._models:
             enc_tag = dec_tag = "?"
@@ -1933,17 +809,8 @@ class WhisperMultiDieSUT:
                   file=sys.stderr)
 
     def _load_optimum_model(self):
-        """Load OVModelForSpeechSeq2Seq on CPU.
-
-        Tries default optimum-intel file names first, falls back to
-        detecting file names from encoder_path/decoder_path.
-
-        Returns:
-            OVModelForSpeechSeq2Seq model instance
-        """
         model_dir = str(self.model_path)
 
-        # Try default file names first (openvino_ prefix from optimum-cli)
         try:
             return OVModelForSpeechSeq2Seq.from_pretrained(
                 model_dir,
@@ -1951,12 +818,10 @@ class WhisperMultiDieSUT:
                 ov_config={"CACHE_DIR": ""},
             )
         except Exception as e:
-            logger.info(f"Default file names failed ({e}), trying detected names...")
+            logger.info(f"Default file names failed ({e}), trying detected names")
 
-        # Fall back: use file names we know exist (from benchmark_runner discovery)
         enc_name = self.encoder_path.name
         dec_name = self.decoder_path.name
-        logger.info(f"  Using encoder={enc_name}, decoder={dec_name}")
 
         return OVModelForSpeechSeq2Seq.from_pretrained(
             model_dir,
@@ -1967,249 +832,53 @@ class WhisperMultiDieSUT:
         )
 
     def _patch_encoder_device(self, model, die: str) -> None:
-        """Re-compile model's encoder on the specified accelerator device.
-
-        Reads the encoder model fresh from disk, reshapes to static shape
-        (required by accelerators), compiles on the target die, and replaces
-        the model's encoder request.
-
-        Args:
-            model: OVModelForSpeechSeq2Seq instance (loaded on CPU)
-            die: Target device (e.g., "X.0", "NPU.0")
-        """
         import openvino as ov
 
         core = ov.Core()
 
-        # Read encoder model fresh from disk (need own copy for static reshape)
         encoder_model = core.read_model(str(self.encoder_path))
 
-        # Reshape to static shape for accelerator (NPU requires static shapes)
-        # Whisper Large V3: batch=1, n_mels=128, time=3000
         for inp in encoder_model.inputs:
             if inp.get_partial_shape().is_dynamic:
                 input_name = inp.get_any_name()
-                static_shape = [1, 128, 3000]
-                encoder_model.reshape({input_name: static_shape})
-                logger.info(f"  Encoder reshaped to {static_shape} for {die}")
+                encoder_model.reshape({input_name: [1, 128, 3000]})
                 break
 
-        # Build accelerator config from user's -p options
         ov_config = {"CACHE_DIR": ""}
         if hasattr(self.config, 'openvino') and hasattr(self.config.openvino, 'device_properties'):
             for key, value in self.config.openvino.device_properties.items():
                 ov_config[key] = value
 
-        # Compile encoder on accelerator die
-        logger.info(f"  Compiling encoder on {die} with config: {ov_config}")
         compiled_encoder = core.compile_model(encoder_model, die, ov_config)
 
-        # Verify the encoder is actually placed on the requested device.
-        # EXECUTION_DEVICES returns the real hardware the model was compiled for.
         try:
             exec_devices = compiled_encoder.get_property("EXECUTION_DEVICES")
-            logger.info(f"  Encoder EXECUTION_DEVICES: {exec_devices}")
             device_prefix = die.split(".")[0]
             on_target = any(device_prefix in d for d in exec_devices)
-            has_cpu = any("CPU" in d for d in exec_devices)
-            if on_target and not has_cpu:
-                logger.info(f"  [OK] Encoder fully on {die}")
-            elif on_target and has_cpu:
-                logger.info(
-                    f"  [OK] Encoder on {die} (heterogeneous: some ops fall back to CPU)"
-                )
-            else:
-                logger.warning(
-                    f"  [WARN] Encoder requested {die} but EXECUTION_DEVICES={exec_devices}. "
-                    f"Model may have fallen back to CPU!"
-                )
-        except Exception as e:
-            logger.warning(f"  Could not query EXECUTION_DEVICES: {e}")
-
-        # Replace encoder's request with accelerator-compiled version.
-        # OVEncoder.forward() calls self.request(inputs, share_inputs=True, share_outputs=True)
-        # where self.request is a CompiledModel — our compiled_encoder is also a CompiledModel.
-        model.encoder.request = compiled_encoder
-        logger.info(f"  Encoder patched to {die}")
-
-    # ------------------------------------------------------------------
-    # Decoder on accelerator
-    # ------------------------------------------------------------------
-    def _patch_decoder_device(self, model, die: str) -> None:
-        """Re-compile model's decoder on the specified accelerator device.
-
-        The X accelerator does not support dynamic shapes, so we compile
-        several copies of the decoder IR – one per *sequence-length bucket*
-        – and swap in a thin proxy that picks the right compiled model at
-        inference time.
-
-        Whisper autoregressive generation calls the decoder with
-        ``input_ids`` of shape ``(1, seq_len)`` where ``seq_len`` is almost
-        always 1.  On the first call, ``seq_len`` may equal the number of
-        forced decoder tokens (typically 1–4).  We cover both cases with a
-        small set of buckets.
-
-        Args:
-            model: OVModelForSpeechSeq2Seq instance (loaded on CPU)
-            die: Target device (e.g. "X.0")
-        """
-        import openvino as ov
-
-        core = ov.Core()
-
-        # Read decoder IR from disk
-        decoder_ir = core.read_model(str(self.decoder_path))
-
-        # --- discover input layout & dynamic dims -------------------------
-        input_info: Dict[str, Any] = {}
-        for inp in decoder_ir.inputs:
-            name = inp.get_any_name()
-            pshape = inp.get_partial_shape()
-            input_info[name] = pshape
-            logger.info(f"  Decoder input '{name}': {pshape}, {inp.get_element_type()}")
-
-        is_stateful = False
-        try:
-            is_stateful = len(decoder_ir.get_variables()) > 0
+            if not on_target:
+                logger.warning(f"Encoder requested {die} but EXECUTION_DEVICES={exec_devices}")
         except Exception:
             pass
-        logger.info(f"  Decoder stateful={is_stateful}")
 
-        # --- detect which dims are dynamic --------------------------------
-        has_kv_inputs = any(
-            "key_values" in n or "past_key" in n for n in input_info
-        )
-
-        # For non-stateful decoders with explicit past_key_values the KV
-        # sequence length grows every step, making bucketing impractical.
-        # Only patch when the model is stateful (KV cache is internal).
-        if has_kv_inputs and not is_stateful:
-            logger.warning(
-                "  Decoder has explicit past_key_values inputs and is not "
-                "stateful – cannot move to accelerator (variable KV dims). "
-                "Keeping decoder on CPU."
-            )
-            return
-
-        # --- define sequence-length buckets --------------------------------
-        # Bucket seq_len values that may appear during generate().
-        # Modern transformers feeds one token at a time (seq_len=1) for all
-        # steps; older versions may feed up to 4 forced decoder tokens in
-        # the first call.
-        seq_len_buckets = [1, 2, 4]
-        logger.info(f"  Decoder seq_len buckets: {seq_len_buckets}")
-
-        # --- build accelerator config (same as encoder) --------------------
-        ov_config: Dict[str, str] = {"CACHE_DIR": ""}
-        if hasattr(self.config, 'openvino') and hasattr(self.config.openvino, 'device_properties'):
-            for key, value in self.config.openvino.device_properties.items():
-                ov_config[key] = value
-
-        # --- compile one model per bucket ----------------------------------
-        #     bucket_key  → (CompiledModel, {input_name: static_shape})
-        buckets: Dict[int, Any] = {}
-
-        for seq_len in seq_len_buckets:
-            dec_model = core.read_model(str(self.decoder_path))
-
-            # Build static shape map for this bucket
-            shape_map: Dict[str, list] = {}
-            for inp in dec_model.inputs:
-                name = inp.get_any_name()
-                ps = inp.get_partial_shape()
-                if not ps.is_dynamic:
-                    continue
-                dims = list(ps)
-
-                def _dim_val(d, fallback=1):
-                    """Extract int from openvino.Dimension (static) or return fallback."""
-                    if d.is_static:
-                        return d.get_length()
-                    return fallback
-
-                if "input_ids" in name:
-                    shape_map[name] = [1, seq_len]
-                elif "encoder_hidden_states" in name:
-                    # Whisper Large V3 encoder output: (1, 1500, 1280)
-                    shape_map[name] = [1, 1500, _dim_val(dims[2], 1280)]
-                elif "beam_idx" in name:
-                    shape_map[name] = [1]
-                elif "cache_position" in name:
-                    shape_map[name] = [seq_len]
-                elif "attention_mask" in name and "encoder" not in name:
-                    shape_map[name] = [1, seq_len]
-                elif "encoder_attention_mask" in name:
-                    shape_map[name] = [1, 1500]
-                else:
-                    # Unknown dynamic input – use dim=1 per axis as fallback
-                    shape_map[name] = [_dim_val(d) for d in dims]
-
-            if shape_map:
-                dec_model.reshape(shape_map)
-                logger.info(f"  Bucket seq_len={seq_len}: reshaped {shape_map}")
-
-            logger.info(f"  Compiling decoder bucket seq_len={seq_len} on {die} ...")
-            compiled = core.compile_model(dec_model, die, ov_config)
-            buckets[seq_len] = compiled
-
-        # --- verify execution devices on first bucket ----------------------
-        try:
-            sample_compiled = next(iter(buckets.values()))
-            exec_devs = sample_compiled.get_property("EXECUTION_DEVICES")
-            logger.info(f"  Decoder EXECUTION_DEVICES: {exec_devs}")
-            device_prefix = die.split(".")[0]
-            on_target = any(device_prefix in d for d in exec_devs)
-            has_cpu = any("CPU" in d for d in exec_devs)
-            if on_target and not has_cpu:
-                logger.info(f"  [OK] Decoder fully on {die}")
-            elif on_target and has_cpu:
-                logger.info(
-                    f"  [OK] Decoder on {die} (heterogeneous: some ops fall back to CPU)"
-                )
-            else:
-                logger.warning(
-                    f"  [WARN] Decoder requested {die} but "
-                    f"EXECUTION_DEVICES={exec_devs}. Keeping CPU decoder."
-                )
-                return
-        except Exception as e:
-            logger.warning(f"  Could not query decoder EXECUTION_DEVICES: {e}")
-
-        # --- install proxy on model.decoder --------------------------------
-        # OVDecoder.forward() calls self.request(inputs, share_inputs=…)
-        # where self.request is a CompiledModel.  We replace it with a thin
-        # proxy that selects the right bucket.
-        original_request = model.decoder.request
-        model.decoder.request = _DecoderBucketDispatch(
-            buckets, original_request
-        )
-        logger.info(f"  Decoder patched to {die} ({len(buckets)} buckets)")
+        model.encoder.request = compiled_encoder
 
     def _get_next_model(self) -> Tuple[str, Any]:
-        """Get next model in round-robin fashion."""
         die_name, model = self._models[self._model_index]
         self._model_index = (self._model_index + 1) % len(self._models)
         return die_name, model
 
     def _process_sample(self, sample_idx: int, model: Any) -> str:
-        """Process a single sample using OVModelForSpeechSeq2Seq.generate()."""
         import torch
 
-        # Get preprocessed mel features from QSL
         features = self.qsl.get_features(sample_idx)
         input_features = features["input_features"]
 
-        # Convert to tensor
         if isinstance(input_features, np.ndarray):
             input_features = torch.from_numpy(input_features)
 
-        # Ensure correct shape (batch, n_mels, time)
         if input_features.dim() == 2:
             input_features = input_features.unsqueeze(0)
 
-        # Generate transcription using optimum-intel's proven generate()
-        # (WhisperForConditionalGeneration.generate → handles forced_decoder_ids,
-        #  suppress_tokens, KV-cache, etc. correctly)
         generated_ids = _generate_quiet(
             model, input_features,
             max_new_tokens=self.max_new_tokens,
@@ -2217,12 +886,10 @@ class WhisperMultiDieSUT:
             task="transcribe",
         )
 
-        # Decode tokens to text
         text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
         return text
 
     def issue_queries(self, query_samples: List[Any]) -> None:
-        """Process queries from LoadGen."""
         self._query_count += len(query_samples)
 
         if self.scenario == Scenario.OFFLINE:
@@ -2231,12 +898,6 @@ class WhisperMultiDieSUT:
             self._issue_queries_server(query_samples)
 
     def _issue_queries_offline(self, query_samples: List[Any]) -> None:
-        """Process all samples in Offline mode.
-
-        When multiple dies are available, samples are processed in parallel
-        using a thread pool (one worker per die).  Each worker owns its
-        model instance so there is no lock contention.
-        """
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         total = len(query_samples)
@@ -2249,7 +910,6 @@ class WhisperMultiDieSUT:
             self._issue_queries_offline_sequential(query_samples)
             return
 
-        # --- parallel path ---------------------------------------------------
         die_batches: List[List[Tuple[Any, int]]] = [[] for _ in range(num_dies)]
         for i, sample in enumerate(query_samples):
             die_batches[i % num_dies].append((sample, sample.index))
@@ -2295,7 +955,6 @@ class WhisperMultiDieSUT:
         print(f" {total}/{total} ({elapsed:.1f}s, {total/elapsed:.1f} qps)",
               file=sys.stderr)
 
-        # Build LoadGen responses preserving original sample order.
         responses = []
         response_arrays = []
         for sample, _idx, text in sorted(all_results, key=lambda r: r[1]):
@@ -2308,15 +967,12 @@ class WhisperMultiDieSUT:
         lg.QuerySamplesComplete(responses)
 
     def _issue_queries_offline_sequential(self, query_samples: List[Any]) -> None:
-        """Sequential offline processing (single-die fast path)."""
         total = len(query_samples)
         responses = []
         response_arrays = []
 
         print(f"[Inference] ", end="", file=sys.stderr)
         dots_printed = 0
-        last_completed = 0
-        wait_start = time.time()
 
         for sample in query_samples:
             sample_idx = sample.index
@@ -2338,14 +994,6 @@ class WhisperMultiDieSUT:
                     print(".", end="", file=sys.stderr, flush=True)
                     dots_printed += 1
 
-            if self._sample_count > last_completed:
-                last_completed = self._sample_count
-                wait_start = time.time()
-            elif time.time() - wait_start > 30:
-                print(f"\n[WARN] Stalled at {self._sample_count}/{total}",
-                      file=sys.stderr)
-                wait_start = time.time()
-
         while dots_printed < 10:
             print(".", end="", file=sys.stderr, flush=True)
             dots_printed += 1
@@ -2357,19 +1005,15 @@ class WhisperMultiDieSUT:
         lg.QuerySamplesComplete(responses)
 
     def _issue_queries_server(self, query_samples: List[Any]) -> None:
-        """Process samples in Server mode (one at a time)."""
         for sample in query_samples:
             sample_idx = sample.index
 
-            # Select model (round-robin across dies)
             die_name, model = self._get_next_model()
 
-            # Generate transcription using model.generate()
             text = self._process_sample(sample_idx, model)
             self._predictions[sample_idx] = text
             self._sample_count += 1
 
-            # Respond immediately
             text_bytes = text.encode('utf-8')
             response_array = array.array('B', text_bytes)
             bi = response_array.buffer_info()
@@ -2378,7 +1022,6 @@ class WhisperMultiDieSUT:
             lg.QuerySamplesComplete([response])
 
     def flush_queries(self) -> None:
-        """Flush pending queries."""
         pass
 
     def get_sut(self) -> Any:
