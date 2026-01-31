@@ -1666,258 +1666,6 @@ class WhisperHybridModel:
         return generated_ids
 
 
-class _StaticKVDecoderProxy:
-    """Drop-in replacement for ``model.decoder`` that runs a static-shape
-    decoder on an accelerator while managing KV cache externally.
-
-    The C++ tool ``convert_decoder_static`` transforms the stateful decoder
-    into a non-stateful model where:
-
-    * Self-attention past KV are explicit **inputs** of shape
-      ``[1, n_heads, kvcache_size, head_dim]`` (padded buffer).
-    * Self-attention present KV **outputs** contain only the *new* KV
-      ``[1, n_heads, seq_len, head_dim]`` (Concat removed from output path).
-    * Cross-attention KV are explicit inputs/outputs (computed once from
-      ``encoder_hidden_states``, reused on every subsequent step).
-
-    This proxy sits in place of ``model.decoder`` and is called by
-    ``model.generate()`` with the standard OVDecoder signature.  It
-    translates between the HF-expected stateful interface and the
-    static-shape compiled model.
-    """
-
-    def __init__(
-        self,
-        compiled_model,
-        kvcache_size: int,
-        n_heads: int = 20,
-        head_dim: int = 64,
-        encoder_kv_len: int = 1500,
-    ):
-        import openvino as ov
-
-        self._compiled = compiled_model
-        self._request = compiled_model.create_infer_request()
-        self._kvcache_size = kvcache_size
-        self._n_heads = n_heads
-        self._head_dim = head_dim
-        self._encoder_kv_len = encoder_kv_len
-
-        # Discover input/output names by category
-        self.input_names = [inp.get_any_name() for inp in compiled_model.inputs]
-        self.output_names = [out.get_any_name() for out in compiled_model.outputs]
-
-        self._kv_in_names = sorted(
-            n for n in self.input_names
-            if "past_key_values" in n or "past_kv" in n
-        )
-        self._decoder_kv_in = sorted(
-            n for n in self._kv_in_names if "decoder" in n or "encoder" not in n
-        )
-        self._encoder_kv_in = sorted(
-            n for n in self._kv_in_names if "encoder" in n
-        )
-        self._decoder_kv_out = sorted(
-            n for n in self.output_names
-            if ("present" in n and "decoder" in n)
-               or ("present_kv" in n and "encoder" not in n)
-        )
-        self._encoder_kv_out = sorted(
-            n for n in self.output_names
-            if "present" in n and "encoder" in n
-        )
-
-        # Pre-allocate KV cache buffers (zeros)
-        self._self_kv_bufs: Dict[str, np.ndarray] = {
-            name: np.zeros((1, n_heads, kvcache_size, head_dim), dtype=np.float32)
-            for name in self._decoder_kv_in
-        }
-        self._cross_kv_bufs: Dict[str, np.ndarray] = {
-            name: np.zeros((1, n_heads, encoder_kv_len, head_dim), dtype=np.float32)
-            for name in self._encoder_kv_in
-        }
-        self._cross_kv_set = False
-        self._past_length = 0
-
-        # Mimic OVDecoder attributes expected by OVModelForSeq2SeqLM /
-        # prepare_inputs_for_generation / _reset_model_state.
-        self.stateful = True        # generate() passes past_key_values=None on first call
-        self.use_past = True
-        self.config = None          # will be set externally
-        self.main_input_name = "input_ids"
-        self.key_value_input_names = []   # empty — we manage KV ourselves
-        self.key_value_output_names = []
-        self.next_beam_idx = np.array([0], dtype=np.int64)
-
-        logger.info(f"  _StaticKVDecoderProxy: kvcache_size={kvcache_size}, "
-                    f"decoder_kv_in={len(self._decoder_kv_in)}, "
-                    f"encoder_kv_in={len(self._encoder_kv_in)}, "
-                    f"decoder_kv_out={len(self._decoder_kv_out)}, "
-                    f"encoder_kv_out={len(self._encoder_kv_out)}")
-
-    # ── called by OVModelForSeq2SeqLM.forward() → self.decoder(...) ─────
-    def __call__(self, *args, **kwargs):
-        return self.forward(*args, **kwargs)
-
-    def forward(
-        self,
-        input_ids,
-        encoder_hidden_states=None,
-        attention_mask=None,
-        encoder_attention_mask=None,
-        past_key_values=None,
-        cache_position=None,
-        **kwargs,
-    ):
-        import torch
-        from transformers.modeling_outputs import Seq2SeqLMOutput
-
-        # --- reset on first call of a new sequence -----------------------
-        if past_key_values is None:
-            self.reset_state()
-
-        # --- numpy-ify inputs -------------------------------------------
-        if isinstance(input_ids, torch.Tensor):
-            input_ids_np = input_ids.numpy()
-        else:
-            input_ids_np = np.asarray(input_ids)
-
-        seq_len = input_ids_np.shape[-1]
-
-        if cache_position is None:
-            cache_position = np.arange(
-                self._past_length, self._past_length + seq_len, dtype=np.int64
-            )
-        elif isinstance(cache_position, torch.Tensor):
-            cache_position = cache_position.numpy()
-
-        # --- build attention mask ----------------------------------------
-        # Shape: [1, kvcache_size + seq_len]
-        # 1 for valid past positions + current seq, 0 for padding.
-        total_attn = self._kvcache_size + seq_len
-        attn_mask = np.zeros((1, total_attn), dtype=np.float32)
-        # past valid positions
-        attn_mask[0, :self._past_length] = 1.0
-        # current input positions (at the end)
-        attn_mask[0, self._kvcache_size : self._kvcache_size + seq_len] = 1.0
-
-        # --- populate inputs --------------------------------------------
-        inputs: Dict[str, np.ndarray] = {"input_ids": input_ids_np}
-
-        if encoder_hidden_states is not None:
-            ehs = encoder_hidden_states
-            if isinstance(ehs, torch.Tensor):
-                ehs = ehs.numpy()
-            inputs["encoder_hidden_states"] = ehs
-
-        if "cache_position" in self.input_names:
-            inputs["cache_position"] = cache_position.astype(np.int64)
-
-        if "beam_idx" in self.input_names:
-            inputs["beam_idx"] = np.zeros(1, dtype=np.int32)
-
-        if "attention_mask" in self.input_names:
-            inputs["attention_mask"] = attn_mask
-
-        if "encoder_attention_mask" in self.input_names:
-            if encoder_attention_mask is not None:
-                if isinstance(encoder_attention_mask, torch.Tensor):
-                    encoder_attention_mask = encoder_attention_mask.numpy()
-                inputs["encoder_attention_mask"] = encoder_attention_mask
-            else:
-                inputs["encoder_attention_mask"] = np.ones(
-                    (1, self._encoder_kv_len), dtype=np.float32
-                )
-
-        # Self-attention KV buffers
-        for name, buf in self._self_kv_bufs.items():
-            inputs[name] = buf
-
-        # Cross-attention KV buffers
-        for name, buf in self._cross_kv_bufs.items():
-            inputs[name] = buf
-
-        # --- infer -------------------------------------------------------
-        self._request.start_async(inputs, share_inputs=True)
-        self._request.wait()
-
-        # --- extract logits ----------------------------------------------
-        logits_data = self._request.get_tensor("logits").data
-        logits = torch.from_numpy(logits_data).clone()
-
-        # --- update self-attention KV buffers ----------------------------
-        # The model outputs only the NEW kv of shape [1, heads, seq_len, head_dim].
-        # Copy them into the pre-allocated buffer at _past_length.
-        for out_name in self._decoder_kv_out:
-            new_kv = np.copy(self._request.get_tensor(out_name).data)
-            # Find the matching input buffer.
-            in_name = out_name.replace("present", "past_key_values")
-            if in_name not in self._self_kv_bufs:
-                # Try alternative naming for numeric-id variables
-                for candidate in self._self_kv_bufs:
-                    if candidate in out_name or out_name in candidate:
-                        in_name = candidate
-                        break
-            if in_name in self._self_kv_bufs:
-                kv_len = new_kv.shape[2]
-                self._self_kv_bufs[in_name][
-                    :, :, self._past_length : self._past_length + kv_len, :
-                ] = new_kv
-
-        # --- update cross-attention KV (once) ----------------------------
-        if not self._cross_kv_set and self._encoder_kv_out:
-            for out_name in self._encoder_kv_out:
-                cross_kv = np.copy(self._request.get_tensor(out_name).data)
-                in_name = out_name.replace("present", "past_key_values")
-                if in_name not in self._cross_kv_bufs:
-                    for candidate in self._cross_kv_bufs:
-                        if candidate in out_name or out_name in candidate:
-                            in_name = candidate
-                            break
-                if in_name in self._cross_kv_bufs:
-                    self._cross_kv_bufs[in_name][:] = cross_kv
-            self._cross_kv_set = True
-
-        self._past_length += seq_len
-
-        return Seq2SeqLMOutput(
-            logits=logits,
-            past_key_values=((),),  # dummy — we manage KV internally
-        )
-
-    # ── OVDecoder-compatible attributes / methods ───────────────────────
-    @property
-    def device(self):
-        return "X"
-
-    def reset_state(self):
-        """Reset KV cache buffers — called via ``model.decoder.request.reset_state()``."""
-        for buf in self._self_kv_bufs.values():
-            buf[:] = 0
-        for buf in self._cross_kv_bufs.values():
-            buf[:] = 0
-        self._cross_kv_set = False
-        self._past_length = 0
-
-    @property
-    def request(self):
-        """Expose self so ``model.decoder.request`` works (``_reset_model_state``
-        calls ``model.decoder.request.reset_state()``)."""
-        return self
-
-    def _get_past_length(self, past_key_values=None):
-        """Return the number of KV positions filled so far.
-
-        Called by ``OVModelForSeq2SeqLM.prepare_inputs_for_generation()``
-        when ``self.decoder.stateful == True``.
-        """
-        return self._past_length
-
-    def _reorder_cache(self, past_key_values, beam_idx):
-        """Beam-search cache reordering (greedy mode: no-op)."""
-        self.next_beam_idx = np.asarray(beam_idx, dtype=np.int64)
-
-
 class _DecoderBucketDispatch:
     """Proxy that sits in place of ``model.decoder.request`` (CompiledModel).
 
@@ -2316,145 +2064,157 @@ class WhisperMultiDieSUT:
         logger.info(f"  Encoder patched to {die}")
 
     # ------------------------------------------------------------------
-    # Decoder on accelerator (static-KV approach)
+    # Decoder on accelerator
     # ------------------------------------------------------------------
     def _patch_decoder_device(self, model, die: str) -> None:
-        """Compile a static-shape decoder on the accelerator.
+        """Re-compile model's decoder on the specified accelerator device.
 
-        Requires the C++ tool ``convert_decoder_static`` to have been run
-        first, producing ``decoder_static.xml`` in the model directory.
-        That model has:
+        The X accelerator does not support dynamic shapes, so we compile
+        several copies of the decoder IR – one per *sequence-length bucket*
+        – and swap in a thin proxy that picks the right compiled model at
+        inference time.
 
-        * Explicit past-KV **inputs** (from StatefulToStateless).
-        * Self-attention outputs redirected to emit only *new* KV
-          (Concat removed from output path).
+        Whisper autoregressive generation calls the decoder with
+        ``input_ids`` of shape ``(1, seq_len)`` where ``seq_len`` is almost
+        always 1.  On the first call, ``seq_len`` may equal the number of
+        forced decoder tokens (typically 1–4).  We cover both cases with a
+        small set of buckets.
 
-        This method reshapes every input to a fixed shape, compiles on the
-        target die, and installs a ``_StaticKVDecoderProxy`` that manages
-        the KV cache buffer in Python while running inference on the
-        accelerator.
-
-        Falls back to CPU decoder if ``decoder_static.xml`` is absent or
-        compilation fails.
+        Args:
+            model: OVModelForSpeechSeq2Seq instance (loaded on CPU)
+            die: Target device (e.g. "X.0")
         """
         import openvino as ov
 
         core = ov.Core()
 
-        # --- locate the converted model -----------------------------------
-        static_xml = self.decoder_path.parent / "decoder_static.xml"
-        if not static_xml.exists():
+        # Read decoder IR from disk
+        decoder_ir = core.read_model(str(self.decoder_path))
+
+        # --- discover input layout & dynamic dims -------------------------
+        input_info: Dict[str, Any] = {}
+        for inp in decoder_ir.inputs:
+            name = inp.get_any_name()
+            pshape = inp.get_partial_shape()
+            input_info[name] = pshape
+            logger.info(f"  Decoder input '{name}': {pshape}, {inp.get_element_type()}")
+
+        is_stateful = False
+        try:
+            is_stateful = len(decoder_ir.get_variables()) > 0
+        except Exception:
+            pass
+        logger.info(f"  Decoder stateful={is_stateful}")
+
+        # --- detect which dims are dynamic --------------------------------
+        has_kv_inputs = any(
+            "key_values" in n or "past_key" in n for n in input_info
+        )
+
+        # For non-stateful decoders with explicit past_key_values the KV
+        # sequence length grows every step, making bucketing impractical.
+        # Only patch when the model is stateful (KV cache is internal).
+        if has_kv_inputs and not is_stateful:
             logger.warning(
-                f"  {static_xml} not found — run convert_decoder_static first. "
+                "  Decoder has explicit past_key_values inputs and is not "
+                "stateful – cannot move to accelerator (variable KV dims). "
                 "Keeping decoder on CPU."
             )
             return
 
-        logger.info(f"  Loading static decoder from {static_xml}")
-        dec = core.read_model(str(static_xml))
+        # --- define sequence-length buckets --------------------------------
+        # Bucket seq_len values that may appear during generate().
+        # Modern transformers feeds one token at a time (seq_len=1) for all
+        # steps; older versions may feed up to 4 forced decoder tokens in
+        # the first call.
+        seq_len_buckets = [1, 2, 4]
+        logger.info(f"  Decoder seq_len buckets: {seq_len_buckets}")
 
-        # --- log inputs/outputs -------------------------------------------
-        logger.info(f"  Static decoder: {len(dec.inputs)} inputs, "
-                    f"{len(dec.outputs)} outputs")
-        for inp in dec.inputs:
-            logger.info(f"    IN  '{inp.get_any_name()}': "
-                        f"{inp.get_partial_shape()}")
-        for out in dec.outputs:
-            logger.info(f"    OUT '{out.get_any_name()}': "
-                        f"{out.get_partial_shape()}")
-
-        # --- constants ----------------------------------------------------
-        seq_len = 1
-        kvcache_size = self.max_new_tokens + 9   # room for forced-decoder-ids
-        n_heads = 20
-        head_dim = 64
-        encoder_kv_len = 1500
-
-        # --- reshape all inputs to static shapes --------------------------
-        shape_map: Dict[str, list] = {}
-        for inp in dec.inputs:
-            name = inp.get_any_name()
-            ps = inp.get_partial_shape()
-
-            if "input_ids" in name:
-                shape_map[name] = [1, seq_len]
-            elif "encoder_hidden_states" in name:
-                shape_map[name] = [1, encoder_kv_len, 1280]
-            elif "beam_idx" in name:
-                shape_map[name] = [1]
-            elif "cache_position" in name:
-                shape_map[name] = [seq_len]
-            elif "encoder_attention_mask" in name:
-                shape_map[name] = [1, encoder_kv_len]
-            elif "attention_mask" in name:
-                # past positions + current seq
-                shape_map[name] = [1, kvcache_size + seq_len]
-            elif "encoder" in name and ("past_key" in name or "past_kv" in name):
-                # cross-attention KV: [1, heads, encoder_len, head_dim]
-                shape_map[name] = [1, n_heads, encoder_kv_len, head_dim]
-            elif "past_key" in name or "past_kv" in name:
-                # self-attention KV: [1, heads, kvcache_size, head_dim]
-                shape_map[name] = [1, n_heads, kvcache_size, head_dim]
-            elif ps.is_dynamic:
-                # fallback: make every dynamic dim = 1
-                shape_map[name] = [
-                    d.get_length() if d.is_static else 1
-                    for d in list(ps)
-                ]
-
-        logger.info(f"  Reshape map ({len(shape_map)} entries):")
-        for k, v in shape_map.items():
-            logger.info(f"    {k}: {v}")
-
-        try:
-            dec.reshape(shape_map)
-        except Exception as e:
-            logger.warning(f"  Static decoder reshape FAILED: {e}")
-            import traceback; traceback.print_exc()
-            return
-
-        # --- compile on accelerator ---------------------------------------
+        # --- build accelerator config (same as encoder) --------------------
         ov_config: Dict[str, str] = {"CACHE_DIR": ""}
         if hasattr(self.config, 'openvino') and hasattr(self.config.openvino, 'device_properties'):
             for key, value in self.config.openvino.device_properties.items():
                 ov_config[key] = value
 
-        try:
-            logger.info(f"  Compiling static decoder on {die} ...")
-            compiled = core.compile_model(dec, die, ov_config)
-            logger.info(f"  Compile OK")
-        except Exception as e:
-            logger.warning(f"  Static decoder compile on {die} FAILED: {e}")
-            import traceback; traceback.print_exc()
-            return
+        # --- compile one model per bucket ----------------------------------
+        #     bucket_key  → (CompiledModel, {input_name: static_shape})
+        buckets: Dict[int, Any] = {}
 
-        # --- verify execution devices -------------------------------------
+        for seq_len in seq_len_buckets:
+            dec_model = core.read_model(str(self.decoder_path))
+
+            # Build static shape map for this bucket
+            shape_map: Dict[str, list] = {}
+            for inp in dec_model.inputs:
+                name = inp.get_any_name()
+                ps = inp.get_partial_shape()
+                if not ps.is_dynamic:
+                    continue
+                dims = list(ps)
+
+                def _dim_val(d, fallback=1):
+                    """Extract int from openvino.Dimension (static) or return fallback."""
+                    if d.is_static:
+                        return d.get_length()
+                    return fallback
+
+                if "input_ids" in name:
+                    shape_map[name] = [1, seq_len]
+                elif "encoder_hidden_states" in name:
+                    # Whisper Large V3 encoder output: (1, 1500, 1280)
+                    shape_map[name] = [1, 1500, _dim_val(dims[2], 1280)]
+                elif "beam_idx" in name:
+                    shape_map[name] = [1]
+                elif "cache_position" in name:
+                    shape_map[name] = [seq_len]
+                elif "attention_mask" in name and "encoder" not in name:
+                    shape_map[name] = [1, seq_len]
+                elif "encoder_attention_mask" in name:
+                    shape_map[name] = [1, 1500]
+                else:
+                    # Unknown dynamic input – use dim=1 per axis as fallback
+                    shape_map[name] = [_dim_val(d) for d in dims]
+
+            if shape_map:
+                dec_model.reshape(shape_map)
+                logger.info(f"  Bucket seq_len={seq_len}: reshaped {shape_map}")
+
+            logger.info(f"  Compiling decoder bucket seq_len={seq_len} on {die} ...")
+            compiled = core.compile_model(dec_model, die, ov_config)
+            buckets[seq_len] = compiled
+
+        # --- verify execution devices on first bucket ----------------------
         try:
-            exec_devs = compiled.get_property("EXECUTION_DEVICES")
+            sample_compiled = next(iter(buckets.values()))
+            exec_devs = sample_compiled.get_property("EXECUTION_DEVICES")
             logger.info(f"  Decoder EXECUTION_DEVICES: {exec_devs}")
-            pfx = die.split(".")[0]
-            if not any(pfx in d for d in exec_devs):
+            device_prefix = die.split(".")[0]
+            on_target = any(device_prefix in d for d in exec_devs)
+            has_cpu = any("CPU" in d for d in exec_devs)
+            if on_target and not has_cpu:
+                logger.info(f"  [OK] Decoder fully on {die}")
+            elif on_target and has_cpu:
+                logger.info(
+                    f"  [OK] Decoder on {die} (heterogeneous: some ops fall back to CPU)"
+                )
+            else:
                 logger.warning(
-                    f"  [WARN] EXECUTION_DEVICES={exec_devs} — "
-                    "keeping CPU decoder"
+                    f"  [WARN] Decoder requested {die} but "
+                    f"EXECUTION_DEVICES={exec_devs}. Keeping CPU decoder."
                 )
                 return
         except Exception as e:
-            logger.warning(f"  Could not query EXECUTION_DEVICES: {e}")
+            logger.warning(f"  Could not query decoder EXECUTION_DEVICES: {e}")
 
-        # --- install proxy ------------------------------------------------
-        proxy = _StaticKVDecoderProxy(
-            compiled,
-            kvcache_size=kvcache_size,
-            n_heads=n_heads,
-            head_dim=head_dim,
-            encoder_kv_len=encoder_kv_len,
+        # --- install proxy on model.decoder --------------------------------
+        # OVDecoder.forward() calls self.request(inputs, share_inputs=…)
+        # where self.request is a CompiledModel.  We replace it with a thin
+        # proxy that selects the right bucket.
+        original_request = model.decoder.request
+        model.decoder.request = _DecoderBucketDispatch(
+            buckets, original_request
         )
-        # Copy config reference that generate() may look up
-        proxy.config = getattr(model.decoder, "config", None)
-        model.decoder = proxy
-        logger.info(f"  Decoder patched to {die} via _StaticKVDecoderProxy "
-                    f"(kvcache_size={kvcache_size})")
+        logger.info(f"  Decoder patched to {die} ({len(buckets)} buckets)")
 
     def _get_next_model(self) -> Tuple[str, Any]:
         """Get next model in round-robin fashion."""
