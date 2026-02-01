@@ -809,11 +809,7 @@ class WhisperMultiDieSUT:
                   file=sys.stderr)
 
     def _load_optimum_model(self):
-        import os
-
         model_dir = str(self.model_path)
-
-        self._ensure_optimum_symlinks()
 
         try:
             return OVModelForSpeechSeq2Seq.from_pretrained(
@@ -831,26 +827,6 @@ class WhisperMultiDieSUT:
             encoder_file_name=self.encoder_path.name,
             decoder_file_name=self.decoder_path.name,
         )
-
-    def _ensure_optimum_symlinks(self) -> None:
-        import os
-
-        standard_map = {
-            "openvino_encoder_model": self.encoder_path,
-            "openvino_decoder_model": self.decoder_path,
-        }
-
-        for standard_stem, actual_path in standard_map.items():
-            for ext in (".xml", ".bin"):
-                standard_file = self.model_path / f"{standard_stem}{ext}"
-                actual_file = actual_path.with_suffix(ext)
-                if standard_file.exists() or not actual_file.exists():
-                    continue
-                try:
-                    os.symlink(actual_file.resolve(), standard_file)
-                    logger.info(f"Symlinked {standard_file.name} -> {actual_file.name}")
-                except OSError as e:
-                    logger.warning(f"Cannot create symlink {standard_file.name}: {e}")
 
     def _patch_encoder_device(self, model, die: str) -> None:
         import openvino as ov
