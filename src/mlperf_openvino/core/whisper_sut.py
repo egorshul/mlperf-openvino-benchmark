@@ -837,7 +837,7 @@ class WhisperMultiDieSUT:
 
         standard_map = {
             "openvino_encoder_model": self.encoder_path,
-            "openvino_decoder_with_past_model": self.decoder_path,
+            "openvino_decoder_model": self.decoder_path,
         }
 
         for standard_stem, actual_path in standard_map.items():
