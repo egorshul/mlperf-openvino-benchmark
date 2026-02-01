@@ -64,16 +64,7 @@ class COCOPromptsDataset(BaseDataset):
         guidance_scale: float = GUIDANCE_SCALE,
         num_inference_steps: int = NUM_INFERENCE_STEPS,
     ):
-        """
-        Initialize COCO prompts dataset.
-
-        Args:
-            data_path: Path to dataset directory
-            count: Number of samples to use (None = all, default 5000 for MLPerf)
-            use_latents: Whether to use pre-computed latents for reproducibility
-            guidance_scale: Classifier-free guidance scale
-            num_inference_steps: Number of diffusion denoising steps
-        """
+        """Initialize COCO prompts dataset."""
         super().__init__(data_path=data_path, count=count)
 
         self.data_path = Path(data_path)
@@ -85,7 +76,6 @@ class COCOPromptsDataset(BaseDataset):
         self._latents_cache: Dict[int, np.ndarray] = {}
         self._is_loaded = False
 
-        # Tokenizer (lazy loaded)
         self._tokenizer = None
 
     def _load_tokenizer(self):
@@ -112,7 +102,6 @@ class COCOPromptsDataset(BaseDataset):
 
         logger.info(f"Loading COCO prompts dataset from {self.data_path}")
 
-        # Try different formats
         loaded = False
 
         # Format 1: MLCommons TSV format (coco-1024.tsv)
@@ -162,7 +151,6 @@ class COCOPromptsDataset(BaseDataset):
         if self.count and self.count < len(self._samples):
             self._samples = self._samples[:self.count]
 
-        # Load pre-computed latents if available
         if self.use_latents:
             self._load_latents()
 
@@ -188,7 +176,6 @@ class COCOPromptsDataset(BaseDataset):
                     image_id = str(line_num)
                     caption = parts[0]
 
-                # Find reference image if available
                 image_path = self._find_reference_image(image_id)
 
                 self._samples.append({
@@ -204,7 +191,6 @@ class COCOPromptsDataset(BaseDataset):
         with open(json_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
 
-        # Build image_id to filename mapping
         id_to_filename = {}
         if 'images' in data:
             for img in data['images']:
@@ -223,7 +209,6 @@ class COCOPromptsDataset(BaseDataset):
             seen_images.add(image_id)
             caption = ann.get('caption', '')
 
-            # Find reference image
             filename = id_to_filename.get(image_id, f"{image_id:012d}.jpg")
             image_path = self._find_reference_image(str(image_id), filename)
 
@@ -255,7 +240,6 @@ class COCOPromptsDataset(BaseDataset):
         filename: Optional[str] = None
     ) -> Optional[str]:
         """Find reference image for accuracy computation."""
-        # Search in various locations
         search_dirs = [
             self.data_path / "coco-1024",  # MLCommons format
             self.data_path / "images" / "val2014",  # COCO format
@@ -263,7 +247,6 @@ class COCOPromptsDataset(BaseDataset):
             self.data_path / "images",
         ]
 
-        # Possible filenames
         filenames = []
         if filename:
             filenames.append(filename)
@@ -296,7 +279,6 @@ class COCOPromptsDataset(BaseDataset):
                 import torch
                 latents = torch.load(latents_file, map_location='cpu')
 
-                # Handle different latents file formats
                 if isinstance(latents, dict):
                     # Format: {'latents': tensor} or similar
                     if 'latents' in latents:
@@ -328,7 +310,6 @@ class COCOPromptsDataset(BaseDataset):
                                 self._latents_cache[idx] = np.array(lat)
 
                 if self._latents_cache:
-                    # Log shape of first latent for debugging
                     first_shape = list(self._latents_cache.values())[0].shape
                     logger.info(f"Loaded {len(self._latents_cache)} pre-computed latents, shape per sample: {first_shape}")
                 else:
@@ -349,19 +330,7 @@ class COCOPromptsDataset(BaseDataset):
         return len(self._samples)
 
     def get_sample(self, index: int) -> Tuple[Dict[str, Any], str]:
-        """
-        Get a sample (prompt and metadata).
-
-        Args:
-            index: Sample index
-
-        Returns:
-            Tuple of (input_dict, caption)
-            input_dict contains:
-            - 'prompt': text caption
-            - 'latents': pre-computed latents (if available)
-            - 'image_path': reference image path (if available)
-        """
+        """Get a sample (prompt and metadata)."""
         sample = self._samples[index]
         caption = sample['caption']
 
@@ -371,11 +340,9 @@ class COCOPromptsDataset(BaseDataset):
             'num_inference_steps': self.num_inference_steps,
         }
 
-        # Add pre-computed latents if available
         if index in self._latents_cache:
             input_dict['latents'] = self._latents_cache[index]
 
-        # Add reference image path for accuracy
         if sample.get('image_path'):
             input_dict['reference_image_path'] = sample['image_path']
 
@@ -386,15 +353,7 @@ class COCOPromptsDataset(BaseDataset):
         return self._samples[index]['caption']
 
     def get_samples(self, indices: List[int]) -> Tuple[List[Dict[str, Any]], List[str]]:
-        """
-        Get multiple preprocessed samples.
-
-        Args:
-            indices: List of sample indices
-
-        Returns:
-            Tuple of (list of input_dicts, list of captions)
-        """
+        """Get multiple preprocessed samples."""
         inputs = []
         labels = []
         for idx in indices:
@@ -408,15 +367,7 @@ class COCOPromptsDataset(BaseDataset):
         return self._samples[index].get('image_path')
 
     def tokenize(self, text: str) -> Dict[str, np.ndarray]:
-        """
-        Tokenize text prompt for CLIP text encoder.
-
-        Args:
-            text: Text prompt
-
-        Returns:
-            Dictionary with input_ids and attention_mask
-        """
+        """Tokenize text prompt for CLIP text encoder."""
         self._load_tokenizer()
 
         if self._tokenizer is None:
@@ -440,17 +391,7 @@ class COCOPromptsDataset(BaseDataset):
         results: np.ndarray,
         indices: List[int]
     ) -> List[np.ndarray]:
-        """
-        Postprocess model outputs (generated images).
-
-        Args:
-            results: Generated images as numpy arrays
-            indices: Sample indices
-
-        Returns:
-            List of processed images
-        """
-        # Convert from latent space to pixel space if needed
+        """Postprocess model outputs (generated images)."""
         # Results should already be in [0, 255] uint8 format
         if isinstance(results, list):
             return results
@@ -461,19 +402,11 @@ class COCOPromptsDataset(BaseDataset):
         generated_images: List[np.ndarray],
         indices: List[int]
     ) -> Dict[str, float]:
-        """
-        Compute CLIP score and FID for generated images.
+        """Compute CLIP score and FID for generated images.
 
         MLPerf v5.1 accuracy targets for SDXL (closed division):
         - CLIP_SCORE: >= 31.68632 and <= 31.81332
         - FID_SCORE: >= 23.01086 and <= 23.95007
-
-        Args:
-            generated_images: List of generated images
-            indices: Sample indices
-
-        Returns:
-            Dictionary with CLIP score and FID
         """
         metrics = {
             'clip_score': 0.0,
@@ -484,11 +417,9 @@ class COCOPromptsDataset(BaseDataset):
         if not generated_images:
             return metrics
 
-        # Compute CLIP score
         clip_score = self._compute_clip_score(generated_images, indices)
         metrics['clip_score'] = clip_score
 
-        # Compute FID if reference images are available
         reference_images = []
         for idx in indices:
             ref_path = self.get_reference_image_path(idx)
@@ -499,7 +430,6 @@ class COCOPromptsDataset(BaseDataset):
             fid_score = self._compute_fid_score(generated_images, reference_images)
             metrics['fid_score'] = fid_score
 
-        # Check MLPerf compliance
         metrics['clip_score_valid'] = 31.68632 <= clip_score <= 31.81332
         metrics['fid_score_valid'] = 23.01086 <= metrics['fid_score'] <= 23.95007
 
@@ -510,18 +440,7 @@ class COCOPromptsDataset(BaseDataset):
         images: List[np.ndarray],
         indices: List[int]
     ) -> float:
-        """
-        Compute CLIP score between generated images and prompts.
-
-        Uses open_clip with ViT-H-14 trained on laion2b as per MLCommons specification.
-
-        Args:
-            images: Generated images
-            indices: Sample indices for getting prompts
-
-        Returns:
-            Average CLIP score (scaled by 100)
-        """
+        """Compute CLIP score between generated images and prompts."""
         try:
             import torch
             import open_clip
@@ -543,7 +462,6 @@ class COCOPromptsDataset(BaseDataset):
             tokenizer = open_clip.get_tokenizer('ViT-B-32')
             model.eval()
 
-            # Move to GPU if available
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             model = model.to(device)
 
@@ -551,9 +469,7 @@ class COCOPromptsDataset(BaseDataset):
             for img, idx in zip(images, indices):
                 prompt = self.get_prompt(idx)
 
-                # Prepare image - handle various formats
                 if isinstance(img, np.ndarray):
-                    # Handle different numpy array formats
                     if img.dtype == np.float32 or img.dtype == np.float64:
                         # Convert from [0, 1] float to [0, 255] uint8
                         if img.max() <= 1.0:
@@ -586,7 +502,6 @@ class COCOPromptsDataset(BaseDataset):
                     image_features = model.encode_image(image_input)
                     text_features = model.encode_text(text_input)
 
-                    # Normalize features
                     image_features = image_features / image_features.norm(dim=-1, keepdim=True)
                     text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
@@ -608,19 +523,7 @@ class COCOPromptsDataset(BaseDataset):
         reference_paths: List[str],
         statistics_path: Optional[str] = None
     ) -> float:
-        """
-        Compute FID score between generated and reference images.
-
-        Uses pre-computed statistics (val2014.npz) if available, as per MLCommons.
-
-        Args:
-            generated_images: Generated images
-            reference_paths: Paths to reference images
-            statistics_path: Path to pre-computed statistics (.npz file)
-
-        Returns:
-            FID score
-        """
+        """Compute FID score between generated and reference images."""
         try:
             from scipy import linalg
             import torch
@@ -631,7 +534,6 @@ class COCOPromptsDataset(BaseDataset):
             return 0.0
 
         try:
-            # Load InceptionV3 for feature extraction
             from torchvision.models import inception_v3, Inception_V3_Weights
             model = inception_v3(weights=Inception_V3_Weights.DEFAULT, transform_input=False)
             model.fc = torch.nn.Identity()  # Remove final FC layer
@@ -664,16 +566,13 @@ class COCOPromptsDataset(BaseDataset):
                     features.append(feat)
                 return np.array(features)
 
-            # Get features for generated images
             gen_features = get_features(generated_images, is_path=False)
 
-            # Compute statistics for generated images
             mu_gen = np.mean(gen_features, axis=0)
             sigma_gen = np.cov(gen_features, rowvar=False)
 
             # Try to use pre-computed statistics (MLCommons requirement)
             if statistics_path is None:
-                # Look for val2014.npz in data directory
                 statistics_path = self._find_statistics_file()
 
             if statistics_path and Path(statistics_path).exists():
@@ -688,7 +587,6 @@ class COCOPromptsDataset(BaseDataset):
                 mu_ref = np.mean(ref_features, axis=0)
                 sigma_ref = np.cov(ref_features, rowvar=False)
 
-            # Compute FID (Fréchet distance)
             diff = mu_gen - mu_ref
 
             # Handle numerical issues with sqrtm
@@ -706,14 +604,7 @@ class COCOPromptsDataset(BaseDataset):
             return 0.0
 
     def _find_statistics_file(self) -> Optional[str]:
-        """
-        Find pre-computed FID statistics file (val2014.npz).
-
-        Looks in common locations for MLCommons-provided statistics.
-
-        Returns:
-            Path to statistics file or None if not found
-        """
+        """Find pre-computed FID statistics file (val2014.npz)."""
         search_paths = [
             Path(self.data_path) / "val2014.npz",
             Path(self.data_path) / "fid_statistics.npz",
@@ -730,15 +621,7 @@ class COCOPromptsDataset(BaseDataset):
         return None
 
     def get_latents(self, index: int) -> Optional[np.ndarray]:
-        """
-        Get pre-generated latents for a sample (MLCommons requirement for reproducibility).
-
-        Args:
-            index: Sample index
-
-        Returns:
-            Pre-generated latents array or None if not available
-        """
+        """Get pre-generated latents for a sample (MLCommons requirement)."""
         if not self._is_loaded:
             self.load()
 
@@ -746,15 +629,7 @@ class COCOPromptsDataset(BaseDataset):
         return sample.get('latents', None)
 
     def load_latents(self, latents_path: str) -> int:
-        """
-        Load pre-generated latents from MLCommons file.
-
-        Args:
-            latents_path: Path to latents file (.pt or .npy)
-
-        Returns:
-            Number of latents loaded
-        """
+        """Load pre-generated latents from MLCommons file."""
         latents_file = Path(latents_path)
         if not latents_file.exists():
             logger.warning(f"Latents file not found: {latents_path}")
@@ -777,14 +652,12 @@ class COCOPromptsDataset(BaseDataset):
                 logger.warning(f"Unsupported latents file format: {latents_file.suffix}")
                 return 0
 
-            # Assign latents to samples
             loaded = 0
             for i, latent in enumerate(latents_list):
                 if i < len(self._samples):
                     if isinstance(latent, np.ndarray):
                         self._samples[i]['latents'] = latent
                     else:
-                        # Convert torch tensor to numpy
                         self._samples[i]['latents'] = latent.numpy() if hasattr(latent, 'numpy') else np.array(latent)
                     loaded += 1
 
@@ -796,12 +669,7 @@ class COCOPromptsDataset(BaseDataset):
             return 0
 
     def get_compliance_indices(self) -> List[int]:
-        """
-        Get the 10 sample indices required for MLCommons human compliance check.
-
-        Returns:
-            List of 10 sample indices for compliance images
-        """
+        """Get the 10 sample indices required for MLCommons human compliance check."""
         # MLCommons uses specific indices for human compliance check
         # These are typically generated with a fixed random seed
         np.random.seed(42)  # MLCommons compliance seed
@@ -813,16 +681,7 @@ class COCOPromptsDataset(BaseDataset):
         images: Dict[int, np.ndarray],
         output_dir: str
     ) -> List[str]:
-        """
-        Save compliance images for MLCommons submission.
-
-        Args:
-            images: Dictionary of sample_index -> generated_image
-            output_dir: Directory to save compliance images
-
-        Returns:
-            List of saved image paths
-        """
+        """Save compliance images for MLCommons submission."""
         from PIL import Image
 
         output_path = Path(output_dir)
@@ -839,7 +698,6 @@ class COCOPromptsDataset(BaseDataset):
                 else:
                     pil_img = img_array
 
-                # Save with sample index in filename
                 filename = f"compliance_sample_{idx:05d}.png"
                 filepath = output_path / filename
                 pil_img.save(filepath, 'PNG')
@@ -867,17 +725,7 @@ class COCOPromptsQSL(QuerySampleLibrary):
         num_inference_steps: int = NUM_INFERENCE_STEPS,
         use_latents: bool = True,  # MLCommons requires pre-generated latents for closed division
     ):
-        """
-        Initialize COCO prompts QSL.
-
-        Args:
-            data_path: Path to dataset directory
-            count: Number of samples to use
-            performance_sample_count: Number of samples for performance run
-            guidance_scale: Classifier-free guidance scale
-            num_inference_steps: Number of diffusion steps
-            use_latents: Whether to use pre-generated latents (required for MLCommons closed division)
-        """
+        """Initialize COCO prompts QSL."""
         super().__init__()
 
         self.dataset = COCOPromptsDataset(
@@ -906,37 +754,19 @@ class COCOPromptsQSL(QuerySampleLibrary):
         return min(self._performance_sample_count, self.total_sample_count)
 
     def load_query_samples(self, sample_indices: List[int]) -> None:
-        """
-        Load samples into memory.
-
-        Args:
-            sample_indices: Indices of samples to load
-        """
+        """Load samples into memory."""
         for idx in sample_indices:
             if idx not in self._loaded_samples:
                 input_dict, _ = self.dataset.get_sample(idx)
                 self._loaded_samples[idx] = input_dict
 
     def unload_query_samples(self, sample_indices: List[int]) -> None:
-        """
-        Unload samples from memory.
-
-        Args:
-            sample_indices: Indices of samples to unload
-        """
+        """Unload samples from memory."""
         for idx in sample_indices:
             self._loaded_samples.pop(idx, None)
 
     def get_features(self, sample_index: int) -> Dict[str, Any]:
-        """
-        Get input features for a sample.
-
-        Args:
-            sample_index: Sample index
-
-        Returns:
-            Dictionary with prompt and generation parameters
-        """
+        """Get input features for a sample."""
         if sample_index in self._loaded_samples:
             return self._loaded_samples[sample_index]
         else:
@@ -944,25 +774,9 @@ class COCOPromptsQSL(QuerySampleLibrary):
             return input_dict
 
     def get_prompt(self, sample_index: int) -> str:
-        """
-        Get text prompt for a sample.
-
-        Args:
-            sample_index: Sample index
-
-        Returns:
-            Text prompt/caption
-        """
+        """Get text prompt for a sample."""
         return self.dataset.get_prompt(sample_index)
 
     def get_label(self, sample_index: int) -> str:
-        """
-        Get ground truth label (prompt) for a sample.
-
-        Args:
-            sample_index: Sample index
-
-        Returns:
-            Text prompt (used for CLIP score computation)
-        """
+        """Get ground truth label (prompt) for a sample."""
         return self.dataset.get_prompt(sample_index)

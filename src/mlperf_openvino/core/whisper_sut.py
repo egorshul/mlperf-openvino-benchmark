@@ -1,9 +1,4 @@
-"""
-Whisper-specific System Under Test implementation.
-
-This module provides SUT implementation optimized for Whisper ASR model,
-using optimum-intel OVModelForSpeechSeq2Seq for proper encoder-decoder inference.
-"""
+"""Whisper ASR System Under Test implementations."""
 
 import array
 import logging
@@ -28,7 +23,6 @@ except ImportError:
     LOADGEN_AVAILABLE = False
     lg = None
 
-# Optimum-Intel for proper Whisper inference
 try:
     from optimum.intel.openvino import OVModelForSpeechSeq2Seq
     OPTIMUM_AVAILABLE = True
@@ -43,13 +37,26 @@ from ..datasets.librispeech import LibriSpeechQSL
 logger = logging.getLogger(__name__)
 
 
-class WhisperOptimumSUT:
-    """
-    System Under Test for Whisper ASR using Optimum-Intel.
+def _generate_quiet(model, input_features, **kwargs):
+    """Call model.generate() suppressing benign HF warnings."""
+    import warnings
 
-    Uses OVModelForSpeechSeq2Seq for proper encoder-decoder inference
-    with correct KV-cache handling and token generation.
-    """
+    tf_logger = logging.getLogger("transformers")
+    prev_level = tf_logger.level
+
+    tf_logger.setLevel(logging.ERROR)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=r".*attention.mask.*pad token.*")
+        warnings.filterwarnings("ignore", message=r".*LogitsProcessor.*has been passed.*")
+        warnings.filterwarnings("ignore", message=r".*generation_config.*default values.*modified.*")
+        try:
+            return model.generate(input_features, **kwargs)
+        finally:
+            tf_logger.setLevel(prev_level)
+
+
+class WhisperOptimumSUT:
+    """Whisper ASR SUT using Optimum-Intel OVModelForSpeechSeq2Seq."""
 
     def __init__(
         self,
@@ -57,18 +64,8 @@ class WhisperOptimumSUT:
         model_path: Union[str, Path],
         qsl: LibriSpeechQSL,
         scenario: Scenario = Scenario.OFFLINE,
-        max_new_tokens: int = 440,  # Leave room for special tokens (448 - 8)
+        max_new_tokens: int = 440,
     ):
-        """
-        Initialize Whisper SUT using Optimum-Intel.
-
-        Args:
-            config: Benchmark configuration
-            model_path: Path to OpenVINO Whisper model directory
-            qsl: Query Sample Library
-            scenario: MLPerf scenario
-            max_new_tokens: Maximum tokens to generate
-        """
         if not LOADGEN_AVAILABLE:
             raise ImportError("MLPerf LoadGen is not installed")
 
@@ -84,31 +81,25 @@ class WhisperOptimumSUT:
         self.scenario = scenario
         self.max_new_tokens = max_new_tokens
 
-        # Results storage
         self._predictions: Dict[int, str] = {}
         self._query_count = 0
         self._sample_count = 0
 
-        # Progress tracking
         self._progress_bar: Optional[Any] = None
         self._start_time = 0.0
         self._last_progress_update = 0.0
-        self._progress_update_interval = 0.5  # seconds
+        self._progress_update_interval = 0.5
 
-        # Create LoadGen handles
         self._sut_handle = None
         self._qsl_handle = None
 
-        # Load model and processor
         self._load_model()
 
     def _load_model(self) -> None:
-        """Load Whisper model using Optimum-Intel."""
         from transformers import AutoProcessor
 
         logger.info(f"Loading Whisper model from {self.model_path}")
 
-        # Load processor (tokenizer + feature extractor)
         try:
             self.processor = AutoProcessor.from_pretrained(self.model_path)
         except Exception as e:
@@ -116,18 +107,15 @@ class WhisperOptimumSUT:
             logger.info("Falling back to openai/whisper-large-v3 processor")
             self.processor = AutoProcessor.from_pretrained("openai/whisper-large-v3")
 
-        # Load OpenVINO model (exported with --task automatic-speech-recognition-with-past)
-        ov_config = {"CACHE_DIR": ""}
         self.model = OVModelForSpeechSeq2Seq.from_pretrained(
             self.model_path,
-            ov_config=ov_config,
+            ov_config={"CACHE_DIR": ""},
             compile=True,
         )
 
         logger.info("Whisper model loaded successfully")
 
     def _start_progress(self, total: int, desc: str = "Processing") -> None:
-        """Start progress tracking."""
         self._start_time = time.time()
         if TQDM_AVAILABLE:
             self._progress_bar = tqdm(
@@ -142,7 +130,6 @@ class WhisperOptimumSUT:
             self._last_progress_update = time.time()
 
     def _update_progress(self, n: int = 1) -> None:
-        """Update progress by n samples."""
         if TQDM_AVAILABLE and self._progress_bar is not None:
             self._progress_bar.update(n)
         else:
@@ -154,7 +141,6 @@ class WhisperOptimumSUT:
                 self._last_progress_update = current_time
 
     def _close_progress(self) -> None:
-        """Close progress tracking."""
         if TQDM_AVAILABLE and self._progress_bar is not None:
             self._progress_bar.close()
             self._progress_bar = None
@@ -164,49 +150,32 @@ class WhisperOptimumSUT:
             logger.info(f"Completed: {self._sample_count} samples in {elapsed:.1f}s ({throughput:.1f} samples/sec)")
 
     def flush_queries(self) -> None:
-        """Flush any pending queries."""
         if self._progress_bar is not None:
             self._close_progress()
 
     def _process_sample(self, sample_idx: int) -> str:
-        """
-        Process a single audio sample.
-
-        Args:
-            sample_idx: Sample index
-
-        Returns:
-            Transcribed text
-        """
         import torch
 
-        # Get preprocessed mel features from QSL
         features = self.qsl.get_features(sample_idx)
         input_features = features["input_features"]
 
-        # Convert to tensor
         if isinstance(input_features, np.ndarray):
             input_features = torch.from_numpy(input_features)
 
-        # Ensure correct shape (batch, n_mels, time)
         if input_features.dim() == 2:
             input_features = input_features.unsqueeze(0)
 
-        # Generate transcription using model with KV-cache support
-        generated_ids = self.model.generate(
-            input_features,
+        generated_ids = _generate_quiet(
+            self.model, input_features,
             max_new_tokens=self.max_new_tokens,
             language="en",
             task="transcribe",
         )
 
-        # Decode tokens to text
         text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-
         return text
 
     def issue_queries(self, query_samples: List[Any]) -> None:
-        """Process queries from LoadGen."""
         self._query_count += len(query_samples)
 
         if self.scenario == Scenario.OFFLINE:
@@ -217,7 +186,6 @@ class WhisperOptimumSUT:
             raise ValueError(f"Unsupported scenario: {self.scenario}")
 
     def _issue_query_offline(self, query_samples: List[Any]) -> None:
-        """Process queries for Offline scenario."""
         responses = []
         response_arrays = []
 
@@ -245,7 +213,6 @@ class WhisperOptimumSUT:
         lg.QuerySamplesComplete(responses)
 
     def _issue_query_server(self, query_samples: List[Any]) -> None:
-        """Process queries for Server scenario."""
         responses = []
         response_arrays = []
 
@@ -272,21 +239,11 @@ class WhisperOptimumSUT:
         lg.QuerySamplesComplete(responses)
 
     def get_sut(self) -> Any:
-        """Get LoadGen SUT handle.
-
-        Returns:
-            LoadGen SUT handle for benchmark execution.
-        """
         if self._sut_handle is None:
             self._sut_handle = lg.ConstructSUT(self.issue_queries, self.flush_queries)
         return self._sut_handle
 
     def get_qsl(self) -> Any:
-        """Get LoadGen QSL handle.
-
-        Returns:
-            LoadGen QSL handle for sample management.
-        """
         if self._qsl_handle is None:
             self._qsl_handle = lg.ConstructQSL(
                 self.qsl.total_sample_count,
@@ -297,30 +254,22 @@ class WhisperOptimumSUT:
         return self._qsl_handle
 
     def get_predictions(self) -> Dict[int, str]:
-        """Get all predictions."""
         return self._predictions.copy()
 
     def reset(self) -> None:
-        """Reset state for new run."""
         self._predictions.clear()
         self._query_count = 0
         self._sample_count = 0
 
 
 class WhisperSUT:
-    """
-    System Under Test for Whisper ASR model (fallback implementation).
+    """Whisper ASR SUT with manual encoder-decoder inference (fallback)."""
 
-    Uses manual encoder-decoder inference when optimum-intel is not available.
-    Prefer WhisperOptimumSUT when possible.
-    """
-
-    # Whisper special tokens
-    SOT_TOKEN = 50258  # Start of transcript
-    EOT_TOKEN = 50257  # End of transcript
-    TRANSCRIBE_TOKEN = 50359  # Transcribe task
-    NO_TIMESTAMPS_TOKEN = 50363  # No timestamps
-    EN_TOKEN = 50259  # English language
+    SOT_TOKEN = 50258
+    EOT_TOKEN = 50257
+    TRANSCRIBE_TOKEN = 50359
+    NO_TIMESTAMPS_TOKEN = 50363
+    EN_TOKEN = 50259
 
     def __init__(
         self,
@@ -329,19 +278,8 @@ class WhisperSUT:
         decoder_backend: BaseBackend,
         qsl: LibriSpeechQSL,
         scenario: Scenario = Scenario.OFFLINE,
-        max_new_tokens: int = 440,  # Leave room for special tokens (448 - 8)
+        max_new_tokens: int = 440,
     ):
-        """
-        Initialize Whisper SUT.
-
-        Args:
-            config: Benchmark configuration
-            encoder_backend: OpenVINO backend for encoder
-            decoder_backend: OpenVINO backend for decoder
-            qsl: Query Sample Library
-            scenario: MLPerf scenario
-            max_new_tokens: Maximum tokens to generate
-        """
         if not LOADGEN_AVAILABLE:
             raise ImportError("MLPerf LoadGen is not installed")
 
@@ -352,29 +290,23 @@ class WhisperSUT:
         self.scenario = scenario
         self.max_new_tokens = max_new_tokens
 
-        # Discover decoder input names
         self._decoder_input_names = self._discover_decoder_inputs()
 
-        # Results storage
         self._predictions: Dict[int, str] = {}
         self._query_count = 0
         self._sample_count = 0
 
-        # Progress tracking
         self._progress_bar: Optional[Any] = None
         self._start_time = 0.0
         self._last_progress_update = 0.0
-        self._progress_update_interval = 0.5  # seconds
+        self._progress_update_interval = 0.5
 
-        # Create LoadGen handles
         self._sut_handle = None
         self._qsl_handle = None
 
-        # Tokenizer for decoding (lazy loaded)
         self._tokenizer = None
-    
+
     def _start_progress(self, total: int, desc: str = "Processing") -> None:
-        """Start progress tracking."""
         self._start_time = time.time()
         if TQDM_AVAILABLE:
             self._progress_bar = tqdm(
@@ -389,11 +321,9 @@ class WhisperSUT:
             self._last_progress_update = time.time()
 
     def _update_progress(self, n: int = 1) -> None:
-        """Update progress by n samples."""
         if TQDM_AVAILABLE and self._progress_bar is not None:
             self._progress_bar.update(n)
         else:
-            # Simple text-based progress update
             current_time = time.time()
             if current_time - self._last_progress_update >= self._progress_update_interval:
                 elapsed = current_time - self._start_time
@@ -402,7 +332,6 @@ class WhisperSUT:
                 self._last_progress_update = current_time
 
     def _close_progress(self) -> None:
-        """Close progress tracking."""
         if TQDM_AVAILABLE and self._progress_bar is not None:
             self._progress_bar.close()
             self._progress_bar = None
@@ -412,25 +341,13 @@ class WhisperSUT:
             logger.info(f"Completed: {self._sample_count} samples in {elapsed:.1f}s ({throughput:.1f} samples/sec)")
 
     def flush_queries(self) -> None:
-        """Flush any pending queries."""
-        # Close progress bar if still open (for Server mode)
         if self._progress_bar is not None:
             self._close_progress()
 
     def _discover_decoder_inputs(self) -> Dict[str, str]:
-        """
-        Discover decoder input names from the model.
-
-        Returns:
-            Dictionary mapping semantic names to actual input names:
-            - 'input_ids': name for decoder input IDs
-            - 'encoder_hidden_states': name for encoder output
-            - 'attention_mask': name for attention mask (optional)
-        """
         input_names = self.decoder.input_names
         result = {}
 
-        # Find input_ids (decoder_input_ids or input_ids)
         for name in input_names:
             name_lower = name.lower()
             if 'input_id' in name_lower or 'decoder_input' in name_lower:
@@ -442,16 +359,13 @@ class WhisperSUT:
             elif 'encoder_attention_mask' in name_lower:
                 result['encoder_attention_mask'] = name
 
-        # Fallback if not found
         if 'input_ids' not in result:
-            # Try first input that looks like IDs
             for name in input_names:
                 if 'id' in name.lower():
                     result['input_ids'] = name
                     break
 
         if 'encoder_hidden_states' not in result:
-            # Try to find encoder output
             for name in input_names:
                 if 'encoder' in name.lower() and 'mask' not in name.lower():
                     result['encoder_hidden_states'] = name
@@ -460,7 +374,6 @@ class WhisperSUT:
         return result
 
     def _load_tokenizer(self):
-        """Load Whisper tokenizer."""
         if self._tokenizer is not None:
             return
 
@@ -469,64 +382,30 @@ class WhisperSUT:
             self._tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-large-v3")
             logger.info("Loaded Whisper tokenizer")
         except ImportError:
-            logger.warning(
-                "transformers not installed, using basic token decoding. "
-                "Install with: pip install transformers"
-            )
+            logger.warning("transformers not installed, using basic token decoding")
             self._tokenizer = None
-    
+
     def _decode_tokens(self, token_ids: List[int]) -> str:
-        """
-        Decode token IDs to text.
-        
-        Args:
-            token_ids: List of token IDs
-            
-        Returns:
-            Decoded text
-        """
         self._load_tokenizer()
-        
+
         if self._tokenizer is not None:
-            # Filter special tokens
             filtered = [t for t in token_ids if t < 50257]
             return self._tokenizer.decode(filtered, skip_special_tokens=True)
         else:
-            # Basic fallback - just return token IDs as string
             return f"[tokens: {len(token_ids)}]"
-    
+
     def _encode(self, mel_features: np.ndarray) -> np.ndarray:
-        """
-        Run encoder on mel spectrogram.
-        
-        Args:
-            mel_features: Mel spectrogram of shape (batch, n_mels, time)
-            
-        Returns:
-            Encoder hidden states
-        """
         inputs = {self.encoder.input_names[0]: mel_features}
         outputs = self.encoder.predict(inputs)
         return list(outputs.values())[0]
-    
+
     def _decode_step(
         self,
         encoder_hidden_states: np.ndarray,
         decoder_input_ids: np.ndarray,
     ) -> np.ndarray:
-        """
-        Run one decoder step.
-
-        Args:
-            encoder_hidden_states: Encoder output
-            decoder_input_ids: Current token sequence
-
-        Returns:
-            Logits for next token
-        """
         inputs = {}
 
-        # Use discovered input names
         if 'input_ids' in self._decoder_input_names:
             inputs[self._decoder_input_names['input_ids']] = decoder_input_ids
         else:
@@ -537,14 +416,11 @@ class WhisperSUT:
         else:
             inputs['encoder_hidden_states'] = encoder_hidden_states
 
-        # Add attention masks if required by model
         if 'attention_mask' in self._decoder_input_names:
-            # Create attention mask (all ones for valid tokens)
             attn_mask = np.ones(decoder_input_ids.shape, dtype=np.int64)
             inputs[self._decoder_input_names['attention_mask']] = attn_mask
 
         if 'encoder_attention_mask' in self._decoder_input_names:
-            # Create encoder attention mask
             batch_size = encoder_hidden_states.shape[0]
             seq_len = encoder_hidden_states.shape[1]
             enc_attn_mask = np.ones((batch_size, seq_len), dtype=np.int64)
@@ -552,27 +428,14 @@ class WhisperSUT:
 
         outputs = self.decoder.predict(inputs)
         return list(outputs.values())[0]
-    
+
     def _generate(
         self,
         mel_features: np.ndarray,
         temperature: float = 0.0,
     ) -> Tuple[List[int], str]:
-        """
-        Generate transcript from mel spectrogram.
-
-        Args:
-            mel_features: Mel spectrogram
-            temperature: Sampling temperature (0 = greedy)
-
-        Returns:
-            Tuple of (token_ids, decoded_text)
-        """
-        # Encode audio
         encoder_hidden_states = self._encode(mel_features)
 
-        # Initialize decoder input with special tokens
-        # [SOT, language, task, no_timestamps]
         decoder_input = [
             self.SOT_TOKEN,
             self.EN_TOKEN,
@@ -583,18 +446,12 @@ class WhisperSUT:
         generated_tokens = []
 
         for step in range(self.max_new_tokens):
-            # Prepare decoder input
             decoder_input_ids = np.array([decoder_input], dtype=np.int64)
-
-            # Get logits
             logits = self._decode_step(encoder_hidden_states, decoder_input_ids)
 
-            # Get next token (greedy or sampling)
-            # Logits shape should be (batch, seq_len, vocab_size)
             if logits.ndim == 3:
                 next_token_logits = logits[0, -1, :]
             elif logits.ndim == 2:
-                # Shape might be (batch, vocab_size) for last token only
                 next_token_logits = logits[0, :]
             else:
                 break
@@ -602,60 +459,39 @@ class WhisperSUT:
             if temperature == 0.0:
                 next_token = int(np.argmax(next_token_logits))
             else:
-                # Softmax with temperature
                 probs = np.exp(next_token_logits / temperature)
                 probs = probs / probs.sum()
                 next_token = int(np.random.choice(len(probs), p=probs))
 
-            # Check for end of transcript
             if next_token == self.EOT_TOKEN:
                 break
 
             generated_tokens.append(next_token)
             decoder_input.append(next_token)
 
-        # Decode tokens to text
         text = self._decode_tokens(generated_tokens)
-
         return generated_tokens, text
-    
+
     def _process_sample(self, sample_idx: int) -> str:
-        """
-        Process a single audio sample.
-
-        Args:
-            sample_idx: Sample index
-
-        Returns:
-            Transcribed text
-        """
         features = self.qsl.get_features(sample_idx)
         mel_features = features["input_features"]
         tokens, text = self._generate(mel_features)
         return text
-    
+
     def issue_queries(self, query_samples: List[Any]) -> None:
-        """
-        Process queries from LoadGen.
-        
-        Args:
-            query_samples: List of QuerySample objects
-        """
         self._query_count += len(query_samples)
-        
+
         if self.scenario == Scenario.OFFLINE:
             self._issue_query_offline(query_samples)
         elif self.scenario == Scenario.SERVER:
             self._issue_query_server(query_samples)
         else:
             raise ValueError(f"Unsupported scenario: {self.scenario}")
-    
-    def _issue_query_offline(self, query_samples: List[Any]) -> None:
-        """Process queries for Offline scenario."""
-        responses = []
-        response_arrays = []  # Keep arrays alive until QuerySamplesComplete!
 
-        # Start progress tracking
+    def _issue_query_offline(self, query_samples: List[Any]) -> None:
+        responses = []
+        response_arrays = []
+
         total_samples = len(query_samples)
         self._start_progress(total_samples, desc="Whisper Offline inference")
 
@@ -663,37 +499,26 @@ class WhisperSUT:
             sample_idx = sample.index
             self._sample_count += 1
 
-            # Process sample
             text = self._process_sample(sample_idx)
             self._predictions[sample_idx] = text
 
-            # Create response (using dummy data for LoadGen)
             response_data = np.array([len(text)], dtype=np.int64)
             response_array = array.array('B', response_data.tobytes())
-            response_arrays.append(response_array)  # Keep alive!
+            response_arrays.append(response_array)
             bi = response_array.buffer_info()
 
-            response = lg.QuerySampleResponse(
-                sample.id,
-                bi[0],
-                bi[1]
-            )
+            response = lg.QuerySampleResponse(sample.id, bi[0], bi[1])
             responses.append(response)
 
-            # Update progress
             self._update_progress(1)
 
-        # Close progress
         self._close_progress()
-
         lg.QuerySamplesComplete(responses)
-    
-    def _issue_query_server(self, query_samples: List[Any]) -> None:
-        """Process queries for Server scenario."""
-        responses = []
-        response_arrays = []  # Keep arrays alive until QuerySamplesComplete!
 
-        # Start progress tracking if first query
+    def _issue_query_server(self, query_samples: List[Any]) -> None:
+        responses = []
+        response_arrays = []
+
         if self._sample_count == 0:
             self._start_progress(0, desc="Whisper Server inference")
 
@@ -701,47 +526,27 @@ class WhisperSUT:
             sample_idx = sample.index
             self._sample_count += 1
 
-            # Process sample
             text = self._process_sample(sample_idx)
             self._predictions[sample_idx] = text
 
-            # Create response
             response_data = np.array([len(text)], dtype=np.int64)
             response_array = array.array('B', response_data.tobytes())
-            response_arrays.append(response_array)  # Keep alive!
+            response_arrays.append(response_array)
             bi = response_array.buffer_info()
 
-            response = lg.QuerySampleResponse(
-                sample.id,
-                bi[0],
-                bi[1]
-            )
+            response = lg.QuerySampleResponse(sample.id, bi[0], bi[1])
             responses.append(response)
 
-            # Update progress
             self._update_progress(1)
 
         lg.QuerySamplesComplete(responses)
-    
-    def get_sut(self) -> Any:
-        """Get LoadGen SUT handle.
 
-        Returns:
-            LoadGen SUT handle for benchmark execution.
-        """
+    def get_sut(self) -> Any:
         if self._sut_handle is None:
-            self._sut_handle = lg.ConstructSUT(
-                self.issue_queries,
-                self.flush_queries
-            )
+            self._sut_handle = lg.ConstructSUT(self.issue_queries, self.flush_queries)
         return self._sut_handle
 
     def get_qsl(self) -> Any:
-        """Get LoadGen QSL handle.
-
-        Returns:
-            LoadGen QSL handle for sample management.
-        """
         if self._qsl_handle is None:
             self._qsl_handle = lg.ConstructQSL(
                 self.qsl.total_sample_count,
@@ -752,24 +557,17 @@ class WhisperSUT:
         return self._qsl_handle
 
     def get_predictions(self) -> Dict[int, str]:
-        """Get all predictions."""
         return self._predictions.copy()
 
     def reset(self) -> None:
-        """Reset state for new run."""
         self._predictions.clear()
         self._query_count = 0
         self._sample_count = 0
 
 
 class WhisperEncoderOnlySUT:
-    """
-    Simplified SUT that only runs the Whisper encoder.
-    
-    Useful for benchmarking encoder performance separately,
-    or when using external decoder/beam search.
-    """
-    
+    """Whisper encoder-only SUT for benchmarking encoder performance."""
+
     def __init__(
         self,
         config: BenchmarkConfig,
@@ -777,39 +575,27 @@ class WhisperEncoderOnlySUT:
         qsl: LibriSpeechQSL,
         scenario: Scenario = Scenario.OFFLINE,
     ):
-        """
-        Initialize encoder-only SUT.
-        
-        Args:
-            config: Benchmark configuration
-            backend: OpenVINO backend for encoder
-            qsl: Query Sample Library
-            scenario: MLPerf scenario
-        """
         if not LOADGEN_AVAILABLE:
             raise ImportError("MLPerf LoadGen is not installed")
-        
+
         self.config = config
         self.backend = backend
         self.qsl = qsl
         self.scenario = scenario
-        
+
         self._predictions: Dict[int, np.ndarray] = {}
         self._query_count = 0
         self._sample_count = 0
 
-        # Progress tracking
         self._progress_bar: Optional[Any] = None
         self._start_time = 0.0
         self._last_progress_update = 0.0
-        self._progress_update_interval = 0.5  # seconds
+        self._progress_update_interval = 0.5
 
-        # Create LoadGen handles
         self._sut_handle = None
         self._qsl_handle = None
 
     def _start_progress(self, total: int, desc: str = "Processing") -> None:
-        """Start progress tracking."""
         self._start_time = time.time()
         if TQDM_AVAILABLE:
             self._progress_bar = tqdm(
@@ -824,11 +610,9 @@ class WhisperEncoderOnlySUT:
             self._last_progress_update = time.time()
 
     def _update_progress(self, n: int = 1) -> None:
-        """Update progress by n samples."""
         if TQDM_AVAILABLE and self._progress_bar is not None:
             self._progress_bar.update(n)
         else:
-            # Simple text-based progress update
             current_time = time.time()
             if current_time - self._last_progress_update >= self._progress_update_interval:
                 elapsed = current_time - self._start_time
@@ -837,7 +621,6 @@ class WhisperEncoderOnlySUT:
                 self._last_progress_update = current_time
 
     def _close_progress(self) -> None:
-        """Close progress tracking."""
         if TQDM_AVAILABLE and self._progress_bar is not None:
             self._progress_bar.close()
             self._progress_bar = None
@@ -847,76 +630,49 @@ class WhisperEncoderOnlySUT:
             logger.info(f"Completed: {self._sample_count} samples in {elapsed:.1f}s ({throughput:.1f} samples/sec)")
 
     def flush_queries(self) -> None:
-        """Flush any pending queries."""
-        # Close progress bar if still open
         if self._progress_bar is not None:
             self._close_progress()
 
     def issue_queries(self, query_samples: List[Any]) -> None:
-        """Process queries from LoadGen."""
         self._query_count += len(query_samples)
 
-        # Start progress tracking
         total_samples = len(query_samples)
         self._start_progress(total_samples, desc="Whisper encoder inference")
 
         responses = []
-        response_arrays = []  # Keep arrays alive until QuerySamplesComplete!
+        response_arrays = []
 
         for sample in query_samples:
             sample_idx = sample.index
             self._sample_count += 1
 
-            # Get input features
             features = self.qsl.get_features(sample_idx)
             mel_features = features["input_features"]
 
-            # Run encoder
             inputs = {self.backend.input_names[0]: mel_features}
             outputs = self.backend.predict(inputs)
             encoder_output = list(outputs.values())[0]
 
             self._predictions[sample_idx] = encoder_output
 
-            # Create response - use array.array for safe memory handling
             response_array = array.array('B', encoder_output.tobytes())
-            response_arrays.append(response_array)  # Keep alive!
+            response_arrays.append(response_array)
             bi = response_array.buffer_info()
 
-            response = lg.QuerySampleResponse(
-                sample.id,
-                bi[0],
-                bi[1]
-            )
+            response = lg.QuerySampleResponse(sample.id, bi[0], bi[1])
             responses.append(response)
 
-            # Update progress
             self._update_progress(1)
 
-        # Close progress
         self._close_progress()
-
         lg.QuerySamplesComplete(responses)
 
     def get_sut(self) -> Any:
-        """Get LoadGen SUT handle.
-
-        Returns:
-            LoadGen SUT handle for benchmark execution.
-        """
         if self._sut_handle is None:
-            self._sut_handle = lg.ConstructSUT(
-                self.issue_queries,
-                self.flush_queries
-            )
+            self._sut_handle = lg.ConstructSUT(self.issue_queries, self.flush_queries)
         return self._sut_handle
 
     def get_qsl(self) -> Any:
-        """Get LoadGen QSL handle.
-
-        Returns:
-            LoadGen QSL handle for sample management.
-        """
         if self._qsl_handle is None:
             self._qsl_handle = lg.ConstructQSL(
                 self.qsl.total_sample_count,
@@ -927,11 +683,364 @@ class WhisperEncoderOnlySUT:
         return self._qsl_handle
 
     def get_predictions(self) -> Dict[int, np.ndarray]:
-        """Get all encoder outputs."""
         return self._predictions.copy()
 
     def reset(self) -> None:
-        """Reset state for new run."""
         self._predictions.clear()
         self._query_count = 0
         self._sample_count = 0
+
+
+class WhisperMultiDieSUT:
+    """Whisper ASR SUT for multi-die accelerators."""
+
+    def __init__(
+        self,
+        config: BenchmarkConfig,
+        encoder_path: Union[str, Path],
+        decoder_path: Union[str, Path],
+        qsl: LibriSpeechQSL,
+        scenario: Scenario = Scenario.OFFLINE,
+        max_new_tokens: int = 440,
+    ):
+        if not LOADGEN_AVAILABLE:
+            raise ImportError("MLPerf LoadGen is not installed")
+
+        self.config = config
+        self.encoder_path = Path(encoder_path)
+        self.decoder_path = Path(decoder_path)
+        self.model_path = self.encoder_path.parent
+        self.qsl = qsl
+        self.scenario = scenario
+        self.max_new_tokens = max_new_tokens
+
+        self._predictions: Dict[int, str] = {}
+        self._query_count = 0
+        self._sample_count = 0
+        self._start_time = 0.0
+
+        self._sut_handle = None
+        self._qsl_handle = None
+
+        self._models: List[Tuple[str, Any]] = []
+        self._model_index = 0
+
+        self.processor = None
+
+        self._setup_models()
+
+    def _discover_device_dies(self, device: str) -> List[str]:
+        import openvino as ov
+        import re
+
+        core = ov.Core()
+        devices = core.available_devices
+        logger.info(f"Available OpenVINO devices: {devices}")
+
+        pattern = re.compile(rf"^{re.escape(device)}\.(\d+)$")
+        device_dies = [d for d in devices if pattern.match(d)]
+        return sorted(device_dies)
+
+    def _setup_models(self) -> None:
+        import re
+        from transformers import AutoProcessor
+
+        if not OPTIMUM_AVAILABLE:
+            raise ImportError(
+                "optimum-intel is required for WhisperMultiDieSUT. "
+                "Install with: pip install optimum[openvino]"
+            )
+
+        target_device = self.config.openvino.device if hasattr(self.config, 'openvino') else "CPU"
+
+        logger.info(f"Setting up Whisper Multi-Die SUT (encoder={target_device}, decoder=CPU)")
+
+        try:
+            self.processor = AutoProcessor.from_pretrained(self.model_path)
+        except Exception:
+            logger.info("Loading processor from openai/whisper-large-v3")
+            self.processor = AutoProcessor.from_pretrained("openai/whisper-large-v3")
+
+        if target_device == "CPU":
+            device_dies = ["CPU"]
+        elif re.match(r"^.+\.\d+$", target_device):
+            device_dies = [target_device]
+        else:
+            device_dies = self._discover_device_dies(target_device)
+            if not device_dies:
+                logger.warning(f"No {target_device} dies found, falling back to CPU")
+                device_dies = ["CPU"]
+
+        for die in device_dies:
+            logger.info(f"Loading OVModelForSpeechSeq2Seq for {die}")
+            try:
+                model = self._load_optimum_model()
+
+                if die != "CPU":
+                    self._patch_encoder_device(model, die)
+
+                self._models.append((die, model))
+            except Exception as e:
+                logger.warning(f"Failed to create model for {die}: {e}")
+
+        if not self._models:
+            logger.info("Creating CPU fallback model")
+            model = self._load_optimum_model()
+            self._models.append(("CPU", model))
+
+        encoder_devices = [die for die, _ in self._models]
+        print(f"[Setup] {len(self._models)} die(s), encoder={encoder_devices}, decoder=CPU",
+              file=sys.stderr)
+
+        for die_name, mdl in self._models:
+            enc_tag = dec_tag = "?"
+            try:
+                exec_devs = mdl.encoder.request.get_property("EXECUTION_DEVICES")
+                on_target = any(die_name.split(".")[0] in d for d in exec_devs)
+                enc_tag = "OK" if on_target else f"WARN:CPU ({exec_devs})"
+            except Exception:
+                enc_tag = "unknown"
+            try:
+                exec_devs = mdl.decoder.request.get_property("EXECUTION_DEVICES")
+                dec_tag = ",".join(exec_devs) if exec_devs else "unknown"
+            except Exception:
+                dec_tag = "CPU"
+            print(f"  {die_name}: encoder=[{enc_tag}] decoder=[{dec_tag}]",
+                  file=sys.stderr)
+
+    def _load_optimum_model(self):
+        model_dir = str(self.model_path)
+
+        try:
+            return OVModelForSpeechSeq2Seq.from_pretrained(
+                model_dir,
+                device="CPU",
+                ov_config={"CACHE_DIR": ""},
+            )
+        except Exception as e:
+            logger.info(f"Default file names failed ({e}), trying detected names")
+
+        return OVModelForSpeechSeq2Seq.from_pretrained(
+            model_dir,
+            device="CPU",
+            ov_config={"CACHE_DIR": ""},
+            encoder_file_name=self.encoder_path.name,
+            decoder_file_name=self.decoder_path.name,
+        )
+
+    def _patch_encoder_device(self, model, die: str) -> None:
+        import openvino as ov
+
+        core = ov.Core()
+
+        encoder_model = core.read_model(str(self.encoder_path))
+
+        for inp in encoder_model.inputs:
+            if inp.get_partial_shape().is_dynamic:
+                input_name = inp.get_any_name()
+                encoder_model.reshape({input_name: [1, 128, 3000]})
+                break
+
+        ov_config = {"CACHE_DIR": ""}
+        if hasattr(self.config, 'openvino') and hasattr(self.config.openvino, 'device_properties'):
+            for key, value in self.config.openvino.device_properties.items():
+                ov_config[key] = value
+
+        compiled_encoder = core.compile_model(encoder_model, die, ov_config)
+
+        try:
+            exec_devices = compiled_encoder.get_property("EXECUTION_DEVICES")
+            device_prefix = die.split(".")[0]
+            on_target = any(device_prefix in d for d in exec_devices)
+            if not on_target:
+                logger.warning(f"Encoder requested {die} but EXECUTION_DEVICES={exec_devices}")
+        except Exception:
+            pass
+
+        model.encoder.request = compiled_encoder
+
+    def _get_next_model(self) -> Tuple[str, Any]:
+        die_name, model = self._models[self._model_index]
+        self._model_index = (self._model_index + 1) % len(self._models)
+        return die_name, model
+
+    def _process_sample(self, sample_idx: int, model: Any) -> str:
+        import torch
+
+        features = self.qsl.get_features(sample_idx)
+        input_features = features["input_features"]
+
+        if isinstance(input_features, np.ndarray):
+            input_features = torch.from_numpy(input_features)
+
+        if input_features.dim() == 2:
+            input_features = input_features.unsqueeze(0)
+
+        generated_ids = _generate_quiet(
+            model, input_features,
+            max_new_tokens=self.max_new_tokens,
+            language="en",
+            task="transcribe",
+        )
+
+        text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        return text
+
+    def issue_queries(self, query_samples: List[Any]) -> None:
+        self._query_count += len(query_samples)
+
+        if self.scenario == Scenario.OFFLINE:
+            self._issue_queries_offline(query_samples)
+        else:
+            self._issue_queries_server(query_samples)
+
+    def _issue_queries_offline(self, query_samples: List[Any]) -> None:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        total = len(query_samples)
+        num_dies = len(self._models)
+        self._start_time = time.time()
+
+        print(f"[Offline] {total} samples, {num_dies} die(s)", file=sys.stderr)
+
+        if num_dies <= 1:
+            self._issue_queries_offline_sequential(query_samples)
+            return
+
+        die_batches: List[List[Tuple[Any, int]]] = [[] for _ in range(num_dies)]
+        for i, sample in enumerate(query_samples):
+            die_batches[i % num_dies].append((sample, sample.index))
+
+        batch_counts = [len(b) for b in die_batches]
+        print(f"[Distribute] {batch_counts} samples per die", file=sys.stderr)
+
+        def _worker(die_idx: int, batch):
+            _, model = self._models[die_idx]
+            results = []
+            for sample, sample_idx in batch:
+                text = self._process_sample(sample_idx, model)
+                results.append((sample, sample_idx, text))
+            return results
+
+        all_results: List[Tuple[Any, int, str]] = []
+        print(f"[Inference] ", end="", file=sys.stderr)
+        dots_printed = 0
+
+        with ThreadPoolExecutor(max_workers=num_dies) as pool:
+            futures = {
+                pool.submit(_worker, die_idx, batch): die_idx
+                for die_idx, batch in enumerate(die_batches)
+                if batch
+            }
+            for future in as_completed(futures):
+                for sample, sample_idx, text in future.result():
+                    self._predictions[sample_idx] = text
+                    self._sample_count += 1
+
+                    progress = int(self._sample_count * 10 / total)
+                    while dots_printed < progress:
+                        print(".", end="", file=sys.stderr, flush=True)
+                        dots_printed += 1
+
+                all_results.extend(future.result())
+
+        while dots_printed < 10:
+            print(".", end="", file=sys.stderr, flush=True)
+            dots_printed += 1
+
+        elapsed = time.time() - self._start_time
+        print(f" {total}/{total} ({elapsed:.1f}s, {total/elapsed:.1f} qps)",
+              file=sys.stderr)
+
+        responses = []
+        response_arrays = []
+        for sample, _idx, text in sorted(all_results, key=lambda r: r[1]):
+            text_bytes = text.encode('utf-8')
+            response_array = array.array('B', text_bytes)
+            response_arrays.append(response_array)
+            bi = response_array.buffer_info()
+            responses.append(lg.QuerySampleResponse(sample.id, bi[0], bi[1]))
+
+        lg.QuerySamplesComplete(responses)
+
+    def _issue_queries_offline_sequential(self, query_samples: List[Any]) -> None:
+        total = len(query_samples)
+        responses = []
+        response_arrays = []
+
+        print(f"[Inference] ", end="", file=sys.stderr)
+        dots_printed = 0
+
+        for sample in query_samples:
+            sample_idx = sample.index
+            die_name, model = self._get_next_model()
+
+            text = self._process_sample(sample_idx, model)
+            self._predictions[sample_idx] = text
+            self._sample_count += 1
+
+            text_bytes = text.encode('utf-8')
+            response_array = array.array('B', text_bytes)
+            response_arrays.append(response_array)
+            bi = response_array.buffer_info()
+            responses.append(lg.QuerySampleResponse(sample.id, bi[0], bi[1]))
+
+            if total > 0:
+                progress = int(self._sample_count * 10 / total)
+                while dots_printed < progress:
+                    print(".", end="", file=sys.stderr, flush=True)
+                    dots_printed += 1
+
+        while dots_printed < 10:
+            print(".", end="", file=sys.stderr, flush=True)
+            dots_printed += 1
+
+        elapsed = time.time() - self._start_time
+        print(f" {total}/{total} ({elapsed:.1f}s, {total/elapsed:.1f} qps)",
+              file=sys.stderr)
+
+        lg.QuerySamplesComplete(responses)
+
+    def _issue_queries_server(self, query_samples: List[Any]) -> None:
+        for sample in query_samples:
+            sample_idx = sample.index
+
+            die_name, model = self._get_next_model()
+
+            text = self._process_sample(sample_idx, model)
+            self._predictions[sample_idx] = text
+            self._sample_count += 1
+
+            text_bytes = text.encode('utf-8')
+            response_array = array.array('B', text_bytes)
+            bi = response_array.buffer_info()
+
+            response = lg.QuerySampleResponse(sample.id, bi[0], bi[1])
+            lg.QuerySamplesComplete([response])
+
+    def flush_queries(self) -> None:
+        pass
+
+    def get_sut(self) -> Any:
+        if self._sut_handle is None:
+            self._sut_handle = lg.ConstructSUT(
+                self.issue_queries, self.flush_queries)
+        return self._sut_handle
+
+    def get_qsl(self) -> Any:
+        if self._qsl_handle is None:
+            self._qsl_handle = lg.ConstructQSL(
+                self.qsl.total_sample_count,
+                self.qsl.performance_sample_count,
+                self.qsl.load_query_samples,
+                self.qsl.unload_query_samples)
+        return self._qsl_handle
+
+    def get_predictions(self) -> Dict[int, str]:
+        return self._predictions.copy()
+
+    def reset(self) -> None:
+        self._predictions.clear()
+        self._query_count = 0
+        self._sample_count = 0
+        self._model_index = 0

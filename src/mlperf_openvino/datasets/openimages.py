@@ -47,16 +47,7 @@ COCO_CLASSES = [
 
 
 def compute_iou(box1: np.ndarray, box2: np.ndarray) -> float:
-    """
-    Compute Intersection over Union between two boxes.
-
-    Args:
-        box1: [x1, y1, x2, y2]
-        box2: [x1, y1, x2, y2]
-
-    Returns:
-        IoU value
-    """
+    """Compute Intersection over Union between two boxes [x1, y1, x2, y2]."""
     x1 = max(box1[0], box2[0])
     y1 = max(box1[1], box2[1])
     x2 = min(box1[2], box2[2])
@@ -76,16 +67,7 @@ def compute_iou(box1: np.ndarray, box2: np.ndarray) -> float:
 
 
 def compute_ap(recalls: np.ndarray, precisions: np.ndarray) -> float:
-    """
-    Compute Average Precision using 101-point interpolation.
-
-    Args:
-        recalls: Array of recall values
-        precisions: Array of precision values
-
-    Returns:
-        Average Precision value
-    """
+    """Compute Average Precision using 101-point interpolation."""
     # Add sentinel values
     recalls = np.concatenate([[0.0], recalls, [1.0]])
     precisions = np.concatenate([[0.0], precisions, [0.0]])
@@ -110,25 +92,12 @@ def compute_map(
     iou_threshold: float = 0.5,
     num_classes: int = 601  # OpenImages has up to 601 classes
 ) -> Dict[str, float]:
-    """
-    Compute mean Average Precision.
-
-    Args:
-        predictions: List of prediction dicts with 'boxes', 'scores', 'labels'
-        ground_truths: List of ground truth dicts with 'boxes', 'labels'
-        iou_threshold: IoU threshold for matching
-        num_classes: Number of classes (601 for OpenImages)
-
-    Returns:
-        Dictionary with mAP and per-class AP
-    """
-    # Organize detections and ground truths by class
+    """Compute mean Average Precision."""
     all_detections = defaultdict(list)
     all_ground_truths = defaultdict(list)
-    all_classes = set()  # Track all classes we see
+    all_classes = set()
 
     for img_idx, (pred, gt) in enumerate(zip(predictions, ground_truths)):
-        # Detections
         if pred is not None and len(pred.get('boxes', [])) > 0:
             for box, score, label in zip(pred['boxes'], pred['scores'], pred['labels']):
                 class_id = int(label)
@@ -139,7 +108,6 @@ def compute_map(
                     'score': score,
                 })
 
-        # Ground truths
         if gt is not None and len(gt.get('boxes', [])) > 0:
             for box, label in zip(gt['boxes'], gt['labels']):
                 class_id = int(label)
@@ -150,7 +118,6 @@ def compute_map(
                     'matched': False,
                 })
 
-    # Compute AP for each class that has ground truths
     aps = {}
     for class_id in all_classes:
         detections = all_detections[class_id]
@@ -159,10 +126,8 @@ def compute_map(
         if len(gts) == 0:
             continue
 
-        # Sort detections by score
         detections = sorted(detections, key=lambda x: x['score'], reverse=True)
 
-        # Reset matched flags
         for gt in gts:
             gt['matched'] = False
 
@@ -187,7 +152,6 @@ def compute_map(
             else:
                 fp[det_idx] = 1
 
-        # Compute precision/recall
         tp_cumsum = np.cumsum(tp)
         fp_cumsum = np.cumsum(fp)
 
@@ -196,7 +160,6 @@ def compute_map(
 
         aps[class_id] = compute_ap(recalls, precisions)
 
-    # Compute mAP
     if aps:
         map_value = np.mean(list(aps.values()))
     else:
@@ -230,23 +193,11 @@ class OpenImagesDataset(BaseDataset):
         count: Optional[int] = None,
         input_size: int = INPUT_SIZE,
         cache_preprocessed: bool = True,
-        use_disk_cache: bool = True,  # Use preprocessed numpy files
-        output_layout: str = "NHWC",  # "NCHW" or "NHWC" - NHWC default, model handles conversion
-        use_opencv: bool = True,  # Use OpenCV for faster preprocessing
+        use_disk_cache: bool = True,
+        output_layout: str = "NHWC",
+        use_opencv: bool = True,
     ):
-        """
-        Initialize OpenImages dataset.
-
-        Args:
-            data_path: Path to dataset directory
-            annotations_file: Path to annotations CSV file
-            count: Number of samples to use (None = all)
-            input_size: Input image size
-            cache_preprocessed: Whether to cache preprocessed images in memory
-            use_disk_cache: Whether to use/create preprocessed numpy cache on disk
-            output_layout: Output tensor layout ("NCHW" or "NHWC")
-            use_opencv: Use OpenCV for faster preprocessing (falls back to PIL if unavailable)
-        """
+        """Initialize OpenImages dataset."""
         if not PIL_AVAILABLE and not CV2_AVAILABLE:
             raise ImportError("Either Pillow or OpenCV is required")
 
@@ -274,14 +225,12 @@ class OpenImagesDataset(BaseDataset):
 
         logger.info(f"Loading OpenImages dataset from {self.data_path}")
 
-        # Find images directory
         images_dir = self.data_path / "images"
         if not images_dir.exists():
             images_dir = self.data_path / "validation" / "data"
         if not images_dir.exists():
             images_dir = self.data_path
 
-        # Find annotations file (prefer COCO JSON over CSV)
         annotations_path = None
         if self.annotations_file:
             annotations_path = Path(self.annotations_file)
@@ -298,7 +247,6 @@ class OpenImagesDataset(BaseDataset):
                     annotations_path = path
                     break
 
-        # Load annotations
         if annotations_path and annotations_path.exists():
             if annotations_path.suffix == '.json':
                 self._load_coco_annotations(annotations_path)
@@ -307,16 +255,13 @@ class OpenImagesDataset(BaseDataset):
         else:
             logger.warning("No annotations file found, using images only")
 
-        # Load image list
         self._load_images(images_dir)
 
-        # Limit count if specified
         if self.count and self.count < len(self._samples):
             self._samples = self._samples[:self.count]
 
         logger.info(f"Loaded {len(self._samples)} images")
 
-        # Set up preprocessed cache directory
         if self.use_disk_cache:
             # Use versioned cache directory to invalidate on preprocessing changes
             # v2: MLPerf standard preprocessing (no ImageNet normalization)
@@ -331,7 +276,6 @@ class OpenImagesDataset(BaseDataset):
         if not self._preprocessed_dir:
             return
 
-        # Check how many cached files exist
         cached_files = list(self._preprocessed_dir.glob("*.npy"))
         num_cached = len(cached_files)
         num_samples = len(self._samples)
@@ -404,10 +348,9 @@ class OpenImagesDataset(BaseDataset):
 
     def _auto_fix_corrupted_images(self, failed_list: List[str]) -> int:
         """Automatically re-download and preprocess corrupted images."""
-        # Extract image IDs from error messages
+        # Format: "image_id (corrupted...)" or "image_id: error"
         image_ids = []
         for msg in failed_list:
-            # Format: "image_id (corrupted...)" or "image_id: error"
             image_id = msg.split()[0].split(':')[0].split('(')[0].strip()
             if image_id:
                 image_ids.append(image_id)
@@ -417,7 +360,6 @@ class OpenImagesDataset(BaseDataset):
 
         print(f"\nAuto-fixing {len(image_ids)} corrupted images...")
 
-        # Find images directory
         images_dir = self.data_path / "validation" / "data"
         if not images_dir.exists():
             images_dir = self.data_path / "images"
@@ -425,7 +367,6 @@ class OpenImagesDataset(BaseDataset):
             logger.warning("Cannot find images directory for auto-fix")
             return 0
 
-        # Delete corrupted files
         for image_id in image_ids:
             img_path = images_dir / f"{image_id}.jpg"
             if img_path.exists():
@@ -434,13 +375,11 @@ class OpenImagesDataset(BaseDataset):
                 except OSError:
                     pass
 
-        # Re-download from S3
         try:
             from ..utils.dataset_downloader import _download_openimages_from_s3
             print(f"Re-downloading {len(image_ids)} images from S3...")
             _download_openimages_from_s3(image_ids, images_dir, num_workers=4)
 
-            # Re-preprocess the fixed images
             print("Re-preprocessing fixed images...")
             fixed_count = 0
             for image_id in image_ids:
@@ -471,14 +410,12 @@ class OpenImagesDataset(BaseDataset):
         with open(annotations_path, 'r') as f:
             coco = json.load(f)
 
-        # Build category mapping
         self._categories = {}
         for cat in coco.get('categories', []):
             self._categories[cat['id']] = cat['name']
 
         logger.info(f"Loaded {len(self._categories)} categories")
 
-        # Build image id to filename mapping
         image_info = {}
         for img in coco.get('images', []):
             image_info[img['id']] = {
@@ -487,7 +424,6 @@ class OpenImagesDataset(BaseDataset):
                 'height': img.get('height', 600),
             }
 
-        # Load annotations grouped by image
         for ann in coco.get('annotations', []):
             img_id = ann['image_id']
             if img_id not in image_info:
@@ -562,21 +498,7 @@ class OpenImagesDataset(BaseDataset):
                 self._items.append(image_id)
 
     def _preprocess_image(self, image_path: str) -> Tuple[np.ndarray, Dict]:
-        """
-        Preprocess image for RetinaNet.
-
-        MLPerf reference preprocessing (identical for both backends):
-        1. Load image as RGB
-        2. Resize to [800, 800] (simple resize, no aspect ratio preservation)
-        3. Normalize: divide by 255.0 ONLY (NO ImageNet mean/std!)
-        4. Convert to NCHW or NHWC format based on output_layout
-
-        Args:
-            image_path: Path to image file
-
-        Returns:
-            Tuple of (preprocessed_image, preprocessing_info)
-        """
+        """Preprocess image for RetinaNet following MLPerf reference."""
         if self.use_opencv:
             return self._preprocess_image_opencv(image_path)
         else:
@@ -584,29 +506,26 @@ class OpenImagesDataset(BaseDataset):
 
     def _preprocess_image_opencv(self, image_path: str) -> Tuple[np.ndarray, Dict]:
         """OpenCV implementation - faster preprocessing."""
-        # Load image (OpenCV loads as BGR)
+        # OpenCV loads as BGR
         img = cv2.imread(image_path)
         if img is None:
             raise ValueError(f"Failed to load image: {image_path}")
 
         orig_height, orig_width = img.shape[:2]
 
-        # Convert BGR -> RGB (MLPerf reference uses RGB)
+        # MLPerf reference uses RGB
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
         # MLPerf reference: simple resize to target size (no aspect ratio preservation)
         # cv2.INTER_LINEAR is equivalent to PIL's BILINEAR
         img = cv2.resize(img, (self.input_size, self.input_size), interpolation=cv2.INTER_LINEAR)
 
-        # Convert to float32 and normalize - ONLY divide by 255!
-        # MLPerf RetinaNet does NOT use ImageNet mean/std normalization
+        # MLPerf RetinaNet does NOT use ImageNet mean/std normalization, only /255
         img_array = img.astype(np.float32) / 255.0
 
-        # Convert to target layout
         output_layout = getattr(self, 'output_layout', 'NHWC')
         if output_layout == "NCHW":
-            # HWC -> CHW
-            img_array = np.transpose(img_array, (2, 0, 1))
+            img_array = np.transpose(img_array, (2, 0, 1))  # HWC -> CHW
         # else: keep HWC for NHWC
 
         img_array = np.expand_dims(img_array, axis=0)
@@ -628,15 +547,12 @@ class OpenImagesDataset(BaseDataset):
         # MLPerf reference: simple resize to target size (no aspect ratio preservation)
         img = img.resize((self.input_size, self.input_size), Image.Resampling.BILINEAR)
 
-        # Convert to numpy and normalize - ONLY divide by 255!
-        # MLPerf RetinaNet does NOT use ImageNet mean/std normalization
+        # MLPerf RetinaNet does NOT use ImageNet mean/std normalization, only /255
         img_array = np.array(img, dtype=np.float32) / 255.0
 
-        # Convert to target layout
         output_layout = getattr(self, 'output_layout', 'NHWC')
         if output_layout == "NCHW":
-            # HWC -> CHW
-            img_array = np.transpose(img_array, (2, 0, 1))
+            img_array = np.transpose(img_array, (2, 0, 1))  # HWC -> CHW
         # else: keep HWC for NHWC
 
         img_array = np.expand_dims(img_array, axis=0)
@@ -655,10 +571,8 @@ class OpenImagesDataset(BaseDataset):
         image_id = sample['image_id']
         image_path = Path(sample['image_path'])
 
-        # Find images directory
         images_dir = image_path.parent
 
-        # Delete corrupted file
         if image_path.exists():
             try:
                 old_size = image_path.stat().st_size
@@ -667,18 +581,15 @@ class OpenImagesDataset(BaseDataset):
             except OSError:
                 pass
 
-        # Re-download from S3 with retries
         max_retries = 3
         for attempt in range(max_retries):
             try:
                 from ..utils.dataset_downloader import _download_openimages_from_s3
                 _download_openimages_from_s3([image_id], images_dir, num_workers=1)
 
-                # Verify download
                 if image_path.exists():
                     file_size = image_path.stat().st_size
                     if file_size > 1000:  # Valid image should be > 1KB
-                        # Try to open with PIL to verify
                         try:
                             with Image.open(image_path) as img:
                                 img.verify()
@@ -698,12 +609,10 @@ class OpenImagesDataset(BaseDataset):
                 dummy = np.zeros((1, 3, self.input_size, self.input_size), dtype=np.float32)
                 return dummy, {}
 
-        # Try preprocessing again
         try:
             return self._preprocess_image(image_path)
         except Exception as e:
             logger.error(f"Still failed after re-download {image_id}: {e}")
-            # Return dummy image
             dummy = np.zeros((1, 3, self.input_size, self.input_size), dtype=np.float32)
             return dummy, {}
 
@@ -719,18 +628,7 @@ class OpenImagesDataset(BaseDataset):
         return len(self._samples)
 
     def get_sample(self, index: int) -> Tuple[np.ndarray, Dict[str, Any]]:
-        """
-        Get preprocessed sample (thread-safe).
-
-        Uses disk cache (numpy files) if available for fast loading.
-        Auto-fixes truncated/corrupted images by re-downloading.
-
-        Args:
-            index: Sample index
-
-        Returns:
-            Tuple of (preprocessed_image, sample_info)
-        """
+        """Get preprocessed sample (thread-safe) with auto-fix for corrupted images."""
         if not self._is_loaded:
             self.load()
 
@@ -741,7 +639,6 @@ class OpenImagesDataset(BaseDataset):
 
         sample = self._samples[index]
 
-        # Check memory cache first
         with self._cache_lock:
             if self.cache_preprocessed and index in self._cache:
                 return self._cache[index], sample
@@ -752,7 +649,6 @@ class OpenImagesDataset(BaseDataset):
             if cache_path.exists():
                 try:
                     img_array = np.load(cache_path)
-                    # Store in memory cache
                     with self._cache_lock:
                         if self.cache_preprocessed:
                             self._cache[index] = img_array
@@ -765,17 +661,14 @@ class OpenImagesDataset(BaseDataset):
         try:
             img_array, preprocess_info = self._preprocess_image(sample['image_path'])
         except (OSError, IOError) as e:
-            # Image is truncated/corrupted - try to re-download
             logger.warning(f"Corrupted image {sample['image_id']}, attempting auto-fix...")
             img_array, preprocess_info = self._fix_and_preprocess(sample)
 
-        # Store in caches
         with self._cache_lock:
             sample['preprocess_info'] = preprocess_info
             if self.cache_preprocessed:
                 self._cache[index] = img_array
 
-        # Also save to disk cache for next time
         if self.use_disk_cache and self._preprocessed_dir:
             cache_path = self._preprocessed_dir / f"{sample['image_id']}.npy"
             try:
@@ -801,15 +694,7 @@ class OpenImagesDataset(BaseDataset):
         return np.stack(images), sample_infos
 
     def get_ground_truth(self, index: int) -> Dict[str, Any]:
-        """
-        Get ground truth annotations for a sample.
-
-        Args:
-            index: Sample index
-
-        Returns:
-            Dictionary with 'boxes' (normalized) and 'labels'
-        """
+        """Get ground truth annotations for a sample."""
         sample = self._samples[index]
         annotations = sample.get('annotations', [])
 
@@ -827,7 +712,6 @@ class OpenImagesDataset(BaseDataset):
             box = ann['box']
             boxes.append(box)
 
-            # Get category_id (from COCO JSON) or default to 0
             category_id = ann.get('category_id', 0)
             labels.append(category_id)
 
@@ -841,21 +725,10 @@ class OpenImagesDataset(BaseDataset):
         results: Union[np.ndarray, Dict, List],
         indices: List[int]
     ) -> List[Dict[str, np.ndarray]]:
-        """
-        Postprocess RetinaNet outputs.
-
-        Args:
-            results: Model outputs
-            indices: Sample indices
-
-        Returns:
-            List of detection dicts with 'boxes', 'scores', 'labels'
-        """
+        """Postprocess RetinaNet outputs."""
         predictions = []
 
-        # Handle different output formats
         if isinstance(results, dict):
-            # Single dict with batched outputs
             boxes = results.get('boxes', results.get('detection_boxes', []))
             scores = results.get('scores', results.get('detection_scores', []))
             labels = results.get('labels', results.get('detection_classes', []))
@@ -879,7 +752,6 @@ class OpenImagesDataset(BaseDataset):
                         'labels': np.array([]),
                     })
         else:
-            # Assume numpy array
             for i in range(len(indices)):
                 predictions.append({
                     'boxes': np.array([]),
@@ -894,16 +766,7 @@ class OpenImagesDataset(BaseDataset):
         predictions: List[Dict],
         indices: List[int]
     ) -> Dict[str, float]:
-        """
-        Compute mAP accuracy.
-
-        Args:
-            predictions: List of prediction dicts
-            indices: Sample indices
-
-        Returns:
-            Dictionary with mAP and other metrics
-        """
+        """Compute mAP accuracy."""
         ground_truths = [self.get_ground_truth(idx) for idx in indices]
 
         return compute_map(predictions, ground_truths)
@@ -918,7 +781,7 @@ class OpenImagesQSL(QuerySampleLibrary):
     """
 
     # Maximum samples to keep in memory (800x800x3 float32 = 7.3MB each)
-    # 1000 samples ≈ 7.3GB memory
+    # 1000 samples ~ 7.3GB memory
     MAX_CACHE_SIZE = 1000
 
     def __init__(
@@ -928,23 +791,11 @@ class OpenImagesQSL(QuerySampleLibrary):
         count: Optional[int] = None,
         performance_sample_count: int = 64,  # MLPerf official for RetinaNet
         input_size: int = INPUT_SIZE,
-        output_layout: str = "NHWC",  # NHWC default, model handles conversion via PrePostProcessor
-        use_opencv: bool = True,  # Use OpenCV for faster preprocessing
-        max_cache_size: Optional[int] = None,  # Override MAX_CACHE_SIZE
+        output_layout: str = "NHWC",
+        use_opencv: bool = True,
+        max_cache_size: Optional[int] = None,
     ):
-        """
-        Initialize OpenImages QSL.
-
-        Args:
-            data_path: Path to dataset directory
-            annotations_file: Path to annotations file
-            count: Number of samples to use
-            performance_sample_count: Number of samples for performance run
-            input_size: Input image size
-            output_layout: Output tensor layout ("NCHW" or "NHWC")
-            use_opencv: Use OpenCV for faster preprocessing
-            max_cache_size: Maximum samples to cache in memory (default: 1000)
-        """
+        """Initialize OpenImages QSL."""
         super().__init__()
 
         self.dataset = OpenImagesDataset(
@@ -953,7 +804,7 @@ class OpenImagesQSL(QuerySampleLibrary):
             count=count,
             input_size=input_size,
             cache_preprocessed=False,  # Disable internal cache - we use LRU cache in QSL
-            use_disk_cache=True,  # Enable disk cache for fast loading (explicit)
+            use_disk_cache=True,
             output_layout=output_layout,
             use_opencv=use_opencv,
         )
@@ -1011,21 +862,14 @@ class OpenImagesQSL(QuerySampleLibrary):
             return None
 
     def load_query_samples(self, sample_indices: List[int]) -> None:
-        """
-        Load samples - uses lazy loading for large datasets.
-
-        For small batches (performance mode), preload all.
-        For large batches (accuracy mode), just warm up disk cache.
-        """
+        """Load samples - uses lazy loading for large datasets."""
         if not self.dataset._is_loaded:
             self.dataset.load()
 
-        # If small batch, preload all into memory
         if len(sample_indices) <= self._max_cache_size:
             self._preload_samples(sample_indices)
         else:
-            # Large batch (accuracy mode) - just ensure disk cache exists
-            # Samples will be loaded on-demand in get_features
+            # Large batch (accuracy mode) - samples loaded on-demand in get_features
             logger.info(f"Lazy loading mode: {len(sample_indices)} samples "
                        f"(cache size: {self._max_cache_size})")
 
@@ -1079,15 +923,12 @@ class OpenImagesQSL(QuerySampleLibrary):
 
     def get_features(self, sample_index: int) -> Dict[str, np.ndarray]:
         """Get input features for a sample with LRU caching."""
-        # Try cache first
         cached = self._cache_get(sample_index)
         if cached is not None:
             return {'input': cached}
 
-        # Load from disk (uses disk cache internally)
         img, _ = self.dataset.get_sample(sample_index)
 
-        # Add to LRU cache
         self._cache_put(sample_index, img)
 
         return {'input': img}

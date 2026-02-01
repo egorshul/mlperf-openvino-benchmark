@@ -14,7 +14,6 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Check for pycocotools
 try:
     from pycocotools.coco import COCO
     from pycocotools.cocoeval import COCOeval
@@ -33,41 +32,21 @@ def evaluate_openimages_accuracy(
     boxes_in_pixels: bool = True,
     sample_to_filename: Optional[Dict[int, str]] = None,
 ) -> Dict[str, float]:
-    """
-    Evaluate RetinaNet predictions using COCO API (official MLPerf method).
-
-    Args:
-        predictions: Dict of {sample_idx: {'boxes': [N,4], 'scores': [N], 'labels': [N]}}
-        coco_annotations_file: Path to COCO format annotations JSON
-        image_sizes: Dict of {sample_idx: (width, height)} - used if boxes need scaling
-        input_size: Model input size (default 800 for RetinaNet)
-        model_labels_zero_indexed: If True, add +1 to labels. MLPerf ONNX model outputs
-                                   0-indexed labels (0-263), COCO uses 1-indexed category_ids (1-264).
-        boxes_in_pixels: If True, boxes are already in pixel coordinates [0, input_size].
-                        MLPerf ONNX RetinaNet outputs pixels, so this should be True.
-        sample_to_filename: Dict of {sample_idx: filename} for proper mapping to COCO image_ids.
-                           CRITICAL for correct evaluation - dataset and COCO may have different orderings!
-
-    Returns:
-        Dictionary with mAP metrics
-    """
+    """Evaluate RetinaNet predictions using COCO API (official MLPerf method)."""
     if not PYCOCOTOOLS_AVAILABLE:
         logger.error("pycocotools not available, cannot compute accurate mAP")
         return {'mAP': 0.0, 'error': 'pycocotools not installed'}
 
-    # Load COCO ground truth
     coco_gt = COCO(coco_annotations_file)
 
-    # Build filename to image_id mapping from COCO
     filename_to_image_id = {}
     for img_id, img_info in coco_gt.imgs.items():
         filename = img_info.get('file_name', '')
         # Normalize filename (remove extension for comparison)
         base_name = filename.replace('.jpg', '').replace('.jpeg', '').replace('.png', '')
         filename_to_image_id[base_name] = img_id
-        filename_to_image_id[filename] = img_id  # Also store with extension
+        filename_to_image_id[filename] = img_id
 
-    # Build sample_idx to image_id mapping
     sample_to_image_id = {}
 
     if sample_to_filename:
@@ -88,7 +67,6 @@ def evaluate_openimages_accuracy(
 
     logger.debug(f"COCO has {len(coco_gt.imgs)} images, {len(coco_gt.cats)} categories")
 
-    # Log available categories for debugging
     cat_ids = sorted(coco_gt.cats.keys())
     logger.debug(f"Category IDs: {cat_ids[:10]}... (total {len(cat_ids)})")
 
@@ -101,8 +79,6 @@ def evaluate_openimages_accuracy(
         logger.warning("This suggests the annotations file was created with OLD format.")
         logger.warning("Please delete openimages-mlperf.json and re-run to regenerate with correct category_ids (1-264).")
 
-    # Auto-detect label format by analyzing first predictions
-    # Check what label values the model outputs
     all_model_labels = []
     for pred in list(predictions.values())[:100]:  # Sample first 100 predictions
         labels = pred.get('labels', np.array([]))
@@ -115,7 +91,6 @@ def evaluate_openimages_accuracy(
         logger.debug(f"Model label range: {min_label} to {max_label}")
         logger.debug(f"COCO category_id range: {min_cat_id} to {max_cat_id}")
 
-        # Auto-detect if we need to adjust label indexing
         if model_labels_zero_indexed:
             # If model outputs 0-indexed and min is 0, we add +1
             if min_label == 0 and min_cat_id == 1:
@@ -124,13 +99,11 @@ def evaluate_openimages_accuracy(
                 logger.warning(f"Model labels start at {min_label}, but model_labels_zero_indexed=True")
                 logger.warning("Labels may already be 1-indexed. Consider setting model_labels_zero_indexed=False")
 
-    # Convert predictions to COCO format
     # COCO format: [{'image_id': int, 'category_id': int, 'bbox': [x,y,w,h], 'score': float}]
     coco_results = []
     skipped_categories = set()
     valid_cat_ids = set(coco_gt.cats.keys())
 
-    # Debug: log first few predictions
     debug_count = 0
 
     for sample_idx, pred in predictions.items():
@@ -147,7 +120,6 @@ def evaluate_openimages_accuracy(
             continue
         image_id = sample_to_image_id[sample_idx]
 
-        # Get image dimensions for denormalization
         if image_id in coco_gt.imgs:
             img_info = coco_gt.imgs[image_id]
             img_width = img_info.get('width', input_size)
@@ -186,12 +158,10 @@ def evaluate_openimages_accuracy(
             if model_labels_zero_indexed:
                 category_id = category_id + 1
 
-            # Skip invalid categories
             if category_id not in valid_cat_ids:
                 skipped_categories.add(category_id)
                 continue
 
-            # Debug output for first few predictions
             if debug_count < 5:
                 logger.debug(f"Pred {debug_count}: img={image_id}, cat={category_id}, "
                             f"box=[{x1_px:.1f},{y1_px:.1f},{bbox_width:.1f},{bbox_height:.1f}], score={score:.3f}")
@@ -207,7 +177,6 @@ def evaluate_openimages_accuracy(
     if skipped_categories:
         logger.warning(f"Skipped {len(skipped_categories)} invalid category IDs: {sorted(skipped_categories)[:20]}")
 
-        # If we skipped too many and they look like off-by-one error, suggest fix
         if 0 in skipped_categories and model_labels_zero_indexed:
             logger.warning("Category 0 was skipped - model might output 0-indexed labels starting from 0")
         if len(skipped_categories) > 100:
@@ -224,7 +193,6 @@ def evaluate_openimages_accuracy(
             logger.error(f"Model label values (after +1 if applied): {sorted(skipped_categories)[:20]}")
             logger.error(f"Valid COCO category_ids: {min_cat_id} to {max_cat_id}")
 
-            # Suggest fix
             if all(c > max_cat_id for c in skipped_categories):
                 logger.error("FIX: Model labels are too high. Try model_labels_zero_indexed=False")
             elif all(c < min_cat_id for c in skipped_categories):
@@ -233,7 +201,6 @@ def evaluate_openimages_accuracy(
 
     logger.debug(f"Evaluating {len(coco_results)} predictions")
 
-    # Run COCO evaluation
     try:
         coco_dt = coco_gt.loadRes(coco_results)
         coco_eval = COCOeval(coco_gt, coco_dt, iouType='bbox')
@@ -241,7 +208,6 @@ def evaluate_openimages_accuracy(
         coco_eval.accumulate()
         coco_eval.summarize()
 
-        # Extract metrics
         # stats[0] = mAP @ IoU=0.50:0.95
         # stats[1] = mAP @ IoU=0.50
         # stats[2] = mAP @ IoU=0.75
@@ -272,19 +238,10 @@ def convert_predictions_for_mlperf(
     image_heights: Dict[int, int],
     image_widths: Dict[int, int],
 ) -> List[np.ndarray]:
-    """
-    Convert predictions to MLPerf accuracy log format.
+    """Convert predictions to MLPerf accuracy log format.
 
     MLPerf format: 7-element array per detection
     [image_id, ymin, xmin, ymax, xmax, score, class]
-
-    Args:
-        predictions: Dict of predictions
-        image_heights: Dict of image heights
-        image_widths: Dict of image widths
-
-    Returns:
-        List of prediction arrays in MLPerf format
     """
     results = []
 

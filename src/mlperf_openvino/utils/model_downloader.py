@@ -375,83 +375,117 @@ def _download_with_retry(
     raise RuntimeError(f"Download failed after {max_retries + 1} attempts: {last_error}")
 
 
+def _find_openvino_model(model_dir: Path, base_name: str) -> Optional[Path]:
+    """
+    Find OpenVINO model file with various naming conventions.
+
+    Args:
+        model_dir: Directory containing model files
+        base_name: Base name (e.g., 'encoder_model', 'decoder_with_past_model')
+
+    Returns:
+        Path to model file if found, None otherwise
+    """
+    # All possible naming patterns
+    candidates = [
+        model_dir / f"openvino_{base_name}.xml",
+        model_dir / f"{base_name}.xml",
+    ]
+
+    # For decoder_with_past, also check merged decoder
+    if base_name == "decoder_with_past_model":
+        candidates.extend([
+            model_dir / "openvino_decoder_model_merged.xml",
+            model_dir / "decoder_model_merged.xml",
+        ])
+
+    for path in candidates:
+        if path.exists():
+            return path
+
+    return None
+
+
 def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str]:
     """
-    Export Whisper model to OpenVINO IR format.
-
-    This creates separate encoder and decoder models for optimal performance.
-    Uses robust download with retry logic and timeout handling.
+    Export Whisper model to OpenVINO IR format with KV-cache support.
 
     Args:
         output_dir: Output directory
         model_id: HuggingFace model ID
 
     Returns:
-        Dictionary with paths to encoder and decoder IR models
+        Dictionary with paths to encoder, decoder, and decoder_with_past IR models
     """
     try:
-        from optimum.intel import OVModelForSpeechSeq2Seq
+        from optimum.exporters.openvino import main_export
         from transformers import WhisperProcessor
     except ImportError:
         raise ImportError(
-            "optimum-intel is required for Whisper export to OpenVINO. "
-            "Install with: pip install optimum[openvino]"
+            "optimum-intel is required. Install with: pip install optimum[openvino]"
         )
 
-    # Configure HuggingFace Hub for reliable downloads
     _configure_hf_download()
-
-    logger.info(f"Exporting Whisper model to OpenVINO: {model_id}")
 
     output_path = Path(output_dir)
     model_name = model_id.split("/")[-1]
     ov_model_path = output_path / f"{model_name}-openvino"
 
-    # Check if already exported
+    # Check if already exported (encoder + decoder is sufficient)
     if ov_model_path.exists():
-        encoder_path = ov_model_path / "encoder_model.xml"
-        decoder_path = ov_model_path / "decoder_model.xml"
+        encoder_path = _find_openvino_model(ov_model_path, "encoder_model")
+        decoder_path = _find_openvino_model(ov_model_path, "decoder_model")
 
-        if encoder_path.exists() and decoder_path.exists():
-            logger.info(f"OpenVINO model already exists at {ov_model_path}")
-            return {
+        if encoder_path and decoder_path:
+            logger.info(f"Model already exists at {ov_model_path}")
+            result = {
                 "encoder_path": str(encoder_path),
                 "decoder_path": str(decoder_path),
                 "model_path": str(ov_model_path),
             }
+            # Optional: check for decoder_with_past
+            decoder_with_past = _find_openvino_model(ov_model_path, "decoder_with_past_model")
+            if decoder_with_past:
+                result["decoder_with_past_path"] = str(decoder_with_past)
+            return result
+        else:
+            shutil.rmtree(str(ov_model_path))
 
-    # Export model with retry logic
-    logger.info("Downloading and exporting model (this may take several minutes)...")
-    logger.info("Large files (3+ GB) - download will resume if interrupted.")
+    logger.info(f"Exporting {model_id} to OpenVINO IR...")
 
-    def do_export():
-        return OVModelForSpeechSeq2Seq.from_pretrained(
-            model_id,
-            export=True,
-            compile=False,
-        )
+    # Export using optimum Python API
+    main_export(
+        model_name_or_path=model_id,
+        output=str(ov_model_path),
+        task="automatic-speech-recognition-with-past",
+    )
 
-    model = _download_with_retry(do_export, max_retries=3)
-
-    # Save model
-    model.save_pretrained(str(ov_model_path))
-
-    # Also save processor with retry
-    logger.info("Downloading processor...")
-
-    def do_processor():
-        return WhisperProcessor.from_pretrained(model_id)
-
-    processor = _download_with_retry(do_processor, max_retries=3)
+    # Save processor
+    processor = WhisperProcessor.from_pretrained(model_id)
     processor.save_pretrained(str(ov_model_path))
 
-    logger.info(f"OpenVINO model saved to {ov_model_path}")
+    # Verify models were created
+    encoder_path = _find_openvino_model(ov_model_path, "encoder_model")
+    decoder_path = _find_openvino_model(ov_model_path, "decoder_model")
+    decoder_with_past_path = _find_openvino_model(ov_model_path, "decoder_with_past_model")
 
-    return {
-        "encoder_path": str(ov_model_path / "encoder_model.xml"),
-        "decoder_path": str(ov_model_path / "decoder_model.xml"),
+    if not encoder_path or not decoder_path:
+        created_files = list(ov_model_path.glob("*.xml"))
+        raise RuntimeError(
+            f"Export failed. Created files: {[f.name for f in created_files]}"
+        )
+
+    logger.info(f"Model exported to {ov_model_path}")
+
+    result = {
+        "encoder_path": str(encoder_path),
+        "decoder_path": str(decoder_path),
         "model_path": str(ov_model_path),
     }
+    if decoder_with_past_path:
+        result["decoder_with_past_path"] = str(decoder_with_past_path)
+
+    return result
 
 
 def export_whisper_encoder_only(

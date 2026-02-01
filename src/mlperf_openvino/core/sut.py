@@ -48,15 +48,7 @@ class OpenVINOSUT:
         qsl: QuerySampleLibrary,
         scenario: Scenario = Scenario.OFFLINE,
     ):
-        """
-        Initialize the SUT.
-
-        Args:
-            config: Benchmark configuration
-            backend: OpenVINO backend instance
-            qsl: Query Sample Library
-            scenario: Test scenario
-        """
+        """Initialize the SUT."""
         if not LOADGEN_AVAILABLE:
             raise ImportError(
                 "MLPerf LoadGen is not installed. Please install with: "
@@ -68,36 +60,27 @@ class OpenVINOSUT:
         self.qsl = qsl
         self.scenario = scenario
 
-        # Ensure backend is loaded
         if not self.backend.is_loaded:
             self.backend.load()
 
-        # Get input name
         self.input_name = config.model.input_name
         if self.input_name not in self.backend.input_names:
-            # Use first input if configured name not found
             self.input_name = self.backend.input_names[0]
 
-        # Get output name
         self.output_name = config.model.output_name
         if self.output_name not in self.backend.output_names:
             self.output_name = self.backend.output_names[0]
 
-        # Results storage
         self._predictions: Dict[int, Any] = {}
-
-        # Statistics
         self._query_count = 0
         self._sample_count = 0
         self._start_time = 0.0
         self._end_time = 0.0
 
-        # Progress tracking
         self._progress_bar: Optional[Any] = None
         self._last_progress_update = 0.0
         self._progress_update_interval = 0.5  # seconds
 
-        # Server mode: Direct AsyncInferQueue (optimal throughput)
         self._async_queue: Optional[AsyncInferQueue] = None
         self._issued_count = 0
         self._input_dtype = None
@@ -117,12 +100,9 @@ class OpenVINOSUT:
         self._start_time = time.time()
         self._issued_count = 0
 
-        # Get optimal number of inference requests
         num_requests = self.backend.num_streams
-        # Double the requests for better pipelining
         num_requests = max(num_requests * 2, 16)
 
-        # Pre-cache input dtype for fast conversion
         compiled_model = self.backend._compiled_model
         input_element_type = str(compiled_model.input(0).element_type)
         if 'f32' in input_element_type.lower():
@@ -136,7 +116,6 @@ class OpenVINOSUT:
         else:
             self._input_dtype = np.float32  # Default
 
-        # Create AsyncInferQueue with callback
         self._async_queue = AsyncInferQueue(compiled_model, num_requests)
 
         # Define minimal callback - runs in OpenVINO thread (GIL acquired only for response)
@@ -148,7 +127,6 @@ class OpenVINOSUT:
                 # Get output tensor directly (minimal copy)
                 output = infer_request.get_output_tensor(0).data
 
-                # Store prediction if needed
                 self._predictions[sample_idx] = output.copy()
 
                 # Send response immediately using output data pointer
@@ -159,7 +137,6 @@ class OpenVINOSUT:
                 )
                 lg.QuerySamplesComplete([response])
             except Exception as e:
-                # Send empty response on error
                 logger.error(f"Callback error: {e}")
                 response = lg.QuerySampleResponse(query_id, 0, 0)
                 lg.QuerySamplesComplete([response])
@@ -168,7 +145,6 @@ class OpenVINOSUT:
 
         self._async_queue.set_callback(inference_callback)
 
-        # Start progress monitoring thread
         self._progress_thread_stop = False
         def progress_thread():
             while not self._progress_thread_stop:
@@ -202,7 +178,6 @@ class OpenVINOSUT:
         if TQDM_AVAILABLE and self._progress_bar is not None:
             self._progress_bar.update(n)
         else:
-            # Simple text-based progress update
             current_time = time.time()
             if current_time - self._last_progress_update >= self._progress_update_interval:
                 elapsed = current_time - self._start_time
@@ -221,53 +196,26 @@ class OpenVINOSUT:
             logger.info(f"Completed: {self._sample_count} samples in {elapsed:.1f}s ({throughput:.1f} samples/sec)")
 
     def _process_sample(self, sample_id: int) -> Tuple[int, np.ndarray]:
-        """
-        Process a single sample.
-
-        Args:
-            sample_id: Sample index
-
-        Returns:
-            Tuple of (sample_id, result)
-        """
-        # Get input features
+        """Process a single sample."""
         features = self.qsl.get_features(sample_id)
-
-        # Prepare input for backend
         inputs = {self.input_name: features.get("input", features.get(self.input_name))}
-
-        # Run inference
         outputs = self.backend.predict(inputs)
-
-        # Get output
         result = outputs.get(self.output_name, list(outputs.values())[0])
-
         return sample_id, result
 
     def _process_batch(
         self,
         sample_ids: List[int]
     ) -> List[Tuple[int, np.ndarray]]:
-        """
-        Process a batch of samples.
-
-        Args:
-            sample_ids: List of sample indices
-
-        Returns:
-            List of (sample_id, result) tuples
-        """
-        # Prepare batch input
+        """Process a batch of samples."""
         batch_inputs = []
         for sample_id in sample_ids:
             features = self.qsl.get_features(sample_id)
             data = features.get("input", features.get(self.input_name))
             batch_inputs.append({self.input_name: data})
 
-        # Run batch inference
         batch_outputs = self.backend.predict_batch(batch_inputs)
 
-        # Collect results
         results = []
         for i, (sample_id, output) in enumerate(zip(sample_ids, batch_outputs)):
             result = output.get(self.output_name, list(output.values())[0])
@@ -285,13 +233,11 @@ class OpenVINOSUT:
         responses = []
         response_arrays = []  # Keep arrays alive until QuerySamplesComplete!
 
-        # Process in batches for efficiency
         batch_size = self.config.openvino.batch_size if self.config.openvino.batch_size > 0 else 1
 
         sample_ids = [qs.id for qs in query_samples]
         sample_indices = [qs.index for qs in query_samples]
 
-        # Start progress tracking
         total_samples = len(sample_indices)
         self._start_progress(total_samples, desc="Offline inference")
 
@@ -299,15 +245,11 @@ class OpenVINOSUT:
             batch_indices = sample_indices[i:i + batch_size]
             batch_ids = sample_ids[i:i + batch_size]
 
-            # Process batch
             batch_results = self._process_batch(batch_indices)
 
-            # Create responses
             for (idx, result), query_id in zip(batch_results, batch_ids):
-                # Store prediction
                 self._predictions[idx] = result
 
-                # Create response
                 response_array = array.array('B', result.tobytes())
                 response_arrays.append(response_array)  # Keep alive!
                 bi = response_array.buffer_info()
@@ -319,14 +261,11 @@ class OpenVINOSUT:
                 )
                 responses.append(response)
 
-            # Update progress
             self._sample_count += len(batch_indices)
             self._update_progress(len(batch_indices))
 
-        # Close progress
         self._close_progress()
 
-        # Report all responses at once
         lg.QuerySamplesComplete(responses)
 
         self._query_count += 1
@@ -370,14 +309,7 @@ class OpenVINOSUT:
         self._query_count += 1
 
     def issue_queries(self, query_samples: List["lg.QuerySample"]) -> None:
-        """
-        Process incoming queries.
-
-        This method is called by LoadGen when queries need to be processed.
-
-        Args:
-            query_samples: List of query samples from LoadGen
-        """
+        """Process incoming queries from LoadGen."""
         if self.scenario == Scenario.OFFLINE:
             self._issue_query_offline(query_samples)
         elif self.scenario == Scenario.SERVER:
@@ -386,45 +318,26 @@ class OpenVINOSUT:
             raise ValueError(f"Unsupported scenario: {self.scenario}")
 
     def flush_queries(self) -> None:
-        """
-        Flush any pending queries.
-
-        This is called by LoadGen when all queries have been issued.
-        """
-        # Server mode: wait for all async inferences to complete
+        """Flush any pending queries."""
         if self._async_queue is not None:
-            # Wait for all pending inferences to complete
             self._async_queue.wait_all()
 
-            # Stop progress thread
             if hasattr(self, '_progress_thread_stop'):
                 self._progress_thread_stop = True
 
-            # Print final stats
             elapsed = time.time() - self._start_time
             throughput = self._sample_count / elapsed if elapsed > 0 else 0
             print(f"\nServer completed: {self._sample_count} samples in {elapsed:.1f}s ({throughput:.1f} samples/sec)")
 
-        # Close progress bar if still open
         if self._progress_bar is not None:
             self._close_progress()
 
     def get_sut(self) -> "lg.ConstructSUT":
-        """
-        Get the LoadGen SUT object.
-
-        Returns:
-            LoadGen SUT handle
-        """
+        """Get the LoadGen SUT object."""
         return lg.ConstructSUT(self.issue_queries, self.flush_queries)
 
     def get_qsl(self) -> "lg.ConstructQSL":
-        """
-        Get the LoadGen QSL object.
-
-        Returns:
-            LoadGen QSL handle
-        """
+        """Get the LoadGen QSL object."""
         return lg.ConstructQSL(
             self.qsl.total_sample_count,
             self.qsl.performance_sample_count,

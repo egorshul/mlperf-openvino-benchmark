@@ -370,15 +370,19 @@ def download_model_cmd(model: str, output_dir: str, format: str, batch_sizes: st
     try:
         if model == 'whisper':
             from .utils.model_downloader import download_whisper_model
-            export_to_openvino = (format == 'openvino')
+            # Whisper always needs OpenVINO IR format for inference
+            if format != 'openvino':
+                click.echo("  Note: Whisper requires OpenVINO format, using --format openvino")
             paths = download_whisper_model(
                 str(output_path),
-                export_to_openvino=export_to_openvino
+                export_to_openvino=True,  # Always export to OpenVINO IR
             )
             click.echo(f"Model downloaded to: {paths['model_path']}")
             if 'encoder_path' in paths:
                 click.echo(f"  Encoder: {paths['encoder_path']}")
                 click.echo(f"  Decoder: {paths['decoder_path']}")
+            if 'decoder_with_past_path' in paths:
+                click.echo(f"  Decoder with KV-cache: {paths['decoder_with_past_path']}")
         elif model == 'sdxl':
             from .utils.model_downloader import download_sdxl_model
             export_to_openvino = (format == 'openvino')
@@ -599,10 +603,13 @@ def setup_cmd(model: str, output_dir: str, format: str):
     click.echo("Step 1: Downloading model...")
     try:
         if model == 'whisper':
-            export_to_openvino = (format == 'openvino')
+            # Whisper always needs OpenVINO IR format for inference
+            # (WhisperOptimumSUT requires .xml/.bin files, not safetensors)
+            if format != 'openvino':
+                click.echo("  Note: Whisper requires OpenVINO format, using --format openvino")
             model_paths = download_whisper_model(
                 str(models_dir),
-                export_to_openvino=export_to_openvino
+                export_to_openvino=True,  # Always export to OpenVINO IR
             )
             model_path = model_paths['model_path']
         elif model == 'sdxl':
@@ -643,7 +650,8 @@ def setup_cmd(model: str, output_dir: str, format: str):
         elif model == 'retinanet':
             dataset_paths = download_dataset('openimages', str(data_dir))
         elif model == 'whisper':
-            dataset_paths = download_dataset('librispeech', str(data_dir), 'dev-clean')
+            # MLPerf requires dev-clean + dev-other combined
+            dataset_paths = download_dataset('librispeech', str(data_dir), 'mlperf')
         elif model == 'sdxl':
             dataset_paths = download_dataset('coco2014', str(data_dir))
 

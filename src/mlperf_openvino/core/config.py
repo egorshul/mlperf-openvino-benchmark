@@ -73,14 +73,12 @@ class OpenVINOConfig:
     def is_accelerator_device(self) -> bool:
         """Check if the configured device is a multi-die accelerator (not CPU/GPU)."""
         device = self.device.upper()
-        # CPU and GPU are standard devices, others may be accelerators
         return device not in ("CPU", "GPU", "AUTO", "MULTI", "HETERO")
 
 
     def is_multi_device(self) -> bool:
         """Check if using multiple dies (device without die number like 'NPU' not 'NPU.0')."""
         device = self.device.upper()
-        # Multi-device if it's an accelerator and doesn't have a die suffix
         if not self.is_accelerator_device():
             return False
         return "." not in device
@@ -92,7 +90,6 @@ class OpenVINOConfig:
             return False
         if "." not in device:
             return False
-        # Check if suffix is a number
         suffix = device.split(".", 1)[1]
         return suffix.isdigit()
 
@@ -112,12 +109,10 @@ class OpenVINOConfig:
             "PERFORMANCE_HINT": self.performance_hint,
         }
 
-        # CPU-specific properties
         properties["AFFINITY"] = "CORE" if self.bind_thread else "NONE"
         if self.threads_per_stream > 0:
             properties["INFERENCE_THREADS_PER_STREAM"] = self.threads_per_stream
 
-        # Remove None values
         return {k: v for k, v in properties.items() if v is not None}
 
     def to_accelerator_properties(self) -> Dict[str, Any]:
@@ -128,9 +123,7 @@ class OpenVINOConfig:
             "PERFORMANCE_HINT": self.performance_hint,
         }
 
-        # Add user-specified device properties
         for key, value in self.device_properties.items():
-            # Try to convert types
             try:
                 if value.isdigit():
                     properties[key] = int(value)
@@ -141,7 +134,6 @@ class OpenVINOConfig:
             except (AttributeError, ValueError):
                 properties[key] = value
 
-        # Remove None values
         return {k: v for k, v in properties.items() if v is not None}
 
 
@@ -177,19 +169,15 @@ class ModelConfig:
     output_name: str = "output"
     data_format: str = "NCHW"
     dtype: str = "FP32"
-    
-    # Accuracy targets
+
     accuracy_target: float = 0.0
     accuracy_threshold: float = 0.99
-    
-    # Preprocessing
+
     preprocessing: PreprocessingConfig = field(default_factory=PreprocessingConfig)
-    
-    # Scenario configs
+
     offline: ScenarioConfig = field(default_factory=ScenarioConfig)
     server: ScenarioConfig = field(default_factory=ScenarioConfig)
-    
-    # Model paths
+
     model_path: Optional[str] = None
     onnx_url: Optional[str] = None
 
@@ -207,49 +195,41 @@ class DatasetConfig:
 @dataclass
 class BenchmarkConfig:
     """Main benchmark configuration."""
-    
-    # General settings
+
     mlperf_version: str = "5.1"
     division: str = "open"
     category: str = "datacenter"
-    
-    # Model configuration
+
     model: ModelConfig = field(default_factory=lambda: ModelConfig(
         name="ResNet50",
         task="image_classification",
         model_type=ModelType.RESNET50,
         input_shape=[1, 3, 224, 224]
     ))
-    
-    # Dataset configuration
+
     dataset: DatasetConfig = field(default_factory=lambda: DatasetConfig(
         name="imagenet2012",
         path="./data/imagenet"
     ))
-    
-    # OpenVINO configuration
+
     openvino: OpenVINOConfig = field(default_factory=OpenVINOConfig)
-    
-    # Test settings
+
     scenario: Scenario = Scenario.OFFLINE
     test_mode: TestMode = TestMode.PERFORMANCE_ONLY
-    
-    # Output settings
+
     results_dir: str = "./results"
     logs_dir: str = "./logs"
-    
+
     @classmethod
     def from_yaml(cls, yaml_path: str, model_name: str = "resnet50") -> "BenchmarkConfig":
         """Load configuration from YAML file."""
         with open(yaml_path, "r") as f:
             data = yaml.safe_load(f)
-        
-        # Parse global settings
+
         global_settings = data.get("global", {})
-        
-        # Parse model config
+
         model_data = data.get("models", {}).get(model_name, {})
-        
+
         preprocessing_data = model_data.get("preprocessing", {})
         preprocessing = PreprocessingConfig(
             resize=tuple(preprocessing_data.get("resize", [256, 256])),
@@ -258,14 +238,14 @@ class BenchmarkConfig:
             std=tuple(preprocessing_data.get("std", [1.0, 1.0, 1.0])),
             channel_order=preprocessing_data.get("channel_order", "RGB"),
         )
-        
+
         offline_data = model_data.get("offline", {})
         offline = ScenarioConfig(
             min_duration_ms=offline_data.get("min_duration_ms", 60000),
             min_query_count=offline_data.get("min_query_count", 24576),
             samples_per_query=offline_data.get("samples_per_query", 1),
         )
-        
+
         server_data = model_data.get("server", {})
         server = ScenarioConfig(
             min_duration_ms=server_data.get("min_duration_ms", 60000),
@@ -280,9 +260,9 @@ class BenchmarkConfig:
             explicit_batch_size=server_data.get("explicit_batch_size", 8),
             batch_timeout_us=server_data.get("batch_timeout_us", 2000),
         )
-        
+
         sources = model_data.get("sources", {})
-        
+
         model_config = ModelConfig(
             name=model_data.get("name", model_name),
             task=model_data.get("task", "image_classification"),
@@ -299,11 +279,10 @@ class BenchmarkConfig:
             server=server,
             onnx_url=sources.get("onnx_url"),
         )
-        
-        # Parse OpenVINO config
+
         ov_data = data.get("openvino", {})
         cpu_data = ov_data.get("cpu", {})
-        
+
         openvino_config = OpenVINOConfig(
             device=ov_data.get("device", "CPU"),
             num_streams=str(ov_data.get("num_streams", "AUTO")),
@@ -317,22 +296,20 @@ class BenchmarkConfig:
             threads_per_stream=cpu_data.get("threads_per_stream", 0),
             enable_hyper_threading=cpu_data.get("enable_hyper_threading", True),
         )
-        
-        # Parse dataset config
+
         datasets_data = data.get("datasets", {})
         dataset_name = model_data.get("dataset", "imagenet2012")
         dataset_data = datasets_data.get(dataset_name, {})
-        
+
         dataset_config = DatasetConfig(
             name=dataset_name,
             path=dataset_data.get("path", f"./data/{dataset_name}"),
             val_map=dataset_data.get("val_map"),
             calibration_path=dataset_data.get("calibration_path"),
         )
-        
-        # Parse output config
+
         output_data = data.get("output", {})
-        
+
         return cls(
             mlperf_version=global_settings.get("mlperf_version", "5.1"),
             division=global_settings.get("division", "open"),
@@ -343,7 +320,7 @@ class BenchmarkConfig:
             results_dir=output_data.get("results_dir", "./results"),
             logs_dir=output_data.get("logs_dir", "./logs"),
         )
-    
+
     @classmethod
     def default_resnet50(cls) -> "BenchmarkConfig":
         """Create default ResNet50 configuration with NPU-optimized Server mode."""
@@ -533,7 +510,7 @@ class BenchmarkConfig:
                 path="./data/coco2014",
             ),
         )
-    
+
     def get_scenario_config(self) -> ScenarioConfig:
         """Get configuration for the current scenario."""
         if self.scenario == Scenario.OFFLINE:
@@ -542,21 +519,18 @@ class BenchmarkConfig:
             return self.model.server
         else:
             raise ValueError(f"Unsupported scenario: {self.scenario}")
-    
+
     def validate(self) -> List[str]:
         """Validate configuration and return list of errors."""
         errors = []
-        
-        # Check model path
+
         if self.model.model_path and not Path(self.model.model_path).exists():
             errors.append(f"Model file not found: {self.model.model_path}")
-        
-        # Check dataset path
+
         if not Path(self.dataset.path).exists():
             errors.append(f"Dataset path not found: {self.dataset.path}")
-        
-        # Check scenario support
+
         if self.scenario not in [Scenario.OFFLINE, Scenario.SERVER]:
             errors.append(f"Scenario {self.scenario} is not supported in this version")
-        
+
         return errors
