@@ -411,8 +411,9 @@ class SQuADDataset(BaseDataset):
         """Postprocess BERT outputs to extract answer spans."""
         if isinstance(results, list):
             # List of tuples from C++ SUT: [(start, end), (start, end), ...]
-            start_logits = np.array([r[0] for r in results])
-            end_logits = np.array([r[1] for r in results])
+            # Keep as list - logits may have different lengths (bucketed inference)
+            start_logits = [np.asarray(r[0]) for r in results]
+            end_logits = [np.asarray(r[1]) for r in results]
         elif isinstance(results, tuple):
             start_logits, end_logits = results
         else:
