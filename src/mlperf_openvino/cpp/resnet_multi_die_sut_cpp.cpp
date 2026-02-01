@@ -331,6 +331,7 @@ void ResNetMultiDieCppSUT::issue_thread_batched_func(size_t die_idx) {
         // Acquire request for this die
         size_t req_id = acquire_request_for_die(die_idx);
         ResNetMultiDieInferContext* ctx = infer_contexts_[req_id].get();
+        ctx->request.wait();
 
         // Copy batch data
         for (int i = 0; i < actual_size; ++i) {
@@ -393,6 +394,7 @@ void ResNetMultiDieCppSUT::issue_thread_batched_func(size_t die_idx) {
 
         size_t req_id = acquire_request_for_die(die_idx);
         ResNetMultiDieInferContext* ctx = infer_contexts_[req_id].get();
+        ctx->request.wait();
 
         for (int i = 0; i < actual_size; ++i) {
             ctx->query_ids[i] = batch_queues_[die_idx][idx].query_ids[i];
@@ -494,6 +496,7 @@ void ResNetMultiDieCppSUT::issue_thread_func(size_t die_idx) {
         // Acquire request for this die
         size_t req_id = acquire_request_for_die(die_idx);
         ResNetMultiDieInferContext* ctx = infer_contexts_[req_id].get();
+        ctx->request.wait();
 
         ctx->query_ids[0] = query_id;
         ctx->sample_indices[0] = sample_idx;
@@ -550,6 +553,7 @@ void ResNetMultiDieCppSUT::issue_thread_func(size_t die_idx) {
 
         size_t req_id = acquire_request_for_die(die_idx);
         ResNetMultiDieInferContext* ctx = infer_contexts_[req_id].get();
+        ctx->request.wait();
 
         ctx->query_ids[0] = query_id;
         ctx->sample_indices[0] = sample_idx;
@@ -981,6 +985,7 @@ void ResNetMultiDieCppSUT::start_async_batch(const float* input_data,
 
     size_t id = acquire_request();
     ResNetMultiDieInferContext* ctx = infer_contexts_[id].get();
+    ctx->request.wait();
 
     actual_batch_size = std::min(actual_batch_size, ResNetMultiDieInferContext::MAX_BATCH);
     for (int i = 0; i < actual_batch_size; ++i) {
