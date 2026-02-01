@@ -583,58 +583,47 @@ void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx
     if (store_predictions_ && real_samples > 0) {
         ov::Tensor output_tensor = ctx->request.get_output_tensor(output_idx_);
         auto actual_type = output_tensor.get_element_type();
-        std::vector<float> converted;
+        size_t total_elems = single_output_size_ * static_cast<size_t>(actual_batch_size);
+
+        // Deep copy output data IMMEDIATELY before any lock acquisition.
+        // The output tensor buffer may be shared/recycled by the NPU driver
+        // across InferRequests on the same die. Concurrent completions can
+        // overwrite the buffer if we delay reading it (e.g., while waiting
+        // for predictions_mutex_).
+        std::vector<float> local_output(total_elems);
+        bool copy_ok = true;
         if (actual_type == ov::element::f32) {
-            const float* output_data = output_tensor.data<float>();
-            std::lock_guard<std::mutex> lock(predictions_mutex_);
-            for (int i = 0; i < real_samples; ++i) {
-                int sample_idx = ctx->sample_indices[i];
-                const float* sample_output = output_data + (i * single_output_size_);
-                predictions_[sample_idx] = std::vector<float>(
-                    sample_output, sample_output + single_output_size_);
-            }
+            const float* src = output_tensor.data<float>();
+            std::memcpy(local_output.data(), src, total_elems * sizeof(float));
         } else if (actual_type == ov::element::f16) {
-            const ov::float16* f16_data = output_tensor.data<ov::float16>();
-            converted.resize(single_output_size_ * actual_batch_size);
-            for (size_t j = 0; j < converted.size(); ++j) {
-                converted[j] = static_cast<float>(f16_data[j]);
-            }
-            std::lock_guard<std::mutex> lock(predictions_mutex_);
-            for (int i = 0; i < real_samples; ++i) {
-                int sample_idx = ctx->sample_indices[i];
-                const float* sample_output = converted.data() + (i * single_output_size_);
-                predictions_[sample_idx] = std::vector<float>(
-                    sample_output, sample_output + single_output_size_);
+            const ov::float16* src = output_tensor.data<ov::float16>();
+            for (size_t j = 0; j < total_elems; ++j) {
+                local_output[j] = static_cast<float>(src[j]);
             }
         } else if (actual_type == ov::element::i64) {
-            // Handle int64 output (e.g., argmax class indices)
-            const int64_t* i64_data = output_tensor.data<int64_t>();
-            std::lock_guard<std::mutex> lock(predictions_mutex_);
-            for (int i = 0; i < real_samples; ++i) {
-                int sample_idx = ctx->sample_indices[i];
-                const int64_t* sample_output = i64_data + (i * single_output_size_);
-                std::vector<float> pred(single_output_size_);
-                for (size_t j = 0; j < single_output_size_; ++j) {
-                    pred[j] = static_cast<float>(sample_output[j]);
-                }
-                predictions_[sample_idx] = std::move(pred);
+            const int64_t* src = output_tensor.data<int64_t>();
+            for (size_t j = 0; j < total_elems; ++j) {
+                local_output[j] = static_cast<float>(src[j]);
             }
         } else if (actual_type == ov::element::i32) {
-            // Handle int32 output
-            const int32_t* i32_data = output_tensor.data<int32_t>();
+            const int32_t* src = output_tensor.data<int32_t>();
+            for (size_t j = 0; j < total_elems; ++j) {
+                local_output[j] = static_cast<float>(src[j]);
+            }
+        } else {
+            std::cerr << "[WARN] Unsupported output type: " << actual_type.get_type_name() << std::endl;
+            copy_ok = false;
+        }
+
+        // Store predictions from local buffer under lock
+        if (copy_ok) {
             std::lock_guard<std::mutex> lock(predictions_mutex_);
             for (int i = 0; i < real_samples; ++i) {
                 int sample_idx = ctx->sample_indices[i];
-                const int32_t* sample_output = i32_data + (i * single_output_size_);
-                std::vector<float> pred(single_output_size_);
-                for (size_t j = 0; j < single_output_size_; ++j) {
-                    pred[j] = static_cast<float>(sample_output[j]);
-                }
-                predictions_[sample_idx] = std::move(pred);
+                const float* sample_output = local_output.data() + (i * single_output_size_);
+                predictions_[sample_idx] = std::vector<float>(
+                    sample_output, sample_output + single_output_size_);
             }
-        } else {
-            // Fallback: try to read as bytes and convert
-            std::cerr << "[WARN] Unsupported output type: " << actual_type.get_type_name() << std::endl;
         }
     }
 
