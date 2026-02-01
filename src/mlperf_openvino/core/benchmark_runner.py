@@ -590,10 +590,16 @@ class BenchmarkRunner:
             if _np.all(_pred == 0):
                 _zero_count += 1
             _argmax_sum += int(_np.argmax(_pred))
+        _input_xor = 0
+        _output_xor = 0
+        if hasattr(self.sut, '_cpp_sut') and hasattr(self.sut._cpp_sut, 'get_input_checksum'):
+            _input_xor = self.sut._cpp_sut.get_input_checksum()
+            _output_xor = self.sut._cpp_sut.get_output_checksum()
         logger.info(
             f"[DIAG] predictions={len(predictions)} expected={total_samples} "
             f"pred_size={_first_pred_size} wrong_size={_wrong_size} "
-            f"zeros={_zero_count} argmax_sum={_argmax_sum}"
+            f"zeros={_zero_count} argmax_sum={_argmax_sum} "
+            f"input_xor=0x{_input_xor:016x} output_xor=0x{_output_xor:016x}"
         )
 
         predicted_labels = []

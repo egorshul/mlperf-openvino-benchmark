@@ -87,6 +87,8 @@ public:
     void wait_all();
     uint64_t get_completed_count() const { return completed_count_.load(std::memory_order_relaxed); }
     uint64_t get_issued_count() const { return issued_count_.load(std::memory_order_relaxed); }
+    uint64_t get_input_checksum() const { return input_checksum_.load(std::memory_order_relaxed); }
+    uint64_t get_output_checksum() const { return output_checksum_.load(std::memory_order_relaxed); }
     void reset_counters();
 
     // Predictions for accuracy mode
@@ -210,6 +212,8 @@ private:
     std::atomic<int> pending_count_{0};
     std::atomic<uint64_t> queued_count_{0};
     std::atomic<uint64_t> skipped_no_data_{0};  // Diagnostic: samples skipped (no data in cache)
+    std::atomic<uint64_t> input_checksum_{0};   // Diagnostic: XOR checksum of input data
+    std::atomic<uint64_t> output_checksum_{0};  // Diagnostic: XOR checksum of output data
 
     // Predictions
     bool store_predictions_ = false;

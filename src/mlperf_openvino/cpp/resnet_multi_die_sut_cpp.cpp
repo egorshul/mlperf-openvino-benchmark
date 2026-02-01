@@ -618,6 +618,32 @@ void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx
             copy_ok = false;
         }
 
+        // Diagnostic: accumulate input/output checksums (order-independent via XOR)
+        if (copy_ok) {
+            const float* inp = ctx->input_tensor.data<float>();
+            size_t inp_elems = ctx->input_tensor.get_size();
+            for (int i = 0; i < real_samples; ++i) {
+                int sidx = ctx->sample_indices[i];
+                // Input: XOR first 4 floats as bits, mixed with sample index
+                uint64_t ih = static_cast<uint64_t>(sidx) * 2654435761ULL;
+                size_t sample_offset = static_cast<size_t>(i) * (inp_elems / actual_batch_size);
+                for (size_t k = 0; k < std::min<size_t>(4, inp_elems / actual_batch_size); ++k) {
+                    uint32_t bits;
+                    std::memcpy(&bits, &inp[sample_offset + k], sizeof(bits));
+                    ih ^= bits;
+                }
+                input_checksum_.fetch_xor(ih, std::memory_order_relaxed);
+                // Output: XOR argmax mixed with sample index
+                const float* sout = local_output.data() + (i * single_output_size_);
+                size_t amax = 0;
+                for (size_t j = 1; j < single_output_size_; ++j) {
+                    if (sout[j] > sout[amax]) amax = j;
+                }
+                uint64_t oh = static_cast<uint64_t>(sidx) * 2654435761ULL ^ amax;
+                output_checksum_.fetch_xor(oh, std::memory_order_relaxed);
+            }
+        }
+
         // Store predictions from local buffer under lock
         if (copy_ok) {
             std::lock_guard<std::mutex> lock(predictions_mutex_);
@@ -1014,6 +1040,8 @@ void ResNetMultiDieCppSUT::reset_counters() {
     completed_count_.store(0, std::memory_order_relaxed);
     queued_count_.store(0, std::memory_order_relaxed);
     skipped_no_data_.store(0, std::memory_order_relaxed);
+    input_checksum_.store(0, std::memory_order_relaxed);
+    output_checksum_.store(0, std::memory_order_relaxed);
 }
 
 std::unordered_map<int, std::vector<float>> ResNetMultiDieCppSUT::get_predictions() const {
@@ -1155,6 +1183,8 @@ void ResNetMultiDieCppSUT::run_server_benchmark(
                   << " argmax_sum=" << argmax_sum
                   << " output_size=" << single_output_size_
                   << std::endl;
+        std::cout << "[Server][DIAG] input_xor=0x" << std::hex << input_checksum_.load()
+                  << " output_xor=0x" << output_checksum_.load() << std::dec << std::endl;
     }
 }
 
