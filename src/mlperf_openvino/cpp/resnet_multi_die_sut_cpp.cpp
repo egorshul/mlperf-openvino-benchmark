@@ -597,11 +597,6 @@ void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx
         auto actual_type = output_tensor.get_element_type();
         size_t total_elems = single_output_size_ * static_cast<size_t>(actual_batch_size);
 
-        // Deep copy output data IMMEDIATELY before any lock acquisition.
-        // The output tensor buffer may be shared/recycled by the NPU driver
-        // across InferRequests on the same die. Concurrent completions can
-        // overwrite the buffer if we delay reading it (e.g., while waiting
-        // for predictions_mutex_).
         std::vector<float> local_output(total_elems);
         bool copy_ok = true;
         if (actual_type == ov::element::f32) {
@@ -627,7 +622,6 @@ void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx
             copy_ok = false;
         }
 
-        // Store predictions from local buffer under lock
         if (copy_ok) {
             std::lock_guard<std::mutex> lock(predictions_mutex_);
             for (int i = 0; i < real_samples; ++i) {
@@ -639,7 +633,6 @@ void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx
         }
     }
 
-    // Read all data from ctx BEFORE releasing the request.
     mlperf::QuerySampleResponse responses[ResNetMultiDieInferContext::MAX_BATCH];
     for (int i = 0; i < real_samples; ++i) {
         responses[i] = {ctx->query_ids[i], 0, 0};
@@ -657,11 +650,6 @@ void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx
     completed_count_.fetch_add(real_samples, std::memory_order_relaxed);
     pending_count_.fetch_sub(1, std::memory_order_relaxed);
 
-    // Complete via LoadGen or callback BEFORE releasing the request.
-    // OpenVINO requires that start_async() is not called on an InferRequest
-    // whose completion callback has not yet returned. Releasing the pool slot
-    // earlier allowed issue threads to reuse the request while this callback
-    // was still running, causing undefined behavior and wrong predictions.
     if (use_direct_loadgen_.load(std::memory_order_relaxed)) {
         if (real_samples > 0) {
             mlperf::QuerySamplesComplete(responses, real_samples);
@@ -675,7 +663,6 @@ void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx
         }
     }
 
-    // Release the request LAST, after all ctx access and LoadGen calls are done.
     release_request(pool_id);
 }
 
@@ -1001,8 +988,6 @@ void ResNetMultiDieCppSUT::start_async_batch(const float* input_data,
 
     pending_count_.fetch_add(1, std::memory_order_relaxed);
     ctx->request.start_async();
-    // In accuracy mode, serialize execution to avoid NPU non-determinism
-    // caused by concurrent InferRequests on the same die.
     if (store_predictions_) {
         ctx->request.wait();
     }
