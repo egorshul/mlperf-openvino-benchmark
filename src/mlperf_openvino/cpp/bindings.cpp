@@ -458,12 +458,6 @@ PYBIND11_MODULE(_cpp_sut, m) {
         .def("get_issued_count", &mlperf_ov::ResNetMultiDieCppSUT::get_issued_count,
              "Get number of issued samples")
 
-        .def("get_input_checksum", &mlperf_ov::ResNetMultiDieCppSUT::get_input_checksum,
-             "Get XOR checksum of input data (diagnostic)")
-
-        .def("get_output_checksum", &mlperf_ov::ResNetMultiDieCppSUT::get_output_checksum,
-             "Get XOR checksum of output argmax (diagnostic)")
-
         .def("reset_counters", &mlperf_ov::ResNetMultiDieCppSUT::reset_counters,
              "Reset counters")
 
