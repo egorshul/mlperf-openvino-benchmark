@@ -634,35 +634,44 @@ void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx
         }
     }
 
-    // Prepare responses only for real samples (not dummies)
+    // Read all data from ctx BEFORE releasing the request.
     mlperf::QuerySampleResponse responses[ResNetMultiDieInferContext::MAX_BATCH];
     for (int i = 0; i < real_samples; ++i) {
         responses[i] = {ctx->query_ids[i], 0, 0};
     }
 
-    // Release request before calling LoadGen
+    std::vector<uint64_t> offline_ids;
+    if (!use_direct_loadgen_.load(std::memory_order_relaxed) && real_samples > 0) {
+        offline_ids.reserve(real_samples);
+        for (int i = 0; i < real_samples; ++i) {
+            offline_ids.push_back(ctx->query_ids[i]);
+        }
+    }
+
     size_t pool_id = ctx->pool_id;
     completed_count_.fetch_add(real_samples, std::memory_order_relaxed);
     pending_count_.fetch_sub(1, std::memory_order_relaxed);
-    release_request(pool_id);
 
-    // Call LoadGen (only for real samples, not dummies)
+    // Complete via LoadGen or callback BEFORE releasing the request.
+    // OpenVINO requires that start_async() is not called on an InferRequest
+    // whose completion callback has not yet returned. Releasing the pool slot
+    // earlier allowed issue threads to reuse the request while this callback
+    // was still running, causing undefined behavior and wrong predictions.
     if (use_direct_loadgen_.load(std::memory_order_relaxed)) {
         if (real_samples > 0) {
             mlperf::QuerySamplesComplete(responses, real_samples);
         }
     } else {
-        // Offline mode callback
-        std::vector<uint64_t> ids;
-        ids.reserve(real_samples);
-        for (int i = 0; i < real_samples; ++i) {
-            ids.push_back(ctx->query_ids[i]);
-        }
-        std::lock_guard<std::mutex> lock(callback_mutex_);
-        if (batch_response_callback_) {
-            batch_response_callback_(ids);
+        if (!offline_ids.empty()) {
+            std::lock_guard<std::mutex> lock(callback_mutex_);
+            if (batch_response_callback_) {
+                batch_response_callback_(offline_ids);
+            }
         }
     }
+
+    // Release the request LAST, after all ctx access and LoadGen calls are done.
+    release_request(pool_id);
 }
 
 // =============================================================================
