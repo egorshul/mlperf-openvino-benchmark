@@ -375,6 +375,9 @@ void ResNetMultiDieCppSUT::issue_thread_batched_func(size_t die_idx) {
         // Submit
         pending_count_.fetch_add(1, std::memory_order_relaxed);
         ctx->request.start_async();
+        if (store_predictions_) {
+            ctx->request.wait();
+        }
         issued_count_.fetch_add(real_samples, std::memory_order_relaxed);
     }
 
@@ -433,6 +436,9 @@ void ResNetMultiDieCppSUT::issue_thread_batched_func(size_t die_idx) {
         queued_count_.fetch_sub(real_samples, std::memory_order_relaxed);
         pending_count_.fetch_add(1, std::memory_order_relaxed);
         ctx->request.start_async();
+        if (store_predictions_) {
+            ctx->request.wait();
+        }
         issued_count_.fetch_add(real_samples, std::memory_order_relaxed);
     }
 }
@@ -512,6 +518,9 @@ void ResNetMultiDieCppSUT::issue_thread_func(size_t die_idx) {
         // Submit
         pending_count_.fetch_add(1, std::memory_order_relaxed);
         ctx->request.start_async();
+        if (store_predictions_) {
+            ctx->request.wait();
+        }
         issued_count_.fetch_add(1, std::memory_order_relaxed);
         queued_count_.fetch_sub(1, std::memory_order_relaxed);
     }
@@ -568,6 +577,9 @@ void ResNetMultiDieCppSUT::issue_thread_func(size_t die_idx) {
 
         pending_count_.fetch_add(1, std::memory_order_relaxed);
         ctx->request.start_async();
+        if (store_predictions_) {
+            ctx->request.wait();
+        }
         issued_count_.fetch_add(1, std::memory_order_relaxed);
         queued_count_.fetch_sub(1, std::memory_order_relaxed);
     }
@@ -1018,6 +1030,11 @@ void ResNetMultiDieCppSUT::start_async_batch(const float* input_data,
 
     pending_count_.fetch_add(1, std::memory_order_relaxed);
     ctx->request.start_async();
+    // In accuracy mode, serialize execution to avoid NPU non-determinism
+    // caused by concurrent InferRequests on the same die.
+    if (store_predictions_) {
+        ctx->request.wait();
+    }
     issued_count_.fetch_add(actual_batch_size, std::memory_order_relaxed);
 }
 
