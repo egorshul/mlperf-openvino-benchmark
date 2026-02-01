@@ -5,6 +5,7 @@
 #include "resnet_multi_die_sut_cpp.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
@@ -486,6 +487,7 @@ void ResNetMultiDieCppSUT::issue_thread_func(size_t die_idx) {
         }
 
         if (!sample_data) {
+            skipped_no_data_.fetch_add(1, std::memory_order_relaxed);
             queued_count_.fetch_sub(1, std::memory_order_relaxed);
             mlperf::QuerySampleResponse response{query_id, 0, 0};
             mlperf::QuerySamplesComplete(&response, 1);
@@ -544,6 +546,7 @@ void ResNetMultiDieCppSUT::issue_thread_func(size_t die_idx) {
         }
 
         if (!sample_data) {
+            skipped_no_data_.fetch_add(1, std::memory_order_relaxed);
             queued_count_.fetch_sub(1, std::memory_order_relaxed);
             mlperf::QuerySampleResponse response{query_id, 0, 0};
             mlperf::QuerySamplesComplete(&response, 1);
@@ -1010,6 +1013,7 @@ void ResNetMultiDieCppSUT::reset_counters() {
     issued_count_.store(0, std::memory_order_relaxed);
     completed_count_.store(0, std::memory_order_relaxed);
     queued_count_.store(0, std::memory_order_relaxed);
+    skipped_no_data_.store(0, std::memory_order_relaxed);
 }
 
 std::unordered_map<int, std::vector<float>> ResNetMultiDieCppSUT::get_predictions() const {
@@ -1119,7 +1123,39 @@ void ResNetMultiDieCppSUT::run_server_benchmark(
 
     mlperf::StartTest(&server_sut, &server_qsl, test_settings, log_settings);
 
-    std::cout << "[Server] Completed: " << completed_count_.load() << " samples" << std::endl;
+    std::cout << "[Server] Completed: " << completed_count_.load() << " samples"
+              << ", skipped_no_data=" << skipped_no_data_.load() << std::endl;
+
+    // Diagnostic: validate predictions after accuracy run
+    if (is_accuracy_mode && store_predictions_) {
+        std::lock_guard<std::mutex> lock(predictions_mutex_);
+        size_t pred_count = predictions_.size();
+        size_t zero_preds = 0;
+        size_t nan_preds = 0;
+        size_t argmax_sum = 0;
+        for (const auto& [idx, pred] : predictions_) {
+            if (pred.empty()) { zero_preds++; continue; }
+            bool all_zero = true;
+            bool has_nan = false;
+            size_t amax = 0;
+            float amax_val = pred[0];
+            for (size_t j = 0; j < pred.size(); ++j) {
+                if (pred[j] != 0.0f) all_zero = false;
+                if (std::isnan(pred[j])) has_nan = true;
+                if (pred[j] > amax_val) { amax_val = pred[j]; amax = j; }
+            }
+            if (all_zero) zero_preds++;
+            if (has_nan) nan_preds++;
+            argmax_sum += amax;
+        }
+        std::cout << "[Server][DIAG] predictions=" << pred_count
+                  << " expected=" << total_sample_count
+                  << " zero=" << zero_preds
+                  << " nan=" << nan_preds
+                  << " argmax_sum=" << argmax_sum
+                  << " output_size=" << single_output_size_
+                  << std::endl;
+    }
 }
 
 } // namespace mlperf_ov

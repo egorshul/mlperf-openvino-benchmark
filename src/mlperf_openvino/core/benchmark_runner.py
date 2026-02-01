@@ -576,6 +576,26 @@ class BenchmarkRunner:
                 f"Prediction count mismatch: got {len(predictions)}, expected {total_samples}"
             )
 
+        # Diagnostic: prediction integrity check
+        import numpy as _np
+        _argmax_sum = 0
+        _zero_count = 0
+        _wrong_size = 0
+        _first_pred_size = None
+        for _idx, _pred in predictions.items():
+            if _first_pred_size is None:
+                _first_pred_size = len(_pred)
+            if len(_pred) != _first_pred_size:
+                _wrong_size += 1
+            if _np.all(_pred == 0):
+                _zero_count += 1
+            _argmax_sum += int(_np.argmax(_pred))
+        logger.info(
+            f"[DIAG] predictions={len(predictions)} expected={total_samples} "
+            f"pred_size={_first_pred_size} wrong_size={_wrong_size} "
+            f"zeros={_zero_count} argmax_sum={_argmax_sum}"
+        )
+
         predicted_labels = []
         ground_truth = []
 

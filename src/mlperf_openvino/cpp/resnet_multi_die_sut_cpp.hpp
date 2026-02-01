@@ -209,6 +209,7 @@ private:
     std::atomic<uint64_t> completed_count_{0};
     std::atomic<int> pending_count_{0};
     std::atomic<uint64_t> queued_count_{0};
+    std::atomic<uint64_t> skipped_no_data_{0};  // Diagnostic: samples skipped (no data in cache)
 
     // Predictions
     bool store_predictions_ = false;
