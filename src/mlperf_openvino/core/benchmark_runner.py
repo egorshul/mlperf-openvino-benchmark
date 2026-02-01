@@ -90,14 +90,10 @@ class BenchmarkRunner:
 
         device = self.config.openvino.device
 
-        # Determine if NHWC input is needed (default is NHWC)
         use_nhwc = True
         if hasattr(self.config.model, 'preprocessing') and self.config.model.preprocessing:
             use_nhwc = getattr(self.config.model.preprocessing, 'output_layout', 'NHWC') == 'NHWC'
 
-        # For accelerator devices, always use MultiDeviceBackend
-        # - "NPU" -> all dies (target_devices=None)
-        # - "NPU.0" -> specific die (target_devices=[device])
         if self.config.openvino.is_accelerator_device():
             if self.config.openvino.is_specific_die():
                 target_devices = [device]
@@ -111,7 +107,6 @@ class BenchmarkRunner:
             backend.load()
             return backend
 
-        # Default: CPU or other device
         backend = OpenVINOBackend(
             model_path=self.config.model.model_path,
             config=self.config.openvino,
@@ -128,7 +123,6 @@ class BenchmarkRunner:
         from ..backends.multi_device_backend import MultiDeviceBackend
         from .sut import OpenVINOSUT
 
-        # For accelerators, use SUTFactory
         if self.backend is None and self.config.openvino.is_accelerator_device():
             return SUTFactory.create_multi_die_sut(
                 ModelType.RESNET50, self.config, qsl, self.backend
@@ -160,11 +154,9 @@ class BenchmarkRunner:
         )
         self.qsl.load()
 
-        # Use multi-device SUT for accelerator
         if self.config.openvino.is_accelerator_device():
             self.sut = self._create_sut_for_backend(self.qsl)
         else:
-            # Use create_sut to automatically select C++ or Python SUT for CPU
             self.sut = create_sut(
                 config=self.config,
                 model_path=self.config.model.model_path,
@@ -185,13 +177,11 @@ class BenchmarkRunner:
         )
         self.qsl.load()
 
-        # Use BERT multi-die SUT for accelerator
         if self.config.openvino.is_accelerator_device():
             self.sut = SUTFactory.create_multi_die_sut(
                 ModelType.BERT, self.config, self.qsl, self.backend
             )
         else:
-            # Use create_bert_sut to automatically select C++ or Python SUT for CPU
             self.sut = create_bert_sut(
                 config=self.config,
                 model_path=self.config.model.model_path,
@@ -217,13 +207,11 @@ class BenchmarkRunner:
         )
         self.qsl.load()
 
-        # Use RetinaNet multi-die SUT for accelerator
         if self.config.openvino.is_accelerator_device():
             self.sut = SUTFactory.create_multi_die_sut(
                 ModelType.RETINANET, self.config, self.qsl, self.backend
             )
         else:
-            # Use create_retinanet_sut to automatically select C++ or Python SUT for CPU
             self.sut = create_retinanet_sut(
                 config=self.config,
                 model_path=self.config.model.model_path,
@@ -245,17 +233,14 @@ class BenchmarkRunner:
 
         model_path = Path(self.config.model.model_path)
 
-        # Check for separate encoder/decoder models (try different naming conventions)
         encoder_path = None
         decoder_path = None
 
         if model_path.is_dir():
-            # Try different naming conventions from optimum-cli
             encoder_candidates = [
                 model_path / "encoder_model.xml",
                 model_path / "openvino_encoder_model.xml",
             ]
-            # Decoder candidates (Optimum handles KV-cache automatically)
             decoder_candidates = [
                 model_path / "decoder_with_past_model.xml",
                 model_path / "openvino_decoder_with_past_model.xml",
@@ -275,7 +260,6 @@ class BenchmarkRunner:
                     decoder_path = dp
                     break
 
-        # Use multi-die SUT for NPU accelerators
         if self.config.openvino.is_accelerator_device():
             if encoder_path and decoder_path:
                 from .whisper_sut import WhisperMultiDieSUT
@@ -418,7 +402,6 @@ class BenchmarkRunner:
         settings.sample_index_rng_seed = scenario_config.sample_index_rng_seed
         settings.schedule_rng_seed = scenario_config.schedule_rng_seed
 
-        # Log LoadGen settings for visibility
         logger.info(f"LoadGen settings: min_duration={scenario_config.min_duration_ms/1000:.0f}s, min_query_count={scenario_config.min_query_count}")
 
         if self.config.scenario == Scenario.OFFLINE:
@@ -457,7 +440,6 @@ class BenchmarkRunner:
         test_settings = self._get_test_settings()
         log_settings = self._get_log_settings()
 
-        # Enable prediction storage for accuracy mode (must be set before test runs)
         is_accuracy_mode = self.config.test_mode == TestMode.ACCURACY_ONLY
         if hasattr(self.sut, 'set_store_predictions'):
             self.sut.set_store_predictions(is_accuracy_mode)
@@ -505,7 +487,6 @@ class BenchmarkRunner:
             self._results["accuracy"] = self._accuracy_results
             self._save_mlperf_accuracy_log()
 
-        # Clean up handles (only if using standard Python path)
         if sut_handle is not None:
             lg.DestroySUT(sut_handle)
         if qsl_handle is not None:
@@ -522,7 +503,6 @@ class BenchmarkRunner:
         if not self._accuracy_results:
             return
 
-        # Determine primary accuracy metric based on model type
         model_type = self.config.model.model_type
         if model_type == ModelType.RESNET50:
             primary_metric = "top1_accuracy"
@@ -543,7 +523,6 @@ class BenchmarkRunner:
             primary_metric = "accuracy"
             metric_value = 0.0
 
-        # MLPerf accuracy log format
         accuracy_log = {
             "accuracy_results": {
                 primary_metric: metric_value,
@@ -555,7 +534,6 @@ class BenchmarkRunner:
             "timestamp": datetime.now().isoformat(),
         }
 
-        # Write to mlperf_log_accuracy.json in results directory
         results_dir = Path(self.config.results_dir)
         results_dir.mkdir(parents=True, exist_ok=True)
         accuracy_log_path = results_dir / "mlperf_log_accuracy.json"
@@ -593,7 +571,6 @@ class BenchmarkRunner:
             self._accuracy_results = {"top1_accuracy": 0.0, "correct": 0, "total": 0}
             return
 
-        # Verify we have predictions for all samples
         if len(predictions) != total_samples:
             logger.warning(
                 f"Prediction count mismatch: got {len(predictions)}, expected {total_samples}"
@@ -603,7 +580,6 @@ class BenchmarkRunner:
         ground_truth = []
 
         for sample_idx, result in sorted(predictions.items()):
-            # Use dataset's postprocess to correctly handle model output format
             pred_classes = self.qsl.dataset.postprocess(result, [sample_idx])
             predicted_labels.append(pred_classes[0])
 
@@ -615,7 +591,6 @@ class BenchmarkRunner:
             ground_truth
         )
 
-        # Log accuracy result
         acc = self._accuracy_results.get('top1_accuracy', 0)
         correct = self._accuracy_results.get('correct', 0)
         total = self._accuracy_results.get('total', 0)
@@ -643,7 +618,6 @@ class BenchmarkRunner:
             self._accuracy_results = {'word_accuracy': 0.0, 'wer': 0.0, 'num_samples': 0}
             return
 
-        # Get predicted texts and ground truth
         pred_texts = []
         ground_truth = []
 
@@ -754,7 +728,6 @@ class BenchmarkRunner:
 
     def print_summary(self) -> None:
         """Print accuracy summary to console."""
-        # Only print accuracy summary if accuracy results are available
         if "accuracy" not in self._results:
             return
 

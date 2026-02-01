@@ -88,7 +88,7 @@ class ProgressMonitor:
             pct = min(100.0, completed / total * 100)
             bar_width = 40
             filled = int(bar_width * completed / total)
-            bar = "█" * filled + "░" * (bar_width - filled)
+            bar = "\u2588" * filled + "\u2591" * (bar_width - filled)
 
             # Calculate throughput
             throughput = completed / elapsed if elapsed > 0 else 0
@@ -124,15 +124,7 @@ class ResNetCppSUTWrapper:
         qsl: QuerySampleLibrary,
         scenario: Scenario = Scenario.OFFLINE,
     ):
-        """
-        Initialize the ResNet C++ SUT wrapper.
-
-        Args:
-            config: Benchmark configuration
-            model_path: Path to ONNX or OpenVINO IR model
-            qsl: Query Sample Library
-            scenario: Test scenario (SERVER or OFFLINE)
-        """
+        """Initialize the ResNet C++ SUT wrapper."""
         if not LOADGEN_AVAILABLE:
             raise ImportError(
                 "MLPerf LoadGen is not installed. Please install with: "
@@ -149,7 +141,6 @@ class ResNetCppSUTWrapper:
         self.qsl = qsl
         self.scenario = scenario
 
-        # Create C++ SUT
         device = config.openvino.device
         num_streams = 0  # Auto
         if config.openvino.num_streams != "AUTO":
@@ -168,7 +159,6 @@ class ResNetCppSUTWrapper:
         self._cpp_sut = ResNetCppSUT(model_path, device, num_streams, performance_hint, use_nhwc)
         self._cpp_sut.load()
 
-        # Get input/output names
         self.input_name = self._cpp_sut.get_input_name()
         self.output_name = self._cpp_sut.get_output_name()
 
@@ -178,7 +168,6 @@ class ResNetCppSUTWrapper:
         # Set up response callback
         self._setup_response_callback()
 
-        # Progress monitor (started when queries are issued)
         self._progress_monitor: Optional[ProgressMonitor] = None
 
     def _setup_response_callback(self):
@@ -193,7 +182,6 @@ class ResNetCppSUTWrapper:
             """
             try:
                 if output_data is not None:
-                    # Create LoadGen response with output data
                     response = lg.QuerySampleResponse(
                         query_id,
                         output_data.ctypes.data,
@@ -213,16 +201,7 @@ class ResNetCppSUTWrapper:
         self._cpp_sut.set_response_callback(response_callback)
 
     def issue_queries(self, query_samples: List["lg.QuerySample"]) -> None:
-        """
-        Process incoming queries using C++ SUT.
-
-        This method is called by LoadGen when queries need to be processed.
-        It prepares the input data and calls C++ start_async for each sample.
-
-        Args:
-            query_samples: List of query samples from LoadGen
-        """
-        # Start progress monitor on first batch
+        """Process incoming queries using C++ SUT."""
         if self._progress_monitor is None:
             self._progress_monitor = ProgressMonitor(
                 total_samples=self.qsl.total_sample_count,
@@ -239,7 +218,6 @@ class ResNetCppSUTWrapper:
             sample_idx = qs.index
             query_id = qs.id
 
-            # Get input data from QSL
             if hasattr(qsl, '_loaded_samples') and sample_idx in qsl._loaded_samples:
                 input_data = qsl._loaded_samples[sample_idx]
             else:
@@ -258,11 +236,7 @@ class ResNetCppSUTWrapper:
             cpp_sut.start_async(input_data, query_id, sample_idx)
 
     def flush_queries(self) -> None:
-        """
-        Flush any pending queries.
-
-        This is called by LoadGen when all queries have been issued.
-        """
+        """Flush any pending queries."""
         self._cpp_sut.wait_all()
         if self._progress_monitor:
             self._progress_monitor.stop()
@@ -336,7 +310,6 @@ class BertCppSUTWrapper:
         self.qsl = qsl
         self.scenario = scenario
 
-        # Create BERT C++ SUT
         device = config.openvino.device
         num_streams = 0
         if config.openvino.num_streams != "AUTO":
@@ -350,7 +323,6 @@ class BertCppSUTWrapper:
         self._cpp_sut = BertCppSUT(model_path, device, num_streams, performance_hint)
         self._cpp_sut.load()
 
-        # Get input/output names
         self.input_ids_name = self._cpp_sut.get_input_ids_name()
         self.attention_mask_name = self._cpp_sut.get_attention_mask_name()
         self.token_type_ids_name = self._cpp_sut.get_token_type_ids_name()
@@ -364,7 +336,6 @@ class BertCppSUTWrapper:
         # Set up response callback
         self._setup_response_callback()
 
-        # Progress monitor (started when queries are issued)
         self._progress_monitor: Optional[ProgressMonitor] = None
 
     def _setup_response_callback(self):
@@ -451,12 +422,7 @@ class BertCppSUTWrapper:
         self._cpp_sut.reset_counters()
 
     def compute_accuracy(self) -> Dict[str, float]:
-        """
-        Compute BERT accuracy metrics (F1 and Exact Match).
-
-        Returns:
-            Dictionary with f1, exact_match, and num_samples
-        """
+        """Compute BERT accuracy metrics (F1 and Exact Match)."""
         predictions = self.get_predictions()
 
         if not predictions:
@@ -482,22 +448,7 @@ def create_sut(
     scenario: Scenario = Scenario.SERVER,
     force_python: bool = False,
 ):
-    """
-    Factory function to create the best available SUT.
-
-    Uses async C++ SUT with InferRequest pool for maximum throughput.
-    Note: X accelerator devices should use MultiDeviceSUT, not this function.
-
-    Args:
-        config: Benchmark configuration
-        model_path: Path to model file
-        qsl: Query Sample Library
-        scenario: Test scenario
-        force_python: Force Python SUT even if C++ is available
-
-    Returns:
-        SUT instance
-    """
+    """Factory function to create the best available SUT."""
     # Accelerator devices are not supported by C++ SUT - they require MultiDeviceSUT
     if config.openvino.is_accelerator_device():
         device = config.openvino.device
@@ -526,22 +477,7 @@ def create_bert_sut(
     scenario: Scenario = Scenario.OFFLINE,
     force_python: bool = False,
 ):
-    """
-    Factory function to create BERT SUT.
-
-    Uses C++ SUT if available for maximum performance.
-    Note: X accelerator devices should use MultiDeviceSUT, not this function.
-
-    Args:
-        config: Benchmark configuration
-        model_path: Path to BERT model file
-        qsl: Query Sample Library (SQuADQSL)
-        scenario: Test scenario
-        force_python: Force Python SUT even if C++ is available
-
-    Returns:
-        BERT SUT instance
-    """
+    """Factory function to create BERT SUT."""
     # Accelerator devices are not supported by C++ SUT - they require MultiDeviceSUT
     if config.openvino.is_accelerator_device():
         device = config.openvino.device
@@ -592,7 +528,6 @@ class RetinaNetCppSUTWrapper:
         self.qsl = qsl
         self.scenario = scenario
 
-        # Create RetinaNet C++ SUT
         device = config.openvino.device
         num_streams = 0
         if config.openvino.num_streams != "AUTO":
@@ -611,7 +546,6 @@ class RetinaNetCppSUTWrapper:
         self._cpp_sut = RetinaNetCppSUT(model_path, device, num_streams, performance_hint, use_nhwc)
         self._cpp_sut.load()
 
-        # Get info
         self.input_name = self._cpp_sut.get_input_name()
         self.boxes_name = self._cpp_sut.get_boxes_name()
         self.scores_name = self._cpp_sut.get_scores_name()
@@ -623,7 +557,6 @@ class RetinaNetCppSUTWrapper:
         # Set up response callback
         self._setup_response_callback()
 
-        # Progress monitor (started when queries are issued)
         self._progress_monitor: Optional[ProgressMonitor] = None
 
     def _setup_response_callback(self):
@@ -792,22 +725,7 @@ def create_retinanet_sut(
     scenario: Scenario = Scenario.OFFLINE,
     force_python: bool = False,
 ):
-    """
-    Factory function to create RetinaNet SUT.
-
-    Uses C++ SUT if available for maximum performance.
-    Note: X accelerator devices should use MultiDeviceSUT, not this function.
-
-    Args:
-        config: Benchmark configuration
-        model_path: Path to RetinaNet model file
-        qsl: Query Sample Library (OpenImagesQSL)
-        scenario: Test scenario
-        force_python: Force Python SUT even if C++ is available
-
-    Returns:
-        RetinaNet SUT instance
-    """
+    """Factory function to create RetinaNet SUT."""
     # Accelerator devices are not supported by C++ SUT - they require MultiDeviceSUT
     if config.openvino.is_accelerator_device():
         device = config.openvino.device

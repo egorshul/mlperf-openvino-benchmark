@@ -45,15 +45,7 @@ class OpenVINOBackend(BaseBackend):
         use_nhwc_input: bool = False,
         **kwargs
     ):
-        """
-        Initialize OpenVINO backend.
-
-        Args:
-            model_path: Path to ONNX or OpenVINO IR model
-            config: OpenVINO configuration
-            use_nhwc_input: If True, expects NHWC input (converted to NCHW internally)
-            **kwargs: Additional options
-        """
+        """Initialize OpenVINO backend."""
         if not OPENVINO_AVAILABLE:
             raise ImportError(
                 "OpenVINO is not installed. Please install it with: "
@@ -76,7 +68,6 @@ class OpenVINOBackend(BaseBackend):
         # For thread-safe inference
         self._request_queue: Optional[queue.Queue] = None
 
-        # Cache input/output info
         self._input_names: List[str] = []
         self._output_names: List[str] = []
         self._input_shapes: Dict[str, Tuple[int, ...]] = {}
@@ -99,16 +90,13 @@ class OpenVINOBackend(BaseBackend):
                 f"or use '--device {device_prefix}' which automatically uses MultiDeviceBackend."
             )
 
-        # Initialize OpenVINO Core
         self._core = Core()
 
-        # Create cache directory if specified
         if self.config.cache_dir:
             cache_path = Path(self.config.cache_dir)
             cache_path.mkdir(parents=True, exist_ok=True)
             self._core.set_property({"CACHE_DIR": str(cache_path)})
 
-        # Load the model
         model_path = Path(self.model_path)
 
         if model_path.suffix.lower() in (".onnx", ".xml"):
@@ -116,20 +104,14 @@ class OpenVINOBackend(BaseBackend):
         else:
             raise ValueError(f"Unsupported model format: {model_path.suffix}")
 
-        # Reshape model for the configured batch size
         self._reshape_model_for_batch(self.config.batch_size)
 
-        # Apply NHWC input layout if requested
         if self.use_nhwc_input:
             self._apply_nhwc_input_layout()
 
-        # Get model info before compilation (after reshape)
         self._extract_model_info()
 
-        # Compile the model with optimizations
         logger.debug(f"Compiling model for device: {self.config.device}")
-
-        # Build properties
         properties = self._build_compile_properties()
 
         self._compiled_model = self._core.compile_model(
@@ -138,7 +120,6 @@ class OpenVINOBackend(BaseBackend):
             properties
         )
 
-        # Get optimal number of inference requests
         try:
             self._optimal_nireq = self._compiled_model.get_property(
                 ov.properties.optimal_number_of_infer_requests()
@@ -146,16 +127,14 @@ class OpenVINOBackend(BaseBackend):
         except Exception:
             self._optimal_nireq = 4
 
-        # Create inference requests
         self._create_infer_requests()
 
         self._loaded = True
-    
+
     def _build_compile_properties(self) -> Dict[str, Any]:
         """Build compilation properties from config."""
         properties = {}
 
-        # Use device-specific property builders from config
         if self.config.is_accelerator_device():
             return self._build_accelerator_compile_properties()
         else:
@@ -165,29 +144,24 @@ class OpenVINOBackend(BaseBackend):
         """Build CPU-specific compilation properties."""
         properties = {}
 
-        # Performance hint
         if self.config.performance_hint:
             hint_enum = getattr(ov.properties.hint.PerformanceMode,
                               self.config.performance_hint, None)
             if hint_enum:
                 properties[ov.properties.hint.performance_mode()] = hint_enum
 
-        # Number of streams
         if self.config.num_streams != "AUTO":
             try:
                 properties[ov.properties.hint.num_requests()] = int(self.config.num_streams)
             except ValueError:
                 pass  # Use AUTO
 
-        # Number of threads
         if self.config.num_threads > 0:
             properties[ov.properties.inference_num_threads()] = self.config.num_threads
 
-        # CPU-specific options
         if self.config.bind_thread:
             properties[ov.properties.hint.enable_cpu_pinning()] = True
 
-        # Enable profiling if requested
         if self.config.enable_profiling:
             properties[ov.properties.enable_profiling()] = True
 
@@ -201,7 +175,6 @@ class OpenVINOBackend(BaseBackend):
         """
         properties = {}
 
-        # Enable profiling if requested
         if self.config.enable_profiling:
             properties[ov.properties.enable_profiling()] = True
 
@@ -209,7 +182,6 @@ class OpenVINOBackend(BaseBackend):
         # Don't add default hints - accelerators may not support them
         if hasattr(self.config, 'device_properties') and self.config.device_properties:
             for key, value in self.config.device_properties.items():
-                # Try to convert types
                 try:
                     if isinstance(value, str):
                         if value.isdigit():
@@ -244,7 +216,6 @@ class OpenVINOBackend(BaseBackend):
 
             new_shapes[name] = new_dims
 
-        # Apply reshape
         self._model.reshape(new_shapes)
         logger.debug(f"Model reshaped for batch_size={batch_size}")
 
@@ -264,7 +235,6 @@ class OpenVINOBackend(BaseBackend):
 
     def _extract_model_info(self) -> None:
         """Extract input/output information from the model."""
-        # Get input info
         self._input_names = []
         self._input_shapes = {}
         self._input_dtypes = {}
@@ -279,12 +249,8 @@ class OpenVINOBackend(BaseBackend):
                 shape = tuple(d if d > 0 else 1 for d in shape)
 
             self._input_shapes[name] = shape
+            self._input_dtypes[name] = input_node.element_type
 
-            # Get element type
-            element_type = input_node.element_type
-            self._input_dtypes[name] = element_type
-
-        # Get output info
         self._output_names = []
         self._output_shapes = {}
 
@@ -297,12 +263,11 @@ class OpenVINOBackend(BaseBackend):
                 shape = tuple(d if d > 0 else 1 for d in shape)
 
             self._output_shapes[name] = shape
-    
+
     def _create_infer_requests(self) -> None:
         """Create inference requests for async execution."""
         self._infer_requests = []
 
-        # Create optimal number of requests for maximum throughput
         nireq = max(1, self._optimal_nireq)
         for _ in range(nireq):
             request = self._compiled_model.create_infer_request()
@@ -323,7 +288,7 @@ class OpenVINOBackend(BaseBackend):
             request = self._compiled_model.create_infer_request()
             self._infer_requests.append(request)
             self._request_queue.put(request)
-    
+
     def _convert_to_model_dtype(self, name: str, data: np.ndarray) -> np.ndarray:
         """Convert input data to the dtype expected by the model."""
         if name not in self._input_dtypes:
@@ -345,27 +310,16 @@ class OpenVINOBackend(BaseBackend):
         return data
 
     def predict(self, inputs: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
-        """
-        Run synchronous inference (NOT thread-safe, use predict_threadsafe for multi-threaded).
-
-        Args:
-            inputs: Dictionary mapping input names to numpy arrays
-
-        Returns:
-            Dictionary mapping output names to numpy arrays
-        """
+        """Run synchronous inference (NOT thread-safe, use predict_threadsafe for multi-threaded)."""
         if not self._loaded:
             self.load()
 
-        # Set input tensors with automatic dtype conversion
         for name, data in inputs.items():
             converted_data = self._convert_to_model_dtype(name, data)
             self._infer_request.set_tensor(name, ov.Tensor(converted_data))
 
-        # Run inference
         self._infer_request.infer()
 
-        # Get output tensors
         outputs = {}
         for name in self._output_names:
             output_tensor = self._infer_request.get_tensor(name)
@@ -374,18 +328,7 @@ class OpenVINOBackend(BaseBackend):
         return outputs
 
     def predict_threadsafe(self, inputs: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
-        """
-        Run synchronous inference in a thread-safe manner.
-
-        Uses a queue of inference requests - each thread gets exclusive
-        access to a request while running inference.
-
-        Args:
-            inputs: Dictionary mapping input names to numpy arrays
-
-        Returns:
-            Dictionary mapping output names to numpy arrays
-        """
+        """Run synchronous inference with per-request locking for thread safety."""
         if not self._loaded:
             self.load()
 
@@ -393,7 +336,6 @@ class OpenVINOBackend(BaseBackend):
         request = self._request_queue.get()
 
         try:
-            # Set input tensors with automatic dtype conversion
             for name, data in inputs.items():
                 converted_data = self._convert_to_model_dtype(name, data)
                 request.set_tensor(name, ov.Tensor(converted_data))
@@ -401,7 +343,6 @@ class OpenVINOBackend(BaseBackend):
             # Run inference (this blocks until complete)
             request.infer()
 
-            # Get output tensors
             outputs = {}
             for name in self._output_names:
                 output_tensor = request.get_tensor(name)
@@ -409,35 +350,19 @@ class OpenVINOBackend(BaseBackend):
 
             return outputs
         finally:
-            # Return request to queue for reuse
             self._request_queue.put(request)
-    
-    def predict_batch(
-        self, 
-        batch: List[Dict[str, np.ndarray]]
-    ) -> List[Dict[str, np.ndarray]]:
-        """
-        Run inference on a batch of inputs.
-        
-        For optimal throughput, this method uses multiple inference requests.
-        
-        Args:
-            batch: List of input dictionaries
-            
-        Returns:
-            List of output dictionaries
-        """
+
+    def predict_batch(self, batch: List[Dict[str, np.ndarray]]) -> List[Dict[str, np.ndarray]]:
+        """Run inference on a batch of inputs using multiple inference requests."""
         if not self._loaded:
             self.load()
-        
+
         results = []
         num_requests = len(self._infer_requests)
-        
-        # Process in chunks matching the number of available requests
+
         for i in range(0, len(batch), num_requests):
             chunk = batch[i:i + num_requests]
-            
-            # Start all inferences
+
             for j, inputs in enumerate(chunk):
                 request = self._infer_requests[j]
 
@@ -446,39 +371,25 @@ class OpenVINOBackend(BaseBackend):
                     request.set_tensor(name, ov.Tensor(converted_data))
 
                 request.start_async()
-            
-            # Wait for all to complete
+
             for j in range(len(chunk)):
                 request = self._infer_requests[j]
                 request.wait()
-                
+
                 outputs = {}
                 for name in self._output_names:
                     output_tensor = request.get_tensor(name)
                     outputs[name] = output_tensor.data.copy()
-                
+
                 results.append(outputs)
-        
+
         return results
-    
-    def predict_async(
-        self,
-        inputs: Dict[str, np.ndarray],
-        request_id: int = 0
-    ) -> InferRequest:
-        """
-        Start asynchronous inference.
-        
-        Args:
-            inputs: Input data
-            request_id: ID of the inference request to use
-            
-        Returns:
-            The inference request (can be used to wait for completion)
-        """
+
+    def predict_async(self, inputs: Dict[str, np.ndarray], request_id: int = 0) -> InferRequest:
+        """Start asynchronous inference, returning the request to wait on."""
         if not self._loaded:
             self.load()
-        
+
         request = self._infer_requests[request_id % len(self._infer_requests)]
 
         for name, data in inputs.items():
@@ -487,24 +398,16 @@ class OpenVINOBackend(BaseBackend):
 
         request.start_async()
         return request
-    
+
     def get_results_async(self, request: InferRequest) -> Dict[str, np.ndarray]:
-        """
-        Get results from async inference request.
-        
-        Args:
-            request: The inference request
-            
-        Returns:
-            Output dictionary
-        """
+        """Wait for async request completion and return output tensors."""
         request.wait()
-        
+
         outputs = {}
         for name in self._output_names:
             output_tensor = request.get_tensor(name)
             outputs[name] = output_tensor.data.copy()
-        
+
         return outputs
 
     def create_async_queue(
@@ -512,17 +415,7 @@ class OpenVINOBackend(BaseBackend):
         num_jobs: Optional[int] = None,
         callback: Optional[callable] = None
     ) -> "AsyncInferQueue":
-        """
-        Create an AsyncInferQueue for high-throughput async inference.
-
-        Args:
-            num_jobs: Number of parallel jobs (default: optimal_nireq)
-            callback: Callback function called when inference completes.
-                      Signature: callback(infer_request, userdata)
-
-        Returns:
-            AsyncInferQueue instance
-        """
+        """Create an AsyncInferQueue for high-throughput async inference."""
         if not self._loaded:
             self.load()
 
@@ -545,15 +438,7 @@ class OpenVINOBackend(BaseBackend):
         inputs: Dict[str, np.ndarray],
         userdata: Any = None
     ) -> None:
-        """
-        Start async inference on the queue.
-
-        Args:
-            async_queue: The AsyncInferQueue
-            inputs: Input tensors
-            userdata: User data passed to callback
-        """
-        # Convert inputs to proper dtypes
+        """Start async inference on the queue."""
         converted = {}
         for name, data in inputs.items():
             converted[name] = self._convert_to_model_dtype(name, data)
@@ -564,34 +449,34 @@ class OpenVINOBackend(BaseBackend):
     def input_names(self) -> List[str]:
         """Get list of input tensor names."""
         return self._input_names
-    
+
     @property
     def output_names(self) -> List[str]:
         """Get list of output tensor names."""
         return self._output_names
-    
+
     @property
     def input_shapes(self) -> Dict[str, Tuple[int, ...]]:
         """Get shapes of input tensors."""
         return self._input_shapes
-    
+
     @property
     def output_shapes(self) -> Dict[str, Tuple[int, ...]]:
         """Get shapes of output tensors."""
         return self._output_shapes
-    
+
     @property
     def num_streams(self) -> int:
         """Get optimal number of inference requests."""
         return self._optimal_nireq
-    
+
     def get_info(self) -> Dict[str, Any]:
         """Get backend information."""
         info = super().get_info()
-        
+
         if OPENVINO_AVAILABLE:
             info["openvino_version"] = ov.__version__
-        
+
         if self._loaded:
             info.update({
                 "device": self.config.device,
@@ -599,58 +484,41 @@ class OpenVINOBackend(BaseBackend):
                 "performance_hint": self.config.performance_hint,
                 "inference_precision": self.config.inference_precision,
             })
-            
-            # Get device info
+
             if self._core:
                 try:
                     info["device_full_name"] = self._core.get_property(
-                        self.config.device, 
+                        self.config.device,
                         "FULL_DEVICE_NAME"
                     )
                 except Exception:
                     pass
-        
+
         return info
-    
-    def benchmark(
-        self, 
-        num_iterations: int = 100,
-        warmup_iterations: int = 10
-    ) -> Dict[str, float]:
-        """
-        Run a simple latency benchmark.
-        
-        Args:
-            num_iterations: Number of benchmark iterations
-            warmup_iterations: Number of warmup iterations
-            
-        Returns:
-            Dictionary with benchmark results (latency in ms)
-        """
+
+    def benchmark(self, num_iterations: int = 100, warmup_iterations: int = 10) -> Dict[str, float]:
+        """Run a simple latency benchmark returning timing statistics in ms."""
         import time
-        
+
         if not self._loaded:
             self.load()
-        
-        # Create dummy input
+
         dummy_inputs = {}
         for name, shape in self.input_shapes.items():
             dummy_inputs[name] = np.random.randn(*shape).astype(np.float32)
-        
-        # Warmup
+
         for _ in range(warmup_iterations):
             self.predict(dummy_inputs)
-        
-        # Benchmark
+
         latencies = []
         for _ in range(num_iterations):
             start = time.perf_counter()
             self.predict(dummy_inputs)
             end = time.perf_counter()
             latencies.append((end - start) * 1000)  # Convert to ms
-        
+
         latencies = np.array(latencies)
-        
+
         return {
             "mean_latency_ms": float(np.mean(latencies)),
             "median_latency_ms": float(np.median(latencies)),

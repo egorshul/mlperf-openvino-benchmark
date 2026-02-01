@@ -45,7 +45,6 @@ class DieContext:
         self.compiled_model = compiled_model
         self.optimal_nireq = optimal_nireq
 
-        # Create inference requests
         self.infer_requests: List[InferRequest] = []
         self.request_queue: queue.Queue = queue.Queue()
 
@@ -101,7 +100,6 @@ class MultiDeviceBackend(BaseBackend):
         self._output_shapes: Dict[str, Tuple[int, ...]] = {}
         self._input_dtypes: Dict[str, Any] = {}
 
-        # Thread pool for parallel inference
         self._executor: Optional[ThreadPoolExecutor] = None
 
         # Round-robin counter for request distribution
@@ -125,7 +123,6 @@ class MultiDeviceBackend(BaseBackend):
             cache_path.mkdir(parents=True, exist_ok=True)
             self._core.set_property({"CACHE_DIR": str(cache_path)})
 
-        # Get device prefix from config
         device_prefix = self.config.get_device_prefix()
         logger.info(f"Device prefix: {device_prefix}")
 
@@ -167,7 +164,6 @@ class MultiDeviceBackend(BaseBackend):
         for device_name in self._active_devices:
             self._compile_for_die(device_name, properties)
 
-        # Create thread pool for parallel inference
         num_workers = len(self._active_devices) * 2  # 2 workers per die
         self._executor = ThreadPoolExecutor(max_workers=num_workers)
 
@@ -206,7 +202,6 @@ class MultiDeviceBackend(BaseBackend):
                 properties
             )
 
-            # Get optimal number of inference requests
             try:
                 optimal_nireq = compiled_model.get_property(
                     ov.properties.optimal_number_of_infer_requests()
@@ -215,7 +210,6 @@ class MultiDeviceBackend(BaseBackend):
                 optimal_nireq = 4  # Fallback
                 logger.warning(f"{device_name}: Could not get optimal_nireq, using {optimal_nireq}")
 
-            # Create die context
             self._die_contexts[device_name] = DieContext(
                 device_name=device_name,
                 compiled_model=compiled_model,
@@ -266,11 +260,7 @@ class MultiDeviceBackend(BaseBackend):
         return properties
 
     def _reshape_model_for_batch(self, batch_size: int) -> None:
-        """Reshape model inputs to the specified batch size.
-
-        Args:
-            batch_size: Target batch size for the first dimension of all inputs
-        """
+        """Reshape model inputs to the specified batch size."""
         logger.info(f"Reshaping model for batch_size={batch_size}")
 
         new_shapes = {}
@@ -278,11 +268,9 @@ class MultiDeviceBackend(BaseBackend):
             name = input_node.any_name
             current_shape = input_node.partial_shape
 
-            # Create new shape with updated batch dimension
             new_dims = []
             for i, dim in enumerate(current_shape):
                 if i == 0:
-                    # First dimension is batch
                     new_dims.append(batch_size)
                 else:
                     # Keep other dimensions as-is
@@ -357,18 +345,7 @@ class MultiDeviceBackend(BaseBackend):
         return die
 
     def predict(self, inputs: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
-        """
-        Run synchronous inference on a single die (round-robin).
-
-        For single-sample inference, uses round-robin distribution
-        across dies for load balancing.
-
-        Args:
-            inputs: Dictionary mapping input names to numpy arrays
-
-        Returns:
-            Dictionary mapping output names to numpy arrays
-        """
+        """Run synchronous inference on a single die (round-robin)."""
         if not self._loaded:
             self.load()
 
@@ -376,19 +353,15 @@ class MultiDeviceBackend(BaseBackend):
         die_name = self._get_next_die()
         ctx = self._die_contexts[die_name]
 
-        # Get available request
         request = ctx.get_request()
 
         try:
-            # Set input tensors
             for name, data in inputs.items():
                 converted = self._convert_to_model_dtype(name, data)
                 request.set_tensor(name, ov.Tensor(converted))
 
-            # Run inference
             request.infer()
 
-            # Get outputs
             outputs = {}
             for name in self._output_names:
                 output_tensor = request.get_tensor(name)
@@ -404,16 +377,7 @@ class MultiDeviceBackend(BaseBackend):
         inputs: Dict[str, np.ndarray],
         die_name: str
     ) -> Dict[str, np.ndarray]:
-        """
-        Run inference on a specific die.
-
-        Args:
-            inputs: Input data
-            die_name: Target die (e.g., 'NPU.0')
-
-        Returns:
-            Output dictionary
-        """
+        """Run inference on a specific die."""
         if not self._loaded:
             self.load()
 
@@ -444,17 +408,7 @@ class MultiDeviceBackend(BaseBackend):
         self,
         batch: List[Dict[str, np.ndarray]]
     ) -> List[Dict[str, np.ndarray]]:
-        """
-        Run inference on a batch of inputs across all dies in parallel.
-
-        Distributes samples across all dies for maximum throughput.
-
-        Args:
-            batch: List of input dictionaries
-
-        Returns:
-            List of output dictionaries (same order as input)
-        """
+        """Run batch inference across all dies in parallel, returning results in input order."""
         if not self._loaded:
             self.load()
 
@@ -473,7 +427,6 @@ class MultiDeviceBackend(BaseBackend):
             future = self._executor.submit(process_sample, idx, inputs)
             futures.append(future)
 
-        # Collect results
         for future in as_completed(futures):
             idx, result = future.result()
             results[idx] = result
@@ -484,17 +437,7 @@ class MultiDeviceBackend(BaseBackend):
         self,
         inputs: Dict[str, np.ndarray]
     ) -> Dict[str, List[Dict[str, np.ndarray]]]:
-        """
-        Run the same inference on ALL dies simultaneously.
-
-        Useful for testing/validation - runs identical input on all dies.
-
-        Args:
-            inputs: Input data
-
-        Returns:
-            Dictionary mapping die names to their outputs
-        """
+        """Run the same inference on all dies simultaneously (for testing/validation)."""
         if not self._loaded:
             self.load()
 
@@ -519,17 +462,7 @@ class MultiDeviceBackend(BaseBackend):
         num_jobs: Optional[int] = None,
         callback: Optional[callable] = None
     ) -> "AsyncInferQueue":
-        """
-        Create an AsyncInferQueue for a specific die.
-
-        Args:
-            die_name: Target die
-            num_jobs: Number of parallel jobs
-            callback: Completion callback
-
-        Returns:
-            AsyncInferQueue for the specified die
-        """
+        """Create an AsyncInferQueue for a specific die."""
         if not self._loaded:
             self.load()
 

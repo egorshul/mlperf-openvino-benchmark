@@ -76,19 +76,7 @@ class SDXLOptimumSUT:
         image_size: int = DEFAULT_IMAGE_SIZE,
         negative_prompt: str = DEFAULT_NEGATIVE_PROMPT,
     ):
-        """
-        Initialize SDXL SUT using Optimum-Intel.
-
-        Args:
-            config: Benchmark configuration
-            model_path: Path to OpenVINO SDXL model directory
-            qsl: Query Sample Library
-            scenario: MLPerf scenario
-            guidance_scale: Classifier-free guidance scale
-            num_inference_steps: Number of denoising steps
-            image_size: Output image size (default 1024x1024)
-            negative_prompt: Negative prompt for guidance
-        """
+        """Initialize SDXL SUT using Optimum-Intel."""
         if not LOADGEN_AVAILABLE:
             raise ImportError("MLPerf LoadGen is not installed")
 
@@ -107,18 +95,15 @@ class SDXLOptimumSUT:
         self.image_size = image_size
         self.negative_prompt = negative_prompt
 
-        # Results storage - store generated images
         self._predictions: Dict[int, np.ndarray] = {}
         self._query_count = 0
         self._sample_count = 0
 
-        # Progress tracking
         self._progress_bar: Optional[Any] = None
         self._start_time = 0.0
         self._last_progress_update = 0.0
         self._progress_update_interval = 1.0  # seconds (SDXL is slower)
 
-        # Create LoadGen handles
         self._sut_handle = None
         self._qsl_handle = None
 
@@ -214,16 +199,7 @@ class SDXLOptimumSUT:
             self._close_progress()
 
     def _process_sample(self, sample_idx: int) -> np.ndarray:
-        """
-        Process a single prompt and generate an image.
-
-        Args:
-            sample_idx: Sample index
-
-        Returns:
-            Generated image as numpy array (H, W, C) in uint8
-        """
-        # Get prompt from QSL
+        """Process a single prompt and generate an image."""
         features = self.qsl.get_features(sample_idx)
         prompt = features['prompt']
 
@@ -338,7 +314,6 @@ class SDXLOptimumSUT:
             image = self._process_sample(sample_idx)
             self._predictions[sample_idx] = image
 
-            # Create response
             response_data = np.array(image.shape, dtype=np.int64)
             response_array = array.array('B', response_data.tobytes())
             response_arrays.append(response_array)
@@ -383,7 +358,6 @@ class SDXLOptimumSUT:
                 'num_samples': 0
             }
 
-        # Prepare images and indices
         indices = sorted(predictions.keys())
         images = [predictions[idx] for idx in indices]
 
@@ -415,18 +389,7 @@ class SDXLManualSUT:
         num_inference_steps: int = DEFAULT_NUM_INFERENCE_STEPS,
         image_size: int = DEFAULT_IMAGE_SIZE,
     ):
-        """
-        Initialize SDXL SUT with manual component loading.
-
-        Args:
-            config: Benchmark configuration
-            model_path: Path to model directory with SDXL components
-            qsl: Query Sample Library
-            scenario: MLPerf scenario
-            guidance_scale: Classifier-free guidance scale
-            num_inference_steps: Number of denoising steps
-            image_size: Output image size
-        """
+        """Initialize SDXL SUT with manual component loading."""
         if not LOADGEN_AVAILABLE:
             raise ImportError("MLPerf LoadGen is not installed")
 
@@ -438,12 +401,10 @@ class SDXLManualSUT:
         self.num_inference_steps = num_inference_steps
         self.image_size = image_size
 
-        # Results storage
         self._predictions: Dict[int, np.ndarray] = {}
         self._query_count = 0
         self._sample_count = 0
 
-        # Progress tracking
         self._progress_bar: Optional[Any] = None
         self._start_time = 0.0
         self._last_progress_update = 0.0
@@ -573,7 +534,6 @@ class SDXLManualSUT:
         if self.text_encoder is not None:
             prompt_embeds = self.text_encoder(text_input_ids)[0]
         else:
-            # Fallback: zero embeddings
             prompt_embeds = np.zeros((1, 77, 768), dtype=np.float32)
 
         # Encode with second text encoder (SDXL specific)
@@ -586,7 +546,6 @@ class SDXLManualSUT:
                 return_tensors="np"
             )
             pooled_output = self.text_encoder_2(tokens_2['input_ids'])
-            # Get pooled and hidden states
             if isinstance(pooled_output, tuple):
                 prompt_embeds_2 = pooled_output[0]
                 pooled_embeds = pooled_output[1] if len(pooled_output) > 1 else None
@@ -615,11 +574,9 @@ class SDXLManualSUT:
         timestep: float,
     ) -> np.ndarray:
         """Perform one denoising step with UNet."""
-        # Prepare UNet inputs
         latent_input = np.concatenate([latents] * 2)  # For CFG
         timestep_array = np.array([timestep], dtype=np.float32)
 
-        # Run UNet
         noise_pred = self.unet({
             'sample': latent_input,
             'timestep': timestep_array,
@@ -728,7 +685,6 @@ class SDXLManualSUT:
         for t in timesteps:
             noise_pred = self._denoise_step(latents, combined_embeds, t)
 
-            # Update latents (simplified scheduler step)
             if self.scheduler is not None:
                 import torch
                 latents_torch = torch.from_numpy(latents)

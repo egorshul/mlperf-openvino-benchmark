@@ -29,24 +29,14 @@ from ..datasets.openimages import OpenImagesQSL
 logger = logging.getLogger(__name__)
 
 # RetinaNet constants for OpenImages (MLPerf uses 264 classes, not COCO's 80)
-NUM_CLASSES = 264  # MLPerf OpenImages classes
+NUM_CLASSES = 264
 SCORE_THRESHOLD = 0.05
 NMS_THRESHOLD = 0.5
 MAX_DETECTIONS = 100
 
 
 def nms(boxes: np.ndarray, scores: np.ndarray, threshold: float = 0.5) -> np.ndarray:
-    """
-    Non-Maximum Suppression.
-
-    Args:
-        boxes: Array of boxes [N, 4] (x1, y1, x2, y2)
-        scores: Array of scores [N]
-        threshold: IoU threshold
-
-    Returns:
-        Indices of kept boxes
-    """
+    """Non-Maximum Suppression."""
     if len(boxes) == 0:
         return np.array([], dtype=np.int64)
 
@@ -84,14 +74,7 @@ def nms(boxes: np.ndarray, scores: np.ndarray, threshold: float = 0.5) -> np.nda
 
 
 class RetinaNetSUT:
-    """
-    System Under Test for RetinaNet Object Detection model.
-
-    RetinaNet outputs:
-    - boxes: Bounding box coordinates
-    - scores: Detection confidence scores
-    - labels: Class labels for detections
-    """
+    """System Under Test for RetinaNet Object Detection model."""
 
     def __init__(
         self,
@@ -103,18 +86,7 @@ class RetinaNetSUT:
         nms_threshold: float = NMS_THRESHOLD,
         max_detections: int = MAX_DETECTIONS,
     ):
-        """
-        Initialize RetinaNet SUT.
-
-        Args:
-            config: Benchmark configuration
-            backend: OpenVINO backend instance
-            qsl: Query Sample Library
-            scenario: MLPerf scenario
-            score_threshold: Minimum score threshold
-            nms_threshold: NMS IoU threshold
-            max_detections: Maximum detections per image
-        """
+        """Initialize RetinaNet SUT."""
         if not LOADGEN_AVAILABLE:
             raise ImportError(
                 "MLPerf LoadGen is not installed. Please install with: "
@@ -129,25 +101,20 @@ class RetinaNetSUT:
         self.nms_threshold = nms_threshold
         self.max_detections = max_detections
 
-        # Ensure backend is loaded
         if not self.backend.is_loaded:
             self.backend.load()
 
-        # Map input/output names
         self._map_io_names()
 
-        # Results storage
         self._predictions: Dict[int, Dict[str, np.ndarray]] = {}
         self._query_count = 0
         self._sample_count = 0
 
-        # Progress tracking
         self._progress_bar: Optional[Any] = None
         self._start_time = 0.0
         self._last_progress_update = 0.0
         self._progress_update_interval = 0.5  # seconds
 
-        # LoadGen handles
         self._sut = None
         self._qsl_handle = None
 
@@ -171,7 +138,6 @@ class RetinaNetSUT:
         if TQDM_AVAILABLE and self._progress_bar is not None:
             self._progress_bar.update(n)
         else:
-            # Simple text-based progress update
             current_time = time.time()
             if current_time - self._last_progress_update >= self._progress_update_interval:
                 elapsed = current_time - self._start_time
@@ -191,7 +157,6 @@ class RetinaNetSUT:
 
     def _map_io_names(self) -> None:
         """Map expected input/output names to model's actual names."""
-        # Input mapping
         model_inputs = self.backend.input_names
 
         self.input_name = None
@@ -204,7 +169,6 @@ class RetinaNetSUT:
         if not self.input_name and model_inputs:
             self.input_name = model_inputs[0]
 
-        # Output mapping
         model_outputs = self.backend.output_names
 
         self.boxes_name = None
@@ -234,17 +198,7 @@ class RetinaNetSUT:
         scores: np.ndarray,
         labels: Optional[np.ndarray] = None
     ) -> Dict[str, np.ndarray]:
-        """
-        Postprocess raw model outputs.
-
-        Args:
-            boxes: Raw box predictions
-            scores: Raw score predictions
-            labels: Raw label predictions
-
-        Returns:
-            Dictionary with filtered boxes, scores, labels
-        """
+        """Postprocess raw model outputs into filtered detections."""
         # Handle different output shapes
         if boxes.ndim == 3:
             boxes = boxes[0]
@@ -309,29 +263,15 @@ class RetinaNetSUT:
         }
 
     def _process_sample(self, sample_idx: int) -> Dict[str, np.ndarray]:
-        """
-        Process a single sample.
-
-        Args:
-            sample_idx: Sample index
-
-        Returns:
-            Dictionary with detections
-        """
+        """Process a single sample and return detections."""
         features = self.qsl.get_features(sample_idx)
-
-        # Prepare inputs
         inputs = {self.input_name: features['input']}
-
-        # Run inference
         outputs = self.backend.predict(inputs)
 
-        # Get outputs
         boxes = outputs.get(self.boxes_name, np.array([]))
         scores = outputs.get(self.scores_name, np.array([]))
         labels = outputs.get(self.labels_name) if self.labels_name else None
 
-        # Postprocess
         return self._postprocess_detections(boxes, scores, labels)
 
     def _issue_query_offline(self, query_samples: List[Any]) -> None:
@@ -339,20 +279,14 @@ class RetinaNetSUT:
         responses = []
         response_arrays = []  # Keep arrays alive until QuerySamplesComplete!
 
-        # Start progress tracking
         total_samples = len(query_samples)
         self._start_progress(total_samples, desc="RetinaNet Offline inference")
 
         for qs in query_samples:
             sample_idx = qs.index
-
-            # Process sample
             detections = self._process_sample(sample_idx)
-
-            # Store prediction
             self._predictions[sample_idx] = detections
 
-            # Create response
             num_detections = len(detections['boxes'])
             response_data = np.array([num_detections], dtype=np.int64)
             response_array = array.array('B', response_data.tobytes())
@@ -366,11 +300,9 @@ class RetinaNetSUT:
             )
             responses.append(response)
 
-            # Update progress
             self._sample_count += 1
             self._update_progress(1)
 
-        # Close progress
         self._close_progress()
 
         lg.QuerySamplesComplete(responses)
@@ -382,20 +314,14 @@ class RetinaNetSUT:
         responses = []
         response_arrays = []  # Keep arrays alive until QuerySamplesComplete!
 
-        # Start progress tracking if first query
         if self._query_count == 0:
             self._start_progress(0, desc="RetinaNet Server inference")
 
         for qs in query_samples:
             sample_idx = qs.index
-
-            # Process sample
             detections = self._process_sample(sample_idx)
-
-            # Store prediction
             self._predictions[sample_idx] = detections
 
-            # Create response
             num_detections = len(detections['boxes'])
             response_data = np.array([num_detections], dtype=np.int64)
             response_array = array.array('B', response_data.tobytes())
@@ -409,7 +335,6 @@ class RetinaNetSUT:
             )
             responses.append(response)
 
-            # Update progress
             self._sample_count += 1
             self._update_progress(1)
 
@@ -418,12 +343,7 @@ class RetinaNetSUT:
         self._query_count += 1
 
     def issue_queries(self, query_samples: List[Any]) -> None:
-        """
-        Process incoming queries.
-
-        Args:
-            query_samples: List of query samples from LoadGen
-        """
+        """Process incoming queries from LoadGen."""
         if self.scenario == Scenario.OFFLINE:
             self._issue_query_offline(query_samples)
         elif self.scenario == Scenario.SERVER:
@@ -433,7 +353,7 @@ class RetinaNetSUT:
 
     def flush_queries(self) -> None:
         """Flush any pending queries."""
-        # Close progress bar if still open (for Server mode)
+        # Close progress bar if still open (Server mode)
         if self._progress_bar is not None:
             self._close_progress()
 
@@ -470,12 +390,7 @@ class RetinaNetSUT:
         self._sample_count = 0
 
     def compute_accuracy(self) -> Dict[str, float]:
-        """
-        Compute mAP accuracy using pycocotools (official MLPerf method).
-
-        Returns:
-            Dictionary with mAP and other metrics
-        """
+        """Compute mAP accuracy using pycocotools (official MLPerf method)."""
         if not self._predictions:
             logger.warning(f"No predictions (sample_count={self._sample_count}, query_count={self._query_count})")
             return {'mAP': 0.0, 'num_samples': 0}
@@ -486,7 +401,6 @@ class RetinaNetSUT:
             from pathlib import Path
 
             if PYCOCOTOOLS_AVAILABLE:
-                # Find COCO annotations file
                 coco_file = None
                 data_path = Path(self.qsl.dataset.data_path)
 

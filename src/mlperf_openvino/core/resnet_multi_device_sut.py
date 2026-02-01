@@ -63,11 +63,9 @@ class ResNetMultiDeviceSUT:
         self.scenario = scenario
         self.batch_size = config.openvino.batch_size
 
-        # Ensure backend is loaded
         if not self.backend.is_loaded:
             self.backend.load()
 
-        # Get input/output names
         self.input_name = config.model.input_name
         if self.input_name not in self.backend.input_names:
             self.input_name = self.backend.input_names[0]
@@ -76,13 +74,10 @@ class ResNetMultiDeviceSUT:
         if self.output_name not in self.backend.output_names:
             self.output_name = self.backend.output_names[0]
 
-        # Get input shape (after reshape) for batching
         self._input_shape = self.backend.input_shapes.get(self.input_name)
 
-        # Results storage
         self._predictions: Dict[int, Any] = {}
 
-        # Statistics
         self._query_count = 0
         self._sample_count = 0
         self._start_time = 0.0
@@ -99,7 +94,6 @@ class ResNetMultiDeviceSUT:
         self._offline_responses: List[Tuple] = []  # (query_ids, response_arrays)
         self._offline_lock = threading.Lock()
 
-        # Progress thread
         self._progress_thread_stop = False
         self._progress_thread = None
 
@@ -112,7 +106,6 @@ class ResNetMultiDeviceSUT:
 
     def _setup_async_queues(self) -> None:
         """Setup async inference queues for all dies."""
-        # Get input dtype and shape from first die
         first_die = self.backend.active_devices[0]
         ctx = self.backend._die_contexts[first_die]
         compiled_model = ctx.compiled_model
@@ -139,7 +132,6 @@ class ResNetMultiDeviceSUT:
             self._model_expects_nchw = True  # Default to NCHW
         logger.debug(f"Model expects NCHW: {self._model_expects_nchw}, input shape: {input_shape}")
 
-        # Create AsyncInferQueue for each die with high queue depth
         for die_name in self.backend.active_devices:
             ctx = self.backend._die_contexts[die_name]
             # High queue depth for maximum pipelining
@@ -156,7 +148,6 @@ class ResNetMultiDeviceSUT:
         def callback(infer_request, userdata):
             query_ids, sample_indices, actual_batch_size, is_offline = userdata
             try:
-                # Get batched output
                 output = infer_request.get_output_tensor(0).data
 
                 # Split batch output to individual samples
@@ -256,14 +247,12 @@ class ResNetMultiDeviceSUT:
 
         self._start_progress_thread()
 
-        # Process in batches
         i = 0
         while i < num_samples:
             # Determine actual batch size (may be smaller at end)
             end_idx = min(i + batch_size, num_samples)
             actual_batch_size = end_idx - i
 
-            # Collect batch data
             query_ids = []
             sample_indices = []
             batch_data = []
@@ -276,7 +265,6 @@ class ResNetMultiDeviceSUT:
                 query_ids.append(query_id)
                 sample_indices.append(sample_idx)
 
-                # Get input data
                 if hasattr(qsl, '_loaded_samples') and sample_idx in qsl._loaded_samples:
                     input_data = qsl._loaded_samples[sample_idx]
                 else:
@@ -306,7 +294,6 @@ class ResNetMultiDeviceSUT:
             if input_dtype is not None and batched_input.dtype != input_dtype:
                 batched_input = batched_input.astype(input_dtype, copy=False)
 
-            # Ensure contiguous
             if not batched_input.flags['C_CONTIGUOUS']:
                 batched_input = np.ascontiguousarray(batched_input)
 
@@ -326,7 +313,6 @@ class ResNetMultiDeviceSUT:
 
         self._stop_progress_thread()
 
-        # Send all responses
         responses = []
         for query_id, response_array in self._offline_responses:
             bi = response_array.buffer_info()
@@ -349,14 +335,12 @@ class ResNetMultiDeviceSUT:
             sample_idx = qs.index
             query_id = qs.id
 
-            # Get input data
             if hasattr(qsl, '_loaded_samples') and sample_idx in qsl._loaded_samples:
                 input_data = qsl._loaded_samples[sample_idx]
             else:
                 features = qsl.get_features(sample_idx)
                 input_data = features.get("input", features.get(input_name))
 
-            # Ensure correct batch dimension
             if batch_size == 1:
                 if input_data.ndim == 3:
                     input_data = input_data[np.newaxis, ...]
@@ -376,7 +360,6 @@ class ResNetMultiDeviceSUT:
             if input_dtype is not None and input_data.dtype != input_dtype:
                 input_data = input_data.astype(input_dtype, copy=False)
 
-            # Ensure contiguous after transpose
             if not input_data.flags['C_CONTIGUOUS']:
                 input_data = np.ascontiguousarray(input_data)
 

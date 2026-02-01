@@ -24,17 +24,12 @@ N_BEST_SIZE = 20
 
 def _get_best_indexes(logits: np.ndarray, n_best: int = N_BEST_SIZE) -> List[int]:
     """Get the n-best logit indices sorted by score."""
-    # Get indices sorted by logit values (descending)
     index_and_score = sorted(enumerate(logits), key=lambda x: x[1], reverse=True)
     return [idx for idx, _ in index_and_score[:n_best]]
 
 
 def normalize_answer(s: str) -> str:
-    """
-    Normalize answer for evaluation.
-
-    Lower text and remove punctuation, articles and extra whitespace.
-    """
+    """Normalize answer: lowercase, remove punctuation, articles, and extra whitespace."""
     def remove_articles(text):
         return re.sub(r'\b(a|an|the)\b', ' ', text)
 
@@ -52,9 +47,7 @@ def normalize_answer(s: str) -> str:
 
 
 def compute_f1(prediction: str, ground_truth: str) -> float:
-    """
-    Compute F1 score between prediction and ground truth.
-    """
+    """Compute F1 score between prediction and ground truth."""
     prediction_tokens = normalize_answer(prediction).split()
     ground_truth_tokens = normalize_answer(ground_truth).split()
 
@@ -72,9 +65,7 @@ def compute_f1(prediction: str, ground_truth: str) -> float:
 
 
 def compute_exact_match(prediction: str, ground_truth: str) -> float:
-    """
-    Compute exact match score.
-    """
+    """Compute exact match score."""
     return float(normalize_answer(prediction) == normalize_answer(ground_truth))
 
 
@@ -87,12 +78,7 @@ class BertTokenizer:
     """
 
     def __init__(self, vocab_file: Optional[str] = None):
-        """
-        Initialize tokenizer.
-
-        Args:
-            vocab_file: Path to vocab.txt file
-        """
+        """Initialize tokenizer."""
         self._vocab = {}
         self._inv_vocab = {}
         self._do_lower_case = True
@@ -100,7 +86,6 @@ class BertTokenizer:
         if vocab_file:
             self._load_vocab(vocab_file)
         else:
-            # Try to load from transformers
             self._load_from_transformers()
 
     def _load_vocab(self, vocab_file: str) -> None:
@@ -132,11 +117,10 @@ class BertTokenizer:
         if hasattr(self, '_hf_tokenizer') and self._hf_tokenizer is not None:
             return self._hf_tokenizer.tokenize(text)
 
-        # Basic tokenization
         if self._do_lower_case:
             text = text.lower()
 
-        # Simple whitespace tokenization
+        # Simple whitespace tokenization (fallback without HF)
         tokens = text.split()
         return tokens
 
@@ -168,29 +152,18 @@ class BertTokenizer:
         max_length: int = MAX_SEQ_LENGTH,
         padding: bool = True,
     ) -> Dict[str, Any]:
-        """
-        Encode question and context for BERT with token-to-original mapping.
-
-        Returns:
-            Dictionary with input_ids, attention_mask, token_type_ids,
-            and mapping information for answer extraction.
-        """
-        # Split context into whitespace-separated doc_tokens
+        """Encode question and context for BERT with token-to-original mapping."""
         doc_tokens = context.split()
 
-        # Build char_to_word mapping
         char_to_word_offset = []
         for i, word in enumerate(doc_tokens):
-            # Find word position in original context
             start = context.find(word, len(''.join(doc_tokens[:i])) + i)
             for _ in range(len(word)):
                 char_to_word_offset.append(i)
             char_to_word_offset.append(i)  # for space after word
 
-        # Tokenize question
         question_tokens = ['[CLS]'] + self.tokenize(question) + ['[SEP]']
 
-        # Tokenize context with mapping to doc_tokens
         tok_to_orig_index = []
         all_doc_tokens = []
 
@@ -200,7 +173,6 @@ class BertTokenizer:
                 tok_to_orig_index.append(i)
                 all_doc_tokens.append(sub_token)
 
-        # Truncate if needed
         max_context_len = max_length - len(question_tokens) - 1  # -1 for [SEP]
         if len(all_doc_tokens) > max_context_len:
             all_doc_tokens = all_doc_tokens[:max_context_len]
@@ -209,7 +181,6 @@ class BertTokenizer:
         context_tokens = all_doc_tokens + ['[SEP]']
         tokens = question_tokens + context_tokens
 
-        # Create token-to-orig mapping for full sequence
         # -1 for question tokens (no mapping to context)
         full_tok_to_orig = [-1] * len(question_tokens) + tok_to_orig_index + [-1]  # -1 for [SEP]
 
@@ -217,7 +188,6 @@ class BertTokenizer:
         attention_mask = [1] * len(input_ids)
         token_type_ids = [0] * len(question_tokens) + [1] * len(context_tokens)
 
-        # Padding
         if padding:
             pad_len = max_length - len(input_ids)
             input_ids = input_ids + [0] * pad_len
@@ -240,12 +210,7 @@ class BertTokenizer:
         max_length: int = MAX_SEQ_LENGTH,
         padding: bool = True,
     ) -> Dict[str, np.ndarray]:
-        """
-        Encode question and context for BERT.
-
-        Returns:
-            Dictionary with input_ids, attention_mask, token_type_ids
-        """
+        """Encode question and context for BERT."""
         result = self.encode_with_mapping(question, context, max_length, padding)
         return {
             'input_ids': result['input_ids'],
@@ -259,9 +224,7 @@ class BertTokenizer:
             return self._hf_tokenizer.decode(token_ids, skip_special_tokens=True)
 
         tokens = self.convert_ids_to_tokens(token_ids)
-        # Remove special tokens
         tokens = [t for t in tokens if t not in ['[CLS]', '[SEP]', '[PAD]']]
-        # Join word pieces
         text = ' '.join(tokens).replace(' ##', '')
         return text
 
@@ -285,17 +248,7 @@ class SQuADDataset(BaseDataset):
         max_query_length: int = MAX_QUERY_LENGTH,
         doc_stride: int = DOC_STRIDE,
     ):
-        """
-        Initialize SQuAD dataset.
-
-        Args:
-            data_path: Path to SQuAD data directory or dev-v1.1.json
-            vocab_file: Path to BERT vocab file
-            count: Number of samples to use (None = all)
-            max_seq_length: Maximum sequence length
-            max_query_length: Maximum query length
-            doc_stride: Document stride for sliding window
-        """
+        """Initialize SQuAD dataset."""
         super().__init__(data_path=data_path, count=count)
 
         self.data_path = Path(data_path)
@@ -317,14 +270,11 @@ class SQuADDataset(BaseDataset):
 
         logger.info(f"Loading SQuAD dataset from {self.data_path}")
 
-        # Initialize tokenizer
         self._tokenizer = BertTokenizer(self.vocab_file)
 
-        # Find data file
         if self.data_path.is_file():
             data_file = self.data_path
         else:
-            # Look for common names
             for name in ["dev-v1.1.json", "train-v1.1.json", "squad.json"]:
                 candidate = self.data_path / name
                 if candidate.exists():
@@ -333,18 +283,14 @@ class SQuADDataset(BaseDataset):
             else:
                 raise FileNotFoundError(f"No SQuAD data file found in {self.data_path}")
 
-        # Load JSON
         with open(data_file, 'r', encoding='utf-8') as f:
             squad_data = json.load(f)
 
-        # Parse examples
         self._parse_squad_data(squad_data)
 
-        # Limit count if specified
         if self.count and self.count < len(self._samples):
             self._samples = self._samples[:self.count]
 
-        # Create features
         self._create_features()
 
         logger.info(f"Loaded {len(self._samples)} examples, {len(self._features)} features")
@@ -415,15 +361,7 @@ class SQuADDataset(BaseDataset):
         return len(self._features)
 
     def get_sample(self, index: int) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
-        """
-        Get preprocessed sample.
-
-        Args:
-            index: Sample index
-
-        Returns:
-            Tuple of (features_dict, sample_info)
-        """
+        """Get preprocessed sample."""
         if not self._is_loaded:
             self.load()
 
@@ -470,26 +408,12 @@ class SQuADDataset(BaseDataset):
         results: Union[np.ndarray, Tuple[np.ndarray, np.ndarray], List[Tuple[np.ndarray, np.ndarray]]],
         indices: List[int]
     ) -> List[str]:
-        """
-        Postprocess BERT outputs to extract answer spans.
-
-        Args:
-            results: Model outputs - can be:
-                - tuple (start_logits, end_logits) with batch dimension
-                - list of tuples [(start, end), ...] per sample
-                - numpy array with shape [batch, 2, seq_len] or [batch, seq_len, 2]
-            indices: Sample indices
-
-        Returns:
-            List of predicted answer texts
-        """
-        # Handle different result formats
+        """Postprocess BERT outputs to extract answer spans."""
         if isinstance(results, list):
             # List of tuples from C++ SUT: [(start, end), (start, end), ...]
             start_logits = np.array([r[0] for r in results])
             end_logits = np.array([r[1] for r in results])
         elif isinstance(results, tuple):
-            # Single tuple with batch arrays
             start_logits, end_logits = results
         else:
             # Numpy array - assume shape [batch, 2, seq_len] or [batch, seq_len, 2]
@@ -508,11 +432,10 @@ class SQuADDataset(BaseDataset):
             tok_to_orig_index = feature.get('tok_to_orig_index', None)
             doc_tokens = feature.get('doc_tokens', None)
 
-            # Get current sample logits
             s_logits = start_logits[i]
             e_logits = end_logits[i]
 
-            # Find context boundaries (token_type_id = 1 is context)
+            # Find context boundaries
             # token_type_id: 0 = [CLS] question [SEP], 1 = context [SEP]
             context_start = 0
             context_end = len(token_type_ids) - 1
@@ -525,18 +448,15 @@ class SQuADDataset(BaseDataset):
                     context_end = j
                     break
 
-            # Get n-best start and end indices
             start_indexes = _get_best_indexes(s_logits, N_BEST_SIZE)
             end_indexes = _get_best_indexes(e_logits, N_BEST_SIZE)
 
-            # Find best valid span using n-best candidates
             best_score = float('-inf')
             best_start = context_start
             best_end = context_start
 
             for start_index in start_indexes:
                 for end_index in end_indexes:
-                    # Skip invalid spans
                     if start_index > end_index:
                         continue
                     if end_index - start_index + 1 > MAX_ANSWER_LENGTH:
@@ -555,14 +475,11 @@ class SQuADDataset(BaseDataset):
                         best_start = start_index
                         best_end = end_index
 
-            # Extract answer text using mapping to original doc_tokens
             if tok_to_orig_index is not None and doc_tokens is not None:
-                # Map token positions to original word positions
                 orig_start = tok_to_orig_index[best_start]
                 orig_end = tok_to_orig_index[best_end]
 
                 if orig_start != -1 and orig_end != -1:
-                    # Get original words and join
                     answer_text = ' '.join(doc_tokens[orig_start:orig_end + 1])
                 else:
                     answer_text = ""
@@ -584,16 +501,7 @@ class SQuADDataset(BaseDataset):
         predictions: List[str],
         indices: List[int]
     ) -> Dict[str, float]:
-        """
-        Compute F1 and Exact Match scores.
-
-        Args:
-            predictions: Predicted answer texts
-            indices: Sample indices
-
-        Returns:
-            Dictionary with F1 and EM scores
-        """
+        """Compute F1 and Exact Match scores."""
         f1_scores = []
         em_scores = []
 
@@ -602,13 +510,11 @@ class SQuADDataset(BaseDataset):
             example_idx = feature['example_index']
             sample = self._samples[example_idx]
 
-            # Get ground truth answers
             ground_truths = [ans['text'] for ans in sample['answers']]
 
             if not ground_truths:
                 continue
 
-            # Compute max F1 and EM over all ground truths
             max_f1 = max(compute_f1(pred, gt) for gt in ground_truths)
             max_em = max(compute_exact_match(pred, gt) for gt in ground_truths)
 
@@ -647,16 +553,7 @@ class SQuADQSL(QuerySampleLibrary):
         performance_sample_count: int = 10833,  # MLPerf default
         max_seq_length: int = MAX_SEQ_LENGTH,
     ):
-        """
-        Initialize SQuAD QSL.
-
-        Args:
-            data_path: Path to SQuAD data directory
-            vocab_file: Path to BERT vocab file
-            count: Number of samples to use
-            performance_sample_count: Number of samples for performance run
-            max_seq_length: Maximum sequence length
-        """
+        """Initialize SQuAD QSL."""
         super().__init__()
 
         self.dataset = SQuADDataset(
@@ -691,7 +588,6 @@ class SQuADQSL(QuerySampleLibrary):
         if sample_idx in self._sample_seq_lengths:
             return self._sample_seq_lengths[sample_idx]
 
-        # Compute from attention_mask
         features = self.get_features(sample_idx)
         attention_mask = features['attention_mask']
         actual_len = int(np.sum(attention_mask))
@@ -743,7 +639,6 @@ class SQuADQSL(QuerySampleLibrary):
                 }
                 self._loaded_samples[idx] = optimized
 
-                # Pre-compute sequence length and bucket
                 actual_len = int(np.sum(attention_mask))
                 self._sample_seq_lengths[idx] = actual_len
                 self._sample_buckets[idx] = self.get_bucket_index(actual_len)
