@@ -331,6 +331,7 @@ void RetinaNetMultiDieCppSUT::issue_thread_batched_func(size_t die_idx) {
         // Acquire request for this die
         size_t req_id = acquire_request_for_die(die_idx);
         RetinaNetMultiDieInferContext* ctx = infer_contexts_[req_id].get();
+        ctx->request.wait();  // Ensure request is idle after acquire
 
         // Copy batch data
         for (int i = 0; i < actual_size; ++i) {
@@ -373,6 +374,10 @@ void RetinaNetMultiDieCppSUT::issue_thread_batched_func(size_t die_idx) {
         // Submit
         pending_count_.fetch_add(1, std::memory_order_relaxed);
         ctx->request.start_async();
+        // Serialize in accuracy mode to prevent NPU non-determinism
+        if (store_predictions_) {
+            ctx->request.wait();
+        }
         issued_count_.fetch_add(real_samples, std::memory_order_relaxed);
     }
 
@@ -393,6 +398,7 @@ void RetinaNetMultiDieCppSUT::issue_thread_batched_func(size_t die_idx) {
 
         size_t req_id = acquire_request_for_die(die_idx);
         RetinaNetMultiDieInferContext* ctx = infer_contexts_[req_id].get();
+        ctx->request.wait();  // Ensure request is idle after acquire
 
         for (int i = 0; i < actual_size; ++i) {
             ctx->query_ids[i] = batch_queues_[die_idx][idx].query_ids[i];
@@ -430,6 +436,10 @@ void RetinaNetMultiDieCppSUT::issue_thread_batched_func(size_t die_idx) {
         queued_count_.fetch_sub(real_samples, std::memory_order_relaxed);
         pending_count_.fetch_add(1, std::memory_order_relaxed);
         ctx->request.start_async();
+        // Serialize in accuracy mode to prevent NPU non-determinism
+        if (store_predictions_) {
+            ctx->request.wait();
+        }
         issued_count_.fetch_add(real_samples, std::memory_order_relaxed);
     }
 }
@@ -494,6 +504,7 @@ void RetinaNetMultiDieCppSUT::issue_thread_func(size_t die_idx) {
         // Acquire request for this die
         size_t req_id = acquire_request_for_die(die_idx);
         RetinaNetMultiDieInferContext* ctx = infer_contexts_[req_id].get();
+        ctx->request.wait();  // Ensure request is idle after acquire
 
         ctx->query_ids[0] = query_id;
         ctx->sample_indices[0] = sample_idx;
@@ -507,6 +518,10 @@ void RetinaNetMultiDieCppSUT::issue_thread_func(size_t die_idx) {
         // Submit
         pending_count_.fetch_add(1, std::memory_order_relaxed);
         ctx->request.start_async();
+        // Serialize in accuracy mode to prevent NPU non-determinism
+        if (store_predictions_) {
+            ctx->request.wait();
+        }
         issued_count_.fetch_add(1, std::memory_order_relaxed);
         queued_count_.fetch_sub(1, std::memory_order_relaxed);
     }
@@ -550,6 +565,7 @@ void RetinaNetMultiDieCppSUT::issue_thread_func(size_t die_idx) {
 
         size_t req_id = acquire_request_for_die(die_idx);
         RetinaNetMultiDieInferContext* ctx = infer_contexts_[req_id].get();
+        ctx->request.wait();  // Ensure request is idle after acquire
 
         ctx->query_ids[0] = query_id;
         ctx->sample_indices[0] = sample_idx;
@@ -561,6 +577,10 @@ void RetinaNetMultiDieCppSUT::issue_thread_func(size_t die_idx) {
 
         pending_count_.fetch_add(1, std::memory_order_relaxed);
         ctx->request.start_async();
+        // Serialize in accuracy mode to prevent NPU non-determinism
+        if (store_predictions_) {
+            ctx->request.wait();
+        }
         issued_count_.fetch_add(1, std::memory_order_relaxed);
         queued_count_.fetch_sub(1, std::memory_order_relaxed);
     }
@@ -654,11 +674,9 @@ void RetinaNetMultiDieCppSUT::on_inference_complete(RetinaNetMultiDieInferContex
         responses[i] = {ctx->query_ids[i], 0, 0};
     }
 
-    // Release request before calling LoadGen
     size_t pool_id = ctx->pool_id;
     completed_count_.fetch_add(real_samples, std::memory_order_relaxed);
     pending_count_.fetch_sub(1, std::memory_order_relaxed);
-    release_request(pool_id);
 
     // Call LoadGen (only for real samples, not dummies)
     if (use_direct_loadgen_.load(std::memory_order_relaxed)) {
@@ -677,6 +695,9 @@ void RetinaNetMultiDieCppSUT::on_inference_complete(RetinaNetMultiDieInferContex
             batch_response_callback_(ids);
         }
     }
+
+    // Release request LAST - after all ctx access and LoadGen calls
+    release_request(pool_id);
 }
 
 // =============================================================================
@@ -1034,6 +1055,7 @@ void RetinaNetMultiDieCppSUT::start_async_batch(const float* input_data,
 
     size_t id = acquire_request();
     RetinaNetMultiDieInferContext* ctx = infer_contexts_[id].get();
+    ctx->request.wait();  // Ensure request is idle after acquire
 
     actual_batch_size = std::min(actual_batch_size, RetinaNetMultiDieInferContext::MAX_BATCH);
     for (int i = 0; i < actual_batch_size; ++i) {
@@ -1048,6 +1070,10 @@ void RetinaNetMultiDieCppSUT::start_async_batch(const float* input_data,
 
     pending_count_.fetch_add(1, std::memory_order_relaxed);
     ctx->request.start_async();
+    // Serialize in accuracy mode to prevent NPU non-determinism
+    if (store_predictions_) {
+        ctx->request.wait();
+    }
     issued_count_.fetch_add(actual_batch_size, std::memory_order_relaxed);
 }
 
