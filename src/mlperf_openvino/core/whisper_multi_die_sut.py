@@ -1,11 +1,12 @@
-"""Whisper ASR Multi-Die System Under Test implementation."""
+"""Whisper ASR Multi-Die System Under Test."""
 
 import array
 import logging
 import re
 import sys
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Union
 
@@ -33,7 +34,12 @@ logger = logging.getLogger(__name__)
 
 
 class WhisperMultiDieSUT:
-    """Whisper ASR SUT for multi-die accelerators."""
+    """Whisper ASR SUT for multi-die accelerators.
+
+    Loads one OVModelForSpeechSeq2Seq per die with the encoder compiled
+    on the accelerator and the decoder on CPU. Offline mode distributes
+    samples across dies in parallel; Server mode uses round-robin dispatch.
+    """
 
     def __init__(
         self,
@@ -56,8 +62,8 @@ class WhisperMultiDieSUT:
         self.max_new_tokens = max_new_tokens
 
         self._predictions: Dict[int, str] = {}
-        self._query_count = 0
         self._sample_count = 0
+        self._query_count = 0
         self._start_time = 0.0
 
         self._sut_handle = None
@@ -65,23 +71,22 @@ class WhisperMultiDieSUT:
 
         self._models: List[Tuple[str, Any]] = []
         self._model_index = 0
-
         self.processor = None
 
         self._setup_models()
 
+    # -- Device discovery & model loading -----------------------------------
+
     def _discover_device_dies(self, device: str) -> List[str]:
+        """Return sorted list of sub-device identifiers (e.g. NPU.0, NPU.1)."""
         import openvino as ov
 
         core = ov.Core()
-        devices = core.available_devices
-        logger.info(f"Available OpenVINO devices: {devices}")
-
         pattern = re.compile(rf"^{re.escape(device)}\.(\d+)$")
-        device_dies = [d for d in devices if pattern.match(d)]
-        return sorted(device_dies)
+        return sorted(d for d in core.available_devices if pattern.match(d))
 
     def _setup_models(self) -> None:
+        """Load one model per accelerator die."""
         from transformers import AutoProcessor
 
         if not OPTIMUM_AVAILABLE:
@@ -90,9 +95,11 @@ class WhisperMultiDieSUT:
                 "Install with: pip install optimum[openvino]"
             )
 
-        target_device = self.config.openvino.device if hasattr(self.config, 'openvino') else "CPU"
-
-        logger.info(f"Setting up Whisper Multi-Die SUT (encoder={target_device}, decoder=CPU)")
+        target_device = (
+            self.config.openvino.device
+            if hasattr(self.config, "openvino")
+            else "CPU"
+        )
 
         try:
             self.processor = AutoProcessor.from_pretrained(self.model_path)
@@ -107,57 +114,40 @@ class WhisperMultiDieSUT:
         else:
             device_dies = self._discover_device_dies(target_device)
             if not device_dies:
-                logger.warning(f"No {target_device} dies found, falling back to CPU")
+                logger.warning("No %s dies found, falling back to CPU", target_device)
                 device_dies = ["CPU"]
 
         for die in device_dies:
-            logger.info(f"Loading OVModelForSpeechSeq2Seq for {die}")
             try:
+                logger.info("Loading Whisper model for %s ...", die)
                 model = self._load_optimum_model()
-
                 if die != "CPU":
                     self._patch_encoder_device(model, die)
-
                 self._models.append((die, model))
-            except Exception as e:
-                logger.warning(f"Failed to create model for {die}: {e}")
+                logger.info("Model ready on %s", die)
+            except Exception:
+                logger.exception("Failed to create model for %s", die)
 
         if not self._models:
-            logger.info("Creating CPU fallback model")
+            logger.warning("No accelerator models loaded, falling back to CPU")
             model = self._load_optimum_model()
             self._models.append(("CPU", model))
 
-        encoder_devices = [die for die, _ in self._models]
-        print(f"[Setup] {len(self._models)} die(s), encoder={encoder_devices}, decoder=CPU",
-              file=sys.stderr)
+        die_names = [name for name, _ in self._models]
+        print(
+            f"[Whisper] {len(self._models)} die(s): {', '.join(die_names)}",
+            file=sys.stderr,
+        )
 
-        for die_name, mdl in self._models:
-            enc_tag = dec_tag = "?"
-            try:
-                exec_devs = mdl.encoder.request.get_property("EXECUTION_DEVICES")
-                on_target = any(die_name.split(".")[0] in d for d in exec_devs)
-                enc_tag = "OK" if on_target else f"WARN:CPU ({exec_devs})"
-            except Exception:
-                enc_tag = "unknown"
-            try:
-                exec_devs = mdl.decoder.request.get_property("EXECUTION_DEVICES")
-                dec_tag = ",".join(exec_devs) if exec_devs else "unknown"
-            except Exception:
-                dec_tag = "CPU"
-            print(f"  {die_name}: encoder=[{enc_tag}] decoder=[{dec_tag}]",
-                  file=sys.stderr)
-
-    def _load_optimum_model(self):
+    def _load_optimum_model(self) -> Any:
+        """Load OVModelForSpeechSeq2Seq on CPU."""
         model_dir = str(self.model_path)
-
         try:
             return OVModelForSpeechSeq2Seq.from_pretrained(
-                model_dir,
-                device="CPU",
-                ov_config={"CACHE_DIR": ""},
+                model_dir, device="CPU", ov_config={"CACHE_DIR": ""},
             )
         except Exception as e:
-            logger.info(f"Default file names failed ({e}), trying detected names")
+            logger.info("Default file names failed (%s), trying detected names", e)
 
         return OVModelForSpeechSeq2Seq.from_pretrained(
             model_dir,
@@ -167,43 +157,29 @@ class WhisperMultiDieSUT:
             decoder_file_name=self.decoder_path.name,
         )
 
-    def _patch_encoder_device(self, model, die: str) -> None:
+    def _patch_encoder_device(self, model: Any, die: str) -> None:
+        """Recompile encoder on the target accelerator die."""
         import openvino as ov
 
         core = ov.Core()
-
         encoder_model = core.read_model(str(self.encoder_path))
 
         for inp in encoder_model.inputs:
             if inp.get_partial_shape().is_dynamic:
-                input_name = inp.get_any_name()
-                encoder_model.reshape({input_name: [1, 128, 3000]})
+                encoder_model.reshape({inp.get_any_name(): [1, 128, 3000]})
                 break
 
-        ov_config = {"CACHE_DIR": ""}
-        if hasattr(self.config, 'openvino') and hasattr(self.config.openvino, 'device_properties'):
+        ov_config: Dict[str, Any] = {"CACHE_DIR": ""}
+        if hasattr(self.config, "openvino") and hasattr(self.config.openvino, "device_properties"):
             for key, value in self.config.openvino.device_properties.items():
                 ov_config[key] = value
 
-        compiled_encoder = core.compile_model(encoder_model, die, ov_config)
+        model.encoder.request = core.compile_model(encoder_model, die, ov_config)
 
-        try:
-            exec_devices = compiled_encoder.get_property("EXECUTION_DEVICES")
-            device_prefix = die.split(".")[0]
-            on_target = any(device_prefix in d for d in exec_devices)
-            if not on_target:
-                logger.warning(f"Encoder requested {die} but EXECUTION_DEVICES={exec_devices}")
-        except Exception:
-            pass
-
-        model.encoder.request = compiled_encoder
-
-    def _get_next_model(self) -> Tuple[str, Any]:
-        die_name, model = self._models[self._model_index]
-        self._model_index = (self._model_index + 1) % len(self._models)
-        return die_name, model
+    # -- Sample processing --------------------------------------------------
 
     def _process_sample(self, sample_idx: int, model: Any) -> str:
+        """Transcribe a single audio sample."""
         import torch
 
         features = self.qsl.get_features(sample_idx)
@@ -211,7 +187,6 @@ class WhisperMultiDieSUT:
 
         if isinstance(input_features, np.ndarray):
             input_features = torch.from_numpy(input_features)
-
         if input_features.dim() == 2:
             input_features = input_features.unsqueeze(0)
 
@@ -221,19 +196,19 @@ class WhisperMultiDieSUT:
             language="en",
             task="transcribe",
         )
+        return self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
 
-        text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-        return text
+    # -- LoadGen query dispatch ---------------------------------------------
 
     def issue_queries(self, query_samples: List[Any]) -> None:
         self._query_count += len(query_samples)
-
         if self.scenario == Scenario.OFFLINE:
             self._issue_queries_offline(query_samples)
         else:
             self._issue_queries_server(query_samples)
 
     def _issue_queries_offline(self, query_samples: List[Any]) -> None:
+        """Offline: distribute samples across dies and run in parallel."""
         total = len(query_samples)
         num_dies = len(self._models)
         self._start_time = time.time()
@@ -244,116 +219,122 @@ class WhisperMultiDieSUT:
             self._issue_queries_offline_sequential(query_samples)
             return
 
+        # Round-robin distribution
         die_batches: List[List[Tuple[Any, int]]] = [[] for _ in range(num_dies)]
         for i, sample in enumerate(query_samples):
             die_batches[i % num_dies].append((sample, sample.index))
 
-        batch_counts = [len(b) for b in die_batches]
-        print(f"[Distribute] {batch_counts} samples per die", file=sys.stderr)
+        all_results: List[Tuple[Any, int, str]] = []
+        results_lock = threading.Lock()
 
-        def _worker(die_idx: int, batch):
+        def _die_worker(die_idx: int, batch: List[Tuple[Any, int]]):
             _, model = self._models[die_idx]
-            results = []
             for sample, sample_idx in batch:
                 text = self._process_sample(sample_idx, model)
-                results.append((sample, sample_idx, text))
-            return results
+                self._predictions[sample_idx] = text
+                self._sample_count += 1
+                with results_lock:
+                    all_results.append((sample, sample_idx, text))
 
-        all_results: List[Tuple[Any, int, str]] = []
-        print(f"[Inference] ", end="", file=sys.stderr)
+        print("[Inference] ", end="", file=sys.stderr)
         dots_printed = 0
 
         with ThreadPoolExecutor(max_workers=num_dies) as pool:
-            futures = {
-                pool.submit(_worker, die_idx, batch): die_idx
-                for die_idx, batch in enumerate(die_batches)
+            futures = [
+                pool.submit(_die_worker, idx, batch)
+                for idx, batch in enumerate(die_batches)
                 if batch
-            }
-            for future in as_completed(futures):
-                for sample, sample_idx, text in future.result():
-                    self._predictions[sample_idx] = text
-                    self._sample_count += 1
+            ]
+            while True:
+                done = sum(1 for f in futures if f.done())
+                completed = self._sample_count
+                target = int(completed * 10 / total) if total else 10
+                while dots_printed < target:
+                    print(".", end="", file=sys.stderr, flush=True)
+                    dots_printed += 1
+                if done == len(futures):
+                    break
+                time.sleep(0.1)
 
-                    progress = int(self._sample_count * 10 / total)
-                    while dots_printed < progress:
-                        print(".", end="", file=sys.stderr, flush=True)
-                        dots_printed += 1
-
-                all_results.extend(future.result())
+            for f in futures:
+                f.result()
 
         while dots_printed < 10:
             print(".", end="", file=sys.stderr, flush=True)
             dots_printed += 1
 
         elapsed = time.time() - self._start_time
-        print(f" {total}/{total} ({elapsed:.1f}s, {total/elapsed:.1f} qps)",
-              file=sys.stderr)
+        print(
+            f" {total}/{total} ({elapsed:.1f}s, {total / elapsed:.1f} qps)",
+            file=sys.stderr,
+        )
 
         responses = []
-        response_arrays = []
+        arrays = []
         for sample, _idx, text in sorted(all_results, key=lambda r: r[1]):
-            text_bytes = text.encode('utf-8')
-            response_array = array.array('B', text_bytes)
-            response_arrays.append(response_array)
-            bi = response_array.buffer_info()
+            text_bytes = text.encode("utf-8")
+            arr = array.array("B", text_bytes)
+            arrays.append(arr)
+            bi = arr.buffer_info()
             responses.append(lg.QuerySampleResponse(sample.id, bi[0], bi[1]))
-
         lg.QuerySamplesComplete(responses)
 
     def _issue_queries_offline_sequential(self, query_samples: List[Any]) -> None:
+        """Single-die Offline path."""
         total = len(query_samples)
         responses = []
-        response_arrays = []
+        arrays = []
 
-        print(f"[Inference] ", end="", file=sys.stderr)
+        print("[Inference] ", end="", file=sys.stderr)
         dots_printed = 0
 
+        _, model = self._models[0]
         for sample in query_samples:
             sample_idx = sample.index
-            die_name, model = self._get_next_model()
-
             text = self._process_sample(sample_idx, model)
             self._predictions[sample_idx] = text
             self._sample_count += 1
 
-            text_bytes = text.encode('utf-8')
-            response_array = array.array('B', text_bytes)
-            response_arrays.append(response_array)
-            bi = response_array.buffer_info()
+            text_bytes = text.encode("utf-8")
+            arr = array.array("B", text_bytes)
+            arrays.append(arr)
+            bi = arr.buffer_info()
             responses.append(lg.QuerySampleResponse(sample.id, bi[0], bi[1]))
 
-            if total > 0:
-                progress = int(self._sample_count * 10 / total)
-                while dots_printed < progress:
-                    print(".", end="", file=sys.stderr, flush=True)
-                    dots_printed += 1
+            target = int(self._sample_count * 10 / total) if total else 10
+            while dots_printed < target:
+                print(".", end="", file=sys.stderr, flush=True)
+                dots_printed += 1
 
         while dots_printed < 10:
             print(".", end="", file=sys.stderr, flush=True)
             dots_printed += 1
 
         elapsed = time.time() - self._start_time
-        print(f" {total}/{total} ({elapsed:.1f}s, {total/elapsed:.1f} qps)",
-              file=sys.stderr)
+        print(
+            f" {total}/{total} ({elapsed:.1f}s, {total / elapsed:.1f} qps)",
+            file=sys.stderr,
+        )
 
         lg.QuerySamplesComplete(responses)
 
     def _issue_queries_server(self, query_samples: List[Any]) -> None:
+        """Server: round-robin across dies, respond per query."""
         for sample in query_samples:
             sample_idx = sample.index
-
-            die_name, model = self._get_next_model()
+            _name, model = self._models[self._model_index]
+            self._model_index = (self._model_index + 1) % len(self._models)
 
             text = self._process_sample(sample_idx, model)
             self._predictions[sample_idx] = text
             self._sample_count += 1
 
-            text_bytes = text.encode('utf-8')
-            response_array = array.array('B', text_bytes)
-            bi = response_array.buffer_info()
+            text_bytes = text.encode("utf-8")
+            arr = array.array("B", text_bytes)
+            bi = arr.buffer_info()
+            lg.QuerySamplesComplete([lg.QuerySampleResponse(sample.id, bi[0], bi[1])])
 
-            response = lg.QuerySampleResponse(sample.id, bi[0], bi[1])
-            lg.QuerySamplesComplete([response])
+    # -- LoadGen integration ------------------------------------------------
 
     def flush_queries(self) -> None:
         pass
@@ -361,7 +342,8 @@ class WhisperMultiDieSUT:
     def get_sut(self) -> Any:
         if self._sut_handle is None:
             self._sut_handle = lg.ConstructSUT(
-                self.issue_queries, self.flush_queries)
+                self.issue_queries, self.flush_queries,
+            )
         return self._sut_handle
 
     def get_qsl(self) -> Any:
@@ -370,7 +352,8 @@ class WhisperMultiDieSUT:
                 self.qsl.total_sample_count,
                 self.qsl.performance_sample_count,
                 self.qsl.load_query_samples,
-                self.qsl.unload_query_samples)
+                self.qsl.unload_query_samples,
+            )
         return self._qsl_handle
 
     def get_predictions(self) -> Dict[int, str]:
