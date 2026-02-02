@@ -604,31 +604,43 @@ class COCOPromptsDataset(BaseDataset):
     ) -> float:
         """Compute FID score between generated and reference images.
 
-        Uses InceptionV3 pool_3 features (2048-dim) with adaptive avg pooling,
-        matching the MLCommons reference implementation.
+        CRITICAL: Must use pytorch-fid InceptionV3 weights
+        (pt_inception-2015-12-05-6726825d.pth), NOT torchvision weights.
+        val2014.npz statistics were computed with these exact weights.
+        MLCommons reference: text_to_image/tools/fid/inception.py
         """
         try:
             from scipy import linalg
             import torch
             from torchvision import transforms
-            from torchvision.models import inception_v3, Inception_V3_Weights
             from PIL import Image
         except ImportError:
             logger.warning("Required packages not installed for FID computation")
             return 0.0
 
         try:
-            # Load InceptionV3 matching MLCommons reference:
-            # Use pool_3 features (2048-dim) via adaptive_avg_pool2d
-            model = inception_v3(weights=Inception_V3_Weights.DEFAULT, transform_input=False)
-            model.fc = torch.nn.Identity()
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+            # MUST use pytorch-fid InceptionV3 weights — same as MLCommons reference.
+            # val2014.npz (mu, sigma) was computed with these weights.
+            # torchvision InceptionV3 has DIFFERENT weights and will give wrong FID.
+            try:
+                from pytorch_fid.inception import InceptionV3
+                dims = 2048
+                block_idx = InceptionV3.BLOCK_INDEX_BY_DIM[dims]
+                model = InceptionV3([block_idx]).to(device)
+                logger.info("Using pytorch-fid InceptionV3 (correct weights for MLCommons FID)")
+            except ImportError:
+                logger.error(
+                    "pytorch-fid is NOT installed. FID scores WILL NOT match MLCommons. "
+                    "Install with: pip install pytorch-fid"
+                )
+                return 0.0
+
             model.eval()
 
-            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            model = model.to(device)
-
-            # MLCommons FID uses ToTensor() only (scales to [0,1]),
-            # NO ImageNet normalization
+            # Transform: Resize + ToTensor (scales to [0,1]).
+            # pytorch-fid InceptionV3 normalizes to [-1,1] internally.
             transform = transforms.Compose([
                 transforms.Resize((299, 299)),
                 transforms.ToTensor(),
@@ -650,7 +662,9 @@ class COCOPromptsDataset(BaseDataset):
                     tensor = transform(img).unsqueeze(0).to(device)
                     with torch.no_grad():
                         feat = model(tensor)
-                        # Adaptive avg pool to get (batch, 2048) features
+                        # pytorch_fid returns list of feature tensors per block
+                        if isinstance(feat, list):
+                            feat = feat[0]
                         if feat.dim() > 2:
                             feat = torch.nn.functional.adaptive_avg_pool2d(feat, (1, 1))
                         feat = feat.squeeze().cpu().numpy()
