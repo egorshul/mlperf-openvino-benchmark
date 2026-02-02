@@ -20,16 +20,18 @@ class SUTFactory:
         backend: Optional[Any] = None,
         encoder_path: Optional[str] = None,
         decoder_path: Optional[str] = None,
+        model_path: Optional[str] = None,
     ) -> Any:
         """Create the appropriate multi-die SUT for the given model type.
 
         Args:
-            model_type: Type of model (RESNET50, BERT, RETINANET, WHISPER)
+            model_type: Type of model (RESNET50, BERT, RETINANET, WHISPER, SDXL)
             config: Benchmark configuration
             qsl: Query Sample Library
             backend: Optional backend for fallback (Python SUTs)
             encoder_path: Path to encoder model (for Whisper)
             decoder_path: Path to decoder model (for Whisper)
+            model_path: Path to model directory (for SDXL)
 
         Returns:
             Configured SUT instance
@@ -48,6 +50,8 @@ class SUTFactory:
             return SUTFactory._create_retinanet_sut(config, qsl, is_accuracy_mode, backend)
         elif model_type == ModelType.WHISPER:
             return SUTFactory._create_whisper_sut(config, qsl, encoder_path, decoder_path)
+        elif model_type == ModelType.SDXL:
+            return SUTFactory._create_sdxl_sut(config, qsl, model_path)
         else:
             raise ValueError(f"Multi-die SUT not supported for model type: {model_type}")
 
@@ -190,6 +194,27 @@ class SUTFactory:
             config=config,
             encoder_path=encoder_path,
             decoder_path=decoder_path,
+            qsl=qsl,
+            scenario=config.scenario,
+        )
+
+    @staticmethod
+    def _create_sdxl_sut(
+        config: BenchmarkConfig,
+        qsl: QuerySampleLibrary,
+        model_path: Optional[str],
+    ) -> Any:
+        """Create SDXL multi-die SUT (Python only, no C++ implementation)."""
+        if not model_path:
+            raise ValueError(
+                "SDXL multi-die SUT requires model_path"
+            )
+
+        from .sdxl_sut import SDXLMultiDieSUT
+        logger.info(f"Using SDXL Python multi-die SUT on {config.openvino.device}")
+        return SDXLMultiDieSUT(
+            config=config,
+            model_path=model_path,
             qsl=qsl,
             scenario=config.scenario,
         )

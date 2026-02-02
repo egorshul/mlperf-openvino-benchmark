@@ -364,6 +364,24 @@ class BenchmarkRunner:
 
         model_path = Path(self.config.model.model_path)
 
+        # Multi-die accelerator path (NPU, XPU, etc.)
+        if self.config.openvino.is_accelerator_device():
+            try:
+                from .sdxl_sut import SDXLMultiDieSUT, OPTIMUM_SDXL_AVAILABLE
+                if OPTIMUM_SDXL_AVAILABLE and model_path.is_dir():
+                    logger.info(
+                        f"Using SDXL multi-die SUT on {self.config.openvino.device}"
+                    )
+                    self.sut = SDXLMultiDieSUT(
+                        config=self.config,
+                        model_path=model_path,
+                        qsl=self.qsl,
+                        scenario=self.config.scenario,
+                    )
+                    return
+            except Exception as e:
+                logger.warning(f"Failed to create SDXLMultiDieSUT: {e}")
+
         try:
             from .sdxl_sut import SDXLOptimumSUT, OPTIMUM_SDXL_AVAILABLE
 
