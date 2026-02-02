@@ -119,9 +119,12 @@ class SDXLOptimumSUT:
 
         try:
             # Load OpenVINO optimized pipeline
+            # load_in_8bit=False prevents NNCF int8 weight compression
+            # which degrades accuracy for MLCommons closed division
             self.pipeline = OVStableDiffusionXLPipeline.from_pretrained(
                 str(self.model_path),
                 compile=True,
+                load_in_8bit=False,
             )
             logger.info("SDXL pipeline loaded successfully (OpenVINO)")
 

@@ -376,6 +376,55 @@ class COCOPromptsDataset(BaseDataset):
             import traceback
             logger.debug(traceback.format_exc())
 
+        # Validate: check if we have latents for all samples
+        num_needed = len(self._samples)
+        num_loaded = len(self._latents_cache)
+        if num_loaded < num_needed:
+            if num_loaded > 0:
+                logger.warning(
+                    f"Latents file has {num_loaded} entries but {num_needed} samples needed. "
+                    f"File may be corrupted or incomplete."
+                )
+            logger.info(
+                f"Generating {num_needed} latents locally "
+                f"(MLCommons reference: seed=0, torch.randn)"
+            )
+            self._generate_latents(num_needed)
+
+    def _generate_latents(self, num_samples: int) -> None:
+        """Generate latents matching MLCommons reference implementation.
+
+        MLCommons reference uses: torch.randn(1, 4, 128, 128) with
+        Generator(cpu).manual_seed(0), one per sample sequentially.
+        """
+        try:
+            import torch
+            generator = torch.Generator("cpu")
+            generator.manual_seed(0)
+
+            self._latents_cache.clear()
+            for idx in range(num_samples):
+                lat = torch.randn(1, 4, LATENT_SIZE, LATENT_SIZE, generator=generator)
+                self._latents_cache[idx] = lat.squeeze(0).numpy().astype(np.float32)
+
+            logger.info(
+                f"Generated {num_samples} latents (seed=0), "
+                f"shape per sample: {self._latents_cache[0].shape}"
+            )
+
+            # Save for reuse
+            save_path = self.data_path / "latents.pt"
+            latents_dict = {}
+            for idx in range(num_samples):
+                latents_dict[idx] = torch.from_numpy(self._latents_cache[idx]).unsqueeze(0)
+            torch.save(latents_dict, str(save_path))
+            logger.info(f"Saved generated latents to {save_path}")
+
+        except Exception as e:
+            logger.error(f"Failed to generate latents: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+
     def __len__(self) -> int:
         return len(self._samples)
 
