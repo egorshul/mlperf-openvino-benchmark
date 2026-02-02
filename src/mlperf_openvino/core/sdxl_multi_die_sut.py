@@ -84,6 +84,7 @@ class SDXLMultiDieSUT:
         self._lock = threading.Lock()
         self._completed = 0
         self._query_count = 0
+        self._start_time = 0.0
 
         self._sut_handle = None
         self._qsl_handle = None
@@ -275,6 +276,11 @@ class SDXLMultiDieSUT:
     # LoadGen query dispatch
     # ------------------------------------------------------------------
 
+    @property
+    def _sample_count(self) -> int:
+        """Completed sample count (used by benchmark_runner for stats)."""
+        return self._completed
+
     def issue_queries(self, query_samples: List[Any]) -> None:
         self._query_count += len(query_samples)
 
@@ -287,17 +293,13 @@ class SDXLMultiDieSUT:
         """Offline: distribute samples across dies, run in parallel."""
         total = len(query_samples)
         num_dies = len(self._pipelines)
-        start_time = time.time()
-
-        print(
-            f"[Offline] {total} samples, {num_dies} die(s)",
-            file=sys.stderr,
-        )
-
+        self._start_time = time.time()
         self._completed = 0
 
+        print(f"[Offline] {total} samples, {num_dies} die(s)", file=sys.stderr)
+
         if num_dies <= 1:
-            self._issue_queries_offline_sequential(query_samples, start_time)
+            self._issue_queries_offline_sequential(query_samples)
             return
 
         # Distribute samples round-robin across dies
@@ -310,7 +312,8 @@ class SDXLMultiDieSUT:
 
         # Each die gets its own thread; samples within a die run sequentially
         # (pipeline is not thread-safe for concurrent calls on the same model).
-        # Different dies run truly in parallel.
+        # Different dies run truly in parallel — OpenVINO releases GIL during
+        # inference, so UNet/VAE/text-encoder calls overlap across dies.
 
         all_results: List[Tuple[Any, int, np.ndarray]] = []
         results_lock = threading.Lock()
@@ -331,6 +334,8 @@ class SDXLMultiDieSUT:
         # Start all die workers in parallel
         print("[Inference] ", end="", file=sys.stderr)
         dots_printed = 0
+        last_completed = 0
+        wait_start = time.time()
 
         with ThreadPoolExecutor(max_workers=num_dies) as pool:
             futures = [
@@ -341,10 +346,7 @@ class SDXLMultiDieSUT:
 
             # Poll for per-sample progress while workers run
             while True:
-                done_count = 0
-                for f in futures:
-                    if f.done():
-                        done_count += 1
+                done_count = sum(1 for f in futures if f.done())
 
                 with self._lock:
                     completed = self._completed
@@ -357,7 +359,17 @@ class SDXLMultiDieSUT:
                 if done_count == len(futures):
                     break
 
-                time.sleep(0.5)
+                if completed > last_completed:
+                    last_completed = completed
+                    wait_start = time.time()
+                elif time.time() - wait_start > 30:
+                    print(
+                        f"\n[WARN] Stalled at {completed}/{total}",
+                        file=sys.stderr,
+                    )
+                    wait_start = time.time()
+
+                time.sleep(0.1)
 
             # Propagate any exceptions
             for f in futures:
@@ -367,7 +379,7 @@ class SDXLMultiDieSUT:
             print(".", end="", file=sys.stderr, flush=True)
             dots_printed += 1
 
-        elapsed = time.time() - start_time
+        elapsed = time.time() - self._start_time
         print(
             f" {total}/{total} ({elapsed:.1f}s, {total/elapsed:.1f} qps)",
             file=sys.stderr,
@@ -388,7 +400,6 @@ class SDXLMultiDieSUT:
     def _issue_queries_offline_sequential(
         self,
         query_samples: List[Any],
-        start_time: float,
     ) -> None:
         """Single-die Offline fallback."""
         total = len(query_samples)
@@ -421,7 +432,7 @@ class SDXLMultiDieSUT:
             print(".", end="", file=sys.stderr, flush=True)
             dots_printed += 1
 
-        elapsed = time.time() - start_time
+        elapsed = time.time() - self._start_time
         print(
             f" {total}/{total} ({elapsed:.1f}s, {total/elapsed:.1f} qps)",
             file=sys.stderr,
@@ -441,6 +452,7 @@ class SDXLMultiDieSUT:
 
             with self._lock:
                 self._predictions[sample_idx] = image
+                self._completed += 1
 
             response_data = np.array(image.shape, dtype=np.int64)
             response_array = array.array('B', response_data.tobytes())
