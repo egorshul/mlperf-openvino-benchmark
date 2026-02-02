@@ -111,7 +111,13 @@ class SDXLMultiDieSUT:
         return sorted(device_dies)
 
     def _setup_pipelines(self) -> None:
-        """Load one OVStableDiffusionXLPipeline per accelerator die."""
+        """Load one OVStableDiffusionXLPipeline per accelerator die.
+
+        For accelerator devices (NPU, XPU) that don't support dynamic shapes,
+        the pipeline is loaded without compilation, reshaped to static shapes
+        (batch_size=1, 1024x1024, num_images_per_prompt=1), moved to the
+        target die, and then compiled.
+        """
         target_device = (
             self.config.openvino.device
             if hasattr(self.config, 'openvino')
@@ -139,22 +145,7 @@ class SDXLMultiDieSUT:
         for die in device_dies:
             logger.info(f"Loading OVStableDiffusionXLPipeline for {die}")
             try:
-                pipeline = OVStableDiffusionXLPipeline.from_pretrained(
-                    str(self.model_path),
-                    device=die,
-                    compile=True,
-                    load_in_8bit=False,
-                )
-
-                # Override scheduler to EulerDiscreteScheduler (MLCommons requirement)
-                try:
-                    from diffusers import EulerDiscreteScheduler
-                    pipeline.scheduler = EulerDiscreteScheduler.from_config(
-                        pipeline.scheduler.config
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to override scheduler on {die}: {e}")
-
+                pipeline = self._load_pipeline_for_device(die)
                 self._pipelines.append((die, pipeline))
                 logger.info(f"Pipeline loaded for {die}")
 
@@ -162,20 +153,9 @@ class SDXLMultiDieSUT:
                 logger.warning(f"Failed to load pipeline for {die}: {e}")
 
         if not self._pipelines:
-            # Fallback: load on CPU
+            # Fallback: load on CPU (dynamic shapes OK)
             logger.warning("No accelerator pipelines loaded, falling back to CPU")
-            pipeline = OVStableDiffusionXLPipeline.from_pretrained(
-                str(self.model_path),
-                compile=True,
-                load_in_8bit=False,
-            )
-            try:
-                from diffusers import EulerDiscreteScheduler
-                pipeline.scheduler = EulerDiscreteScheduler.from_config(
-                    pipeline.scheduler.config
-                )
-            except Exception:
-                pass
+            pipeline = self._load_pipeline_for_device("CPU")
             self._pipelines.append(("CPU", pipeline))
 
         die_names = [die for die, _ in self._pipelines]
@@ -183,6 +163,59 @@ class SDXLMultiDieSUT:
             f"[Setup] SDXL Multi-Die: {len(self._pipelines)} die(s) = {die_names}",
             file=sys.stderr,
         )
+
+    def _load_pipeline_for_device(self, die: str) -> Any:
+        """Load, reshape to static shapes, and compile pipeline for a device.
+
+        Accelerator devices (NPU, XPU) typically don't support dynamic shapes.
+        The pipeline is loaded without compilation, reshaped to fixed
+        (batch_size=1, 1024x1024) dimensions, then compiled on the target die.
+        CPU pipelines skip the reshape step since dynamic shapes work fine.
+        """
+        is_cpu = die.upper() == "CPU"
+
+        if is_cpu:
+            # CPU supports dynamic shapes — simple path
+            pipeline = OVStableDiffusionXLPipeline.from_pretrained(
+                str(self.model_path),
+                compile=True,
+                load_in_8bit=False,
+            )
+        else:
+            # Accelerator: load → reshape to static → move to device → compile
+            logger.info(f"  Loading pipeline (compile=False) ...")
+            pipeline = OVStableDiffusionXLPipeline.from_pretrained(
+                str(self.model_path),
+                compile=False,
+                load_in_8bit=False,
+            )
+
+            logger.info(
+                f"  Reshaping to static shapes: "
+                f"batch_size=1, {self.image_size}x{self.image_size}, "
+                f"num_images_per_prompt=1"
+            )
+            pipeline.reshape(
+                batch_size=1,
+                height=self.image_size,
+                width=self.image_size,
+                num_images_per_prompt=1,
+            )
+
+            logger.info(f"  Moving to device {die} and compiling ...")
+            pipeline.to(die)
+            pipeline.compile()
+
+        # Override scheduler to EulerDiscreteScheduler (MLCommons requirement)
+        try:
+            from diffusers import EulerDiscreteScheduler
+            pipeline.scheduler = EulerDiscreteScheduler.from_config(
+                pipeline.scheduler.config
+            )
+        except Exception as e:
+            logger.warning(f"Failed to override scheduler on {die}: {e}")
+
+        return pipeline
 
     def _get_next_pipeline(self) -> Tuple[str, Any]:
         """Get next pipeline in round-robin order (for Server mode)."""
