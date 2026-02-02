@@ -1519,6 +1519,7 @@ def download_coco2014(
                 logger.warning("Will use randomly generated latents (not MLCommons closed-division compliant)")
 
     # Download official MLCommons captions file
+    # For closed division, the EXACT MLCommons prompts must be used
     if "captions_tsv" in dataset_info:
         if not mlcommons_captions.exists() or force:
             logger.info("Downloading MLCommons official captions file...")
@@ -1531,6 +1532,12 @@ def download_coco2014(
             except Exception as e:
                 logger.warning(f"Failed to download MLCommons captions: {e}")
                 logger.warning("Using locally generated captions file")
+
+        # Use official MLCommons captions as the primary prompts file
+        # This is REQUIRED for closed division (exact same prompts as reference)
+        if mlcommons_captions.exists():
+            shutil.copy2(str(mlcommons_captions), str(prompts_file))
+            logger.info(f"Using official MLCommons captions as primary prompts file: {prompts_file}")
 
     # Count samples
     actual_samples = sum(1 for _ in open(prompts_file, 'r'))
