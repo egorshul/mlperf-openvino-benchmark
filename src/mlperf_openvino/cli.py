@@ -188,7 +188,7 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         actual_hint = performance_hint
 
     if batch_size is None:
-        batch_size = 1
+        batch_size = 0
 
     benchmark_config.openvino.num_streams = num_streams
     benchmark_config.openvino.batch_size = batch_size

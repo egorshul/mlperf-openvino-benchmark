@@ -52,7 +52,7 @@ class OpenVINOConfig:
     device: str = "CPU"
     num_streams: str = "AUTO"
     num_threads: int = 0  # 0 = auto-detect
-    batch_size: int = 1  # Inference batch size
+    batch_size: int = 0  # Inference batch size (0 = model default)
     enable_profiling: bool = False
     cache_dir: str = "./cache"
     performance_hint: str = "THROUGHPUT"  # THROUGHPUT or LATENCY

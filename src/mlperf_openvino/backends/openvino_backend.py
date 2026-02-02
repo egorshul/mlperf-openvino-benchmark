@@ -104,7 +104,7 @@ class OpenVINOBackend(BaseBackend):
         else:
             raise ValueError(f"Unsupported model format: {model_path.suffix}")
 
-        self._reshape_model_for_batch(self.config.batch_size)
+        self._reshape_model_for_batch(max(self.config.batch_size, 1))
 
         if self.use_nhwc_input:
             self._apply_nhwc_input_layout()

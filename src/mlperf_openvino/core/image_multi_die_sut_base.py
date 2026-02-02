@@ -46,12 +46,11 @@ class ImageMultiDieSUTBase(ABC):
         self.qsl = qsl
         self.scenario = scenario
 
-        # Batch size: Server=1 (AUTO_BATCH), Offline=configured or default
         if scenario == Scenario.SERVER:
             self.batch_size = 1
         else:
             configured_batch = config.openvino.batch_size
-            if configured_batch <= 1:
+            if configured_batch <= 0:
                 self.batch_size = self.DEFAULT_OFFLINE_BATCH_SIZE
             else:
                 self.batch_size = configured_batch

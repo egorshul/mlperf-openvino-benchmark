@@ -61,7 +61,7 @@ class ResNetMultiDeviceSUT:
         self.backend = backend
         self.qsl = qsl
         self.scenario = scenario
-        self.batch_size = config.openvino.batch_size
+        self.batch_size = max(config.openvino.batch_size, 1)
 
         if not self.backend.is_loaded:
             self.backend.load()
