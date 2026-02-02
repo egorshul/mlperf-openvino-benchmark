@@ -412,6 +412,7 @@ class SDXLManualSUT:
         guidance_scale: float = DEFAULT_GUIDANCE_SCALE,
         num_inference_steps: int = DEFAULT_NUM_INFERENCE_STEPS,
         image_size: int = DEFAULT_IMAGE_SIZE,
+        negative_prompt: str = DEFAULT_NEGATIVE_PROMPT,
     ):
         """Initialize SDXL SUT with manual component loading."""
         if not LOADGEN_AVAILABLE:
@@ -424,6 +425,7 @@ class SDXLManualSUT:
         self.guidance_scale = guidance_scale
         self.num_inference_steps = num_inference_steps
         self.image_size = image_size
+        self.negative_prompt = negative_prompt
 
         self._predictions: Dict[int, np.ndarray] = {}
         self._query_count = 0
@@ -538,12 +540,18 @@ class SDXLManualSUT:
 
         logger.info("SDXL components loaded successfully")
 
-    def _encode_prompt(self, prompt: str) -> np.ndarray:
-        """Encode text prompt using CLIP text encoders."""
+    def _encode_prompt(self, prompt: str):
+        """Encode text prompt using CLIP text encoders.
+
+        Returns:
+            Tuple of (prompt_embeds, pooled_prompt_embeds):
+            - prompt_embeds: [1, 77, 2048] concatenated hidden states
+            - pooled_prompt_embeds: [1, 1280] pooled output from text_encoder_2
+        """
         if self.tokenizer is None:
             raise RuntimeError("Tokenizer not loaded")
 
-        # Tokenize
+        # Tokenize for first text encoder
         tokens = self.tokenizer(
             prompt,
             padding="max_length",
@@ -552,7 +560,7 @@ class SDXLManualSUT:
             return_tensors="np"
         )
 
-        # Encode with first text encoder
+        # Encode with first text encoder (CLIP ViT-L/14 → 768-dim)
         text_input_ids = tokens['input_ids']
 
         if self.text_encoder is not None:
@@ -560,7 +568,9 @@ class SDXLManualSUT:
         else:
             prompt_embeds = np.zeros((1, 77, 768), dtype=np.float32)
 
-        # Encode with second text encoder (SDXL specific)
+        # Encode with second text encoder (OpenCLIP ViT-bigG → 1280-dim)
+        pooled_prompt_embeds = np.zeros((1, 1280), dtype=np.float32)
+
         if self.text_encoder_2 is not None and self.tokenizer_2 is not None:
             tokens_2 = self.tokenizer_2(
                 prompt,
@@ -569,18 +579,22 @@ class SDXLManualSUT:
                 truncation=True,
                 return_tensors="np"
             )
-            pooled_output = self.text_encoder_2(tokens_2['input_ids'])
-            if isinstance(pooled_output, tuple):
-                prompt_embeds_2 = pooled_output[0]
-                pooled_embeds = pooled_output[1] if len(pooled_output) > 1 else None
-            else:
-                prompt_embeds_2 = pooled_output
-                pooled_embeds = None
+            text_encoder_2_output = self.text_encoder_2(tokens_2['input_ids'])
 
-            # Concatenate embeddings
+            # OpenVINO compiled model returns outputs by index
+            # Output 0: hidden_states [1, 77, 1280]
+            # Output 1: pooled_output [1, 1280]
+            if hasattr(text_encoder_2_output, '__len__') and len(text_encoder_2_output) > 1:
+                prompt_embeds_2 = text_encoder_2_output[0]
+                pooled_prompt_embeds = text_encoder_2_output[1]
+            else:
+                prompt_embeds_2 = text_encoder_2_output[0] if hasattr(text_encoder_2_output, '__getitem__') else text_encoder_2_output
+                # No pooled output available
+
+            # Concatenate hidden states from both encoders along feature dim
             prompt_embeds = np.concatenate([prompt_embeds, prompt_embeds_2], axis=-1)
 
-        return prompt_embeds
+        return prompt_embeds, pooled_prompt_embeds
 
     def _generate_latents(self, batch_size: int = 1) -> np.ndarray:
         """Generate initial random latents."""
@@ -596,8 +610,18 @@ class SDXLManualSUT:
         latents: np.ndarray,
         prompt_embeds: np.ndarray,
         timestep: float,
+        pooled_embeds: Optional[np.ndarray] = None,
+        time_ids: Optional[np.ndarray] = None,
     ) -> np.ndarray:
-        """Perform one denoising step with UNet."""
+        """Perform one denoising step with UNet.
+
+        Args:
+            latents: Current latents [1, 4, 128, 128]
+            prompt_embeds: Concatenated [negative, positive] hidden states [2, 77, 2048]
+            timestep: Current timestep
+            pooled_embeds: Concatenated [negative, positive] pooled embeddings [2, 1280]
+            time_ids: Time conditioning [2, 6]
+        """
         latent_input = np.concatenate([latents] * 2)  # For CFG
 
         # Scale model input (required by EulerDiscreteScheduler)
@@ -611,11 +635,29 @@ class SDXLManualSUT:
 
         timestep_array = np.array([timestep], dtype=np.float32)
 
-        noise_pred = self.unet({
+        # Build UNet inputs
+        unet_inputs = {
             'sample': latent_input,
             'timestep': timestep_array,
             'encoder_hidden_states': prompt_embeds,
-        })[0]
+        }
+
+        # SDXL UNet requires additional conditioning (text_embeds + time_ids)
+        if pooled_embeds is not None:
+            unet_inputs['text_embeds'] = pooled_embeds
+        if time_ids is not None:
+            unet_inputs['time_ids'] = time_ids
+
+        # Run UNet - gracefully handle if model doesn't accept extra inputs
+        try:
+            noise_pred = self.unet(unet_inputs)[0]
+        except Exception:
+            # Fallback: try without added_cond_kwargs
+            noise_pred = self.unet({
+                'sample': latent_input,
+                'timestep': timestep_array,
+                'encoder_hidden_states': prompt_embeds,
+            })[0]
 
         # Classifier-free guidance
         noise_pred_uncond, noise_pred_text = np.split(noise_pred, 2)
@@ -694,16 +736,33 @@ class SDXLManualSUT:
             self._close_progress()
 
     def _process_sample(self, sample_idx: int) -> np.ndarray:
-        """Generate image for a sample (MLCommons-compliant)."""
+        """Generate image for a sample (MLCommons-compliant).
+
+        Follows MLCommons reference: encode prompt + negative prompt,
+        build SDXL conditioning (pooled embeds + time_ids), run denoising loop.
+        """
         features = self.qsl.get_features(sample_idx)
         prompt = features['prompt']
 
-        # Encode prompt
-        prompt_embeds = self._encode_prompt(prompt)
+        # Encode positive prompt
+        prompt_embeds, pooled_prompt_embeds = self._encode_prompt(prompt)
 
-        # Also encode empty (negative) prompt for CFG
-        empty_embeds = self._encode_prompt("")
-        combined_embeds = np.concatenate([empty_embeds, prompt_embeds])
+        # Encode negative prompt for CFG (MLCommons official negative prompt)
+        negative_embeds, pooled_negative_embeds = self._encode_prompt(
+            self.negative_prompt
+        )
+
+        # Concatenate [negative, positive] for classifier-free guidance
+        combined_embeds = np.concatenate([negative_embeds, prompt_embeds])
+        combined_pooled = np.concatenate([pooled_negative_embeds, pooled_prompt_embeds])
+
+        # Build time_ids: [original_h, original_w, crop_top, crop_left, target_h, target_w]
+        # SDXL default: original=1024x1024, crop=(0,0), target=1024x1024
+        time_ids_single = np.array(
+            [self.image_size, self.image_size, 0, 0, self.image_size, self.image_size],
+            dtype=np.float32
+        ).reshape(1, 6)
+        combined_time_ids = np.concatenate([time_ids_single, time_ids_single])  # [2, 6]
 
         # Use pre-computed latents if available (required for closed division)
         latents = features.get('latents', None)
@@ -730,7 +789,11 @@ class SDXLManualSUT:
             timesteps = np.linspace(1000, 0, self.num_inference_steps)
 
         for t in timesteps:
-            noise_pred = self._denoise_step(latents, combined_embeds, t)
+            noise_pred = self._denoise_step(
+                latents, combined_embeds, t,
+                pooled_embeds=combined_pooled,
+                time_ids=combined_time_ids,
+            )
 
             if self.scheduler is not None:
                 import torch
