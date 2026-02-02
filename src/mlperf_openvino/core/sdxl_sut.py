@@ -93,6 +93,13 @@ class SDXLOptimumSUT:
         self.image_size = image_size
         self.negative_prompt = negative_prompt
 
+        # Batch size: from config, forced to 1 for Server
+        if scenario == Scenario.SERVER:
+            self.batch_size = 1
+        else:
+            bs = config.openvino.batch_size if hasattr(config, 'openvino') else 0
+            self.batch_size = bs if bs > 1 else 1
+
         self._predictions: Dict[int, np.ndarray] = {}
         self._query_count = 0
         self._sample_count = 0
@@ -108,9 +115,21 @@ class SDXLOptimumSUT:
         logger.info("Loading SDXL model from %s", self.model_path)
 
         try:
-            self.pipeline = OVStableDiffusionXLPipeline.from_pretrained(
-                str(self.model_path), compile=True, load_in_8bit=False,
-            )
+            if self.batch_size > 1:
+                self.pipeline = OVStableDiffusionXLPipeline.from_pretrained(
+                    str(self.model_path), compile=False, load_in_8bit=False,
+                )
+                self.pipeline.reshape(
+                    batch_size=self.batch_size,
+                    height=self.image_size,
+                    width=self.image_size,
+                    num_images_per_prompt=1,
+                )
+                self.pipeline.compile()
+            else:
+                self.pipeline = OVStableDiffusionXLPipeline.from_pretrained(
+                    str(self.model_path), compile=True, load_in_8bit=False,
+                )
         except Exception as e:
             logger.warning("Failed to load OpenVINO pipeline: %s", e)
             if DIFFUSERS_AVAILABLE:
@@ -184,6 +203,53 @@ class SDXLOptimumSUT:
 
         return image
 
+    def _process_batch(self, sample_indices: List[int]) -> List[np.ndarray]:
+        """Generate a batch of images with MLCommons-compliant parameters."""
+        import torch
+
+        prompts = []
+        latents_list = []
+
+        for idx in sample_indices:
+            features = self.qsl.get_features(idx)
+            prompts.append(features["prompt"])
+            latent = features.get("latents", None)
+            if latent is not None:
+                if isinstance(latent, np.ndarray):
+                    t = torch.from_numpy(latent.copy()).float()
+                else:
+                    t = torch.tensor(latent).float()
+                if t.dim() == 3:
+                    t = t.unsqueeze(0)
+                latents_list.append(t)
+
+        pipe_kwargs = {
+            "prompt": prompts,
+            "negative_prompt": [self.negative_prompt] * len(prompts),
+            "guidance_scale": self.guidance_scale,
+            "num_inference_steps": self.num_inference_steps,
+            "height": self.image_size,
+            "width": self.image_size,
+            "output_type": "np",
+        }
+        if latents_list and len(latents_list) == len(prompts):
+            pipe_kwargs["latents"] = torch.cat(latents_list, dim=0)
+
+        result = self.pipeline(**pipe_kwargs)
+
+        images = []
+        for img in result.images:
+            if isinstance(img, np.ndarray):
+                if img.max() <= 1.0:
+                    img = (img * 255).round().astype(np.uint8)
+                elif img.dtype != np.uint8:
+                    img = img.astype(np.uint8)
+            else:
+                img = np.array(img)
+            images.append(img)
+
+        return images
+
     def issue_queries(self, query_samples: List[Any]) -> None:
         self._query_count += len(query_samples)
         if self.scenario == Scenario.OFFLINE:
@@ -197,20 +263,35 @@ class SDXLOptimumSUT:
         self._start_time = time.time()
         responses = []
         response_arrays = []
+        bs = self.batch_size
 
-        print(f"[Offline] {total} samples", file=sys.stderr)
+        bs_info = f", batch={bs}" if bs > 1 else ""
+        print(f"[Offline] {total} samples{bs_info}", file=sys.stderr)
 
-        for sample in query_samples:
-            sample_idx = sample.index
-            image = self._process_sample(sample_idx)
-            self._predictions[sample_idx] = image
-            self._sample_count += 1
+        for i in range(0, total, bs):
+            chunk = query_samples[i:i + bs]
+            indices = [s.index for s in chunk]
 
-            response_data = np.array(image.shape, dtype=np.int64)
-            response_array = array.array("B", response_data.tobytes())
-            response_arrays.append(response_array)
-            bi = response_array.buffer_info()
-            responses.append(lg.QuerySampleResponse(sample.id, bi[0], bi[1]))
+            if len(indices) < bs:
+                indices_padded = indices + [indices[-1]] * (bs - len(indices))
+            else:
+                indices_padded = indices
+
+            if bs > 1:
+                images = self._process_batch(indices_padded)
+                images = images[:len(chunk)]
+            else:
+                images = [self._process_sample(indices[0])]
+
+            for sample, image in zip(chunk, images):
+                self._predictions[sample.index] = image
+                self._sample_count += 1
+
+                response_data = np.array(image.shape, dtype=np.int64)
+                response_array = array.array("B", response_data.tobytes())
+                response_arrays.append(response_array)
+                bi = response_array.buffer_info()
+                responses.append(lg.QuerySampleResponse(sample.id, bi[0], bi[1]))
 
             _print_progress(self._sample_count, total, self._start_time)
 

@@ -93,6 +93,13 @@ class SDXLMultiDieSUT:
         self.image_size = image_size
         self.negative_prompt = negative_prompt
 
+        # Batch size: from config, forced to 1 for Server
+        if scenario == Scenario.SERVER:
+            self.batch_size = 1
+        else:
+            bs = config.openvino.batch_size if hasattr(config, 'openvino') else 0
+            self.batch_size = bs if bs > 1 else 1
+
         self._predictions: Dict[int, np.ndarray] = {}
         self._lock = threading.Lock()
         self._completed = 0
@@ -151,8 +158,9 @@ class SDXLMultiDieSUT:
             self._pipelines.append(("CPU", pipeline, threading.Lock()))
 
         die_names = [name for name, _, _ in self._pipelines]
+        bs_info = f", batch={self.batch_size}" if self.batch_size > 1 else ""
         print(
-            f"[SDXL] {len(self._pipelines)} die(s): {', '.join(die_names)}",
+            f"[SDXL] {len(self._pipelines)} die(s): {', '.join(die_names)}{bs_info}",
             file=sys.stderr,
         )
 
@@ -164,7 +172,7 @@ class SDXLMultiDieSUT:
         """
         is_cpu = die.upper() == "CPU"
 
-        if is_cpu:
+        if is_cpu and self.batch_size <= 1:
             pipeline = OVStableDiffusionXLPipeline.from_pretrained(
                 str(self.model_path), compile=True, load_in_8bit=False,
             )
@@ -173,12 +181,13 @@ class SDXLMultiDieSUT:
                 str(self.model_path), compile=False, load_in_8bit=False,
             )
             pipeline.reshape(
-                batch_size=1,
+                batch_size=self.batch_size,
                 height=self.image_size,
                 width=self.image_size,
                 num_images_per_prompt=1,
             )
-            pipeline.to(die)
+            if not is_cpu:
+                pipeline.to(die)
             pipeline.compile()
 
         # Suppress internal denoising-step progress bars
@@ -246,6 +255,53 @@ class SDXLMultiDieSUT:
 
         return image
 
+    def _process_batch(self, sample_indices: List[int], pipeline: Any) -> List[np.ndarray]:
+        """Generate a batch of images with MLCommons-compliant parameters."""
+        import torch
+
+        prompts = []
+        latents_list = []
+
+        for idx in sample_indices:
+            features = self.qsl.get_features(idx)
+            prompts.append(features["prompt"])
+            latent = features.get("latents", None)
+            if latent is not None:
+                if isinstance(latent, np.ndarray):
+                    t = torch.from_numpy(latent.copy()).float()
+                else:
+                    t = torch.tensor(latent).float()
+                if t.dim() == 3:
+                    t = t.unsqueeze(0)
+                latents_list.append(t)
+
+        pipe_kwargs = {
+            "prompt": prompts,
+            "negative_prompt": [self.negative_prompt] * len(prompts),
+            "guidance_scale": self.guidance_scale,
+            "num_inference_steps": self.num_inference_steps,
+            "height": self.image_size,
+            "width": self.image_size,
+            "output_type": "np",
+        }
+        if latents_list and len(latents_list) == len(prompts):
+            pipe_kwargs["latents"] = torch.cat(latents_list, dim=0)
+
+        result = pipeline(**pipe_kwargs)
+
+        images = []
+        for img in result.images:
+            if isinstance(img, np.ndarray):
+                if img.max() <= 1.0:
+                    img = (img * 255).round().astype(np.uint8)
+                elif img.dtype != np.uint8:
+                    img = img.astype(np.uint8)
+            else:
+                img = np.array(img)
+            images.append(img)
+
+        return images
+
     # -- LoadGen query dispatch ---------------------------------------------
 
     @property
@@ -283,14 +339,29 @@ class SDXLMultiDieSUT:
 
         def _die_worker(die_idx: int, batch: List[Tuple[Any, int]]):
             _name, pipeline, die_lock = self._pipelines[die_idx]
-            for sample, sample_idx in batch:
+            bs = self.batch_size
+            for i in range(0, len(batch), bs):
+                chunk = batch[i:i + bs]
+                indices = [idx for _, idx in chunk]
+
+                if len(indices) < bs:
+                    indices_padded = indices + [indices[-1]] * (bs - len(indices))
+                else:
+                    indices_padded = indices
+
                 with die_lock:
-                    image = self._process_sample(sample_idx, pipeline)
-                with self._lock:
-                    self._predictions[sample_idx] = image
-                    self._completed += 1
-                with results_lock:
-                    all_results.append((sample, sample_idx, image))
+                    if bs > 1:
+                        images = self._process_batch(indices_padded, pipeline)
+                        images = images[:len(chunk)]
+                    else:
+                        images = [self._process_sample(indices[0], pipeline)]
+
+                for (sample, sample_idx), image in zip(chunk, images):
+                    with self._lock:
+                        self._predictions[sample_idx] = image
+                        self._completed += 1
+                    with results_lock:
+                        all_results.append((sample, sample_idx, image))
 
         with ThreadPoolExecutor(max_workers=num_dies) as pool:
             futures = [
@@ -321,12 +392,26 @@ class SDXLMultiDieSUT:
         all_results: List[Tuple[Any, int, np.ndarray]] = []
 
         _, pipeline, _ = self._pipelines[0]
-        for sample in query_samples:
-            sample_idx = sample.index
-            image = self._process_sample(sample_idx, pipeline)
-            self._predictions[sample_idx] = image
-            self._completed += 1
-            all_results.append((sample, sample_idx, image))
+        bs = self.batch_size
+        for i in range(0, total, bs):
+            chunk = query_samples[i:i + bs]
+            indices = [s.index for s in chunk]
+
+            if len(indices) < bs:
+                indices_padded = indices + [indices[-1]] * (bs - len(indices))
+            else:
+                indices_padded = indices
+
+            if bs > 1:
+                images = self._process_batch(indices_padded, pipeline)
+                images = images[:len(chunk)]
+            else:
+                images = [self._process_sample(indices[0], pipeline)]
+
+            for sample, image in zip(chunk, images):
+                self._predictions[sample.index] = image
+                self._completed += 1
+                all_results.append((sample, sample.index, image))
             _print_progress(self._completed, total, self._start_time)
 
         _print_progress(total, total, self._start_time)

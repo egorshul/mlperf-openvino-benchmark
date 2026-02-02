@@ -11,6 +11,7 @@ with exactly one caption per image.
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -88,7 +89,7 @@ class COCOPromptsDataset(BaseDataset):
             self._tokenizer = CLIPTokenizer.from_pretrained(
                 "openai/clip-vit-large-patch14"
             )
-            logger.info("Loaded CLIP tokenizer")
+            logger.debug("Loaded CLIP tokenizer")
         except ImportError:
             logger.warning(
                 "transformers not installed. Install with: pip install transformers"
@@ -100,7 +101,7 @@ class COCOPromptsDataset(BaseDataset):
         if self._is_loaded:
             return
 
-        logger.info(f"Loading COCO prompts dataset from {self.data_path}")
+        logger.debug("Loading COCO prompts dataset from %s", self.data_path)
 
         loaded = False
 
@@ -156,7 +157,8 @@ class COCOPromptsDataset(BaseDataset):
         if self.use_latents:
             self._load_latents()
 
-        logger.info(f"Loaded {len(self._samples)} prompts")
+        latent_info = "shared latent" if self._latents_cache else "no latents"
+        print(f"[Dataset] {len(self._samples)} prompts, {latent_info}", file=sys.stderr)
         self._is_loaded = True
 
     def _load_from_tsv(self, tsv_file: Path) -> None:
@@ -166,7 +168,7 @@ class COCOPromptsDataset(BaseDataset):
         - Simple: image_id<tab>caption (coco-1024.tsv)
         - MLCommons: id<tab>image_id<tab>caption<tab>... (captions_source.tsv, 7 cols with header)
         """
-        logger.info(f"Loading from TSV: {tsv_file}")
+        logger.debug("Loading from TSV: %s", tsv_file)
 
         is_mlcommons_format = False
         with open(tsv_file, 'r', encoding='utf-8') as f:
@@ -205,7 +207,7 @@ class COCOPromptsDataset(BaseDataset):
 
     def _load_from_coco_json(self, json_file: Path) -> None:
         """Load samples from COCO JSON annotations format."""
-        logger.info(f"Loading from COCO JSON: {json_file}")
+        logger.debug("Loading from COCO JSON: %s", json_file)
 
         with open(json_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
@@ -239,7 +241,7 @@ class COCOPromptsDataset(BaseDataset):
 
     def _load_from_txt(self, txt_file: Path) -> None:
         """Load samples from simple text file (one caption per line)."""
-        logger.info(f"Loading from TXT: {txt_file}")
+        logger.debug("Loading from TXT: %s", txt_file)
 
         with open(txt_file, 'r', encoding='utf-8') as f:
             for idx, line in enumerate(f):
@@ -319,7 +321,7 @@ class COCOPromptsDataset(BaseDataset):
             self._generate_latents()
             return
 
-        logger.info(f"Loading pre-computed latents from {latents_file}")
+        logger.debug("Loading pre-computed latents from %s", latents_file)
 
         try:
             if latents_file.suffix == '.npy':
@@ -337,7 +339,7 @@ class COCOPromptsDataset(BaseDataset):
             if latent.ndim == 3:
                 latent = latent[np.newaxis, :]  # (4,128,128) -> (1,4,128,128)
 
-            logger.info(f"Latent tensor shape: {latent.shape}")
+            logger.debug("Latent tensor shape: %s", latent.shape)
 
             # MLCommons: same latent for ALL samples
             # Store the single latent, get_sample() returns it for every index
@@ -345,9 +347,8 @@ class COCOPromptsDataset(BaseDataset):
             for idx in range(len(self._samples)):
                 self._latents_cache[idx] = latent.squeeze(0)  # (4, 128, 128)
 
-            logger.info(
-                f"Loaded shared latent for {len(self._samples)} samples "
-                f"(MLCommons: all samples use same noise)"
+            logger.debug(
+                "Loaded shared latent for %d samples", len(self._samples)
             )
 
         except Exception as e:
@@ -375,9 +376,8 @@ class COCOPromptsDataset(BaseDataset):
 
             self._shared_latent = latent.numpy().astype(np.float32)
 
-            logger.info(
-                f"Generated shared latent (seed=0), shape: {latent_np.shape}, "
-                f"assigned to {len(self._samples)} samples"
+            logger.debug(
+                "Generated shared latent (seed=0), shape: %s", latent_np.shape
             )
 
             # Save in MLCommons format for reuse
@@ -385,7 +385,7 @@ class COCOPromptsDataset(BaseDataset):
             save_dir.mkdir(parents=True, exist_ok=True)
             save_path = save_dir / "latents.pt"
             torch.save(latent, str(save_path))
-            logger.info(f"Saved generated latent to {save_path}")
+            logger.debug("Saved generated latent to %s", save_path)
 
         except Exception as e:
             logger.error(f"Failed to generate latents: {e}")
@@ -491,13 +491,13 @@ class COCOPromptsDataset(BaseDataset):
         if not generated_images:
             return metrics
 
-        # Log generated image statistics for diagnostics
-        logger.info(f"=== Accuracy evaluation: {len(generated_images)} images ===")
-        for i, img in enumerate(generated_images):
-            if isinstance(img, np.ndarray):
-                logger.info(
-                    f"  Image[{i}]: shape={img.shape}, dtype={img.dtype}, "
-                    f"min={img.min()}, max={img.max()}, mean={img.mean():.1f}"
+        logger.debug("Accuracy evaluation: %d images", len(generated_images))
+        if generated_images:
+            img0 = generated_images[0]
+            if isinstance(img0, np.ndarray):
+                logger.debug(
+                    "  Sample image: shape=%s, dtype=%s, range=[%s, %s]",
+                    img0.shape, img0.dtype, img0.min(), img0.max(),
                 )
 
         clip_score = self._compute_clip_score(generated_images, indices)
@@ -520,6 +520,15 @@ class COCOPromptsDataset(BaseDataset):
 
         metrics['clip_score_valid'] = 31.68632 <= clip_score <= 31.81332
         metrics['fid_score_valid'] = 23.01086 <= metrics['fid_score'] <= 23.95007
+
+        clip_ok = "ok" if metrics['clip_score_valid'] else "FAIL"
+        fid_ok = "ok" if metrics['fid_score_valid'] else "FAIL"
+        print(
+            f"[Accuracy] CLIP={metrics['clip_score']:.2f} ({clip_ok}), "
+            f"FID={metrics['fid_score']:.2f} ({fid_ok}) | "
+            f"{metrics['num_samples']} samples",
+            file=sys.stderr,
+        )
 
         return metrics
 
@@ -596,12 +605,10 @@ class COCOPromptsDataset(BaseDataset):
                     # Compute cosine similarity and scale by 100
                     score = (image_features @ text_features.T).item() * 100
                     scores.append(score)
-                    logger.info(
-                        f"  CLIP[{idx}]: {score:.2f} | prompt: {prompt[:80]}..."
-                    )
+                    logger.debug("CLIP[%d]: %.2f", idx, score)
 
             mean_clip = float(np.mean(scores)) if scores else 0.0
-            logger.info(f"  CLIP mean={mean_clip:.4f}, std={np.std(scores):.4f}, n={len(scores)}")
+            logger.debug("CLIP mean=%.4f, std=%.4f, n=%d", mean_clip, np.std(scores), len(scores))
             return mean_clip
 
         except Exception as e:
@@ -645,7 +652,7 @@ class COCOPromptsDataset(BaseDataset):
                 dims = 2048
                 block_idx = InceptionV3.BLOCK_INDEX_BY_DIM[dims]
                 model = InceptionV3([block_idx]).to(device)
-                logger.info("FID: Using pytorch-fid InceptionV3 (correct weights)")
+                logger.debug("FID: Using pytorch-fid InceptionV3 (correct weights)")
             except ImportError:
                 logger.error(
                     "pytorch-fid is NOT installed. FID scores WILL NOT match MLCommons. "
@@ -688,9 +695,9 @@ class COCOPromptsDataset(BaseDataset):
                 return np.array(features)
 
             gen_features = get_features(generated_images, is_path=False)
-            logger.info(
-                f"FID: gen_features shape={gen_features.shape}, "
-                f"mean={gen_features.mean():.4f}, std={gen_features.std():.4f}"
+            logger.debug(
+                "FID: gen_features shape=%s, mean=%.4f, std=%.4f",
+                gen_features.shape, gen_features.mean(), gen_features.std(),
             )
 
             mu_gen = np.mean(gen_features, axis=0)
@@ -701,62 +708,39 @@ class COCOPromptsDataset(BaseDataset):
                 statistics_path = self._find_statistics_file()
 
             if statistics_path and Path(statistics_path).exists():
-                logger.info(f"FID: Using pre-computed statistics from {statistics_path}")
+                logger.debug("FID: Using pre-computed statistics from %s", statistics_path)
                 stats = np.load(statistics_path)
                 mu_ref = stats['mu']
                 sigma_ref = stats['sigma']
             else:
-                logger.info("FID: Computing statistics from reference images (not MLCommons-compliant)")
+                logger.debug("FID: Computing statistics from reference images")
                 ref_features = get_features(reference_paths, is_path=True)
                 mu_ref = np.mean(ref_features, axis=0)
                 sigma_ref = np.cov(ref_features, rowvar=False)
 
-            # === Detailed FID diagnostics ===
             diff = mu_gen - mu_ref
             mean_term = float(diff @ diff)
-
-            # Covariance matrix ranks
-            gen_rank = np.linalg.matrix_rank(sigma_gen)
-            ref_rank = np.linalg.matrix_rank(sigma_ref)
             tr_gen = float(np.trace(sigma_gen))
             tr_ref = float(np.trace(sigma_ref))
 
-            logger.info(f"FID: mu_ref shape={mu_ref.shape}, sigma_ref shape={sigma_ref.shape}")
-            logger.info(f"FID: ||mu_gen - mu_ref||^2 = {mean_term:.4f}")
-            logger.info(
-                f"FID: sigma_gen rank={gen_rank}/{sigma_gen.shape[0]} "
-                f"(max possible with {num_gen} samples: {num_gen - 1}), "
-                f"trace={tr_gen:.2f}"
-            )
-            logger.info(f"FID: sigma_ref rank={ref_rank}/{sigma_ref.shape[0]}, trace={tr_ref:.2f}")
-
             if num_gen < 2048:
-                logger.warning(
-                    f"FID: Only {num_gen} samples! Covariance matrix sigma_gen has rank <={num_gen - 1} "
-                    f"in 2048-dim space. FID is UNRELIABLE with <2048 samples. "
-                    f"MLCommons target FID ~23 is computed with 5000 samples. "
-                    f"Expected FID with {num_gen} samples: >> 23 (dominated by missing variance)."
+                logger.debug(
+                    "FID: %d samples — covariance rank limited, FID may differ from 5000-sample target",
+                    num_gen,
                 )
 
             covmean, _ = linalg.sqrtm(sigma_gen @ sigma_ref, disp=False)
             if np.iscomplexobj(covmean):
-                imag_max = np.abs(np.diagonal(covmean).imag).max()
-                logger.info(f"FID: sqrtm has complex component, max imag on diagonal={imag_max:.6f}")
                 if not np.allclose(np.diagonal(covmean).imag, 0, atol=1e-3):
-                    logger.warning("FID: Significant complex values in sqrtm — numerically unstable!")
+                    logger.warning("FID: Significant complex values in sqrtm")
                 covmean = covmean.real
 
             tr_covmean = float(np.trace(covmean))
             trace_term = tr_gen + tr_ref - 2 * tr_covmean
-
             fid = mean_term + trace_term
-            logger.info(
-                f"FID decomposition: FID={fid:.4f} = "
-                f"mean_diff({mean_term:.4f}) + trace_term({trace_term:.4f})"
-            )
-            logger.info(
-                f"FID trace detail: Tr(sigma_gen)={tr_gen:.2f} + Tr(sigma_ref)={tr_ref:.2f} "
-                f"- 2*Tr(sqrtm)={2*tr_covmean:.2f}"
+
+            logger.debug(
+                "FID=%.4f (mean_diff=%.4f + trace=%.4f)", fid, mean_term, trace_term,
             )
 
             return float(fid)
@@ -825,7 +809,7 @@ class COCOPromptsDataset(BaseDataset):
                         self._samples[i]['latents'] = latent.numpy() if hasattr(latent, 'numpy') else np.array(latent)
                     loaded += 1
 
-            logger.info(f"Loaded {loaded} pre-generated latents from {latents_path}")
+            logger.debug("Loaded %d pre-generated latents from %s", loaded, latents_path)
             return loaded
 
         except Exception as e:
@@ -867,9 +851,9 @@ class COCOPromptsDataset(BaseDataset):
                 pil_img.save(filepath, 'PNG')
                 saved_paths.append(str(filepath))
 
-                logger.info(f"Saved compliance image: {filepath}")
+                logger.debug("Saved compliance image: %s", filepath)
 
-        logger.info(f"Saved {len(saved_paths)} compliance images to {output_dir}")
+        logger.debug("Saved %d compliance images to %s", len(saved_paths), output_dir)
         return saved_paths
 
 
