@@ -134,16 +134,14 @@ DATASET_REGISTRY: Dict[str, Dict] = {
             "size_mb": 10,
         },
         "latents": {
-            # media.githubusercontent.com serves actual LFS content (raw/ returns LFS pointer)
-            "url": "https://media.githubusercontent.com/media/mlcommons/inference/master/text_to_image/tools/latents.pt",
-            "fallback_url": "https://github.com/mlcommons/inference/raw/master/text_to_image/tools/latents.pt",
+            # Single shared latent tensor (1, 4, 128, 128) ≈ 256KB
+            "url": "https://github.com/mlcommons/inference/raw/master/text_to_image/tools/latents.pt",
             "filename": "latents.pt",
-            "size_mb": 500,
-            "min_size_mb": 100,  # validation: real file is ~1.3GB, LFS pointer is <1KB
+            "size_mb": 1,
         },
         "captions_tsv": {
-            "url": "https://github.com/mlcommons/inference/raw/master/text_to_image/coco2014/captions/captions.tsv",
-            "filename": "captions.tsv",
+            "url": "https://github.com/mlcommons/inference/raw/master/text_to_image/coco2014/captions/captions_source.tsv",
+            "filename": "captions_source.tsv",
             "size_mb": 1,
         },
         "num_samples": 5000,  # MLPerf uses 5000 samples
@@ -1490,8 +1488,11 @@ def download_coco2014(
 
     # Download MLCommons pre-computed files for official submission
     fid_stats_file = data_dir / "val2014.npz"
-    latents_file = data_dir / "latents.pt"
-    mlcommons_captions = data_dir / "captions.tsv"
+    # MLCommons expects latents/latents.pt (subdirectory)
+    latents_dir = data_dir / "latents"
+    latents_dir.mkdir(parents=True, exist_ok=True)
+    latents_file = latents_dir / "latents.pt"
+    mlcommons_captions = data_dir / "captions_source.tsv"
 
     # Download FID statistics (required for MLCommons-compliant FID computation)
     if "fid_statistics" in dataset_info:
@@ -1508,51 +1509,19 @@ def download_coco2014(
                 logger.warning("FID computation will use reference images instead (not MLCommons-compliant)")
 
     # Download pre-generated latents (required for reproducibility in closed division)
+    # MLCommons latents.pt is a single tensor (1, 4, 128, 128) ≈ 256KB, shared by all samples
     if "latents" in dataset_info:
         if not latents_file.exists() or force:
-            latents_info = dataset_info["latents"]
-            min_size_bytes = latents_info.get("min_size_mb", 100) * 1024 * 1024
-
-            # Try primary URL (media.githubusercontent.com for LFS files)
-            downloaded = False
-            for url_key in ["url", "fallback_url"]:
-                url = latents_info.get(url_key)
-                if not url:
-                    continue
-                logger.info(f"Downloading MLCommons pre-generated latents from {url}...")
-                try:
-                    _download_file(
-                        url,
-                        str(latents_file),
-                        expected_size_mb=latents_info["size_mb"]
-                    )
-                    # Validate: real latents.pt is >100MB, LFS pointer is <1KB
-                    actual_size = latents_file.stat().st_size
-                    if actual_size < min_size_bytes:
-                        logger.warning(
-                            f"Downloaded latents.pt is too small ({actual_size / 1024:.0f} KB). "
-                            f"Expected >{latents_info.get('min_size_mb', 100)} MB. "
-                            f"Likely a Git LFS pointer, not actual content."
-                        )
-                        latents_file.unlink()
-                        continue
-                    downloaded = True
-                    break
-                except Exception as e:
-                    logger.warning(f"Failed to download latents from {url}: {e}")
-
-            if not downloaded:
-                logger.warning(
-                    "Could not download MLCommons latents.pt. "
-                    "Latents will be generated locally at first run. "
-                    "For official submission, download manually:\n"
-                    "  git lfs install\n"
-                    "  git clone --filter=blob:none --sparse "
-                    "https://github.com/mlcommons/inference.git /tmp/mlcommons\n"
-                    "  cd /tmp/mlcommons && git sparse-checkout set text_to_image/tools\n"
-                    "  git lfs pull --include='text_to_image/tools/latents.pt'\n"
-                    f"  cp text_to_image/tools/latents.pt {latents_file}"
+            logger.info("Downloading MLCommons pre-generated latents...")
+            try:
+                _download_file(
+                    dataset_info["latents"]["url"],
+                    str(latents_file),
+                    expected_size_mb=dataset_info["latents"]["size_mb"]
                 )
+            except Exception as e:
+                logger.warning(f"Failed to download latents: {e}")
+                logger.warning("Latents will be generated locally at first run (seed=0)")
 
     # Download official MLCommons captions file
     # For closed division, the EXACT MLCommons prompts must be used
@@ -1569,11 +1538,30 @@ def download_coco2014(
                 logger.warning(f"Failed to download MLCommons captions: {e}")
                 logger.warning("Using locally generated captions file")
 
-        # Use official MLCommons captions as the primary prompts file
-        # This is REQUIRED for closed division (exact same prompts as reference)
+        # Convert captions_source.tsv (7 columns) to simple format (id<tab>caption)
+        # captions_source.tsv: id, image_id, caption, height, width, file_name, coco_url
         if mlcommons_captions.exists():
-            shutil.copy2(str(mlcommons_captions), str(prompts_file))
-            logger.info(f"Using official MLCommons captions as primary prompts file: {prompts_file}")
+            count = 0
+            with open(mlcommons_captions, 'r', encoding='utf-8') as src, \
+                 open(prompts_file, 'w', encoding='utf-8') as dst:
+                for line in src:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split('\t')
+                    # Skip header
+                    if parts[0] == 'id':
+                        continue
+                    if len(parts) >= 3:
+                        # Use image_id (col 1) and caption (col 2)
+                        image_id = parts[1]
+                        caption = parts[2]
+                        dst.write(f"{image_id}\t{caption}\n")
+                        count += 1
+            logger.info(
+                f"Converted MLCommons captions_source.tsv to {prompts_file} "
+                f"({count} prompts)"
+            )
 
     # Count samples
     actual_samples = sum(1 for _ in open(prompts_file, 'r'))

@@ -104,8 +104,10 @@ class COCOPromptsDataset(BaseDataset):
 
         loaded = False
 
-        # Format 1: MLCommons TSV format (coco-1024.tsv)
+        # Format 1: MLCommons TSV format (coco-1024.tsv, converted from captions_source.tsv)
         tsv_file = self.data_path / "coco-1024.tsv"
+        if not tsv_file.exists():
+            tsv_file = self.data_path / "captions_source.tsv"
         if not tsv_file.exists():
             tsv_file = self.data_path / "captions.tsv"
         if tsv_file.exists():
@@ -158,9 +160,15 @@ class COCOPromptsDataset(BaseDataset):
         self._is_loaded = True
 
     def _load_from_tsv(self, tsv_file: Path) -> None:
-        """Load samples from TSV format (MLCommons format)."""
+        """Load samples from TSV format.
+
+        Supports two formats:
+        - Simple: image_id<tab>caption (coco-1024.tsv)
+        - MLCommons: id<tab>image_id<tab>caption<tab>... (captions_source.tsv, 7 cols with header)
+        """
         logger.info(f"Loading from TSV: {tsv_file}")
 
+        is_mlcommons_format = False
         with open(tsv_file, 'r', encoding='utf-8') as f:
             for line_num, line in enumerate(f):
                 line = line.strip()
@@ -168,7 +176,18 @@ class COCOPromptsDataset(BaseDataset):
                     continue
 
                 parts = line.split('\t')
-                if len(parts) >= 2:
+
+                # Detect and skip header row (captions_source.tsv)
+                if line_num == 0 and parts[0] == 'id':
+                    is_mlcommons_format = True
+                    continue
+
+                if is_mlcommons_format and len(parts) >= 3:
+                    # captions_source.tsv: id, image_id, caption, height, width, ...
+                    image_id = parts[1]
+                    caption = parts[2]
+                elif len(parts) >= 2:
+                    # Simple format: image_id, caption
                     image_id = parts[0]
                     caption = parts[1]
                 else:
@@ -271,12 +290,11 @@ class COCOPromptsDataset(BaseDataset):
     def _load_latents(self) -> None:
         """Load pre-computed latents for reproducibility (MLCommons requirement).
 
-        Searches for latents in multiple locations and formats:
-        - latents/latents.pt (PyTorch format)
-        - latents/latents.npy (NumPy format)
-        - latents.pt / latents.npy at data_path root
+        MLCommons reference: ALL samples share the SAME single latent tensor
+        of shape (1, 4, 128, 128). The latent is generated once with seed=0
+        and reused for every prompt. Only the text prompt differs per sample.
         """
-        # Search multiple locations
+        # Search multiple locations (MLCommons expects latents/latents.pt)
         search_paths = [
             self.data_path / "latents" / "latents.pt",
             self.data_path / "latents" / "latents.npy",
@@ -295,132 +313,79 @@ class COCOPromptsDataset(BaseDataset):
         if latents_file is None:
             logger.warning(
                 "Pre-computed latents file not found. "
-                "For MLCommons closed division, latents.pt is REQUIRED. "
-                f"Searched: {[str(p) for p in search_paths[:4]]}"
+                "Generating locally (seed=0). For official Closed Division, "
+                "use the exact MLCommons latents.pt from the inference repo."
             )
+            self._generate_latents()
             return
 
         logger.info(f"Loading pre-computed latents from {latents_file}")
 
         try:
-            latents_data = None
-
             if latents_file.suffix == '.npy':
-                latents_data = np.load(str(latents_file))
-            elif latents_file.suffix == '.npz':
-                npz = np.load(str(latents_file))
-                latents_data = npz['latents'] if 'latents' in npz else list(npz.values())[0]
+                latent = np.load(str(latents_file)).astype(np.float32)
             else:
-                # .pt format
+                # .pt format — MLCommons saves a single tensor (1, 4, 128, 128)
                 import torch
-                latents_data = torch.load(str(latents_file), map_location='cpu', weights_only=True)
+                latent = torch.load(str(latents_file), map_location='cpu', weights_only=True)
+                if hasattr(latent, 'numpy'):
+                    latent = latent.numpy().astype(np.float32)
+                else:
+                    latent = np.array(latent, dtype=np.float32)
 
-                if isinstance(latents_data, dict):
-                    if 'latents' in latents_data:
-                        latents_data = latents_data['latents']
-                    elif 'noise' in latents_data:
-                        latents_data = latents_data['noise']
-                    elif latents_data:
-                        # MLCommons format: {0: tensor(1,4,128,128), 1: tensor(...), ...}
-                        # Check if keys are integer indices
-                        first_key = next(iter(latents_data))
-                        if isinstance(first_key, int):
-                            # Dict of indexed latents — load each one directly
-                            num_to_load = min(len(latents_data), len(self._samples))
-                            for idx in range(num_to_load):
-                                if idx in latents_data:
-                                    lat = latents_data[idx]
-                                    if hasattr(lat, 'numpy'):
-                                        lat = lat.numpy()
-                                    lat = np.array(lat, dtype=np.float32)
-                                    # Squeeze leading batch dim: (1,4,128,128) -> (4,128,128)
-                                    if lat.ndim == 4 and lat.shape[0] == 1:
-                                        lat = lat.squeeze(0)
-                                    self._latents_cache[idx] = lat
-                            latents_data = None  # Already loaded into cache
-                        else:
-                            latents_data = list(latents_data.values())[0]
-                    else:
-                        logger.warning("Empty latents dict")
-                        return
+            # Ensure shape (1, 4, 128, 128) — squeeze extra dims if needed
+            if latent.ndim == 3:
+                latent = latent[np.newaxis, :]  # (4,128,128) -> (1,4,128,128)
 
-                # Convert torch tensor to numpy
-                if latents_data is not None and hasattr(latents_data, 'numpy'):
-                    latents_data = latents_data.numpy()
+            logger.info(f"Latent tensor shape: {latent.shape}")
 
-            if latents_data is not None and isinstance(latents_data, np.ndarray) and latents_data.ndim == 4:
-                # Shape: [num_samples, 4, H, W]
-                logger.info(f"Latents tensor shape: {latents_data.shape}")
-                num_to_load = min(latents_data.shape[0], len(self._samples))
-                for idx in range(num_to_load):
-                    self._latents_cache[idx] = latents_data[idx].astype(np.float32)
-            elif latents_data is not None and isinstance(latents_data, (list, tuple)):
-                for idx, lat in enumerate(latents_data):
-                    if idx < len(self._samples):
-                        if hasattr(lat, 'numpy'):
-                            self._latents_cache[idx] = lat.numpy().astype(np.float32)
-                        else:
-                            self._latents_cache[idx] = np.array(lat, dtype=np.float32)
+            # MLCommons: same latent for ALL samples
+            # Store the single latent, get_sample() returns it for every index
+            self._shared_latent = latent
+            for idx in range(len(self._samples)):
+                self._latents_cache[idx] = latent.squeeze(0)  # (4, 128, 128)
 
-            if self._latents_cache:
-                first_shape = list(self._latents_cache.values())[0].shape
-                logger.info(
-                    f"Loaded {len(self._latents_cache)} pre-computed latents, "
-                    f"shape per sample: {first_shape}"
-                )
-            else:
-                logger.warning("No latents were loaded from file")
+            logger.info(
+                f"Loaded shared latent for {len(self._samples)} samples "
+                f"(MLCommons: all samples use same noise)"
+            )
 
         except Exception as e:
             logger.warning(f"Failed to load latents: {e}")
             import traceback
             logger.debug(traceback.format_exc())
+            self._generate_latents()
 
-        # Validate: check if we have latents for all samples
-        num_needed = len(self._samples)
-        num_loaded = len(self._latents_cache)
-        if num_loaded < num_needed:
-            if num_loaded > 0:
-                logger.warning(
-                    f"Latents file has {num_loaded} entries but {num_needed} samples needed. "
-                    f"File may be corrupted or incomplete."
-                )
-            logger.warning(
-                f"Generating {num_needed} latents locally "
-                f"(seed=0, torch.randn). NOTE: for official Closed Division "
-                f"submission, use the exact MLCommons latents.pt file. "
-                f"Download via: git lfs pull from mlcommons/inference repo."
-            )
-            self._generate_latents(num_needed)
+    def _generate_latents(self) -> None:
+        """Generate single shared latent matching MLCommons reference.
 
-    def _generate_latents(self, num_samples: int) -> None:
-        """Generate latents matching MLCommons reference implementation.
-
-        MLCommons reference uses: torch.randn(1, 4, 128, 128) with
-        Generator(cpu).manual_seed(0), one per sample sequentially.
+        MLCommons latent.py: randn_tensor((1, 4, 128, 128), seed=0).
+        Same latent is used for ALL samples.
         """
         try:
             import torch
             generator = torch.Generator("cpu")
             generator.manual_seed(0)
 
-            self._latents_cache.clear()
-            for idx in range(num_samples):
-                lat = torch.randn(1, 4, LATENT_SIZE, LATENT_SIZE, generator=generator)
-                self._latents_cache[idx] = lat.squeeze(0).numpy().astype(np.float32)
+            latent = torch.randn(1, 4, LATENT_SIZE, LATENT_SIZE, generator=generator)
+            latent_np = latent.squeeze(0).numpy().astype(np.float32)
+
+            for idx in range(len(self._samples)):
+                self._latents_cache[idx] = latent_np
+
+            self._shared_latent = latent.numpy().astype(np.float32)
 
             logger.info(
-                f"Generated {num_samples} latents (seed=0), "
-                f"shape per sample: {self._latents_cache[0].shape}"
+                f"Generated shared latent (seed=0), shape: {latent_np.shape}, "
+                f"assigned to {len(self._samples)} samples"
             )
 
-            # Save for reuse
-            save_path = self.data_path / "latents.pt"
-            latents_dict = {}
-            for idx in range(num_samples):
-                latents_dict[idx] = torch.from_numpy(self._latents_cache[idx]).unsqueeze(0)
-            torch.save(latents_dict, str(save_path))
-            logger.info(f"Saved generated latents to {save_path}")
+            # Save in MLCommons format for reuse
+            save_dir = self.data_path / "latents"
+            save_dir.mkdir(parents=True, exist_ok=True)
+            save_path = save_dir / "latents.pt"
+            torch.save(latent, str(save_path))
+            logger.info(f"Saved generated latent to {save_path}")
 
         except Exception as e:
             logger.error(f"Failed to generate latents: {e}")

@@ -349,10 +349,11 @@ class BenchmarkRunner:
         # Check latents availability (critical for accuracy)
         latents_loaded = len(self.qsl.dataset._latents_cache)
         total_samples = self.qsl.dataset.total_count
-        if latents_loaded > 0:
+        if latents_loaded == total_samples:
+            has_shared = hasattr(self.qsl.dataset, '_shared_latent')
             logger.info(
-                f"SDXL: {latents_loaded}/{total_samples} pre-computed latents loaded "
-                f"(MLCommons closed division)"
+                f"SDXL: Latents ready for {total_samples} samples "
+                f"({'shared single latent' if has_shared else 'per-sample latents'})"
             )
         else:
             logger.warning(
