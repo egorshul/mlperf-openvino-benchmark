@@ -804,10 +804,10 @@ class BenchmarkRunner:
         elif model_type == 'sdxl':
             clip = acc.get('clip_score', 0)
             fid = acc.get('fid_score', 0)
-            # MLPerf SDXL: CLIP >= 31.68632 and FID within range
-            clip_pass = clip >= 31.68632
-            status = "PASS" if clip_pass else "FAIL"
-            print(f"CLIP: {clip:.4f} [{status}]")
-            print(f"FID: {fid:.4f}")
+            # MLPerf SDXL: CLIP in [31.68632, 31.81332], FID in [23.01086, 23.95007]
+            clip_status = "PASS" if 31.68632 <= clip <= 31.81332 else "FAIL"
+            fid_status = "PASS" if 23.01086 <= fid <= 23.95007 else "FAIL"
+            print(f"CLIP: {clip:.4f} [{clip_status}]")
+            print(f"FID: {fid:.4f} [{fid_status}]")
 
         print("="*50 + "\n")

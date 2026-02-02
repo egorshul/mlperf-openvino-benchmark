@@ -119,13 +119,23 @@ class SDXLOptimumSUT:
                 self.pipeline = OVStableDiffusionXLPipeline.from_pretrained(
                     str(self.model_path), compile=False, load_in_8bit=False,
                 )
-                self.pipeline.reshape(
-                    batch_size=self.batch_size,
-                    height=self.image_size,
-                    width=self.image_size,
-                    num_images_per_prompt=1,
-                )
-                self.pipeline.compile()
+                try:
+                    self.pipeline.reshape(
+                        batch_size=self.batch_size,
+                        height=self.image_size,
+                        width=self.image_size,
+                        num_images_per_prompt=1,
+                    )
+                    self.pipeline.compile()
+                except Exception as exc:
+                    logger.warning(
+                        "batch=%d failed (%s), falling back to 1",
+                        self.batch_size, exc,
+                    )
+                    self.pipeline = OVStableDiffusionXLPipeline.from_pretrained(
+                        str(self.model_path), compile=True, load_in_8bit=False,
+                    )
+                    self.batch_size = 1
             else:
                 self.pipeline = OVStableDiffusionXLPipeline.from_pretrained(
                     str(self.model_path), compile=True, load_in_8bit=False,

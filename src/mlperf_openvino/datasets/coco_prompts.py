@@ -521,15 +521,6 @@ class COCOPromptsDataset(BaseDataset):
         metrics['clip_score_valid'] = 31.68632 <= clip_score <= 31.81332
         metrics['fid_score_valid'] = 23.01086 <= metrics['fid_score'] <= 23.95007
 
-        clip_ok = "ok" if metrics['clip_score_valid'] else "FAIL"
-        fid_ok = "ok" if metrics['fid_score_valid'] else "FAIL"
-        print(
-            f"[Accuracy] CLIP={metrics['clip_score']:.2f} ({clip_ok}), "
-            f"FID={metrics['fid_score']:.2f} ({fid_ok}) | "
-            f"{metrics['num_samples']} samples",
-            file=sys.stderr,
-        )
-
         return metrics
 
     def _compute_clip_score(

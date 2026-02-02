@@ -180,15 +180,37 @@ class SDXLMultiDieSUT:
             pipeline = OVStableDiffusionXLPipeline.from_pretrained(
                 str(self.model_path), compile=False, load_in_8bit=False,
             )
-            pipeline.reshape(
-                batch_size=self.batch_size,
-                height=self.image_size,
-                width=self.image_size,
-                num_images_per_prompt=1,
-            )
-            if not is_cpu:
-                pipeline.to(die)
-            pipeline.compile()
+            try:
+                pipeline.reshape(
+                    batch_size=self.batch_size,
+                    height=self.image_size,
+                    width=self.image_size,
+                    num_images_per_prompt=1,
+                )
+                if not is_cpu:
+                    pipeline.to(die)
+                pipeline.compile()
+            except Exception as exc:
+                if self.batch_size > 1:
+                    logger.warning(
+                        "batch=%d failed on %s (%s), falling back to 1",
+                        self.batch_size, die, exc,
+                    )
+                    pipeline = OVStableDiffusionXLPipeline.from_pretrained(
+                        str(self.model_path), compile=False, load_in_8bit=False,
+                    )
+                    pipeline.reshape(
+                        batch_size=1,
+                        height=self.image_size,
+                        width=self.image_size,
+                        num_images_per_prompt=1,
+                    )
+                    if not is_cpu:
+                        pipeline.to(die)
+                    pipeline.compile()
+                    self.batch_size = 1
+                else:
+                    raise
 
         # Suppress internal denoising-step progress bars
         pipeline.set_progress_bar_config(disable=True)
