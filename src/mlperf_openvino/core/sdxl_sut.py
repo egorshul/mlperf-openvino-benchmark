@@ -114,7 +114,7 @@ class SDXLOptimumSUT:
         self._load_pipeline()
 
     def _load_pipeline(self) -> None:
-        """Load SDXL pipeline using Optimum-Intel."""
+        """Load SDXL pipeline using Optimum-Intel with MLCommons-compliant scheduler."""
         logger.info(f"Loading SDXL model from {self.model_path}")
 
         try:
@@ -135,12 +135,21 @@ class SDXLOptimumSUT:
                     str(self.model_path),
                     torch_dtype=torch.float32,
                 )
-                # Move to CPU
                 self.pipeline = self.pipeline.to("cpu")
             else:
                 raise RuntimeError(
                     f"Cannot load SDXL model from {self.model_path}: {e}"
                 )
+
+        # Override scheduler to EulerDiscreteScheduler (MLCommons requirement)
+        try:
+            from diffusers import EulerDiscreteScheduler
+            self.pipeline.scheduler = EulerDiscreteScheduler.from_config(
+                self.pipeline.scheduler.config
+            )
+            logger.info("Scheduler overridden to EulerDiscreteScheduler (MLCommons)")
+        except Exception as e:
+            logger.warning(f"Failed to override scheduler: {e}")
 
     def _get_generator(self, seed: int = 42):
         """Get random generator for reproducibility."""
@@ -199,63 +208,78 @@ class SDXLOptimumSUT:
             self._close_progress()
 
     def _process_sample(self, sample_idx: int) -> np.ndarray:
-        """Process a single prompt and generate an image."""
+        """Process a single prompt and generate an image.
+
+        MLCommons compliance requires:
+        - Pre-computed latents from latents.pt (closed division)
+        - EulerDiscreteScheduler with 20 steps
+        - guidance_scale=8.0
+        - Specific negative prompt
+        """
         features = self.qsl.get_features(sample_idx)
         prompt = features['prompt']
 
-        # Get generation parameters (may be overridden per sample)
         guidance_scale = features.get('guidance_scale', self.guidance_scale)
         num_steps = features.get('num_inference_steps', self.num_inference_steps)
 
-        # Use pre-computed latents if available (for reproducibility)
+        # Use pre-computed latents if available (REQUIRED for closed division)
         latents = features.get('latents', None)
 
-        # Convert numpy latents to torch tensor and ensure correct shape
-        # The pipeline expects torch tensors with shape [batch, 4, height/8, width/8]
-        # For 1024x1024 images: [1, 4, 128, 128]
         if latents is not None:
             try:
                 import torch
                 if isinstance(latents, np.ndarray):
-                    latents = torch.from_numpy(latents).float()
+                    latents = torch.from_numpy(latents.copy()).float()
 
-                # Ensure correct shape for SDXL latents
-                # Expected: [1, 4, 128, 128] for 1024x1024 image
+                # Ensure [1, 4, 128, 128] shape
                 if latents.dim() == 3:
-                    # Shape is [C, H, W] - add batch dimension
                     latents = latents.unsqueeze(0)
 
-                # Check if shape is valid
                 if latents.shape[1] != 4:
-                    # If channels != 4, latents format may be incompatible
-                    # Skip using pre-computed latents
                     logger.warning(
                         f"Latents have {latents.shape[1]} channels, expected 4. "
                         "Using random latents instead."
                     )
                     latents = None
-
             except ImportError:
                 logger.warning("PyTorch not available, cannot convert latents")
                 latents = None
 
-        # Generate image
-        generator = self._get_generator(seed=sample_idx)
+        # Build pipeline kwargs
+        pipe_kwargs = {
+            "prompt": prompt,
+            "negative_prompt": self.negative_prompt,
+            "guidance_scale": guidance_scale,
+            "num_inference_steps": num_steps,
+            "height": self.image_size,
+            "width": self.image_size,
+            "output_type": "np",
+        }
 
-        result = self.pipeline(
-            prompt=prompt,
-            negative_prompt=self.negative_prompt,
-            guidance_scale=guidance_scale,
-            num_inference_steps=num_steps,
-            height=self.image_size,
-            width=self.image_size,
-            generator=generator,
-            latents=latents,
-        )
+        if latents is not None:
+            pipe_kwargs["latents"] = latents
+        else:
+            # Fallback: use deterministic generator when no pre-computed latents
+            logger.warning(
+                f"No pre-computed latents for sample {sample_idx}. "
+                "Results may not match MLCommons reference."
+            )
+            pipe_kwargs["generator"] = self._get_generator(seed=sample_idx)
 
-        # Extract image from result and convert to numpy array
+        result = self.pipeline(**pipe_kwargs)
+
+        # output_type="np" returns numpy arrays in [0, 1] float range
         image = result.images[0]
-        return np.array(image)
+        if isinstance(image, np.ndarray):
+            if image.max() <= 1.0:
+                image = (image * 255).round().astype(np.uint8)
+            elif image.dtype != np.uint8:
+                image = image.astype(np.uint8)
+        else:
+            # PIL Image fallback
+            image = np.array(image)
+
+        return image
 
     def issue_queries(self, query_samples: List[Any]) -> None:
         """Process queries from LoadGen."""
@@ -575,6 +599,16 @@ class SDXLManualSUT:
     ) -> np.ndarray:
         """Perform one denoising step with UNet."""
         latent_input = np.concatenate([latents] * 2)  # For CFG
+
+        # Scale model input (required by EulerDiscreteScheduler)
+        if self.scheduler is not None:
+            import torch
+            latent_input_torch = torch.from_numpy(latent_input)
+            t_torch = torch.tensor([timestep])
+            latent_input = self.scheduler.scale_model_input(
+                latent_input_torch, t_torch
+            ).numpy()
+
         timestep_array = np.array([timestep], dtype=np.float32)
 
         noise_pred = self.unet({
@@ -593,15 +627,15 @@ class SDXLManualSUT:
 
     def _decode_latents(self, latents: np.ndarray) -> np.ndarray:
         """Decode latents to image using VAE decoder."""
-        # Scale latents
-        latents = latents / 0.18215
+        # Scale latents - SDXL uses 0.13025 (NOT 0.18215 which is SD 1.x)
+        latents = latents / 0.13025
 
         # Decode
         image = self.vae_decoder(latents)[0]
 
-        # Post-process
+        # Post-process: VAE output is in [-1, 1] range
         image = (image / 2 + 0.5).clip(0, 1)
-        image = (image * 255).astype(np.uint8)
+        image = (image * 255).round().astype(np.uint8)
 
         # NCHW to NHWC
         if image.ndim == 4:
@@ -660,26 +694,39 @@ class SDXLManualSUT:
             self._close_progress()
 
     def _process_sample(self, sample_idx: int) -> np.ndarray:
-        """Generate image for a sample."""
+        """Generate image for a sample (MLCommons-compliant)."""
         features = self.qsl.get_features(sample_idx)
         prompt = features['prompt']
 
         # Encode prompt
         prompt_embeds = self._encode_prompt(prompt)
 
-        # Also encode empty prompt for CFG
+        # Also encode empty (negative) prompt for CFG
         empty_embeds = self._encode_prompt("")
         combined_embeds = np.concatenate([empty_embeds, prompt_embeds])
 
-        # Generate initial latents
-        latents = self._generate_latents()
+        # Use pre-computed latents if available (required for closed division)
+        latents = features.get('latents', None)
+        if latents is not None:
+            if latents.ndim == 3:
+                latents = latents[np.newaxis, ...]  # Add batch dim
+            latents = latents.astype(np.float32)
+        else:
+            logger.warning(
+                f"No pre-computed latents for sample {sample_idx}. "
+                "Using random latents (not MLCommons-compliant)."
+            )
+            latents = self._generate_latents()
 
         # Denoising loop
         if self.scheduler is not None:
             self.scheduler.set_timesteps(self.num_inference_steps)
             timesteps = self.scheduler.timesteps.numpy()
+
+            # Scale latents by init_noise_sigma (required by EulerDiscreteScheduler)
+            init_noise_sigma = float(self.scheduler.init_noise_sigma)
+            latents = latents * init_noise_sigma
         else:
-            # Simple linear schedule
             timesteps = np.linspace(1000, 0, self.num_inference_steps)
 
         for t in timesteps:
@@ -694,7 +741,6 @@ class SDXLManualSUT:
                     noise_torch, t_torch, latents_torch
                 ).prev_sample.numpy()
             else:
-                # Simple update
                 alpha = 1.0 - (t / 1000.0)
                 latents = latents - alpha * noise_pred * 0.1
 

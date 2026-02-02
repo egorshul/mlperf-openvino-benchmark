@@ -346,6 +346,21 @@ class BenchmarkRunner:
         )
         self.qsl.load()
 
+        # Check latents availability (critical for accuracy)
+        latents_loaded = len(self.qsl.dataset._latents_cache)
+        total_samples = self.qsl.dataset.total_count
+        if latents_loaded > 0:
+            logger.info(
+                f"SDXL: {latents_loaded}/{total_samples} pre-computed latents loaded "
+                f"(MLCommons closed division)"
+            )
+        else:
+            logger.warning(
+                "SDXL: No pre-computed latents loaded! "
+                "Accuracy results will NOT match MLCommons reference. "
+                "Download latents.pt and place in data/coco2014/latents/"
+            )
+
         model_path = Path(self.config.model.model_path)
 
         try:
@@ -363,9 +378,10 @@ class BenchmarkRunner:
                         qsl=self.qsl,
                         scenario=self.config.scenario,
                     )
+                    logger.info("SDXL: Using Optimum-Intel pipeline (OVStableDiffusionXLPipeline)")
                     return
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to create SDXLOptimumSUT: {e}")
 
         from .sdxl_sut import SDXLManualSUT
         self.sut = SDXLManualSUT(
@@ -374,6 +390,7 @@ class BenchmarkRunner:
             qsl=self.qsl,
             scenario=self.config.scenario,
         )
+        logger.info("SDXL: Using manual pipeline (SDXLManualSUT)")
 
     def _get_test_settings(self) -> "lg.TestSettings":
         """Create LoadGen test settings."""
