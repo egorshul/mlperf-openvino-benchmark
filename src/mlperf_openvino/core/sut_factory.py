@@ -188,7 +188,7 @@ class SUTFactory:
                 "Whisper multi-die SUT requires encoder_path and decoder_path"
             )
 
-        from .whisper_sut import WhisperMultiDieSUT
+        from .whisper_multi_die_sut import WhisperMultiDieSUT
         logger.info(f"Using Whisper Python multi-die SUT on {config.openvino.device}")
         return WhisperMultiDieSUT(
             config=config,
@@ -210,7 +210,7 @@ class SUTFactory:
                 "SDXL multi-die SUT requires model_path"
             )
 
-        from .sdxl_sut import SDXLMultiDieSUT
+        from .sdxl_multi_die_sut import SDXLMultiDieSUT
         logger.info(f"Using SDXL Python multi-die SUT on {config.openvino.device}")
         return SDXLMultiDieSUT(
             config=config,

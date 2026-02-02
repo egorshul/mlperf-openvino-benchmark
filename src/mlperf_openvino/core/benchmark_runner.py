@@ -262,7 +262,7 @@ class BenchmarkRunner:
 
         if self.config.openvino.is_accelerator_device():
             if encoder_path and decoder_path:
-                from .whisper_sut import WhisperMultiDieSUT
+                from .whisper_multi_die_sut import WhisperMultiDieSUT
                 logger.info(f"Using Whisper multi-die SUT on {self.config.openvino.device}")
                 self.sut = WhisperMultiDieSUT(
                     config=self.config,
@@ -367,7 +367,7 @@ class BenchmarkRunner:
         # Multi-die accelerator path (NPU, XPU, etc.)
         if self.config.openvino.is_accelerator_device():
             try:
-                from .sdxl_sut import SDXLMultiDieSUT, OPTIMUM_SDXL_AVAILABLE
+                from .sdxl_multi_die_sut import SDXLMultiDieSUT, OPTIMUM_SDXL_AVAILABLE
                 if OPTIMUM_SDXL_AVAILABLE and model_path.is_dir():
                     logger.info(
                         f"Using SDXL multi-die SUT on {self.config.openvino.device}"
