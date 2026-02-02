@@ -855,42 +855,26 @@ void RetinaNetMultiDieCppSUT::load() {
     // Map output names
     map_output_names();
 
-    // Determine actual batch size for model compilation
     int compile_batch_size = batch_size_;
     if (use_explicit_batching_ && explicit_batch_size_ > 1) {
         compile_batch_size = explicit_batch_size_;
     }
 
-    if (compile_batch_size > 1 || input_shape_[0] == 0) {
+    int model_batch = static_cast<int>(input_shape_[0]);
+
+    if (model_batch > 0 && compile_batch_size != model_batch) {
+        std::cerr << "[RetinaNet] Model native batch=" << model_batch
+                  << ", ignoring requested batch=" << compile_batch_size << std::endl;
+        batch_size_ = model_batch;
+    } else if (model_batch == 0) {
         std::map<std::string, ov::PartialShape> new_shapes;
         for (const auto& input : inputs) {
             ov::PartialShape new_shape = input.get_partial_shape();
             new_shape[0] = compile_batch_size;
             new_shapes[input.get_any_name()] = new_shape;
         }
-        try {
-            model_->reshape(new_shapes);
-            input_shape_ = model_->inputs()[0].get_partial_shape().get_min_shape();
-        } catch (const std::exception& e) {
-            std::cerr << "[RetinaNet] Reshape to batch=" << compile_batch_size
-                      << " failed: " << e.what() << std::endl;
-            std::cerr << "[RetinaNet] Falling back to batch_size=1" << std::endl;
-            model_ = core_.read_model(model_path_);
-            map_output_names();
-            input_shape_ = model_->inputs()[0].get_partial_shape().get_min_shape();
-            batch_size_ = 1;
-            compile_batch_size = 1;
-            if (input_shape_[0] == 0) {
-                std::map<std::string, ov::PartialShape> fallback_shapes;
-                for (const auto& inp : model_->inputs()) {
-                    ov::PartialShape s = inp.get_partial_shape();
-                    s[0] = 1;
-                    fallback_shapes[inp.get_any_name()] = s;
-                }
-                model_->reshape(fallback_shapes);
-                input_shape_ = model_->inputs()[0].get_partial_shape().get_min_shape();
-            }
-        }
+        model_->reshape(new_shapes);
+        input_shape_ = model_->inputs()[0].get_partial_shape().get_min_shape();
     }
 
     // Update batch_size_ for explicit batching
