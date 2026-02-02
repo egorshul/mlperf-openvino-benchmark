@@ -46,12 +46,11 @@ class ImageMultiDieSUTBase(ABC):
         self.qsl = qsl
         self.scenario = scenario
 
-        # Batch size: Server=1 (AUTO_BATCH), Offline=configured or default
         if scenario == Scenario.SERVER:
             self.batch_size = 1
         else:
             configured_batch = config.openvino.batch_size
-            if configured_batch <= 1:
+            if configured_batch <= 0:
                 self.batch_size = self.DEFAULT_OFFLINE_BATCH_SIZE
             else:
                 self.batch_size = configured_batch
@@ -135,6 +134,7 @@ class ImageMultiDieSUTBase(ABC):
         self._cpp_sut.set_store_predictions(is_accuracy_mode)
         self._is_accuracy_mode = is_accuracy_mode
         self.input_name = self._cpp_sut.get_input_name()
+        self.batch_size = self._cpp_sut.get_batch_size()
 
         logger.info(
             f"C++ {self.MODEL_NAME} SUT loaded: {self._cpp_sut.get_num_dies()} dies, "

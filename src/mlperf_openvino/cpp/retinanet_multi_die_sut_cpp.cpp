@@ -855,13 +855,18 @@ void RetinaNetMultiDieCppSUT::load() {
     // Map output names
     map_output_names();
 
-    // Determine actual batch size for model compilation
     int compile_batch_size = batch_size_;
     if (use_explicit_batching_ && explicit_batch_size_ > 1) {
         compile_batch_size = explicit_batch_size_;
     }
 
-    if (compile_batch_size > 1 || input_shape_[0] == 0) {
+    int model_batch = static_cast<int>(input_shape_[0]);
+
+    if (model_batch > 0 && compile_batch_size != model_batch) {
+        std::cerr << "[RetinaNet] Model native batch=" << model_batch
+                  << ", ignoring requested batch=" << compile_batch_size << std::endl;
+        batch_size_ = model_batch;
+    } else if (model_batch == 0) {
         std::map<std::string, ov::PartialShape> new_shapes;
         for (const auto& input : inputs) {
             ov::PartialShape new_shape = input.get_partial_shape();
