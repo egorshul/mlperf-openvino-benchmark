@@ -49,8 +49,7 @@ struct ResNetMultiDieInferContext {
     uint64_t query_ids[MAX_BATCH];
     int sample_indices[MAX_BATCH];
     int actual_batch_size = 0;
-    int num_dummies = 0;  // Number of dummy samples (for explicit batching)
-    mlperf::QuerySampleResponse responses[MAX_BATCH];
+    int num_dummies = 0;
 };
 
 /**
