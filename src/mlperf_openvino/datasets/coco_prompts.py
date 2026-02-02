@@ -313,7 +313,7 @@ class COCOPromptsDataset(BaseDataset):
             else:
                 # .pt format
                 import torch
-                latents_data = torch.load(str(latents_file), map_location='cpu')
+                latents_data = torch.load(str(latents_file), map_location='cpu', weights_only=True)
 
                 if isinstance(latents_data, dict):
                     if 'latents' in latents_data:
@@ -321,22 +321,40 @@ class COCOPromptsDataset(BaseDataset):
                     elif 'noise' in latents_data:
                         latents_data = latents_data['noise']
                     elif latents_data:
-                        latents_data = list(latents_data.values())[0]
+                        # MLCommons format: {0: tensor(1,4,128,128), 1: tensor(...), ...}
+                        # Check if keys are integer indices
+                        first_key = next(iter(latents_data))
+                        if isinstance(first_key, int):
+                            # Dict of indexed latents — load each one directly
+                            num_to_load = min(len(latents_data), len(self._samples))
+                            for idx in range(num_to_load):
+                                if idx in latents_data:
+                                    lat = latents_data[idx]
+                                    if hasattr(lat, 'numpy'):
+                                        lat = lat.numpy()
+                                    lat = np.array(lat, dtype=np.float32)
+                                    # Squeeze leading batch dim: (1,4,128,128) -> (4,128,128)
+                                    if lat.ndim == 4 and lat.shape[0] == 1:
+                                        lat = lat.squeeze(0)
+                                    self._latents_cache[idx] = lat
+                            latents_data = None  # Already loaded into cache
+                        else:
+                            latents_data = list(latents_data.values())[0]
                     else:
                         logger.warning("Empty latents dict")
                         return
 
                 # Convert torch tensor to numpy
-                if hasattr(latents_data, 'numpy'):
+                if latents_data is not None and hasattr(latents_data, 'numpy'):
                     latents_data = latents_data.numpy()
 
-            if isinstance(latents_data, np.ndarray) and latents_data.ndim == 4:
+            if latents_data is not None and isinstance(latents_data, np.ndarray) and latents_data.ndim == 4:
                 # Shape: [num_samples, 4, H, W]
                 logger.info(f"Latents tensor shape: {latents_data.shape}")
                 num_to_load = min(latents_data.shape[0], len(self._samples))
                 for idx in range(num_to_load):
                     self._latents_cache[idx] = latents_data[idx].astype(np.float32)
-            elif isinstance(latents_data, (list, tuple)):
+            elif latents_data is not None and isinstance(latents_data, (list, tuple)):
                 for idx, lat in enumerate(latents_data):
                     if idx < len(self._samples):
                         if hasattr(lat, 'numpy'):
@@ -466,8 +484,13 @@ class COCOPromptsDataset(BaseDataset):
             if ref_path:
                 reference_images.append(ref_path)
 
-        if reference_images:
-            fid_score = self._compute_fid_score(generated_images, reference_images)
+        # Compute FID: use pre-computed statistics (val2014.npz) if available,
+        # or fall back to reference images
+        statistics_path = self._find_statistics_file()
+        if reference_images or statistics_path:
+            fid_score = self._compute_fid_score(
+                generated_images, reference_images, statistics_path=statistics_path
+            )
             metrics['fid_score'] = fid_score
 
         metrics['clip_score_valid'] = 31.68632 <= clip_score <= 31.81332
