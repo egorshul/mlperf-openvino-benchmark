@@ -33,6 +33,25 @@ from ..datasets.librispeech import LibriSpeechQSL
 logger = logging.getLogger(__name__)
 
 
+def _fmt_time(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    return f"{int(seconds // 60)}m{int(seconds % 60):02d}s"
+
+
+def _print_progress(completed: int, total: int, start_time: float) -> None:
+    elapsed = time.time() - start_time
+    rate = completed / elapsed if elapsed > 0 else 0.0
+    if completed >= total:
+        line = f"\r[Inference] {completed}/{total} | {rate:.2f} samples/s | {_fmt_time(elapsed)}"
+        print(line, file=sys.stderr, flush=True)
+        print(file=sys.stderr)
+    else:
+        eta = (total - completed) / rate if rate > 0 else 0.0
+        line = f"\r[Inference] {completed}/{total} | {rate:.2f} samples/s | ETA {_fmt_time(eta)}"
+        print(line, end="", file=sys.stderr, flush=True)
+
+
 class WhisperMultiDieSUT:
     """Whisper ASR SUT for multi-die accelerators.
 
@@ -212,6 +231,7 @@ class WhisperMultiDieSUT:
         total = len(query_samples)
         num_dies = len(self._models)
         self._start_time = time.time()
+        self._sample_count = 0
 
         print(f"[Offline] {total} samples, {num_dies} die(s)", file=sys.stderr)
 
@@ -236,9 +256,6 @@ class WhisperMultiDieSUT:
                 with results_lock:
                     all_results.append((sample, sample_idx, text))
 
-        print("[Inference] ", end="", file=sys.stderr)
-        dots_printed = 0
-
         with ThreadPoolExecutor(max_workers=num_dies) as pool:
             futures = [
                 pool.submit(_die_worker, idx, batch)
@@ -247,27 +264,15 @@ class WhisperMultiDieSUT:
             ]
             while True:
                 done = sum(1 for f in futures if f.done())
-                completed = self._sample_count
-                target = int(completed * 10 / total) if total else 10
-                while dots_printed < target:
-                    print(".", end="", file=sys.stderr, flush=True)
-                    dots_printed += 1
+                _print_progress(self._sample_count, total, self._start_time)
                 if done == len(futures):
                     break
-                time.sleep(0.1)
+                time.sleep(0.5)
 
             for f in futures:
                 f.result()
 
-        while dots_printed < 10:
-            print(".", end="", file=sys.stderr, flush=True)
-            dots_printed += 1
-
-        elapsed = time.time() - self._start_time
-        print(
-            f" {total}/{total} ({elapsed:.1f}s, {total / elapsed:.1f} qps)",
-            file=sys.stderr,
-        )
+        _print_progress(total, total, self._start_time)
 
         responses = []
         arrays = []
@@ -285,9 +290,6 @@ class WhisperMultiDieSUT:
         responses = []
         arrays = []
 
-        print("[Inference] ", end="", file=sys.stderr)
-        dots_printed = 0
-
         _, model = self._models[0]
         for sample in query_samples:
             sample_idx = sample.index
@@ -300,22 +302,9 @@ class WhisperMultiDieSUT:
             arrays.append(arr)
             bi = arr.buffer_info()
             responses.append(lg.QuerySampleResponse(sample.id, bi[0], bi[1]))
+            _print_progress(self._sample_count, total, self._start_time)
 
-            target = int(self._sample_count * 10 / total) if total else 10
-            while dots_printed < target:
-                print(".", end="", file=sys.stderr, flush=True)
-                dots_printed += 1
-
-        while dots_printed < 10:
-            print(".", end="", file=sys.stderr, flush=True)
-            dots_printed += 1
-
-        elapsed = time.time() - self._start_time
-        print(
-            f" {total}/{total} ({elapsed:.1f}s, {total / elapsed:.1f} qps)",
-            file=sys.stderr,
-        )
-
+        _print_progress(total, total, self._start_time)
         lg.QuerySamplesComplete(responses)
 
     def _issue_queries_server(self, query_samples: List[Any]) -> None:

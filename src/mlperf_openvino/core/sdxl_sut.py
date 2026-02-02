@@ -1,9 +1,4 @@
-"""
-Stable Diffusion XL System Under Test implementation.
-
-This module provides SUT implementation for SDXL text-to-image model,
-using OpenVINO for inference or optimum-intel OVStableDiffusionXLPipeline.
-"""
+"""Stable Diffusion XL System Under Test."""
 
 import array
 import logging
@@ -15,20 +10,12 @@ from typing import Any, Dict, List, Optional, Union
 import numpy as np
 
 try:
-    from tqdm import tqdm
-    TQDM_AVAILABLE = True
-except ImportError:
-    TQDM_AVAILABLE = False
-    tqdm = None
-
-try:
     import mlperf_loadgen as lg
     LOADGEN_AVAILABLE = True
 except ImportError:
     LOADGEN_AVAILABLE = False
     lg = None
 
-# Optimum-Intel for SDXL pipeline
 try:
     from optimum.intel import OVStableDiffusionXLPipeline
     OPTIMUM_SDXL_AVAILABLE = True
@@ -36,7 +23,6 @@ except ImportError:
     OPTIMUM_SDXL_AVAILABLE = False
     OVStableDiffusionXLPipeline = None
 
-# Diffusers for alternative pipeline
 try:
     from diffusers import StableDiffusionXLPipeline
     DIFFUSERS_AVAILABLE = True
@@ -49,21 +35,35 @@ from ..datasets.coco_prompts import COCOPromptsQSL
 
 logger = logging.getLogger(__name__)
 
-# SDXL default parameters (MLCommons reference implementation)
 DEFAULT_GUIDANCE_SCALE = 8.0
 DEFAULT_NUM_INFERENCE_STEPS = 20
 DEFAULT_IMAGE_SIZE = 1024
-# MLCommons official negative prompt
-DEFAULT_NEGATIVE_PROMPT = "normal quality, low quality, worst quality, low res, blurry, nsfw, nude"
+DEFAULT_NEGATIVE_PROMPT = (
+    "normal quality, low quality, worst quality, low res, blurry, nsfw, nude"
+)
+
+
+def _fmt_time(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    return f"{int(seconds // 60)}m{int(seconds % 60):02d}s"
+
+
+def _print_progress(completed: int, total: int, start_time: float) -> None:
+    elapsed = time.time() - start_time
+    rate = completed / elapsed if elapsed > 0 else 0.0
+    if completed >= total:
+        line = f"\r[Inference] {completed}/{total} | {rate:.2f} samples/s | {_fmt_time(elapsed)}"
+        print(line, file=sys.stderr, flush=True)
+        print(file=sys.stderr)
+    else:
+        eta = (total - completed) / rate if rate > 0 else 0.0
+        line = f"\r[Inference] {completed}/{total} | {rate:.2f} samples/s | ETA {_fmt_time(eta)}"
+        print(line, end="", file=sys.stderr, flush=True)
 
 
 class SDXLOptimumSUT:
-    """
-    System Under Test for Stable Diffusion XL using Optimum-Intel.
-
-    Uses OVStableDiffusionXLPipeline for optimized OpenVINO inference
-    with proper handling of UNet, VAE, and text encoders.
-    """
+    """SDXL SUT using Optimum-Intel OVStableDiffusionXLPipeline."""
 
     def __init__(
         self,
@@ -76,10 +76,8 @@ class SDXLOptimumSUT:
         image_size: int = DEFAULT_IMAGE_SIZE,
         negative_prompt: str = DEFAULT_NEGATIVE_PROMPT,
     ):
-        """Initialize SDXL SUT using Optimum-Intel."""
         if not LOADGEN_AVAILABLE:
             raise ImportError("MLPerf LoadGen is not installed")
-
         if not OPTIMUM_SDXL_AVAILABLE:
             raise ImportError(
                 "Optimum-Intel with SDXL support is required. "
@@ -98,157 +96,64 @@ class SDXLOptimumSUT:
         self._predictions: Dict[int, np.ndarray] = {}
         self._query_count = 0
         self._sample_count = 0
-
-        self._progress_bar: Optional[Any] = None
         self._start_time = 0.0
-        self._last_progress_update = 0.0
-        self._progress_update_interval = 1.0  # seconds (SDXL is slower)
 
         self._sut_handle = None
         self._qsl_handle = None
 
-        # Random generator for reproducibility
-        self._generator = None
-
-        # Load pipeline
         self._load_pipeline()
 
     def _load_pipeline(self) -> None:
-        """Load SDXL pipeline using Optimum-Intel with MLCommons-compliant scheduler."""
-        logger.info(f"Loading SDXL model from {self.model_path}")
+        """Load SDXL pipeline with MLCommons-compliant scheduler."""
+        logger.info("Loading SDXL model from %s", self.model_path)
 
         try:
-            # Load OpenVINO optimized pipeline
-            # load_in_8bit=False prevents NNCF int8 weight compression
-            # which degrades accuracy for MLCommons closed division
             self.pipeline = OVStableDiffusionXLPipeline.from_pretrained(
-                str(self.model_path),
-                compile=True,
-                load_in_8bit=False,
+                str(self.model_path), compile=True, load_in_8bit=False,
             )
-            logger.info("SDXL pipeline loaded successfully (OpenVINO)")
-
         except Exception as e:
-            logger.warning(f"Failed to load OpenVINO pipeline: {e}")
-
+            logger.warning("Failed to load OpenVINO pipeline: %s", e)
             if DIFFUSERS_AVAILABLE:
-                logger.info("Falling back to diffusers pipeline")
                 import torch
                 self.pipeline = StableDiffusionXLPipeline.from_pretrained(
-                    str(self.model_path),
-                    torch_dtype=torch.float32,
-                )
-                self.pipeline = self.pipeline.to("cpu")
+                    str(self.model_path), torch_dtype=torch.float32,
+                ).to("cpu")
             else:
-                raise RuntimeError(
-                    f"Cannot load SDXL model from {self.model_path}: {e}"
-                )
+                raise RuntimeError(f"Cannot load SDXL model: {e}")
 
-        # Override scheduler to EulerDiscreteScheduler (MLCommons requirement)
+        self.pipeline.set_progress_bar_config(disable=True)
+
         try:
             from diffusers import EulerDiscreteScheduler
             self.pipeline.scheduler = EulerDiscreteScheduler.from_config(
                 self.pipeline.scheduler.config
             )
-            logger.info("Scheduler overridden to EulerDiscreteScheduler (MLCommons)")
         except Exception as e:
-            logger.warning(f"Failed to override scheduler: {e}")
-
-    def _get_generator(self, seed: int = 42):
-        """Get random generator for reproducibility."""
-        try:
-            import torch
-            return torch.Generator().manual_seed(seed)
-        except ImportError:
-            return None
-
-    def _start_progress(self, total: int, desc: str = "Processing") -> None:
-        """Start progress tracking."""
-        self._start_time = time.time()
-        if TQDM_AVAILABLE:
-            self._progress_bar = tqdm(
-                total=total,
-                desc=desc,
-                unit="images",
-                file=sys.stderr,
-                dynamic_ncols=True,
-            )
-        else:
-            logger.info(f"Starting: {desc} ({total} images)")
-            self._last_progress_update = time.time()
-
-    def _update_progress(self, n: int = 1) -> None:
-        """Update progress by n samples."""
-        if TQDM_AVAILABLE and self._progress_bar is not None:
-            self._progress_bar.update(n)
-        else:
-            current_time = time.time()
-            if current_time - self._last_progress_update >= self._progress_update_interval:
-                elapsed = current_time - self._start_time
-                throughput = self._sample_count / elapsed if elapsed > 0 else 0
-                logger.info(
-                    f"Progress: {self._sample_count} images, "
-                    f"{throughput:.2f} images/sec"
-                )
-                self._last_progress_update = current_time
-
-    def _close_progress(self) -> None:
-        """Close progress tracking."""
-        if TQDM_AVAILABLE and self._progress_bar is not None:
-            self._progress_bar.close()
-            self._progress_bar = None
-        else:
-            elapsed = time.time() - self._start_time
-            throughput = self._sample_count / elapsed if elapsed > 0 else 0
-            logger.info(
-                f"Completed: {self._sample_count} images in {elapsed:.1f}s "
-                f"({throughput:.2f} images/sec)"
-            )
+            logger.warning("Failed to set EulerDiscreteScheduler: %s", e)
 
     def flush_queries(self) -> None:
-        """Flush any pending queries."""
-        if self._progress_bar is not None:
-            self._close_progress()
+        pass
 
     def _process_sample(self, sample_idx: int) -> np.ndarray:
-        """Process a single prompt and generate an image.
-
-        MLCommons compliance requires:
-        - Pre-computed latents from latents.pt (closed division)
-        - EulerDiscreteScheduler with 20 steps
-        - guidance_scale=8.0
-        - Specific negative prompt
-        """
+        """Generate a single image with MLCommons-compliant parameters."""
         features = self.qsl.get_features(sample_idx)
-        prompt = features['prompt']
-
-        guidance_scale = features.get('guidance_scale', self.guidance_scale)
-        num_steps = features.get('num_inference_steps', self.num_inference_steps)
-
-        # Use pre-computed latents if available (REQUIRED for closed division)
-        latents = features.get('latents', None)
+        prompt = features["prompt"]
+        guidance_scale = features.get("guidance_scale", self.guidance_scale)
+        num_steps = features.get("num_inference_steps", self.num_inference_steps)
+        latents = features.get("latents", None)
 
         if latents is not None:
             try:
                 import torch
                 if isinstance(latents, np.ndarray):
                     latents = torch.from_numpy(latents.copy()).float()
-
-                # Ensure [1, 4, 128, 128] shape
                 if latents.dim() == 3:
                     latents = latents.unsqueeze(0)
-
                 if latents.shape[1] != 4:
-                    logger.warning(
-                        f"Latents have {latents.shape[1]} channels, expected 4. "
-                        "Using random latents instead."
-                    )
                     latents = None
             except ImportError:
-                logger.warning("PyTorch not available, cannot convert latents")
                 latents = None
 
-        # Build pipeline kwargs
         pipe_kwargs = {
             "prompt": prompt,
             "negative_prompt": self.negative_prompt,
@@ -258,100 +163,72 @@ class SDXLOptimumSUT:
             "width": self.image_size,
             "output_type": "np",
         }
-
         if latents is not None:
             pipe_kwargs["latents"] = latents
         else:
-            # Fallback: use deterministic generator when no pre-computed latents
-            logger.warning(
-                f"No pre-computed latents for sample {sample_idx}. "
-                "Results may not match MLCommons reference."
-            )
-            pipe_kwargs["generator"] = self._get_generator(seed=sample_idx)
+            try:
+                import torch
+                pipe_kwargs["generator"] = torch.Generator().manual_seed(sample_idx)
+            except ImportError:
+                pass
 
-        result = self.pipeline(**pipe_kwargs)
+        image = self.pipeline(**pipe_kwargs).images[0]
 
-        # output_type="np" returns numpy arrays in [0, 1] float range
-        image = result.images[0]
         if isinstance(image, np.ndarray):
             if image.max() <= 1.0:
                 image = (image * 255).round().astype(np.uint8)
             elif image.dtype != np.uint8:
                 image = image.astype(np.uint8)
         else:
-            # PIL Image fallback
             image = np.array(image)
 
         return image
 
     def issue_queries(self, query_samples: List[Any]) -> None:
-        """Process queries from LoadGen."""
         self._query_count += len(query_samples)
-
         if self.scenario == Scenario.OFFLINE:
             self._issue_query_offline(query_samples)
-        elif self.scenario == Scenario.SERVER:
-            self._issue_query_server(query_samples)
         else:
-            raise ValueError(f"Unsupported scenario: {self.scenario}")
+            self._issue_query_server(query_samples)
 
     def _issue_query_offline(self, query_samples: List[Any]) -> None:
         """Process queries for Offline scenario."""
+        total = len(query_samples)
+        self._start_time = time.time()
         responses = []
         response_arrays = []
 
-        total_samples = len(query_samples)
-        self._start_progress(total_samples, desc="SDXL Offline generation")
+        print(f"[Offline] {total} samples", file=sys.stderr)
 
         for sample in query_samples:
             sample_idx = sample.index
-            self._sample_count += 1
-
-            # Generate image
             image = self._process_sample(sample_idx)
             self._predictions[sample_idx] = image
+            self._sample_count += 1
 
-            # Create response (store image size as dummy response)
             response_data = np.array(image.shape, dtype=np.int64)
-            response_array = array.array('B', response_data.tobytes())
+            response_array = array.array("B", response_data.tobytes())
             response_arrays.append(response_array)
             bi = response_array.buffer_info()
+            responses.append(lg.QuerySampleResponse(sample.id, bi[0], bi[1]))
 
-            response = lg.QuerySampleResponse(sample.id, bi[0], bi[1])
-            responses.append(response)
+            _print_progress(self._sample_count, total, self._start_time)
 
-            self._update_progress(1)
-
-        self._close_progress()
+        _print_progress(total, total, self._start_time)
         lg.QuerySamplesComplete(responses)
 
     def _issue_query_server(self, query_samples: List[Any]) -> None:
         """Process queries for Server scenario."""
-        responses = []
-        response_arrays = []
-
-        if self._sample_count == 0:
-            self._start_progress(0, desc="SDXL Server generation")
-
         for sample in query_samples:
             sample_idx = sample.index
-            self._sample_count += 1
-
-            # Generate image
             image = self._process_sample(sample_idx)
             self._predictions[sample_idx] = image
+            self._sample_count += 1
 
             response_data = np.array(image.shape, dtype=np.int64)
-            response_array = array.array('B', response_data.tobytes())
-            response_arrays.append(response_array)
+            response_array = array.array("B", response_data.tobytes())
             bi = response_array.buffer_info()
-
-            response = lg.QuerySampleResponse(sample.id, bi[0], bi[1])
-            responses.append(response)
-
-            self._update_progress(1)
-
-        lg.QuerySamplesComplete(responses)
+            lg.QuerySamplesComplete([lg.QuerySampleResponse(sample.id, bi[0], bi[1])])
 
     def get_sut(self) -> Any:
         """Get LoadGen SUT handle."""
@@ -375,36 +252,22 @@ class SDXLOptimumSUT:
         return self._predictions.copy()
 
     def compute_accuracy(self) -> Dict[str, float]:
-        """Compute CLIP score and FID for generated images."""
         predictions = self.get_predictions()
-
         if not predictions:
-            return {
-                'clip_score': 0.0,
-                'fid_score': 0.0,
-                'num_samples': 0
-            }
+            return {"clip_score": 0.0, "fid_score": 0.0, "num_samples": 0}
 
         indices = sorted(predictions.keys())
         images = [predictions[idx] for idx in indices]
-
-        # Use dataset's compute_accuracy
         return self.qsl.dataset.compute_accuracy(images, indices)
 
     def reset(self) -> None:
-        """Reset state for new run."""
         self._predictions.clear()
         self._query_count = 0
         self._sample_count = 0
 
 
 class SDXLManualSUT:
-    """
-    System Under Test for SDXL with manual component loading.
-
-    This SUT loads individual SDXL components (UNet, VAE, text encoders)
-    as separate OpenVINO models for more control over the inference pipeline.
-    """
+    """SDXL SUT with manual OpenVINO component loading (UNet, VAE, text encoders)."""
 
     def __init__(
         self,
@@ -417,7 +280,6 @@ class SDXLManualSUT:
         image_size: int = DEFAULT_IMAGE_SIZE,
         negative_prompt: str = DEFAULT_NEGATIVE_PROMPT,
     ):
-        """Initialize SDXL SUT with manual component loading."""
         if not LOADGEN_AVAILABLE:
             raise ImportError("MLPerf LoadGen is not installed")
 
@@ -433,17 +295,11 @@ class SDXLManualSUT:
         self._predictions: Dict[int, np.ndarray] = {}
         self._query_count = 0
         self._sample_count = 0
-
-        self._progress_bar: Optional[Any] = None
         self._start_time = 0.0
-        self._last_progress_update = 0.0
-        self._progress_update_interval = 1.0
 
-        # LoadGen handles
         self._sut_handle = None
         self._qsl_handle = None
 
-        # Model components
         self.unet = None
         self.vae_decoder = None
         self.text_encoder = None
@@ -452,7 +308,6 @@ class SDXLManualSUT:
         self.tokenizer_2 = None
         self.scheduler = None
 
-        # Load components
         self._load_components()
 
     def _load_components(self) -> None:
@@ -690,60 +545,11 @@ class SDXLManualSUT:
 
         return image
 
-    def _start_progress(self, total: int, desc: str = "Processing") -> None:
-        """Start progress tracking."""
-        self._start_time = time.time()
-        if TQDM_AVAILABLE:
-            self._progress_bar = tqdm(
-                total=total,
-                desc=desc,
-                unit="images",
-                file=sys.stderr,
-                dynamic_ncols=True,
-            )
-        else:
-            logger.info(f"Starting: {desc} ({total} images)")
-            self._last_progress_update = time.time()
-
-    def _update_progress(self, n: int = 1) -> None:
-        """Update progress by n samples."""
-        if TQDM_AVAILABLE and self._progress_bar is not None:
-            self._progress_bar.update(n)
-        else:
-            current_time = time.time()
-            if current_time - self._last_progress_update >= self._progress_update_interval:
-                elapsed = current_time - self._start_time
-                throughput = self._sample_count / elapsed if elapsed > 0 else 0
-                logger.info(
-                    f"Progress: {self._sample_count} images, "
-                    f"{throughput:.2f} images/sec"
-                )
-                self._last_progress_update = current_time
-
-    def _close_progress(self) -> None:
-        """Close progress tracking."""
-        if TQDM_AVAILABLE and self._progress_bar is not None:
-            self._progress_bar.close()
-            self._progress_bar = None
-        else:
-            elapsed = time.time() - self._start_time
-            throughput = self._sample_count / elapsed if elapsed > 0 else 0
-            logger.info(
-                f"Completed: {self._sample_count} images in {elapsed:.1f}s "
-                f"({throughput:.2f} images/sec)"
-            )
-
     def flush_queries(self) -> None:
-        """Flush any pending queries."""
-        if self._progress_bar is not None:
-            self._close_progress()
+        pass
 
     def _process_sample(self, sample_idx: int) -> np.ndarray:
-        """Generate image for a sample (MLCommons-compliant).
-
-        Follows MLCommons reference: encode prompt + negative prompt,
-        build SDXL conditioning (pooled embeds + time_ids), run denoising loop.
-        """
+        """Generate image for a sample (MLCommons-compliant)."""
         features = self.qsl.get_features(sample_idx)
         prompt = features['prompt']
 
@@ -816,110 +622,79 @@ class SDXLManualSUT:
         return image
 
     def issue_queries(self, query_samples: List[Any]) -> None:
-        """Process queries from LoadGen."""
         self._query_count += len(query_samples)
-
         if self.scenario == Scenario.OFFLINE:
             self._issue_query_offline(query_samples)
-        elif self.scenario == Scenario.SERVER:
-            self._issue_query_server(query_samples)
         else:
-            raise ValueError(f"Unsupported scenario: {self.scenario}")
+            self._issue_query_server(query_samples)
 
     def _issue_query_offline(self, query_samples: List[Any]) -> None:
         """Process queries for Offline scenario."""
+        total = len(query_samples)
+        self._start_time = time.time()
         responses = []
         response_arrays = []
 
-        total_samples = len(query_samples)
-        self._start_progress(total_samples, desc="SDXL Offline generation")
+        print(f"[Offline] {total} samples", file=sys.stderr)
 
         for sample in query_samples:
             sample_idx = sample.index
-            self._sample_count += 1
-
             image = self._process_sample(sample_idx)
             self._predictions[sample_idx] = image
+            self._sample_count += 1
 
             response_data = np.array(image.shape, dtype=np.int64)
-            response_array = array.array('B', response_data.tobytes())
+            response_array = array.array("B", response_data.tobytes())
             response_arrays.append(response_array)
             bi = response_array.buffer_info()
+            responses.append(lg.QuerySampleResponse(sample.id, bi[0], bi[1]))
 
-            response = lg.QuerySampleResponse(sample.id, bi[0], bi[1])
-            responses.append(response)
+            _print_progress(self._sample_count, total, self._start_time)
 
-            self._update_progress(1)
-
-        self._close_progress()
+        _print_progress(total, total, self._start_time)
         lg.QuerySamplesComplete(responses)
 
     def _issue_query_server(self, query_samples: List[Any]) -> None:
         """Process queries for Server scenario."""
-        responses = []
-        response_arrays = []
-
-        if self._sample_count == 0:
-            self._start_progress(0, desc="SDXL Server generation")
-
         for sample in query_samples:
             sample_idx = sample.index
-            self._sample_count += 1
-
             image = self._process_sample(sample_idx)
             self._predictions[sample_idx] = image
+            self._sample_count += 1
 
             response_data = np.array(image.shape, dtype=np.int64)
-            response_array = array.array('B', response_data.tobytes())
-            response_arrays.append(response_array)
+            response_array = array.array("B", response_data.tobytes())
             bi = response_array.buffer_info()
-
-            response = lg.QuerySampleResponse(sample.id, bi[0], bi[1])
-            responses.append(response)
-
-            self._update_progress(1)
-
-        lg.QuerySamplesComplete(responses)
+            lg.QuerySamplesComplete([lg.QuerySampleResponse(sample.id, bi[0], bi[1])])
 
     def get_sut(self) -> Any:
-        """Get LoadGen SUT handle."""
         if self._sut_handle is None:
             self._sut_handle = lg.ConstructSUT(self.issue_queries, self.flush_queries)
         return self._sut_handle
 
     def get_qsl(self) -> Any:
-        """Get LoadGen QSL handle."""
         if self._qsl_handle is None:
             self._qsl_handle = lg.ConstructQSL(
                 self.qsl.total_sample_count,
                 self.qsl.performance_sample_count,
                 self.qsl.load_query_samples,
-                self.qsl.unload_query_samples
+                self.qsl.unload_query_samples,
             )
         return self._qsl_handle
 
     def get_predictions(self) -> Dict[int, np.ndarray]:
-        """Get all generated images."""
         return self._predictions.copy()
 
     def compute_accuracy(self) -> Dict[str, float]:
-        """Compute CLIP score and FID."""
         predictions = self.get_predictions()
-
         if not predictions:
-            return {
-                'clip_score': 0.0,
-                'fid_score': 0.0,
-                'num_samples': 0
-            }
+            return {"clip_score": 0.0, "fid_score": 0.0, "num_samples": 0}
 
         indices = sorted(predictions.keys())
         images = [predictions[idx] for idx in indices]
-
         return self.qsl.dataset.compute_accuracy(images, indices)
 
     def reset(self) -> None:
-        """Reset state for new run."""
         self._predictions.clear()
         self._query_count = 0
         self._sample_count = 0

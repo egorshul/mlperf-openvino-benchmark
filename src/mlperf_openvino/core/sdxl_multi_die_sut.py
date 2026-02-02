@@ -39,6 +39,25 @@ DEFAULT_NEGATIVE_PROMPT = (
 )
 
 
+def _fmt_time(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    return f"{int(seconds // 60)}m{int(seconds % 60):02d}s"
+
+
+def _print_progress(completed: int, total: int, start_time: float) -> None:
+    elapsed = time.time() - start_time
+    rate = completed / elapsed if elapsed > 0 else 0.0
+    if completed >= total:
+        line = f"\r[Inference] {completed}/{total} | {rate:.2f} samples/s | {_fmt_time(elapsed)}"
+        print(line, file=sys.stderr, flush=True)
+        print(file=sys.stderr)
+    else:
+        eta = (total - completed) / rate if rate > 0 else 0.0
+        line = f"\r[Inference] {completed}/{total} | {rate:.2f} samples/s | ETA {_fmt_time(eta)}"
+        print(line, end="", file=sys.stderr, flush=True)
+
+
 class SDXLMultiDieSUT:
     """SDXL text-to-image SUT for multi-die accelerators.
 
@@ -162,6 +181,9 @@ class SDXLMultiDieSUT:
             pipeline.to(die)
             pipeline.compile()
 
+        # Suppress internal denoising-step progress bars
+        pipeline.set_progress_bar_config(disable=True)
+
         try:
             from diffusers import EulerDiscreteScheduler
             pipeline.scheduler = EulerDiscreteScheduler.from_config(
@@ -270,9 +292,6 @@ class SDXLMultiDieSUT:
                 with results_lock:
                     all_results.append((sample, sample_idx, image))
 
-        print("[Inference] ", end="", file=sys.stderr)
-        dots_printed = 0
-
         with ThreadPoolExecutor(max_workers=num_dies) as pool:
             futures = [
                 pool.submit(_die_worker, idx, batch)
@@ -283,27 +302,15 @@ class SDXLMultiDieSUT:
                 done = sum(1 for f in futures if f.done())
                 with self._lock:
                     completed = self._completed
-                target = int(completed * 10 / total) if total else 10
-                while dots_printed < target:
-                    print(".", end="", file=sys.stderr, flush=True)
-                    dots_printed += 1
+                _print_progress(completed, total, self._start_time)
                 if done == len(futures):
                     break
-                time.sleep(0.1)
+                time.sleep(0.5)
 
             for f in futures:
                 f.result()
 
-        while dots_printed < 10:
-            print(".", end="", file=sys.stderr, flush=True)
-            dots_printed += 1
-
-        elapsed = time.time() - self._start_time
-        print(
-            f" {total}/{total} ({elapsed:.1f}s, {total / elapsed:.1f} qps)",
-            file=sys.stderr,
-        )
-
+        _print_progress(total, total, self._start_time)
         self._send_loadgen_responses(all_results)
 
     def _issue_queries_offline_sequential(
@@ -313,9 +320,6 @@ class SDXLMultiDieSUT:
         total = len(query_samples)
         all_results: List[Tuple[Any, int, np.ndarray]] = []
 
-        print("[Inference] ", end="", file=sys.stderr)
-        dots_printed = 0
-
         _, pipeline, _ = self._pipelines[0]
         for sample in query_samples:
             sample_idx = sample.index
@@ -323,22 +327,9 @@ class SDXLMultiDieSUT:
             self._predictions[sample_idx] = image
             self._completed += 1
             all_results.append((sample, sample_idx, image))
+            _print_progress(self._completed, total, self._start_time)
 
-            target = int(self._completed * 10 / total) if total else 10
-            while dots_printed < target:
-                print(".", end="", file=sys.stderr, flush=True)
-                dots_printed += 1
-
-        while dots_printed < 10:
-            print(".", end="", file=sys.stderr, flush=True)
-            dots_printed += 1
-
-        elapsed = time.time() - self._start_time
-        print(
-            f" {total}/{total} ({elapsed:.1f}s, {total / elapsed:.1f} qps)",
-            file=sys.stderr,
-        )
-
+        _print_progress(total, total, self._start_time)
         self._send_loadgen_responses(all_results)
 
     def _issue_queries_server(self, query_samples: List[Any]) -> None:
