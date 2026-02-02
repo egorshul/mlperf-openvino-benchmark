@@ -134,9 +134,12 @@ DATASET_REGISTRY: Dict[str, Dict] = {
             "size_mb": 10,
         },
         "latents": {
-            "url": "https://github.com/mlcommons/inference/raw/master/text_to_image/tools/latents.pt",
+            # media.githubusercontent.com serves actual LFS content (raw/ returns LFS pointer)
+            "url": "https://media.githubusercontent.com/media/mlcommons/inference/master/text_to_image/tools/latents.pt",
+            "fallback_url": "https://github.com/mlcommons/inference/raw/master/text_to_image/tools/latents.pt",
             "filename": "latents.pt",
             "size_mb": 500,
+            "min_size_mb": 100,  # validation: real file is ~1.3GB, LFS pointer is <1KB
         },
         "captions_tsv": {
             "url": "https://github.com/mlcommons/inference/raw/master/text_to_image/coco2014/captions/captions.tsv",
@@ -1507,16 +1510,49 @@ def download_coco2014(
     # Download pre-generated latents (required for reproducibility in closed division)
     if "latents" in dataset_info:
         if not latents_file.exists() or force:
-            logger.info("Downloading MLCommons pre-generated latents...")
-            try:
-                _download_file(
-                    dataset_info["latents"]["url"],
-                    str(latents_file),
-                    expected_size_mb=dataset_info["latents"]["size_mb"]
+            latents_info = dataset_info["latents"]
+            min_size_bytes = latents_info.get("min_size_mb", 100) * 1024 * 1024
+
+            # Try primary URL (media.githubusercontent.com for LFS files)
+            downloaded = False
+            for url_key in ["url", "fallback_url"]:
+                url = latents_info.get(url_key)
+                if not url:
+                    continue
+                logger.info(f"Downloading MLCommons pre-generated latents from {url}...")
+                try:
+                    _download_file(
+                        url,
+                        str(latents_file),
+                        expected_size_mb=latents_info["size_mb"]
+                    )
+                    # Validate: real latents.pt is >100MB, LFS pointer is <1KB
+                    actual_size = latents_file.stat().st_size
+                    if actual_size < min_size_bytes:
+                        logger.warning(
+                            f"Downloaded latents.pt is too small ({actual_size / 1024:.0f} KB). "
+                            f"Expected >{latents_info.get('min_size_mb', 100)} MB. "
+                            f"Likely a Git LFS pointer, not actual content."
+                        )
+                        latents_file.unlink()
+                        continue
+                    downloaded = True
+                    break
+                except Exception as e:
+                    logger.warning(f"Failed to download latents from {url}: {e}")
+
+            if not downloaded:
+                logger.warning(
+                    "Could not download MLCommons latents.pt. "
+                    "Latents will be generated locally at first run. "
+                    "For official submission, download manually:\n"
+                    "  git lfs install\n"
+                    "  git clone --filter=blob:none --sparse "
+                    "https://github.com/mlcommons/inference.git /tmp/mlcommons\n"
+                    "  cd /tmp/mlcommons && git sparse-checkout set text_to_image/tools\n"
+                    "  git lfs pull --include='text_to_image/tools/latents.pt'\n"
+                    f"  cp text_to_image/tools/latents.pt {latents_file}"
                 )
-            except Exception as e:
-                logger.warning(f"Failed to download latents: {e}")
-                logger.warning("Will use randomly generated latents (not MLCommons closed-division compliant)")
 
     # Download official MLCommons captions file
     # For closed division, the EXACT MLCommons prompts must be used

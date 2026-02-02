@@ -385,9 +385,11 @@ class COCOPromptsDataset(BaseDataset):
                     f"Latents file has {num_loaded} entries but {num_needed} samples needed. "
                     f"File may be corrupted or incomplete."
                 )
-            logger.info(
+            logger.warning(
                 f"Generating {num_needed} latents locally "
-                f"(MLCommons reference: seed=0, torch.randn)"
+                f"(seed=0, torch.randn). NOTE: for official Closed Division "
+                f"submission, use the exact MLCommons latents.pt file. "
+                f"Download via: git lfs pull from mlcommons/inference repo."
             )
             self._generate_latents(num_needed)
 
