@@ -93,7 +93,6 @@ class SDXLOptimumSUT:
         self.image_size = image_size
         self.negative_prompt = negative_prompt
 
-        # Batch size: from config, forced to 1 for Server
         if scenario == Scenario.SERVER:
             self.batch_size = 1
         else:
@@ -112,7 +111,7 @@ class SDXLOptimumSUT:
 
     def _load_pipeline(self) -> None:
         """Load SDXL pipeline with MLCommons-compliant scheduler."""
-        logger.info("Loading SDXL model from %s", self.model_path)
+        logger.debug("Loading SDXL model from %s", self.model_path)
 
         try:
             if self.batch_size > 1:
@@ -409,41 +408,36 @@ class SDXLManualSUT:
             raise ImportError("OpenVINO is required for SDXL inference")
 
         core = ov.Core()
-        logger.info(f"Loading SDXL components from {self.model_path}")
+        logger.debug(f"Loading SDXL components from {self.model_path}")
 
-        # Load UNet
         unet_path = self.model_path / "unet" / "openvino_model.xml"
         if not unet_path.exists():
             unet_path = self.model_path / "unet.xml"
         if unet_path.exists():
-            logger.info(f"Loading UNet from {unet_path}")
+            logger.debug(f"Loading UNet from {unet_path}")
             self.unet = core.compile_model(str(unet_path), "CPU")
 
-        # Load VAE decoder
         vae_path = self.model_path / "vae_decoder" / "openvino_model.xml"
         if not vae_path.exists():
             vae_path = self.model_path / "vae_decoder.xml"
         if vae_path.exists():
-            logger.info(f"Loading VAE decoder from {vae_path}")
+            logger.debug(f"Loading VAE decoder from {vae_path}")
             self.vae_decoder = core.compile_model(str(vae_path), "CPU")
 
-        # Load text encoder
         text_enc_path = self.model_path / "text_encoder" / "openvino_model.xml"
         if not text_enc_path.exists():
             text_enc_path = self.model_path / "text_encoder.xml"
         if text_enc_path.exists():
-            logger.info(f"Loading text encoder from {text_enc_path}")
+            logger.debug(f"Loading text encoder from {text_enc_path}")
             self.text_encoder = core.compile_model(str(text_enc_path), "CPU")
 
-        # Load text encoder 2 (SDXL uses two text encoders)
         text_enc2_path = self.model_path / "text_encoder_2" / "openvino_model.xml"
         if not text_enc2_path.exists():
             text_enc2_path = self.model_path / "text_encoder_2.xml"
         if text_enc2_path.exists():
-            logger.info(f"Loading text encoder 2 from {text_enc2_path}")
+            logger.debug(f"Loading text encoder 2 from {text_enc2_path}")
             self.text_encoder_2 = core.compile_model(str(text_enc2_path), "CPU")
 
-        # Load tokenizers
         try:
             from transformers import CLIPTokenizer
             tokenizer_path = self.model_path / "tokenizer"
@@ -464,7 +458,6 @@ class SDXLManualSUT:
         except ImportError:
             logger.warning("transformers not available, tokenizers not loaded")
 
-        # Load scheduler
         try:
             from diffusers import EulerDiscreteScheduler
             scheduler_path = self.model_path / "scheduler"
@@ -487,7 +480,7 @@ class SDXLManualSUT:
                 f"Expected: unet.xml, vae_decoder.xml"
             )
 
-        logger.info("SDXL components loaded successfully")
+        logger.debug("SDXL components loaded successfully")
 
     def _encode_prompt(self, prompt: str):
         """Encode text prompt using CLIP text encoders.
@@ -500,7 +493,6 @@ class SDXLManualSUT:
         if self.tokenizer is None:
             raise RuntimeError("Tokenizer not loaded")
 
-        # Tokenize for first text encoder
         tokens = self.tokenizer(
             prompt,
             padding="max_length",
@@ -509,7 +501,6 @@ class SDXLManualSUT:
             return_tensors="np"
         )
 
-        # Encode with first text encoder (CLIP ViT-L/14 → 768-dim)
         text_input_ids = tokens['input_ids']
 
         if self.text_encoder is not None:
@@ -517,7 +508,6 @@ class SDXLManualSUT:
         else:
             prompt_embeds = np.zeros((1, 77, 768), dtype=np.float32)
 
-        # Encode with second text encoder (OpenCLIP ViT-bigG → 1280-dim)
         pooled_prompt_embeds = np.zeros((1, 1280), dtype=np.float32)
 
         if self.text_encoder_2 is not None and self.tokenizer_2 is not None:
@@ -530,24 +520,17 @@ class SDXLManualSUT:
             )
             text_encoder_2_output = self.text_encoder_2(tokens_2['input_ids'])
 
-            # OpenVINO compiled model returns outputs by index
-            # Output 0: hidden_states [1, 77, 1280]
-            # Output 1: pooled_output [1, 1280]
             if hasattr(text_encoder_2_output, '__len__') and len(text_encoder_2_output) > 1:
                 prompt_embeds_2 = text_encoder_2_output[0]
                 pooled_prompt_embeds = text_encoder_2_output[1]
             else:
                 prompt_embeds_2 = text_encoder_2_output[0] if hasattr(text_encoder_2_output, '__getitem__') else text_encoder_2_output
-                # No pooled output available
-
-            # Concatenate hidden states from both encoders along feature dim
             prompt_embeds = np.concatenate([prompt_embeds, prompt_embeds_2], axis=-1)
 
         return prompt_embeds, pooled_prompt_embeds
 
     def _generate_latents(self, batch_size: int = 1) -> np.ndarray:
         """Generate initial random latents."""
-        # SDXL uses 128x128 latent space for 1024x1024 images
         latent_size = self.image_size // 8
         latents = np.random.randn(
             batch_size, 4, latent_size, latent_size
@@ -571,9 +554,8 @@ class SDXLManualSUT:
             pooled_embeds: Concatenated [negative, positive] pooled embeddings [2, 1280]
             time_ids: Time conditioning [2, 6]
         """
-        latent_input = np.concatenate([latents] * 2)  # For CFG
+        latent_input = np.concatenate([latents] * 2)
 
-        # Scale model input (required by EulerDiscreteScheduler)
         if self.scheduler is not None:
             import torch
             latent_input_torch = torch.from_numpy(latent_input)
@@ -584,31 +566,26 @@ class SDXLManualSUT:
 
         timestep_array = np.array([timestep], dtype=np.float32)
 
-        # Build UNet inputs
         unet_inputs = {
             'sample': latent_input,
             'timestep': timestep_array,
             'encoder_hidden_states': prompt_embeds,
         }
 
-        # SDXL UNet requires additional conditioning (text_embeds + time_ids)
         if pooled_embeds is not None:
             unet_inputs['text_embeds'] = pooled_embeds
         if time_ids is not None:
             unet_inputs['time_ids'] = time_ids
 
-        # Run UNet - gracefully handle if model doesn't accept extra inputs
         try:
             noise_pred = self.unet(unet_inputs)[0]
         except Exception:
-            # Fallback: try without added_cond_kwargs
             noise_pred = self.unet({
                 'sample': latent_input,
                 'timestep': timestep_array,
                 'encoder_hidden_states': prompt_embeds,
             })[0]
 
-        # Classifier-free guidance
         noise_pred_uncond, noise_pred_text = np.split(noise_pred, 2)
         noise_pred = noise_pred_uncond + self.guidance_scale * (
             noise_pred_text - noise_pred_uncond
@@ -618,17 +595,11 @@ class SDXLManualSUT:
 
     def _decode_latents(self, latents: np.ndarray) -> np.ndarray:
         """Decode latents to image using VAE decoder."""
-        # Scale latents - SDXL uses 0.13025 (NOT 0.18215 which is SD 1.x)
         latents = latents / 0.13025
-
-        # Decode
         image = self.vae_decoder(latents)[0]
-
-        # Post-process: VAE output is in [-1, 1] range
         image = (image / 2 + 0.5).clip(0, 1)
         image = (image * 255).round().astype(np.uint8)
 
-        # NCHW to NHWC
         if image.ndim == 4:
             image = image.transpose(0, 2, 3, 1)[0]
         elif image.ndim == 3:
@@ -643,32 +614,24 @@ class SDXLManualSUT:
         """Generate image for a sample (MLCommons-compliant)."""
         features = self.qsl.get_features(sample_idx)
         prompt = features['prompt']
-
-        # Encode positive prompt
         prompt_embeds, pooled_prompt_embeds = self._encode_prompt(prompt)
-
-        # Encode negative prompt for CFG (MLCommons official negative prompt)
         negative_embeds, pooled_negative_embeds = self._encode_prompt(
             self.negative_prompt
         )
 
-        # Concatenate [negative, positive] for classifier-free guidance
         combined_embeds = np.concatenate([negative_embeds, prompt_embeds])
         combined_pooled = np.concatenate([pooled_negative_embeds, pooled_prompt_embeds])
 
-        # Build time_ids: [original_h, original_w, crop_top, crop_left, target_h, target_w]
-        # SDXL default: original=1024x1024, crop=(0,0), target=1024x1024
         time_ids_single = np.array(
             [self.image_size, self.image_size, 0, 0, self.image_size, self.image_size],
             dtype=np.float32
         ).reshape(1, 6)
-        combined_time_ids = np.concatenate([time_ids_single, time_ids_single])  # [2, 6]
+        combined_time_ids = np.concatenate([time_ids_single, time_ids_single])
 
-        # Use pre-computed latents if available (required for closed division)
         latents = features.get('latents', None)
         if latents is not None:
             if latents.ndim == 3:
-                latents = latents[np.newaxis, ...]  # Add batch dim
+                latents = latents[np.newaxis, ...]
             latents = latents.astype(np.float32)
         else:
             logger.warning(
@@ -677,12 +640,9 @@ class SDXLManualSUT:
             )
             latents = self._generate_latents()
 
-        # Denoising loop
         if self.scheduler is not None:
             self.scheduler.set_timesteps(self.num_inference_steps)
             timesteps = self.scheduler.timesteps.numpy()
-
-            # Scale latents by init_noise_sigma (required by EulerDiscreteScheduler)
             init_noise_sigma = float(self.scheduler.init_noise_sigma)
             latents = latents * init_noise_sigma
         else:
@@ -707,7 +667,6 @@ class SDXLManualSUT:
                 alpha = 1.0 - (t / 1000.0)
                 latents = latents - alpha * noise_pred * 0.1
 
-        # Decode to image
         image = self._decode_latents(latents)
 
         return image

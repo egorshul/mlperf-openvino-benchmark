@@ -105,12 +105,12 @@ class WhisperOptimumSUT:
     def _load_model(self) -> None:
         from transformers import AutoProcessor
 
-        logger.info("Loading Whisper model from %s", self.model_path)
+        logger.debug("Loading Whisper model from %s", self.model_path)
 
         try:
             self.processor = AutoProcessor.from_pretrained(self.model_path)
         except Exception:
-            logger.info("Falling back to openai/whisper-large-v3 processor")
+            logger.debug("Falling back to openai/whisper-large-v3 processor")
             self.processor = AutoProcessor.from_pretrained("openai/whisper-large-v3")
 
         self.model = OVModelForSpeechSeq2Seq.from_pretrained(

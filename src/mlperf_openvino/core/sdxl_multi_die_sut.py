@@ -93,7 +93,6 @@ class SDXLMultiDieSUT:
         self.image_size = image_size
         self.negative_prompt = negative_prompt
 
-        # Batch size: from config, forced to 1 for Server
         if scenario == Scenario.SERVER:
             self.batch_size = 1
         else:
@@ -109,13 +108,10 @@ class SDXLMultiDieSUT:
         self._sut_handle = None
         self._qsl_handle = None
 
-        # (die_name, pipeline, die_lock) per die
         self._pipelines: List[Tuple[str, Any, threading.Lock]] = []
         self._pipeline_index = 0
 
         self._setup_pipelines()
-
-    # -- Device discovery & pipeline loading --------------------------------
 
     def _discover_device_dies(self, device: str) -> List[str]:
         """Return sorted list of sub-device identifiers (e.g. NPU.0, NPU.1)."""
@@ -145,12 +141,12 @@ class SDXLMultiDieSUT:
 
         for die in device_dies:
             try:
-                logger.info("Loading SDXL pipeline on %s ...", die)
+                logger.debug("Loading SDXL pipeline on %s ...", die)
                 pipeline = self._load_pipeline_for_device(die)
                 self._pipelines.append((die, pipeline, threading.Lock()))
-                logger.info("Pipeline ready on %s", die)
-            except Exception:
-                logger.exception("Failed to load pipeline for %s", die)
+                logger.debug("Pipeline ready on %s", die)
+            except Exception as exc:
+                logger.debug("Failed to load pipeline for %s: %s", die, exc)
 
         if not self._pipelines:
             logger.warning("No accelerator pipelines loaded, falling back to CPU")
@@ -212,7 +208,6 @@ class SDXLMultiDieSUT:
                 else:
                     raise
 
-        # Suppress internal denoising-step progress bars
         pipeline.set_progress_bar_config(disable=True)
 
         try:
@@ -224,8 +219,6 @@ class SDXLMultiDieSUT:
             logger.warning("Failed to set EulerDiscreteScheduler on %s", die)
 
         return pipeline
-
-    # -- Sample processing --------------------------------------------------
 
     def _process_sample(self, sample_idx: int, pipeline: Any) -> np.ndarray:
         """Generate a single image with MLCommons-compliant parameters."""
@@ -324,8 +317,6 @@ class SDXLMultiDieSUT:
 
         return images
 
-    # -- LoadGen query dispatch ---------------------------------------------
-
     @property
     def _sample_count(self) -> int:
         """Completed sample count (used by benchmark_runner)."""
@@ -351,7 +342,6 @@ class SDXLMultiDieSUT:
             self._issue_queries_offline_sequential(query_samples)
             return
 
-        # Round-robin distribution
         die_batches: List[List[Tuple[Any, int]]] = [[] for _ in range(num_dies)]
         for i, sample in enumerate(query_samples):
             die_batches[i % num_dies].append((sample, sample.index))
@@ -472,8 +462,6 @@ class SDXLMultiDieSUT:
             bi = arr.buffer_info()
             responses.append(lg.QuerySampleResponse(sample.id, bi[0], bi[1]))
         lg.QuerySamplesComplete(responses)
-
-    # -- LoadGen integration ------------------------------------------------
 
     def flush_queries(self) -> None:
         pass

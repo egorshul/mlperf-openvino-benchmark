@@ -94,8 +94,6 @@ class WhisperMultiDieSUT:
 
         self._setup_models()
 
-    # -- Device discovery & model loading -----------------------------------
-
     def _discover_device_dies(self, device: str) -> List[str]:
         """Return sorted list of sub-device identifiers (e.g. NPU.0, NPU.1)."""
         import openvino as ov
@@ -123,7 +121,7 @@ class WhisperMultiDieSUT:
         try:
             self.processor = AutoProcessor.from_pretrained(self.model_path)
         except Exception:
-            logger.info("Loading processor from openai/whisper-large-v3")
+            logger.debug("Loading processor from openai/whisper-large-v3")
             self.processor = AutoProcessor.from_pretrained("openai/whisper-large-v3")
 
         if target_device == "CPU":
@@ -138,14 +136,14 @@ class WhisperMultiDieSUT:
 
         for die in device_dies:
             try:
-                logger.info("Loading Whisper model for %s ...", die)
+                logger.debug("Loading Whisper model for %s ...", die)
                 model = self._load_optimum_model()
                 if die != "CPU":
                     self._patch_encoder_device(model, die)
                 self._models.append((die, model))
-                logger.info("Model ready on %s", die)
-            except Exception:
-                logger.exception("Failed to create model for %s", die)
+                logger.debug("Model ready on %s", die)
+            except Exception as exc:
+                logger.debug("Failed to load model for %s: %s", die, exc)
 
         if not self._models:
             logger.warning("No accelerator models loaded, falling back to CPU")
@@ -166,7 +164,7 @@ class WhisperMultiDieSUT:
                 model_dir, device="CPU", ov_config={"CACHE_DIR": ""},
             )
         except Exception as e:
-            logger.info("Default file names failed (%s), trying detected names", e)
+            logger.debug("Default file names failed (%s), trying detected names", e)
 
         return OVModelForSpeechSeq2Seq.from_pretrained(
             model_dir,
@@ -195,8 +193,6 @@ class WhisperMultiDieSUT:
 
         model.encoder.request = core.compile_model(encoder_model, die, ov_config)
 
-    # -- Sample processing --------------------------------------------------
-
     def _process_sample(self, sample_idx: int, model: Any) -> str:
         """Transcribe a single audio sample."""
         import torch
@@ -216,8 +212,6 @@ class WhisperMultiDieSUT:
             task="transcribe",
         )
         return self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-
-    # -- LoadGen query dispatch ---------------------------------------------
 
     def issue_queries(self, query_samples: List[Any]) -> None:
         self._query_count += len(query_samples)
@@ -322,8 +316,6 @@ class WhisperMultiDieSUT:
             arr = array.array("B", text_bytes)
             bi = arr.buffer_info()
             lg.QuerySamplesComplete([lg.QuerySampleResponse(sample.id, bi[0], bi[1])])
-
-    # -- LoadGen integration ------------------------------------------------
 
     def flush_queries(self) -> None:
         pass
