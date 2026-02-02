@@ -10,10 +10,11 @@ import array
 import logging
 import re
 import sys
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Tuple, Union
 
 import numpy as np
 
@@ -44,14 +45,10 @@ DEFAULT_NEGATIVE_PROMPT = "normal quality, low quality, worst quality, low res, 
 
 
 class SDXLMultiDieSUT:
-    """
-    System Under Test for SDXL on multi-die accelerators.
+    """SDXL text-to-image SUT for multi-die accelerators.
 
-    Loads one OVStableDiffusionXLPipeline per accelerator die and
-    distributes image generation across dies in parallel (Offline)
-    or round-robin (Server).
-
-    Python-only implementation.
+    One OVStableDiffusionXLPipeline per die; parallel Offline dispatch,
+    round-robin Server dispatch.  Python-only implementation.
     """
 
     def __init__(
@@ -65,7 +62,6 @@ class SDXLMultiDieSUT:
         image_size: int = DEFAULT_IMAGE_SIZE,
         negative_prompt: str = DEFAULT_NEGATIVE_PROMPT,
     ):
-        """Initialize SDXL multi-die SUT."""
         if not LOADGEN_AVAILABLE:
             raise ImportError("MLPerf LoadGen is not installed")
 
@@ -85,18 +81,22 @@ class SDXLMultiDieSUT:
         self.negative_prompt = negative_prompt
 
         self._predictions: Dict[int, np.ndarray] = {}
+        self._lock = threading.Lock()
+        self._completed = 0
         self._query_count = 0
-        self._sample_count = 0
-        self._start_time = 0.0
 
         self._sut_handle = None
         self._qsl_handle = None
 
-        # List of (die_name, pipeline) tuples
-        self._pipelines: List[Tuple[str, Any]] = []
-        self._pipeline_index = 0  # Round-robin index for Server mode
+        # (die_name, pipeline, die_lock) per die
+        self._pipelines: List[Tuple[str, Any, threading.Lock]] = []
+        self._pipeline_index = 0
 
         self._setup_pipelines()
+
+    # ------------------------------------------------------------------
+    # Device discovery & pipeline loading
+    # ------------------------------------------------------------------
 
     def _discover_device_dies(self, device: str) -> List[str]:
         """Discover available dies for the given device prefix."""
@@ -107,16 +107,15 @@ class SDXLMultiDieSUT:
         logger.info(f"Available OpenVINO devices: {devices}")
 
         pattern = re.compile(rf"^{re.escape(device)}\.(\d+)$")
-        device_dies = [d for d in devices if pattern.match(d)]
-        return sorted(device_dies)
+        return sorted(d for d in devices if pattern.match(d))
 
     def _setup_pipelines(self) -> None:
         """Load one OVStableDiffusionXLPipeline per accelerator die.
 
-        For accelerator devices (NPU, XPU) that don't support dynamic shapes,
-        the pipeline is loaded without compilation, reshaped to static shapes
-        (batch_size=1, 1024x1024, num_images_per_prompt=1), moved to the
-        target die, and then compiled.
+        Accelerator devices (NPU, XPU) require static shapes.
+        Pipeline is loaded with compile=False, reshaped to static
+        (batch_size=1, 1024x1024, num_images_per_prompt=1), moved to
+        the target die, then compiled.
         """
         target_device = (
             self.config.openvino.device
@@ -124,16 +123,12 @@ class SDXLMultiDieSUT:
             else "CPU"
         )
 
-        logger.info(f"Setting up SDXL Multi-Die SUT (device={target_device})")
-
         # Determine dies to use
         if target_device == "CPU":
             device_dies = ["CPU"]
         elif re.match(r"^.+\.\d+$", target_device):
-            # Specific die requested (e.g., NPU.0)
             device_dies = [target_device]
         else:
-            # Discover all dies for device prefix (e.g., NPU -> [NPU.0, NPU.1])
             device_dies = self._discover_device_dies(target_device)
             if not device_dies:
                 logger.warning(
@@ -141,59 +136,59 @@ class SDXLMultiDieSUT:
                 )
                 device_dies = [target_device]
 
-        # Load a pipeline per die
+        print(
+            f"[Setup] SDXL multi-die: device={target_device}, "
+            f"target dies={device_dies}",
+            file=sys.stderr,
+        )
+
         for die in device_dies:
-            logger.info(f"Loading OVStableDiffusionXLPipeline for {die}")
             try:
                 pipeline = self._load_pipeline_for_device(die)
-                self._pipelines.append((die, pipeline))
-                logger.info(f"Pipeline loaded for {die}")
-
+                self._pipelines.append((die, pipeline, threading.Lock()))
             except Exception as e:
                 logger.warning(f"Failed to load pipeline for {die}: {e}")
 
         if not self._pipelines:
-            # Fallback: load on CPU (dynamic shapes OK)
             logger.warning("No accelerator pipelines loaded, falling back to CPU")
             pipeline = self._load_pipeline_for_device("CPU")
-            self._pipelines.append(("CPU", pipeline))
+            self._pipelines.append(("CPU", pipeline, threading.Lock()))
 
-        die_names = [die for die, _ in self._pipelines]
+        die_names = [die for die, _, _ in self._pipelines]
         print(
-            f"[Setup] SDXL Multi-Die: {len(self._pipelines)} die(s) = {die_names}",
+            f"[Setup] SDXL multi-die: {len(self._pipelines)} die(s) loaded, "
+            f"devices={die_names}",
             file=sys.stderr,
         )
 
     def _load_pipeline_for_device(self, die: str) -> Any:
-        """Load, reshape to static shapes, and compile pipeline for a device.
+        """Load, reshape to static shapes, and compile pipeline on *die*.
 
-        Accelerator devices (NPU, XPU) typically don't support dynamic shapes.
-        The pipeline is loaded without compilation, reshaped to fixed
-        (batch_size=1, 1024x1024) dimensions, then compiled on the target die.
-        CPU pipelines skip the reshape step since dynamic shapes work fine.
+        Accelerator devices don't support dynamic shapes.  Pipeline is
+        loaded without compilation, reshaped to fixed dimensions, then
+        compiled on the target die.  CPU skips reshape.
         """
         is_cpu = die.upper() == "CPU"
 
         if is_cpu:
-            # CPU supports dynamic shapes — simple path
+            print(f"  [{die}] Loading pipeline (dynamic shapes) ...", file=sys.stderr)
             pipeline = OVStableDiffusionXLPipeline.from_pretrained(
                 str(self.model_path),
                 compile=True,
                 load_in_8bit=False,
             )
         else:
-            # Accelerator: load → reshape to static → move to device → compile
-            logger.info(f"  Loading pipeline (compile=False) ...")
+            print(f"  [{die}] Loading pipeline (compile=False) ...", file=sys.stderr)
             pipeline = OVStableDiffusionXLPipeline.from_pretrained(
                 str(self.model_path),
                 compile=False,
                 load_in_8bit=False,
             )
 
-            logger.info(
-                f"  Reshaping to static shapes: "
-                f"batch_size=1, {self.image_size}x{self.image_size}, "
-                f"num_images_per_prompt=1"
+            print(
+                f"  [{die}] Reshaping to static: batch=1, "
+                f"{self.image_size}x{self.image_size}, nimg=1 ...",
+                file=sys.stderr,
             )
             pipeline.reshape(
                 batch_size=1,
@@ -202,7 +197,7 @@ class SDXLMultiDieSUT:
                 num_images_per_prompt=1,
             )
 
-            logger.info(f"  Moving to device {die} and compiling ...")
+            print(f"  [{die}] Compiling ...", file=sys.stderr)
             pipeline.to(die)
             pipeline.compile()
 
@@ -215,27 +210,21 @@ class SDXLMultiDieSUT:
         except Exception as e:
             logger.warning(f"Failed to override scheduler on {die}: {e}")
 
+        print(f"  [{die}] Ready", file=sys.stderr)
         return pipeline
 
-    def _get_next_pipeline(self) -> Tuple[str, Any]:
-        """Get next pipeline in round-robin order (for Server mode)."""
-        die_name, pipeline = self._pipelines[self._pipeline_index]
-        self._pipeline_index = (self._pipeline_index + 1) % len(self._pipelines)
-        return die_name, pipeline
+    # ------------------------------------------------------------------
+    # Sample processing (shared between Offline and Server)
+    # ------------------------------------------------------------------
 
     def _process_sample(self, sample_idx: int, pipeline: Any) -> np.ndarray:
-        """Generate an image for the given sample using the specified pipeline.
-
-        MLCommons compliance: pre-computed latents, EulerDiscreteScheduler,
-        20 steps, guidance_scale=8.0, specific negative prompt.
-        """
+        """Generate one image.  MLCommons compliant parameters."""
         features = self.qsl.get_features(sample_idx)
         prompt = features['prompt']
 
         guidance_scale = features.get('guidance_scale', self.guidance_scale)
         num_steps = features.get('num_inference_steps', self.num_inference_steps)
 
-        # Use pre-computed latents if available (REQUIRED for closed division)
         latents = features.get('latents', None)
 
         if latents is not None:
@@ -246,13 +235,8 @@ class SDXLMultiDieSUT:
                 if latents.dim() == 3:
                     latents = latents.unsqueeze(0)
                 if latents.shape[1] != 4:
-                    logger.warning(
-                        f"Latents have {latents.shape[1]} channels, expected 4. "
-                        "Using random latents instead."
-                    )
                     latents = None
             except ImportError:
-                logger.warning("PyTorch not available, cannot convert latents")
                 latents = None
 
         pipe_kwargs = {
@@ -268,10 +252,6 @@ class SDXLMultiDieSUT:
         if latents is not None:
             pipe_kwargs["latents"] = latents
         else:
-            logger.warning(
-                f"No pre-computed latents for sample {sample_idx}. "
-                "Results may not match MLCommons reference."
-            )
             try:
                 import torch
                 pipe_kwargs["generator"] = torch.Generator().manual_seed(sample_idx)
@@ -291,8 +271,11 @@ class SDXLMultiDieSUT:
 
         return image
 
+    # ------------------------------------------------------------------
+    # LoadGen query dispatch
+    # ------------------------------------------------------------------
+
     def issue_queries(self, query_samples: List[Any]) -> None:
-        """Process queries from LoadGen."""
         self._query_count += len(query_samples)
 
         if self.scenario == Scenario.OFFLINE:
@@ -301,18 +284,20 @@ class SDXLMultiDieSUT:
             self._issue_queries_server(query_samples)
 
     def _issue_queries_offline(self, query_samples: List[Any]) -> None:
-        """Offline mode: distribute samples across dies in parallel."""
+        """Offline: distribute samples across dies, run in parallel."""
         total = len(query_samples)
         num_dies = len(self._pipelines)
-        self._start_time = time.time()
+        start_time = time.time()
 
         print(
-            f"[Offline] SDXL: {total} samples, {num_dies} die(s)",
+            f"[Offline] {total} samples, {num_dies} die(s)",
             file=sys.stderr,
         )
 
+        self._completed = 0
+
         if num_dies <= 1:
-            self._issue_queries_offline_sequential(query_samples)
+            self._issue_queries_offline_sequential(query_samples, start_time)
             return
 
         # Distribute samples round-robin across dies
@@ -323,47 +308,72 @@ class SDXLMultiDieSUT:
         batch_counts = [len(b) for b in die_batches]
         print(f"[Distribute] {batch_counts} samples per die", file=sys.stderr)
 
-        def _worker(die_idx: int, batch: List[Tuple[Any, int]]):
-            _, pipeline = self._pipelines[die_idx]
-            results = []
-            for sample, sample_idx in batch:
-                image = self._process_sample(sample_idx, pipeline)
-                results.append((sample, sample_idx, image))
-            return results
+        # Each die gets its own thread; samples within a die run sequentially
+        # (pipeline is not thread-safe for concurrent calls on the same model).
+        # Different dies run truly in parallel.
 
         all_results: List[Tuple[Any, int, np.ndarray]] = []
+        results_lock = threading.Lock()
+
+        def _die_worker(die_idx: int, batch: List[Tuple[Any, int]]):
+            die_name, pipeline, die_lock = self._pipelines[die_idx]
+            for sample, sample_idx in batch:
+                with die_lock:
+                    image = self._process_sample(sample_idx, pipeline)
+
+                with self._lock:
+                    self._predictions[sample_idx] = image
+                    self._completed += 1
+
+                with results_lock:
+                    all_results.append((sample, sample_idx, image))
+
+        # Start all die workers in parallel
         print("[Inference] ", end="", file=sys.stderr)
         dots_printed = 0
 
         with ThreadPoolExecutor(max_workers=num_dies) as pool:
-            futures = {
-                pool.submit(_worker, die_idx, batch): die_idx
+            futures = [
+                pool.submit(_die_worker, die_idx, batch)
                 for die_idx, batch in enumerate(die_batches)
                 if batch
-            }
-            for future in as_completed(futures):
-                for sample, sample_idx, image in future.result():
-                    self._predictions[sample_idx] = image
-                    self._sample_count += 1
+            ]
 
-                    progress = int(self._sample_count * 10 / total)
-                    while dots_printed < progress:
-                        print(".", end="", file=sys.stderr, flush=True)
-                        dots_printed += 1
+            # Poll for per-sample progress while workers run
+            while True:
+                done_count = 0
+                for f in futures:
+                    if f.done():
+                        done_count += 1
 
-                all_results.extend(future.result())
+                with self._lock:
+                    completed = self._completed
+
+                progress = int(completed * 10 / total) if total else 10
+                while dots_printed < progress:
+                    print(".", end="", file=sys.stderr, flush=True)
+                    dots_printed += 1
+
+                if done_count == len(futures):
+                    break
+
+                time.sleep(0.5)
+
+            # Propagate any exceptions
+            for f in futures:
+                f.result()
 
         while dots_printed < 10:
             print(".", end="", file=sys.stderr, flush=True)
             dots_printed += 1
 
-        elapsed = time.time() - self._start_time
+        elapsed = time.time() - start_time
         print(
-            f" {total}/{total} ({elapsed:.1f}s, {total/elapsed:.1f} images/sec)",
+            f" {total}/{total} ({elapsed:.1f}s, {total/elapsed:.1f} qps)",
             file=sys.stderr,
         )
 
-        # Send responses to LoadGen
+        # Send LoadGen responses (sorted by sample index for determinism)
         responses = []
         response_arrays = []
         for sample, _idx, image in sorted(all_results, key=lambda r: r[1]):
@@ -375,8 +385,12 @@ class SDXLMultiDieSUT:
 
         lg.QuerySamplesComplete(responses)
 
-    def _issue_queries_offline_sequential(self, query_samples: List[Any]) -> None:
-        """Single-die fallback for Offline mode."""
+    def _issue_queries_offline_sequential(
+        self,
+        query_samples: List[Any],
+        start_time: float,
+    ) -> None:
+        """Single-die Offline fallback."""
         total = len(query_samples)
         responses = []
         response_arrays = []
@@ -384,13 +398,13 @@ class SDXLMultiDieSUT:
         print("[Inference] ", end="", file=sys.stderr)
         dots_printed = 0
 
+        _, pipeline, _ = self._pipelines[0]
         for sample in query_samples:
             sample_idx = sample.index
-            _, pipeline = self._pipelines[0]
 
             image = self._process_sample(sample_idx, pipeline)
             self._predictions[sample_idx] = image
-            self._sample_count += 1
+            self._completed += 1
 
             response_data = np.array(image.shape, dtype=np.int64)
             response_array = array.array('B', response_data.tobytes())
@@ -398,33 +412,35 @@ class SDXLMultiDieSUT:
             bi = response_array.buffer_info()
             responses.append(lg.QuerySampleResponse(sample.id, bi[0], bi[1]))
 
-            if total > 0:
-                progress = int(self._sample_count * 10 / total)
-                while dots_printed < progress:
-                    print(".", end="", file=sys.stderr, flush=True)
-                    dots_printed += 1
+            progress = int(self._completed * 10 / total) if total else 10
+            while dots_printed < progress:
+                print(".", end="", file=sys.stderr, flush=True)
+                dots_printed += 1
 
         while dots_printed < 10:
             print(".", end="", file=sys.stderr, flush=True)
             dots_printed += 1
 
-        elapsed = time.time() - self._start_time
+        elapsed = time.time() - start_time
         print(
-            f" {total}/{total} ({elapsed:.1f}s, {total/elapsed:.1f} images/sec)",
+            f" {total}/{total} ({elapsed:.1f}s, {total/elapsed:.1f} qps)",
             file=sys.stderr,
         )
 
         lg.QuerySamplesComplete(responses)
 
     def _issue_queries_server(self, query_samples: List[Any]) -> None:
-        """Server mode: round-robin across dies, respond per-query."""
+        """Server: round-robin across dies, respond per-query."""
         for sample in query_samples:
             sample_idx = sample.index
-            _, pipeline = self._get_next_pipeline()
+            die_name, pipeline, die_lock = self._pipelines[self._pipeline_index]
+            self._pipeline_index = (self._pipeline_index + 1) % len(self._pipelines)
 
-            image = self._process_sample(sample_idx, pipeline)
-            self._predictions[sample_idx] = image
-            self._sample_count += 1
+            with die_lock:
+                image = self._process_sample(sample_idx, pipeline)
+
+            with self._lock:
+                self._predictions[sample_idx] = image
 
             response_data = np.array(image.shape, dtype=np.int64)
             response_array = array.array('B', response_data.tobytes())
@@ -433,12 +449,14 @@ class SDXLMultiDieSUT:
             response = lg.QuerySampleResponse(sample.id, bi[0], bi[1])
             lg.QuerySamplesComplete([response])
 
+    # ------------------------------------------------------------------
+    # LoadGen integration
+    # ------------------------------------------------------------------
+
     def flush_queries(self) -> None:
-        """Flush any pending queries."""
         pass
 
     def get_sut(self) -> Any:
-        """Get LoadGen SUT handle."""
         if self._sut_handle is None:
             self._sut_handle = lg.ConstructSUT(
                 self.issue_queries, self.flush_queries
@@ -446,7 +464,6 @@ class SDXLMultiDieSUT:
         return self._sut_handle
 
     def get_qsl(self) -> Any:
-        """Get LoadGen QSL handle."""
         if self._qsl_handle is None:
             self._qsl_handle = lg.ConstructQSL(
                 self.qsl.total_sample_count,
@@ -457,11 +474,9 @@ class SDXLMultiDieSUT:
         return self._qsl_handle
 
     def get_predictions(self) -> Dict[int, np.ndarray]:
-        """Get all generated images."""
         return self._predictions.copy()
 
     def compute_accuracy(self) -> Dict[str, float]:
-        """Compute CLIP score and FID for generated images."""
         predictions = self.get_predictions()
 
         if not predictions:
@@ -477,8 +492,7 @@ class SDXLMultiDieSUT:
         return self.qsl.dataset.compute_accuracy(images, indices)
 
     def reset(self) -> None:
-        """Reset state for new run."""
         self._predictions.clear()
+        self._completed = 0
         self._query_count = 0
-        self._sample_count = 0
         self._pipeline_index = 0
