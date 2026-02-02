@@ -868,8 +868,29 @@ void RetinaNetMultiDieCppSUT::load() {
             new_shape[0] = compile_batch_size;
             new_shapes[input.get_any_name()] = new_shape;
         }
-        model_->reshape(new_shapes);
-        input_shape_ = model_->inputs()[0].get_partial_shape().get_min_shape();
+        try {
+            model_->reshape(new_shapes);
+            input_shape_ = model_->inputs()[0].get_partial_shape().get_min_shape();
+        } catch (const std::exception& e) {
+            std::cerr << "[RetinaNet] Reshape to batch=" << compile_batch_size
+                      << " failed: " << e.what() << std::endl;
+            std::cerr << "[RetinaNet] Falling back to batch_size=1" << std::endl;
+            model_ = core_.read_model(model_path_);
+            map_output_names();
+            input_shape_ = model_->inputs()[0].get_partial_shape().get_min_shape();
+            batch_size_ = 1;
+            compile_batch_size = 1;
+            if (input_shape_[0] == 0) {
+                std::map<std::string, ov::PartialShape> fallback_shapes;
+                for (const auto& inp : model_->inputs()) {
+                    ov::PartialShape s = inp.get_partial_shape();
+                    s[0] = 1;
+                    fallback_shapes[inp.get_any_name()] = s;
+                }
+                model_->reshape(fallback_shapes);
+                input_shape_ = model_->inputs()[0].get_partial_shape().get_min_shape();
+            }
+        }
     }
 
     // Update batch_size_ for explicit batching

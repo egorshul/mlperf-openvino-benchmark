@@ -135,6 +135,7 @@ class ImageMultiDieSUTBase(ABC):
         self._cpp_sut.set_store_predictions(is_accuracy_mode)
         self._is_accuracy_mode = is_accuracy_mode
         self.input_name = self._cpp_sut.get_input_name()
+        self.batch_size = self._cpp_sut.get_batch_size()
 
         logger.info(
             f"C++ {self.MODEL_NAME} SUT loaded: {self._cpp_sut.get_num_dies()} dies, "
