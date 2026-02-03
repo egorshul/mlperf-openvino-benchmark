@@ -216,16 +216,6 @@ class SDXLMultiDieSUT:
         except Exception:
             logger.warning("Failed to set EulerDiscreteScheduler on %s", die)
 
-        sched = pipeline.scheduler
-        print(
-            f"[SDXL] scheduler: {type(sched).__name__}, "
-            f"spacing={sched.config.get('timestep_spacing')}, "
-            f"offset={sched.config.get('steps_offset')}, "
-            f"prediction={sched.config.get('prediction_type')}, "
-            f"watermark={'off' if not getattr(pipeline, 'watermark', None) else 'ON'}",
-            file=sys.stderr,
-        )
-
         if hasattr(pipeline, "watermark"):
             pipeline.watermark = None
 
