@@ -209,10 +209,16 @@ class SDXLMultiDieSUT:
         try:
             from diffusers import EulerDiscreteScheduler
             pipeline.scheduler = EulerDiscreteScheduler.from_config(
-                pipeline.scheduler.config
+                pipeline.scheduler.config,
+                timestep_spacing="leading",
+                steps_offset=1,
+                prediction_type="epsilon",
             )
         except Exception:
             logger.warning("Failed to set EulerDiscreteScheduler on %s", die)
+
+        if hasattr(pipeline, "watermark"):
+            pipeline.watermark = None
 
         return pipeline
 

@@ -154,10 +154,16 @@ class SDXLOptimumSUT:
         try:
             from diffusers import EulerDiscreteScheduler
             self.pipeline.scheduler = EulerDiscreteScheduler.from_config(
-                self.pipeline.scheduler.config
+                self.pipeline.scheduler.config,
+                timestep_spacing="leading",
+                steps_offset=1,
+                prediction_type="epsilon",
             )
         except Exception as e:
             logger.warning("Failed to set EulerDiscreteScheduler: %s", e)
+
+        if hasattr(self.pipeline, "watermark"):
+            self.pipeline.watermark = None
 
     def flush_queries(self) -> None:
         pass
