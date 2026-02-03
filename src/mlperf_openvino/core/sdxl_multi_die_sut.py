@@ -141,10 +141,9 @@ class SDXLMultiDieSUT:
 
         for die in device_dies:
             try:
-                logger.debug("Loading SDXL pipeline on %s ...", die)
+                print(f"[SDXL] Compiling on {die} ...", file=sys.stderr, flush=True)
                 pipeline = self._load_pipeline_for_device(die)
                 self._pipelines.append((die, pipeline, threading.Lock()))
-                logger.debug("Pipeline ready on %s", die)
             except Exception as exc:
                 logger.debug("Failed to load pipeline for %s: %s", die, exc)
 

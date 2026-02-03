@@ -105,7 +105,8 @@ class WhisperOptimumSUT:
     def _load_model(self) -> None:
         from transformers import AutoProcessor
 
-        logger.debug("Loading Whisper model from %s", self.model_path)
+        device = self.config.openvino.device if hasattr(self.config, "openvino") else "CPU"
+        print(f"[Whisper] Compiling on {device} ...", file=sys.stderr, flush=True)
 
         try:
             self.processor = AutoProcessor.from_pretrained(self.model_path)

@@ -111,7 +111,8 @@ class SDXLOptimumSUT:
 
     def _load_pipeline(self) -> None:
         """Load SDXL pipeline with MLCommons-compliant scheduler."""
-        logger.debug("Loading SDXL model from %s", self.model_path)
+        device = self.config.openvino.device if hasattr(self.config, "openvino") else "CPU"
+        print(f"[SDXL] Compiling on {device} ...", file=sys.stderr, flush=True)
 
         try:
             if self.batch_size > 1:

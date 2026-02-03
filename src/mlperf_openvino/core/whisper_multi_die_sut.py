@@ -136,12 +136,11 @@ class WhisperMultiDieSUT:
 
         for die in device_dies:
             try:
-                logger.debug("Loading Whisper model for %s ...", die)
+                print(f"[Whisper] Compiling on {die} ...", file=sys.stderr, flush=True)
                 model = self._load_optimum_model()
                 if die != "CPU":
                     self._patch_encoder_device(model, die)
                 self._models.append((die, model))
-                logger.debug("Model ready on %s", die)
             except Exception as exc:
                 logger.debug("Failed to load model for %s: %s", die, exc)
 
