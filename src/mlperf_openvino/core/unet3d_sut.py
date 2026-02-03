@@ -204,10 +204,11 @@ class UNet3DSUT:
         return self._run_sliding_window(volume)
 
     def _issue_query_offline(self, query_samples: List[Any]) -> None:
-        """Process queries in Offline mode."""
-        responses = []
-        response_arrays = []
+        """Process queries in Offline mode (MLPerf reference: base_SUT.py).
 
+        Sends actual segmentation bytes per-sample for accuracy log
+        compatibility with official accuracy_kits.py script.
+        """
         total_samples = len(query_samples)
         self._start_progress(total_samples, desc="3D-UNet Offline inference")
 
@@ -216,27 +217,20 @@ class UNet3DSUT:
             segmentation = self._process_sample(sample_idx)
             self._predictions[sample_idx] = segmentation
 
-            # Send dummy response data (segmentation stored internally)
-            response_data = np.array([segmentation.shape[0]], dtype=np.int64)
-            response_array = array.array("B", response_data.tobytes())
-            response_arrays.append(response_array)
+            # Send actual segmentation bytes (matches reference base_SUT.py)
+            response_array = array.array("B", segmentation.tobytes())
             bi = response_array.buffer_info()
-
             response = lg.QuerySampleResponse(qs.id, bi[0], bi[1])
-            responses.append(response)
+            lg.QuerySamplesComplete([response])
 
             self._sample_count += 1
             self._update_progress(1)
 
         self._close_progress()
-        lg.QuerySamplesComplete(responses)
         self._query_count += 1
 
     def _issue_query_server(self, query_samples: List[Any]) -> None:
         """Process queries in Server mode."""
-        responses = []
-        response_arrays = []
-
         if self._query_count == 0:
             self._start_progress(0, desc="3D-UNet Server inference")
 
@@ -245,18 +239,14 @@ class UNet3DSUT:
             segmentation = self._process_sample(sample_idx)
             self._predictions[sample_idx] = segmentation
 
-            response_data = np.array([segmentation.shape[0]], dtype=np.int64)
-            response_array = array.array("B", response_data.tobytes())
-            response_arrays.append(response_array)
+            response_array = array.array("B", segmentation.tobytes())
             bi = response_array.buffer_info()
-
             response = lg.QuerySampleResponse(qs.id, bi[0], bi[1])
-            responses.append(response)
+            lg.QuerySamplesComplete([response])
 
             self._sample_count += 1
             self._update_progress(1)
 
-        lg.QuerySamplesComplete(responses)
         self._query_count += 1
 
     def issue_queries(self, query_samples: List[Any]) -> None:

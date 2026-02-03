@@ -475,6 +475,12 @@ class BenchmarkRunner:
                 logger.info(f"Server target QPS: {scenario_config.target_qps}")
             logger.info(f"Server target latency: {scenario_config.target_latency_ns / 1e6:.1f}ms")
 
+        # 3D-UNet: sample_concatenate_permutation = 1 (mlperf.conf)
+        # Uses multiple permutations for non-uniform sample sizes
+        if self.config.model.model_type == ModelType.UNET3D:
+            if hasattr(settings, 'sample_concatenate_permutation'):
+                settings.sample_concatenate_permutation = True
+
         return settings
 
     def _get_log_settings(self) -> "lg.LogSettings":
