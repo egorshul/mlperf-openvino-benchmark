@@ -328,13 +328,11 @@ class SDXLOptimumSUT:
             lg.QuerySamplesComplete([lg.QuerySampleResponse(sample.id, bi[0], bi[1])])
 
     def get_sut(self) -> Any:
-        """Get LoadGen SUT handle."""
         if self._sut_handle is None:
             self._sut_handle = lg.ConstructSUT(self.issue_queries, self.flush_queries)
         return self._sut_handle
 
     def get_qsl(self) -> Any:
-        """Get LoadGen QSL handle."""
         if self._qsl_handle is None:
             self._qsl_handle = lg.ConstructQSL(
                 self.qsl.total_sample_count,
@@ -345,7 +343,6 @@ class SDXLOptimumSUT:
         return self._qsl_handle
 
     def get_predictions(self) -> Dict[int, np.ndarray]:
-        """Get all generated images."""
         return self._predictions.copy()
 
     def compute_accuracy(self) -> Dict[str, float]:
@@ -486,8 +483,6 @@ class SDXLManualSUT:
                 f"Required SDXL components not found in {self.model_path}. "
                 f"Expected: unet.xml, vae_decoder.xml"
             )
-
-        logger.debug("SDXL components loaded successfully")
 
     def _encode_prompt(self, prompt: str):
         """Encode text prompt using CLIP text encoders.
