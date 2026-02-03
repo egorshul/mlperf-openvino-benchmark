@@ -221,6 +221,43 @@ models:
       target_qps: 10.0  # Lower QPS due to high latency
       min_duration_ms: 600000  # 10 minutes (MLPerf v5.1 official requirement)
 
+  3d-unet:
+    name: "3D-UNet"
+    task: "medical_image_segmentation"
+    dataset: "kits19"
+    input_shape: [1, 1, 128, 128, 128]  # (batch, channels, depth, height, width)
+    input_name: "input"
+    output_name: "output"
+    data_format: "NCDHW"
+    dtype: "FP32"
+
+    # Sliding window inference parameters
+    sliding_window:
+      patch_size: [128, 128, 128]
+      overlap_factor: 0.5  # 50% overlap between patches
+      gaussian_sigma_scale: 0.125  # Gaussian weighting sigma
+
+    # MLPerf accuracy target (mean Dice score)
+    accuracy_target: 0.86170  # Mean Dice (99% of 0.8617 reference)
+    accuracy_threshold: 0.99
+
+    # Model sources (official MLPerf model)
+    sources:
+      onnx_url: "https://zenodo.org/record/5597155/files/3dunet_kits19_128x128x128.onnx"
+
+    # MLPerf LoadGen settings
+    performance_sample_count: 42  # QSL size (KiTS19 validation set)
+
+    offline:
+      min_duration_ms: 600000  # 10 minutes (MLPerf official requirement)
+      min_query_count: 42  # MLPerf official (KiTS19 dataset size)
+      samples_per_query: 1
+
+    server:
+      target_latency_ns: 0
+      target_qps: 1.0
+      min_duration_ms: 600000  # 10 minutes (MLPerf official requirement)
+
 # OpenVINO specific settings
 openvino:
   device: "CPU"
@@ -287,6 +324,11 @@ datasets:
     prompts_file: "coco-1024.tsv"
     captions_file: "annotations/captions_val2014.json"
     images_dir: "coco-1024"  # Optional reference images for FID
+
+  kits19:
+    path: "./data/kits19"
+    # KiTS19 validation cases (preprocessed NIfTI volumes)
+    # Expected structure: data/kits19/case_XXXXX/imaging.nii.gz, segmentation.nii.gz
 
 # Output settings
 output:

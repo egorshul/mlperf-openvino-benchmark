@@ -11,6 +11,7 @@ MLPerf Inference v5.1 benchmark implementation using OpenVINO backend.
 | RetinaNet | Object Detection | OpenImages | mAP | ≥ 37.19% |
 | Whisper Large v3 | Speech Recognition | LibriSpeech | Word Acc | ≥ 96.95% |
 | SDXL | Text-to-Image | COCO 2014 | CLIP/FID | 31.68-31.81 |
+| 3D-UNet | Medical Image Segmentation | KiTS19 | Mean Dice | ≥ 86.17% |
 
 ## Installation
 
@@ -75,7 +76,7 @@ mlperf-ov info                 # System information
 ### Common Options
 
 ```
---model, -m      Model: resnet50, bert, retinanet, whisper, sdxl
+--model, -m      Model: resnet50, bert, retinanet, whisper, sdxl, 3d-unet
 --mode           Mode: accuracy, performance
 --scenario, -s   Scenario: Offline, Server
 --device, -d     Device: CPU, NPU, NPU.0, etc.

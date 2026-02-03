@@ -57,6 +57,8 @@ class BenchmarkRunner:
             and is_accelerator
         )
 
+        is_3dunet = model_type == ModelType.UNET3D
+
         if is_sdxl:
             self.backend = None
         elif is_whisper:
@@ -75,6 +77,8 @@ class BenchmarkRunner:
             self._setup_sdxl()
         elif is_whisper:
             self._setup_whisper()
+        elif is_3dunet:
+            self._setup_3dunet()
         elif model_type == ModelType.RESNET50:
             self._setup_resnet50()
         elif model_type == ModelType.BERT:
@@ -218,6 +222,25 @@ class BenchmarkRunner:
                 qsl=self.qsl,
                 scenario=self.config.scenario,
             )
+
+    def _setup_3dunet(self) -> None:
+        """Set up 3D-UNet benchmark."""
+        from ..datasets.kits19 import KiTS19QSL
+        from .unet3d_sut import UNet3DSUT
+
+        self.qsl = KiTS19QSL(
+            data_path=self.config.dataset.path,
+            count=self.config.dataset.num_samples if self.config.dataset.num_samples > 0 else None,
+            performance_sample_count=42,
+        )
+        self.qsl.load()
+
+        self.sut = UNet3DSUT(
+            config=self.config,
+            backend=self.backend,
+            qsl=self.qsl,
+            scenario=self.config.scenario,
+        )
 
     def _setup_whisper(self) -> None:
         """Set up Whisper benchmark."""
@@ -552,6 +575,9 @@ class BenchmarkRunner:
         elif model_type == ModelType.WHISPER:
             primary_metric = "word_accuracy"
             metric_value = self._accuracy_results.get("word_accuracy", 0.0)
+        elif model_type == ModelType.UNET3D:
+            primary_metric = "mean_dice"
+            metric_value = self._accuracy_results.get("mean_dice", 0.0)
         elif model_type == ModelType.SDXL:
             primary_metric = "clip_score"
             metric_value = self._accuracy_results.get("clip_score", 0.0)
@@ -592,6 +618,8 @@ class BenchmarkRunner:
             self._compute_bert_accuracy()
         elif model_type == ModelType.RETINANET:
             self._compute_retinanet_accuracy()
+        elif model_type == ModelType.UNET3D:
+            self._compute_3dunet_accuracy()
         elif model_type == ModelType.WHISPER:
             self._compute_whisper_accuracy()
         elif model_type == ModelType.SDXL:
@@ -644,6 +672,15 @@ class BenchmarkRunner:
         self._accuracy_results = self.sut.compute_accuracy()
 
         logger.info(f"mAP: {self._accuracy_results.get('mAP', 0):.4f}")
+
+    def _compute_3dunet_accuracy(self) -> None:
+        """Compute 3D-UNet accuracy (Mean Dice score)."""
+        self._accuracy_results = self.sut.compute_accuracy()
+
+        mean_dice = self._accuracy_results.get('mean_dice', 0)
+        kidney_dice = self._accuracy_results.get('kidney_dice', 0)
+        tumor_dice = self._accuracy_results.get('tumor_dice', 0)
+        logger.info(f"Mean Dice: {mean_dice:.4f} (kidney={kidney_dice:.4f}, tumor={tumor_dice:.4f})")
 
     def _compute_whisper_accuracy(self) -> None:
         """Compute Whisper accuracy (Word Accuracy - MLPerf v5.1 metric)."""
@@ -801,6 +838,15 @@ class BenchmarkRunner:
             status = "PASS" if word_acc >= 0.9694 else "FAIL"
             print(f"Word Accuracy: {word_acc:.4f} [{status}]")
             print(f"WER: {wer:.4f}")
+        elif model_type == '3d-unet':
+            mean_dice = acc.get('mean_dice', 0)
+            kidney_dice = acc.get('kidney_dice', 0)
+            tumor_dice = acc.get('tumor_dice', 0)
+            # MLPerf 3D-UNet threshold: mean Dice >= 0.85308 (99% of 0.86170)
+            status = "PASS" if mean_dice >= 0.85308 else "FAIL"
+            print(f"Mean Dice: {mean_dice:.4f} [{status}]")
+            print(f"Kidney Dice: {kidney_dice:.4f}")
+            print(f"Tumor Dice: {tumor_dice:.4f}")
         elif model_type == 'sdxl':
             clip = acc.get('clip_score', 0)
             fid = acc.get('fid_score', 0)

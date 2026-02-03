@@ -33,6 +33,7 @@ class ModelType(Enum):
     RETINANET = "retinanet"
     WHISPER = "whisper"
     SDXL = "sdxl"
+    UNET3D = "3d-unet"
 
 
 @dataclass
@@ -508,6 +509,41 @@ class BenchmarkConfig:
             dataset=DatasetConfig(
                 name="coco2014",
                 path="./data/coco2014",
+            ),
+        )
+
+    @classmethod
+    def default_3dunet(cls) -> "BenchmarkConfig":
+        """Create default 3D-UNet configuration for KiTS19."""
+        return cls(
+            model=ModelConfig(
+                name="3D-UNet",
+                task="medical_image_segmentation",
+                model_type=ModelType.UNET3D,
+                input_shape=[1, 1, 128, 128, 128],  # (batch, channels, depth, height, width)
+                input_name="input",
+                output_name="output",
+                data_format="NCDHW",
+                dtype="FP32",
+                accuracy_target=0.86170,  # Mean Dice (official MLPerf)
+                accuracy_threshold=0.99,
+                preprocessing=PreprocessingConfig(),  # Not used for 3D medical volumes
+                offline=ScenarioConfig(
+                    min_duration_ms=600000,  # MLPerf official: 10 minutes
+                    min_query_count=42,  # MLPerf official (KiTS19 validation set size)
+                    samples_per_query=1,
+                ),
+                server=ScenarioConfig(
+                    min_duration_ms=600000,  # MLPerf official: 10 minutes
+                    min_query_count=42,  # MLPerf official
+                    target_latency_ns=0,
+                    target_qps=1.0,
+                ),
+                onnx_url="https://zenodo.org/record/5597155/files/3dunet_kits19_128x128x128.onnx",
+            ),
+            dataset=DatasetConfig(
+                name="kits19",
+                path="./data/kits19",
             ),
         )
 
