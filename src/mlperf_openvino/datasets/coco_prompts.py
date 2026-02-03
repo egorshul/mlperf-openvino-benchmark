@@ -11,6 +11,7 @@ with exactly one caption per image.
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -88,7 +89,7 @@ class COCOPromptsDataset(BaseDataset):
             self._tokenizer = CLIPTokenizer.from_pretrained(
                 "openai/clip-vit-large-patch14"
             )
-            logger.info("Loaded CLIP tokenizer")
+            logger.debug("Loaded CLIP tokenizer")
         except ImportError:
             logger.warning(
                 "transformers not installed. Install with: pip install transformers"
@@ -100,12 +101,14 @@ class COCOPromptsDataset(BaseDataset):
         if self._is_loaded:
             return
 
-        logger.info(f"Loading COCO prompts dataset from {self.data_path}")
+        logger.debug("Loading COCO prompts dataset from %s", self.data_path)
 
         loaded = False
 
-        # Format 1: MLCommons TSV format (coco-1024.tsv)
+        # Format 1: MLCommons TSV format (coco-1024.tsv, converted from captions_source.tsv)
         tsv_file = self.data_path / "coco-1024.tsv"
+        if not tsv_file.exists():
+            tsv_file = self.data_path / "captions_source.tsv"
         if not tsv_file.exists():
             tsv_file = self.data_path / "captions.tsv"
         if tsv_file.exists():
@@ -154,13 +157,20 @@ class COCOPromptsDataset(BaseDataset):
         if self.use_latents:
             self._load_latents()
 
-        logger.info(f"Loaded {len(self._samples)} prompts")
+        latent_info = "shared latent" if self._latents_cache else "no latents"
+        print(f"[Dataset] {len(self._samples)} prompts, {latent_info}", file=sys.stderr)
         self._is_loaded = True
 
     def _load_from_tsv(self, tsv_file: Path) -> None:
-        """Load samples from TSV format (MLCommons format)."""
-        logger.info(f"Loading from TSV: {tsv_file}")
+        """Load samples from TSV format.
 
+        Supports two formats:
+        - Simple: image_id<tab>caption (coco-1024.tsv)
+        - MLCommons: id<tab>image_id<tab>caption<tab>... (captions_source.tsv, 7 cols with header)
+        """
+        logger.debug("Loading from TSV: %s", tsv_file)
+
+        is_mlcommons_format = False
         with open(tsv_file, 'r', encoding='utf-8') as f:
             for line_num, line in enumerate(f):
                 line = line.strip()
@@ -168,7 +178,18 @@ class COCOPromptsDataset(BaseDataset):
                     continue
 
                 parts = line.split('\t')
-                if len(parts) >= 2:
+
+                # Detect and skip header row (captions_source.tsv)
+                if line_num == 0 and parts[0] == 'id':
+                    is_mlcommons_format = True
+                    continue
+
+                if is_mlcommons_format and len(parts) >= 3:
+                    # captions_source.tsv: id, image_id, caption, height, width, ...
+                    image_id = parts[1]
+                    caption = parts[2]
+                elif len(parts) >= 2:
+                    # Simple format: image_id, caption
                     image_id = parts[0]
                     caption = parts[1]
                 else:
@@ -186,7 +207,7 @@ class COCOPromptsDataset(BaseDataset):
 
     def _load_from_coco_json(self, json_file: Path) -> None:
         """Load samples from COCO JSON annotations format."""
-        logger.info(f"Loading from COCO JSON: {json_file}")
+        logger.debug("Loading from COCO JSON: %s", json_file)
 
         with open(json_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
@@ -220,7 +241,7 @@ class COCOPromptsDataset(BaseDataset):
 
     def _load_from_txt(self, txt_file: Path) -> None:
         """Load samples from simple text file (one caption per line)."""
-        logger.info(f"Loading from TXT: {txt_file}")
+        logger.debug("Loading from TXT: %s", txt_file)
 
         with open(txt_file, 'r', encoding='utf-8') as f:
             for idx, line in enumerate(f):
@@ -269,54 +290,107 @@ class COCOPromptsDataset(BaseDataset):
         return None
 
     def _load_latents(self) -> None:
-        """Load pre-computed latents for reproducibility."""
-        latents_file = self.data_path / "latents" / "latents.pt"
-        if not latents_file.exists():
-            latents_file = self.data_path / "latents.pt"
+        """Load pre-computed latents for reproducibility (MLCommons requirement).
 
-        if latents_file.exists():
-            try:
+        MLCommons reference: ALL samples share the SAME single latent tensor
+        of shape (1, 4, 128, 128). The latent is generated once with seed=0
+        and reused for every prompt. Only the text prompt differs per sample.
+        """
+        # Search multiple locations (MLCommons expects latents/latents.pt)
+        search_paths = [
+            self.data_path / "latents" / "latents.pt",
+            self.data_path / "latents" / "latents.npy",
+            self.data_path / "latents.pt",
+            self.data_path / "latents.npy",
+            Path.cwd() / "data" / "coco2014" / "latents" / "latents.pt",
+            Path.cwd() / "data" / "coco2014" / "latents" / "latents.npy",
+        ]
+
+        latents_file = None
+        for path in search_paths:
+            if path.exists():
+                latents_file = path
+                break
+
+        if latents_file is None:
+            logger.warning(
+                "Pre-computed latents file not found. "
+                "Generating locally (seed=0). For official Closed Division, "
+                "use the exact MLCommons latents.pt from the inference repo."
+            )
+            self._generate_latents()
+            return
+
+        logger.debug("Loading pre-computed latents from %s", latents_file)
+
+        try:
+            if latents_file.suffix == '.npy':
+                latent = np.load(str(latents_file)).astype(np.float32)
+            else:
+                # .pt format — MLCommons saves a single tensor (1, 4, 128, 128)
                 import torch
-                latents = torch.load(latents_file, map_location='cpu')
-
-                if isinstance(latents, dict):
-                    # Format: {'latents': tensor} or similar
-                    if 'latents' in latents:
-                        latents = latents['latents']
-                    elif 'noise' in latents:
-                        latents = latents['noise']
-                    elif latents:
-                        latents = list(latents.values())[0]
-                    else:
-                        logger.warning("Empty latents dict")
-                        return
-
-                if isinstance(latents, torch.Tensor):
-                    # Single tensor with shape [num_samples, 4, H, W]
-                    if latents.dim() == 4:
-                        logger.info(f"Latents tensor shape: {latents.shape}")
-                        for idx in range(min(latents.shape[0], len(self._samples))):
-                            lat = latents[idx]  # Shape: [4, H, W]
-                            self._latents_cache[idx] = lat.numpy()
-                    else:
-                        logger.warning(f"Unexpected latents tensor dimensions: {latents.dim()}")
-                elif isinstance(latents, (list, tuple)):
-                    # List of tensors, one per sample
-                    for idx, lat in enumerate(latents):
-                        if idx < len(self._samples):
-                            if hasattr(lat, 'numpy'):
-                                self._latents_cache[idx] = lat.numpy()
-                            else:
-                                self._latents_cache[idx] = np.array(lat)
-
-                if self._latents_cache:
-                    first_shape = list(self._latents_cache.values())[0].shape
-                    logger.info(f"Loaded {len(self._latents_cache)} pre-computed latents, shape per sample: {first_shape}")
+                latent = torch.load(str(latents_file), map_location='cpu', weights_only=True)
+                if hasattr(latent, 'numpy'):
+                    latent = latent.numpy().astype(np.float32)
                 else:
-                    logger.warning("No latents were loaded from file")
+                    latent = np.array(latent, dtype=np.float32)
 
-            except Exception as e:
-                logger.warning(f"Failed to load latents: {e}")
+            # Ensure shape (1, 4, 128, 128) — squeeze extra dims if needed
+            if latent.ndim == 3:
+                latent = latent[np.newaxis, :]  # (4,128,128) -> (1,4,128,128)
+
+            logger.debug("Latent tensor shape: %s", latent.shape)
+
+            # MLCommons: same latent for ALL samples
+            # Store the single latent, get_sample() returns it for every index
+            self._shared_latent = latent
+            for idx in range(len(self._samples)):
+                self._latents_cache[idx] = latent.squeeze(0)  # (4, 128, 128)
+
+            logger.debug(
+                "Loaded shared latent for %d samples", len(self._samples)
+            )
+
+        except Exception as e:
+            logger.warning(f"Failed to load latents: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            self._generate_latents()
+
+    def _generate_latents(self) -> None:
+        """Generate single shared latent matching MLCommons reference.
+
+        MLCommons latent.py: randn_tensor((1, 4, 128, 128), seed=0).
+        Same latent is used for ALL samples.
+        """
+        try:
+            import torch
+            generator = torch.Generator("cpu")
+            generator.manual_seed(0)
+
+            latent = torch.randn(1, 4, LATENT_SIZE, LATENT_SIZE, generator=generator)
+            latent_np = latent.squeeze(0).numpy().astype(np.float32)
+
+            for idx in range(len(self._samples)):
+                self._latents_cache[idx] = latent_np
+
+            self._shared_latent = latent.numpy().astype(np.float32)
+
+            logger.debug(
+                "Generated shared latent (seed=0), shape: %s", latent_np.shape
+            )
+
+            # Save in MLCommons format for reuse
+            save_dir = self.data_path / "latents"
+            save_dir.mkdir(parents=True, exist_ok=True)
+            save_path = save_dir / "latents.pt"
+            torch.save(latent, str(save_path))
+            logger.debug("Saved generated latent to %s", save_path)
+
+        except Exception as e:
+            logger.error(f"Failed to generate latents: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
 
     def __len__(self) -> int:
         return len(self._samples)
@@ -417,6 +491,15 @@ class COCOPromptsDataset(BaseDataset):
         if not generated_images:
             return metrics
 
+        logger.debug("Accuracy evaluation: %d images", len(generated_images))
+        if generated_images:
+            img0 = generated_images[0]
+            if isinstance(img0, np.ndarray):
+                logger.debug(
+                    "  Sample image: shape=%s, dtype=%s, range=[%s, %s]",
+                    img0.shape, img0.dtype, img0.min(), img0.max(),
+                )
+
         clip_score = self._compute_clip_score(generated_images, indices)
         metrics['clip_score'] = clip_score
 
@@ -426,8 +509,13 @@ class COCOPromptsDataset(BaseDataset):
             if ref_path:
                 reference_images.append(ref_path)
 
-        if reference_images:
-            fid_score = self._compute_fid_score(generated_images, reference_images)
+        # Compute FID: use pre-computed statistics (val2014.npz) if available,
+        # or fall back to reference images
+        statistics_path = self._find_statistics_file()
+        if reference_images or statistics_path:
+            fid_score = self._compute_fid_score(
+                generated_images, reference_images, statistics_path=statistics_path
+            )
             metrics['fid_score'] = fid_score
 
         metrics['clip_score_valid'] = 31.68632 <= clip_score <= 31.81332
@@ -508,8 +596,11 @@ class COCOPromptsDataset(BaseDataset):
                     # Compute cosine similarity and scale by 100
                     score = (image_features @ text_features.T).item() * 100
                     scores.append(score)
+                    logger.debug("CLIP[%d]: %.2f", idx, score)
 
-            return float(np.mean(scores)) if scores else 0.0
+            mean_clip = float(np.mean(scores)) if scores else 0.0
+            logger.debug("CLIP mean=%.4f, std=%.4f, n=%d", mean_clip, np.std(scores), len(scores))
+            return mean_clip
 
         except Exception as e:
             import traceback
@@ -523,7 +614,13 @@ class COCOPromptsDataset(BaseDataset):
         reference_paths: List[str],
         statistics_path: Optional[str] = None
     ) -> float:
-        """Compute FID score between generated and reference images."""
+        """Compute FID score between generated and reference images.
+
+        CRITICAL: Must use pytorch-fid InceptionV3 weights
+        (pt_inception-2015-12-05-6726825d.pth), NOT torchvision weights.
+        val2014.npz statistics were computed with these exact weights.
+        MLCommons reference: text_to_image/tools/fid/inception.py
+        """
         try:
             from scipy import linalg
             import torch
@@ -533,20 +630,34 @@ class COCOPromptsDataset(BaseDataset):
             logger.warning("Required packages not installed for FID computation")
             return 0.0
 
+        num_gen = len(generated_images)
+
         try:
-            from torchvision.models import inception_v3, Inception_V3_Weights
-            model = inception_v3(weights=Inception_V3_Weights.DEFAULT, transform_input=False)
-            model.fc = torch.nn.Identity()  # Remove final FC layer
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+            # MUST use pytorch-fid InceptionV3 weights — same as MLCommons reference.
+            # val2014.npz (mu, sigma) was computed with these weights.
+            # torchvision InceptionV3 has DIFFERENT weights and will give wrong FID.
+            try:
+                from pytorch_fid.inception import InceptionV3
+                dims = 2048
+                block_idx = InceptionV3.BLOCK_INDEX_BY_DIM[dims]
+                model = InceptionV3([block_idx]).to(device)
+                logger.debug("FID: Using pytorch-fid InceptionV3 (correct weights)")
+            except ImportError:
+                logger.error(
+                    "pytorch-fid is NOT installed. FID scores WILL NOT match MLCommons. "
+                    "Install with: pip install pytorch-fid"
+                )
+                return 0.0
+
             model.eval()
 
-            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            model = model.to(device)
-
+            # Transform: Resize + ToTensor (scales to [0,1]).
+            # pytorch-fid InceptionV3 normalizes to [-1,1] internally.
             transform = transforms.Compose([
                 transforms.Resize((299, 299)),
                 transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225]),
             ])
 
             def get_features(images_or_paths, is_path=False):
@@ -559,48 +670,76 @@ class COCOPromptsDataset(BaseDataset):
                             img = Image.fromarray(item.astype(np.uint8))
                         else:
                             img = item
+                        if hasattr(img, 'mode') and img.mode != 'RGB':
+                            img = img.convert('RGB')
 
                     tensor = transform(img).unsqueeze(0).to(device)
                     with torch.no_grad():
-                        feat = model(tensor).cpu().numpy().flatten()
+                        feat = model(tensor)
+                        # pytorch_fid returns list of feature tensors per block
+                        if isinstance(feat, list):
+                            feat = feat[0]
+                        if feat.dim() > 2:
+                            feat = torch.nn.functional.adaptive_avg_pool2d(feat, (1, 1))
+                        feat = feat.squeeze().cpu().numpy()
                     features.append(feat)
                 return np.array(features)
 
             gen_features = get_features(generated_images, is_path=False)
+            logger.debug(
+                "FID: gen_features shape=%s, mean=%.4f, std=%.4f",
+                gen_features.shape, gen_features.mean(), gen_features.std(),
+            )
 
             mu_gen = np.mean(gen_features, axis=0)
             sigma_gen = np.cov(gen_features, rowvar=False)
 
-            # Try to use pre-computed statistics (MLCommons requirement)
+            # Use pre-computed statistics (MLCommons requirement: val2014.npz)
             if statistics_path is None:
                 statistics_path = self._find_statistics_file()
 
             if statistics_path and Path(statistics_path).exists():
-                logger.info(f"Using pre-computed FID statistics from {statistics_path}")
+                logger.debug("FID: Using pre-computed statistics from %s", statistics_path)
                 stats = np.load(statistics_path)
                 mu_ref = stats['mu']
                 sigma_ref = stats['sigma']
             else:
-                # Compute from reference images (fallback)
-                logger.info("Computing FID statistics from reference images (not MLCommons-compliant)")
+                logger.debug("FID: Computing statistics from reference images")
                 ref_features = get_features(reference_paths, is_path=True)
                 mu_ref = np.mean(ref_features, axis=0)
                 sigma_ref = np.cov(ref_features, rowvar=False)
 
             diff = mu_gen - mu_ref
+            mean_term = float(diff @ diff)
+            tr_gen = float(np.trace(sigma_gen))
+            tr_ref = float(np.trace(sigma_ref))
 
-            # Handle numerical issues with sqrtm
+            if num_gen < 2048:
+                logger.debug(
+                    "FID: %d samples — covariance rank limited, FID may differ from 5000-sample target",
+                    num_gen,
+                )
+
             covmean, _ = linalg.sqrtm(sigma_gen @ sigma_ref, disp=False)
             if np.iscomplexobj(covmean):
                 if not np.allclose(np.diagonal(covmean).imag, 0, atol=1e-3):
-                    logger.warning("Complex values in sqrtm computation")
+                    logger.warning("FID: Significant complex values in sqrtm")
                 covmean = covmean.real
 
-            fid = diff @ diff + np.trace(sigma_gen + sigma_ref - 2 * covmean)
+            tr_covmean = float(np.trace(covmean))
+            trace_term = tr_gen + tr_ref - 2 * tr_covmean
+            fid = mean_term + trace_term
+
+            logger.debug(
+                "FID=%.4f (mean_diff=%.4f + trace=%.4f)", fid, mean_term, trace_term,
+            )
+
             return float(fid)
 
         except Exception as e:
             logger.warning(f"Error computing FID score: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
             return 0.0
 
     def _find_statistics_file(self) -> Optional[str]:
@@ -661,7 +800,7 @@ class COCOPromptsDataset(BaseDataset):
                         self._samples[i]['latents'] = latent.numpy() if hasattr(latent, 'numpy') else np.array(latent)
                     loaded += 1
 
-            logger.info(f"Loaded {loaded} pre-generated latents from {latents_path}")
+            logger.debug("Loaded %d pre-generated latents from %s", loaded, latents_path)
             return loaded
 
         except Exception as e:
@@ -703,9 +842,9 @@ class COCOPromptsDataset(BaseDataset):
                 pil_img.save(filepath, 'PNG')
                 saved_paths.append(str(filepath))
 
-                logger.info(f"Saved compliance image: {filepath}")
+                logger.debug("Saved compliance image: %s", filepath)
 
-        logger.info(f"Saved {len(saved_paths)} compliance images to {output_dir}")
+        logger.debug("Saved %d compliance images to %s", len(saved_paths), output_dir)
         return saved_paths
 
 

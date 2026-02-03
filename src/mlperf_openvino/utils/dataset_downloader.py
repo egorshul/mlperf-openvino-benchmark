@@ -134,13 +134,14 @@ DATASET_REGISTRY: Dict[str, Dict] = {
             "size_mb": 10,
         },
         "latents": {
+            # Single shared latent tensor (1, 4, 128, 128) ≈ 256KB
             "url": "https://github.com/mlcommons/inference/raw/master/text_to_image/tools/latents.pt",
             "filename": "latents.pt",
-            "size_mb": 500,
+            "size_mb": 1,
         },
         "captions_tsv": {
-            "url": "https://github.com/mlcommons/inference/raw/master/text_to_image/coco2014/captions/captions.tsv",
-            "filename": "captions.tsv",
+            "url": "https://github.com/mlcommons/inference/raw/master/text_to_image/coco2014/captions/captions_source.tsv",
+            "filename": "captions_source.tsv",
             "size_mb": 1,
         },
         "num_samples": 5000,  # MLPerf uses 5000 samples
@@ -1487,8 +1488,11 @@ def download_coco2014(
 
     # Download MLCommons pre-computed files for official submission
     fid_stats_file = data_dir / "val2014.npz"
-    latents_file = data_dir / "latents.pt"
-    mlcommons_captions = data_dir / "captions.tsv"
+    # MLCommons expects latents/latents.pt (subdirectory)
+    latents_dir = data_dir / "latents"
+    latents_dir.mkdir(parents=True, exist_ok=True)
+    latents_file = latents_dir / "latents.pt"
+    mlcommons_captions = data_dir / "captions_source.tsv"
 
     # Download FID statistics (required for MLCommons-compliant FID computation)
     if "fid_statistics" in dataset_info:
@@ -1505,6 +1509,7 @@ def download_coco2014(
                 logger.warning("FID computation will use reference images instead (not MLCommons-compliant)")
 
     # Download pre-generated latents (required for reproducibility in closed division)
+    # MLCommons latents.pt is a single tensor (1, 4, 128, 128) ≈ 256KB, shared by all samples
     if "latents" in dataset_info:
         if not latents_file.exists() or force:
             logger.info("Downloading MLCommons pre-generated latents...")
@@ -1516,9 +1521,10 @@ def download_coco2014(
                 )
             except Exception as e:
                 logger.warning(f"Failed to download latents: {e}")
-                logger.warning("Will use randomly generated latents (not MLCommons closed-division compliant)")
+                logger.warning("Latents will be generated locally at first run (seed=0)")
 
     # Download official MLCommons captions file
+    # For closed division, the EXACT MLCommons prompts must be used
     if "captions_tsv" in dataset_info:
         if not mlcommons_captions.exists() or force:
             logger.info("Downloading MLCommons official captions file...")
@@ -1531,6 +1537,31 @@ def download_coco2014(
             except Exception as e:
                 logger.warning(f"Failed to download MLCommons captions: {e}")
                 logger.warning("Using locally generated captions file")
+
+        # Convert captions_source.tsv (7 columns) to simple format (id<tab>caption)
+        # captions_source.tsv: id, image_id, caption, height, width, file_name, coco_url
+        if mlcommons_captions.exists():
+            count = 0
+            with open(mlcommons_captions, 'r', encoding='utf-8') as src, \
+                 open(prompts_file, 'w', encoding='utf-8') as dst:
+                for line in src:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split('\t')
+                    # Skip header
+                    if parts[0] == 'id':
+                        continue
+                    if len(parts) >= 3:
+                        # Use image_id (col 1) and caption (col 2)
+                        image_id = parts[1]
+                        caption = parts[2]
+                        dst.write(f"{image_id}\t{caption}\n")
+                        count += 1
+            logger.info(
+                f"Converted MLCommons captions_source.tsv to {prompts_file} "
+                f"({count} prompts)"
+            )
 
     # Count samples
     actual_samples = sum(1 for _ in open(prompts_file, 'r'))

@@ -673,10 +673,13 @@ def _export_sdxl_to_openvino(output_dir: str, model_id: str) -> Dict[str, str]:
     logger.info("Large files (6+ GB) - download will resume if interrupted.")
 
     def do_export():
+        # load_in_8bit=False prevents NNCF int8 weight compression
+        # which degrades accuracy for MLCommons closed division
         return OVStableDiffusionXLPipeline.from_pretrained(
             model_id,
             export=True,
             compile=False,
+            load_in_8bit=False,
         )
 
     pipeline = _download_with_retry(do_export, max_retries=3)

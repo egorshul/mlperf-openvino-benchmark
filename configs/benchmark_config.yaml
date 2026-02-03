@@ -186,12 +186,12 @@ models:
     data_format: "NC"
     dtype: "FP32"
 
-    # Image generation parameters
+    # Image generation parameters (MLCommons reference)
     generation:
       image_size: 1024
       guidance_scale: 8.0
       num_inference_steps: 20
-      negative_prompt: ""
+      negative_prompt: "normal quality, low quality, worst quality, low res, blurry, nsfw, nude"
 
     # MLPerf v5.1 accuracy targets for SDXL (closed division)
     # CLIP_SCORE: >= 31.68632 and <= 31.81332

@@ -180,7 +180,7 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
             actual_hint = None
         elif scenario == 'Offline':
             actual_hint = 'THROUGHPUT'
-            if batch_size is None:
+            if batch_size is None and model != 'sdxl':
                 batch_size = 32
         else:
             actual_hint = 'THROUGHPUT'
@@ -188,7 +188,7 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         actual_hint = performance_hint
 
     if batch_size is None:
-        batch_size = 0
+        batch_size = 1 if model == 'sdxl' else 0
 
     benchmark_config.openvino.num_streams = num_streams
     benchmark_config.openvino.batch_size = batch_size

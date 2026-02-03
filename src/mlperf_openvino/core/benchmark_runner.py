@@ -262,7 +262,7 @@ class BenchmarkRunner:
 
         if self.config.openvino.is_accelerator_device():
             if encoder_path and decoder_path:
-                from .whisper_sut import WhisperMultiDieSUT
+                from .whisper_multi_die_sut import WhisperMultiDieSUT
                 logger.info(f"Using Whisper multi-die SUT on {self.config.openvino.device}")
                 self.sut = WhisperMultiDieSUT(
                     config=self.config,
@@ -346,7 +346,41 @@ class BenchmarkRunner:
         )
         self.qsl.load()
 
+        # Check latents availability (critical for accuracy)
+        latents_loaded = len(self.qsl.dataset._latents_cache)
+        total_samples = self.qsl.dataset.total_count
+        if latents_loaded == total_samples:
+            has_shared = hasattr(self.qsl.dataset, '_shared_latent')
+            logger.info(
+                f"SDXL: Latents ready for {total_samples} samples "
+                f"({'shared single latent' if has_shared else 'per-sample latents'})"
+            )
+        else:
+            logger.warning(
+                "SDXL: No pre-computed latents loaded! "
+                "Accuracy results will NOT match MLCommons reference. "
+                "Download latents.pt and place in data/coco2014/latents/"
+            )
+
         model_path = Path(self.config.model.model_path)
+
+        # Multi-die accelerator path (NPU, XPU, etc.)
+        if self.config.openvino.is_accelerator_device():
+            try:
+                from .sdxl_multi_die_sut import SDXLMultiDieSUT, OPTIMUM_SDXL_AVAILABLE
+                if OPTIMUM_SDXL_AVAILABLE and model_path.is_dir():
+                    logger.info(
+                        f"Using SDXL multi-die SUT on {self.config.openvino.device}"
+                    )
+                    self.sut = SDXLMultiDieSUT(
+                        config=self.config,
+                        model_path=model_path,
+                        qsl=self.qsl,
+                        scenario=self.config.scenario,
+                    )
+                    return
+            except Exception as e:
+                logger.warning(f"Failed to create SDXLMultiDieSUT: {e}")
 
         try:
             from .sdxl_sut import SDXLOptimumSUT, OPTIMUM_SDXL_AVAILABLE
@@ -363,9 +397,10 @@ class BenchmarkRunner:
                         qsl=self.qsl,
                         scenario=self.config.scenario,
                     )
+                    logger.info("SDXL: Using Optimum-Intel pipeline (OVStableDiffusionXLPipeline)")
                     return
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to create SDXLOptimumSUT: {e}")
 
         from .sdxl_sut import SDXLManualSUT
         self.sut = SDXLManualSUT(
@@ -374,6 +409,7 @@ class BenchmarkRunner:
             qsl=self.qsl,
             scenario=self.config.scenario,
         )
+        logger.info("SDXL: Using manual pipeline (SDXLManualSUT)")
 
     def _get_test_settings(self) -> "lg.TestSettings":
         """Create LoadGen test settings."""
@@ -768,10 +804,10 @@ class BenchmarkRunner:
         elif model_type == 'sdxl':
             clip = acc.get('clip_score', 0)
             fid = acc.get('fid_score', 0)
-            # MLPerf SDXL: CLIP >= 31.68632 and FID within range
-            clip_pass = clip >= 31.68632
-            status = "PASS" if clip_pass else "FAIL"
-            print(f"CLIP: {clip:.4f} [{status}]")
-            print(f"FID: {fid:.4f}")
+            # MLPerf SDXL: CLIP in [31.68632, 31.81332], FID in [23.01086, 23.95007]
+            clip_status = "PASS" if 31.68632 <= clip <= 31.81332 else "FAIL"
+            fid_status = "PASS" if 23.01086 <= fid <= 23.95007 else "FAIL"
+            print(f"CLIP: {clip:.4f} [{clip_status}]")
+            print(f"FID: {fid:.4f} [{fid_status}]")
 
         print("="*50 + "\n")
