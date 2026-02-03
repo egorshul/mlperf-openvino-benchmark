@@ -161,10 +161,10 @@ class SDXLMultiDieSUT:
         )
 
     def _load_pipeline_for_device(self, die: str) -> Any:
-        """Load, reshape to static shapes, and compile pipeline on *die*.
+        """Load, reshape to static shapes, and compile pipeline.
 
-        Accelerator devices require static shapes: the pipeline is loaded
-        without compilation, reshaped, then compiled on the target die.
+        Only the UNet is placed on the accelerator die; text encoders and
+        VAE decoder stay on CPU to preserve FP32 accuracy.
         """
         is_cpu = die.upper() == "CPU"
 
@@ -184,7 +184,7 @@ class SDXLMultiDieSUT:
                     num_images_per_prompt=1,
                 )
                 if not is_cpu:
-                    pipeline.to(die)
+                    pipeline.unet.to(die)
                 pipeline.compile()
             except Exception as exc:
                 if self.batch_size > 1:
@@ -202,7 +202,7 @@ class SDXLMultiDieSUT:
                         num_images_per_prompt=1,
                     )
                     if not is_cpu:
-                        pipeline.to(die)
+                        pipeline.unet.to(die)
                     pipeline.compile()
                     self.batch_size = 1
                 else:
