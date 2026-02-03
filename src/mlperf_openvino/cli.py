@@ -737,7 +737,7 @@ def list_models():
             'task': 'Medical Image Segmentation',
             'dataset': 'KiTS19',
             'metric': 'Mean Dice',
-            'target': '86.17%',
+            'target': '85.47% (99% of 86.33%)',
         },
     ]
 

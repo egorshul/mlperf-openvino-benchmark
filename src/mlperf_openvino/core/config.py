@@ -525,17 +525,17 @@ class BenchmarkConfig:
                 output_name="output",
                 data_format="NCDHW",
                 dtype="FP32",
-                accuracy_target=0.86170,  # Mean Dice (official MLPerf)
-                accuracy_threshold=0.99,
+                accuracy_target=0.86330,  # Reference FP32 mean Dice (official MLPerf)
+                accuracy_threshold=0.99,  # 99% of reference -> 0.854667
                 preprocessing=PreprocessingConfig(),  # Not used for 3D medical volumes
                 offline=ScenarioConfig(
                     min_duration_ms=600000,  # MLPerf official: 10 minutes
-                    min_query_count=42,  # MLPerf official (KiTS19 validation set size)
+                    min_query_count=43,  # MLPerf official (mlperf.conf)
                     samples_per_query=1,
                 ),
                 server=ScenarioConfig(
                     min_duration_ms=600000,  # MLPerf official: 10 minutes
-                    min_query_count=42,  # MLPerf official
+                    min_query_count=43,  # MLPerf official
                     target_latency_ns=0,
                     target_qps=1.0,
                 ),

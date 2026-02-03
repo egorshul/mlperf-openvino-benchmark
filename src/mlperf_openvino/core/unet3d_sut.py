@@ -192,8 +192,8 @@ class UNet3DSUT:
         weight_sum = np.clip(weight_sum, a_min=1e-7, a_max=None)
         aggregated /= weight_sum[np.newaxis, ...]
 
-        # Argmax to get class predictions
-        segmentation = np.argmax(aggregated, axis=0).astype(np.int64)
+        # Argmax to get class predictions (uint8 per MLPerf reference)
+        segmentation = np.argmax(aggregated, axis=0).astype(np.uint8)
 
         return segmentation
 

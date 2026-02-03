@@ -1,7 +1,11 @@
-"""KiTS19 dataset for 3D-UNet medical image segmentation benchmark."""
+"""KiTS19 dataset for 3D-UNet medical image segmentation benchmark.
+
+Follows the MLCommons reference implementation:
+https://github.com/mlcommons/inference/tree/master/vision/medical_imaging/3d-unet-kits19
+"""
 
 import logging
-import os
+import pickle
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -15,33 +19,48 @@ logger = logging.getLogger(__name__)
 NUM_CLASSES = 3  # background, kidney, tumor
 PATCH_SIZE = (128, 128, 128)
 OVERLAP_FACTOR = 0.5
-GAUSSIAN_SIGMA_SCALE = 0.125
 
-# Preprocessing constants (MLPerf nnU-Net reference)
-CLIP_LOW_PERCENTILE = 0.5
-CLIP_HIGH_PERCENTILE = 99.5
+# Fixed preprocessing constants from MLPerf nnU-Net reference (global_vars.py).
+# These were precomputed from foreground voxel statistics across the training set.
+TARGET_SPACING = (1.6, 1.2, 1.2)  # target voxel spacing in mm (z, y, x)
+MIN_CLIP_VAL = -79.0
+MAX_CLIP_VAL = 304.0
+MEAN_VAL = 101.0
+STDDEV_VAL = 76.9
+PADDING_VAL = -2.2  # (MIN_CLIP_VAL - MEAN_VAL) / STDDEV_VAL
+
+# Dice score smoothing (MLPerf reference: accuracy_kits.py)
+DICE_SMOOTH_NR = 1e-6
+DICE_SMOOTH_DR = 1e-6
 
 
-def _get_gaussian_importance_map(
-    patch_size: Tuple[int, ...],
-    sigma_scale: float = 0.125,
-) -> np.ndarray:
-    """Create Gaussian importance map for sliding window aggregation.
+def _get_gaussian_importance_map(patch_size: Tuple[int, ...]) -> np.ndarray:
+    """Create Gaussian importance map matching MLPerf reference (inference_utils.py).
 
-    This matches the nnU-Net reference implementation used by MLPerf.
+    The reference builds a 3D Gaussian via sequential outer products of a 1D
+    scipy.signal.gaussian, then applies a cube root transformation to flatten
+    the distribution before normalizing.
     """
-    center = [(s - 1) / 2.0 for s in patch_size]
-    sigma = [s * sigma_scale for s in patch_size]
+    try:
+        from scipy.signal import gaussian as scipy_gaussian
+    except ImportError:
+        raise ImportError(
+            "scipy is required for Gaussian kernel computation. "
+            "Install with: pip install scipy"
+        )
 
-    grid = np.ogrid[tuple(slice(0, s) for s in patch_size)]
-    gaussian = np.ones(patch_size, dtype=np.float32)
+    n = patch_size[0]  # 128
+    sigma = 0.125 * n  # 16.0
 
-    for i, (g, c, s) in enumerate(zip(grid, center, sigma)):
-        gaussian *= np.exp(-0.5 * ((g - c) / s) ** 2)
+    g1 = scipy_gaussian(n, std=sigma)
+    g2 = np.outer(g1, g1)
+    g3 = np.outer(g2.flatten(), g1).reshape(n, n, n)
 
-    gaussian /= gaussian.max()
-    gaussian = np.clip(gaussian, a_min=1e-7, a_max=None)
-    return gaussian
+    # Cube root transformation (matches MLPerf reference)
+    g3 = g3 ** (1.0 / 3.0)
+    g3 /= g3.max()
+
+    return g3.astype(np.float32)
 
 
 def _compute_sliding_window_positions(
@@ -53,7 +72,6 @@ def _compute_sliding_window_positions(
 
     Uses step_size = patch_size * (1 - overlap_factor), matching MLPerf reference.
     """
-    positions = []
     steps = [max(1, int(p * (1 - overlap_factor))) for p in patch_size]
 
     ranges = []
@@ -64,7 +82,7 @@ def _compute_sliding_window_positions(
             starts.append(dim_size - p_size)
         ranges.append(starts)
 
-    # Generate all combinations
+    positions = []
     for d in ranges[0]:
         for h in ranges[1]:
             for w in ranges[2]:
@@ -77,36 +95,47 @@ def compute_dice_score(
     prediction: np.ndarray,
     ground_truth: np.ndarray,
     class_id: int,
-    smooth: float = 1e-5,
 ) -> float:
-    """Compute Dice score for a single class."""
-    pred_mask = (prediction == class_id).astype(np.float32)
-    gt_mask = (ground_truth == class_id).astype(np.float32)
+    """Compute Dice score for a single class (MLPerf reference: accuracy_kits.py).
+
+    Dice = (2 * intersection + smooth_nr) / (pred_sum + gt_sum + smooth_dr)
+    """
+    pred_mask = (prediction == class_id).astype(np.float64)
+    gt_mask = (ground_truth == class_id).astype(np.float64)
 
     intersection = np.sum(pred_mask * gt_mask)
-    denominator = np.sum(pred_mask) + np.sum(gt_mask)
+    pred_sum = np.sum(pred_mask)
+    gt_sum = np.sum(gt_mask)
 
-    if denominator < smooth:
-        return 1.0 if np.sum(gt_mask) == 0 else 0.0
-
-    return float(2.0 * intersection / (denominator + smooth))
+    return float(
+        (2.0 * intersection + DICE_SMOOTH_NR)
+        / (pred_sum + gt_sum + DICE_SMOOTH_DR)
+    )
 
 
 class KiTS19Dataset(BaseDataset):
     """KiTS19 dataset for 3D medical image segmentation.
 
-    Expected directory structure:
+    Supports three data formats (checked in order):
+
+    1. MLPerf reference preprocessed pickle format:
+        data_path/
+            preprocessed_files.pkl   # {"file_list": ["case_00XXX", ...]}
+            case_00000.pkl
+            case_00001.pkl
+            ...
+
+    2. Raw NIfTI format (will apply resampling + normalization):
         data_path/
             case_00000/
                 imaging.nii.gz
                 segmentation.nii.gz
-            case_00001/
-                imaging.nii.gz
-                segmentation.nii.gz
             ...
-        OR (preprocessed numpy format):
-            case_00000.npy (imaging)
-            case_00000_seg.npy (segmentation)
+
+    3. Preprocessed numpy format (already resampled + normalized):
+        data_path/
+            case_00000.npy
+            case_00000_seg.npy
             ...
     """
 
@@ -116,18 +145,17 @@ class KiTS19Dataset(BaseDataset):
         count: Optional[int] = None,
         patch_size: Tuple[int, ...] = PATCH_SIZE,
         overlap_factor: float = OVERLAP_FACTOR,
-        gaussian_sigma_scale: float = GAUSSIAN_SIGMA_SCALE,
         **kwargs,
     ):
         super().__init__(data_path, count, **kwargs)
 
         self.patch_size = patch_size
         self.overlap_factor = overlap_factor
-        self.gaussian_sigma_scale = gaussian_sigma_scale
 
         self._volumes: Dict[int, np.ndarray] = {}
         self._segmentations: Dict[int, np.ndarray] = {}
         self._case_names: List[str] = []
+        self._data_format: Optional[str] = None  # "pickle", "nifti", "numpy"
         self._gaussian_map: Optional[np.ndarray] = None
 
     def load(self) -> None:
@@ -137,38 +165,70 @@ class KiTS19Dataset(BaseDataset):
 
         data_path = Path(self.data_path)
 
-        # Try NIfTI directory structure first
-        nifti_cases = sorted(
-            d for d in data_path.iterdir()
-            if d.is_dir() and d.name.startswith("case_")
-        ) if data_path.exists() else []
-
-        if nifti_cases:
-            for case_dir in nifti_cases:
-                imaging = case_dir / "imaging.nii.gz"
-                if imaging.exists():
-                    self._items.append(str(case_dir))
-                    self._case_names.append(case_dir.name)
-                    self._labels.append(str(case_dir / "segmentation.nii.gz"))
+        # 1. Try MLPerf reference pickle format
+        pkl_meta = data_path / "preprocessed_files.pkl"
+        if pkl_meta.exists():
+            self._load_pickle_metadata(data_path, pkl_meta)
+            self._data_format = "pickle"
         else:
-            # Try preprocessed numpy format
-            npy_files = sorted(data_path.glob("case_*[0-9].npy"))
-            for npy_file in npy_files:
-                self._items.append(str(npy_file))
-                self._case_names.append(npy_file.stem)
-                seg_file = npy_file.parent / f"{npy_file.stem}_seg.npy"
-                self._labels.append(str(seg_file))
+            # 2. Try NIfTI directory structure
+            nifti_cases = sorted(
+                d for d in data_path.iterdir()
+                if d.is_dir() and d.name.startswith("case_")
+            ) if data_path.exists() else []
+
+            if nifti_cases:
+                self._load_nifti_metadata(nifti_cases)
+                self._data_format = "nifti"
+            else:
+                # 3. Try preprocessed numpy format
+                self._load_numpy_metadata(data_path)
+                self._data_format = "numpy"
 
         if self.count is not None:
             self._items = self._items[:self.count]
             self._case_names = self._case_names[:self.count]
             self._labels = self._labels[:self.count]
 
-        logger.info(f"Found {len(self._items)} KiTS19 cases")
+        logger.info(
+            f"Found {len(self._items)} KiTS19 cases (format: {self._data_format})"
+        )
         self._loaded = True
 
-    def _load_nifti(self, path: str) -> np.ndarray:
-        """Load a NIfTI file and return numpy array."""
+    def _load_pickle_metadata(self, data_path: Path, meta_path: Path) -> None:
+        """Load MLPerf reference preprocessed pickle metadata."""
+        with open(meta_path, "rb") as f:
+            meta = pickle.load(f)
+
+        file_list = meta.get("file_list", [])
+        for case_name in file_list:
+            pkl_file = data_path / f"{case_name}.pkl"
+            if pkl_file.exists():
+                self._items.append(str(pkl_file))
+                self._case_names.append(case_name)
+                # Ground truth is stored within the pickle or as separate file
+                self._labels.append(str(pkl_file))
+
+    def _load_nifti_metadata(self, nifti_cases: List[Path]) -> None:
+        """Load NIfTI directory metadata."""
+        for case_dir in nifti_cases:
+            imaging = case_dir / "imaging.nii.gz"
+            if imaging.exists():
+                self._items.append(str(case_dir))
+                self._case_names.append(case_dir.name)
+                self._labels.append(str(case_dir / "segmentation.nii.gz"))
+
+    def _load_numpy_metadata(self, data_path: Path) -> None:
+        """Load preprocessed numpy format metadata."""
+        npy_files = sorted(data_path.glob("case_*[0-9].npy"))
+        for npy_file in npy_files:
+            self._items.append(str(npy_file))
+            self._case_names.append(npy_file.stem)
+            seg_file = npy_file.parent / f"{npy_file.stem}_seg.npy"
+            self._labels.append(str(seg_file))
+
+    def _load_nifti_file(self, path: str) -> np.ndarray:
+        """Load a NIfTI file and return numpy array with affine."""
         try:
             import nibabel as nib
         except ImportError:
@@ -177,51 +237,91 @@ class KiTS19Dataset(BaseDataset):
                 "Install with: pip install nibabel"
             )
         nii = nib.load(path)
-        return np.asarray(nii.dataobj, dtype=np.float32)
+        return np.asarray(nii.dataobj, dtype=np.float32), nii.affine
+
+    def _resample_volume(
+        self,
+        volume: np.ndarray,
+        affine: np.ndarray,
+        order: int = 1,
+    ) -> np.ndarray:
+        """Resample volume to target spacing [1.6, 1.2, 1.2] mm.
+
+        Matches MLPerf reference preprocess.py using scipy.ndimage.zoom.
+        order=1 (linear) for images, order=0 (nearest) for labels.
+        """
+        try:
+            from scipy.ndimage import zoom
+        except ImportError:
+            raise ImportError(
+                "scipy is required for volume resampling. "
+                "Install with: pip install scipy"
+            )
+
+        # Extract current voxel spacing from affine
+        current_spacing = np.abs(np.diag(affine[:3, :3]))
+
+        # Compute zoom factors
+        zoom_factors = current_spacing / np.array(TARGET_SPACING)
+
+        if np.allclose(zoom_factors, 1.0, atol=1e-3):
+            return volume
+
+        resampled = zoom(volume, zoom_factors, order=order, mode="nearest")
+        return resampled.astype(volume.dtype)
 
     def _preprocess_volume(self, volume: np.ndarray) -> np.ndarray:
-        """Preprocess a 3D volume following MLPerf nnU-Net reference.
+        """Preprocess a 3D volume following MLPerf nnU-Net reference (global_vars.py).
 
-        1. Clip to [p0.5, p99.5] percentiles
-        2. Z-score normalization (mean=0, std=1)
+        Uses FIXED dataset-level statistics (not per-volume):
+        1. Clip to [-79.0, 304.0]
+        2. Z-score normalize with mean=101.0, std=76.9
         """
-        # Clip to percentile range
-        low = np.percentile(volume, CLIP_LOW_PERCENTILE)
-        high = np.percentile(volume, CLIP_HIGH_PERCENTILE)
-        volume = np.clip(volume, low, high)
-
-        # Z-score normalization
-        mean = np.mean(volume)
-        std = np.std(volume)
-        if std > 0:
-            volume = (volume - mean) / std
-        else:
-            volume = volume - mean
-
+        volume = np.clip(volume, MIN_CLIP_VAL, MAX_CLIP_VAL)
+        volume = (volume - MEAN_VAL) / STDDEV_VAL
         return volume.astype(np.float32)
 
     def _load_volume(self, index: int) -> np.ndarray:
         """Load and preprocess a volume by index."""
         path = self._items[index]
 
-        if path.endswith(".npy"):
-            volume = np.load(path).astype(np.float32)
-        else:
-            # NIfTI directory
-            imaging_path = Path(path) / "imaging.nii.gz"
-            volume = self._load_nifti(str(imaging_path))
+        if self._data_format == "pickle":
+            with open(path, "rb") as f:
+                data = pickle.load(f)
+            # MLPerf reference pickle: data is a list/tuple, volume at index 0
+            volume = np.array(data[0], dtype=np.float32)
+            # Pickle data is already preprocessed (resampled + normalized)
+            return volume
 
-        return self._preprocess_volume(volume)
+        elif self._data_format == "numpy":
+            # Numpy format assumed already preprocessed
+            return np.load(path).astype(np.float32)
+
+        else:
+            # NIfTI: needs resampling + preprocessing
+            imaging_path = Path(path) / "imaging.nii.gz"
+            volume, affine = self._load_nifti_file(str(imaging_path))
+            volume = self._resample_volume(volume, affine, order=1)
+            return self._preprocess_volume(volume)
 
     def _load_segmentation(self, index: int) -> np.ndarray:
         """Load ground truth segmentation by index."""
         path = self._labels[index]
 
-        if path.endswith(".npy"):
-            return np.load(path).astype(np.int64)
+        if self._data_format == "pickle":
+            with open(path, "rb") as f:
+                data = pickle.load(f)
+            # MLPerf reference pickle: segmentation at index 1
+            return np.array(data[1], dtype=np.uint8)
+
+        elif self._data_format == "numpy":
+            return np.load(path).astype(np.uint8)
+
         else:
-            seg = self._load_nifti(path)
-            return seg.astype(np.int64)
+            # NIfTI: needs resampling with nearest interpolation
+            seg, affine = self._load_nifti_file(path)
+            seg = self._resample_volume(seg, affine, order=0)
+            return seg.astype(np.uint8)
 
     def get_volume(self, index: int) -> np.ndarray:
         """Get preprocessed volume (cached)."""
@@ -236,11 +336,9 @@ class KiTS19Dataset(BaseDataset):
         return self._segmentations[index]
 
     def get_gaussian_map(self) -> np.ndarray:
-        """Get the Gaussian importance map for patch aggregation."""
+        """Get Gaussian importance map (MLPerf reference: scipy + cube root)."""
         if self._gaussian_map is None:
-            self._gaussian_map = _get_gaussian_importance_map(
-                self.patch_size, self.gaussian_sigma_scale
-            )
+            self._gaussian_map = _get_gaussian_importance_map(self.patch_size)
         return self._gaussian_map
 
     def get_sliding_window_positions(
@@ -277,11 +375,14 @@ class KiTS19Dataset(BaseDataset):
         """Convert model output logits to class predictions (argmax)."""
         if results.ndim == 5:
             # (batch, classes, D, H, W) -> (batch, D, H, W)
-            return [np.argmax(results[i], axis=0) for i in range(results.shape[0])]
+            return [
+                np.argmax(results[i], axis=0).astype(np.uint8)
+                for i in range(results.shape[0])
+            ]
         elif results.ndim == 4:
             # (classes, D, H, W) -> (D, H, W)
-            return [np.argmax(results, axis=0)]
-        return [results]
+            return [np.argmax(results, axis=0).astype(np.uint8)]
+        return [results.astype(np.uint8)]
 
     def compute_accuracy(
         self,
@@ -290,26 +391,34 @@ class KiTS19Dataset(BaseDataset):
     ) -> Dict[str, float]:
         """Compute mean Dice score (MLPerf 3D-UNet metric).
 
-        Computes Dice for kidney (class 1) and tumor (class 2),
-        returns the mean as the primary metric.
+        Per-case: mean of kidney Dice and tumor Dice.
+        Overall: mean across all cases. NaN treated as 0 per reference.
         """
-        kidney_dices = []
-        tumor_dices = []
+        case_dices = []
 
         for pred, gt in zip(predictions, labels):
             kidney_dice = compute_dice_score(pred, gt, class_id=1)
             tumor_dice = compute_dice_score(pred, gt, class_id=2)
-            kidney_dices.append(kidney_dice)
-            tumor_dices.append(tumor_dice)
+            case_mean = (kidney_dice + tumor_dice) / 2.0
+            case_dices.append({
+                "kidney": kidney_dice,
+                "tumor": tumor_dice,
+                "mean": case_mean,
+            })
 
-        mean_kidney = float(np.mean(kidney_dices)) if kidney_dices else 0.0
-        mean_tumor = float(np.mean(tumor_dices)) if tumor_dices else 0.0
-        mean_dice = (mean_kidney + mean_tumor) / 2.0
+        # Overall means (NaN -> 0 per reference)
+        kidney_dices = [c["kidney"] for c in case_dices]
+        tumor_dices = [c["tumor"] for c in case_dices]
+        mean_dices = [c["mean"] for c in case_dices]
+
+        overall_mean = float(np.nanmean(mean_dices)) if mean_dices else 0.0
+        overall_kidney = float(np.nanmean(kidney_dices)) if kidney_dices else 0.0
+        overall_tumor = float(np.nanmean(tumor_dices)) if tumor_dices else 0.0
 
         return {
-            "mean_dice": mean_dice,
-            "kidney_dice": mean_kidney,
-            "tumor_dice": mean_tumor,
+            "mean_dice": overall_mean,
+            "kidney_dice": overall_kidney,
+            "tumor_dice": overall_tumor,
             "num_samples": len(predictions),
         }
 
@@ -321,7 +430,7 @@ class KiTS19QSL(QuerySampleLibrary):
         self,
         data_path: str,
         count: Optional[int] = None,
-        performance_sample_count: int = 42,
+        performance_sample_count: int = 43,
         patch_size: Tuple[int, ...] = PATCH_SIZE,
         overlap_factor: float = OVERLAP_FACTOR,
         **kwargs,
