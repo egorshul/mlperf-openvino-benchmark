@@ -147,6 +147,13 @@ DATASET_REGISTRY: Dict[str, Dict] = {
         "num_samples": 5000,  # MLPerf uses 5000 samples
         "note": "For MLPerf SDXL benchmark (closed division)",
     },
+    "kits19": {
+        "description": "KiTS19 kidney tumor segmentation dataset for 3D-UNet",
+        "git_repo": "https://github.com/neheller/kits19",
+        "num_cases": 300,  # 210 training + 90 test (no labels)
+        "num_labeled": 210,  # Cases with ground truth segmentation
+        "note": "Requires git clone + download script (~30GB)",
+    },
 }
 
 
@@ -1579,6 +1586,110 @@ def download_coco2014(
     }
 
 
+def download_kits19(
+    output_dir: str,
+    force: bool = False,
+) -> Dict[str, str]:
+    """
+    Download KiTS19 dataset for 3D-UNet medical image segmentation.
+
+    Clones the official KiTS19 repository and downloads imaging data
+    using the provided starter_code.get_imaging script.
+
+    Data structure after download:
+        kits19/data/case_00000/imaging.nii.gz
+        kits19/data/case_00000/segmentation.nii.gz
+        ...
+
+    Args:
+        output_dir: Directory to save dataset
+        force: Force re-download
+
+    Returns:
+        Dictionary with dataset paths
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    data_dir = output_path / "kits19"
+    cases_dir = data_dir / "data"
+
+    # Check if already downloaded
+    if cases_dir.exists() and not force:
+        existing_cases = sorted(
+            d for d in cases_dir.iterdir()
+            if d.is_dir() and d.name.startswith("case_")
+            and (d / "imaging.nii.gz").exists()
+        )
+        if len(existing_cases) >= 210:
+            logger.info(f"KiTS19 already exists at {data_dir} with {len(existing_cases)} cases")
+            return {
+                "data_path": str(cases_dir),
+                "num_samples": len(existing_cases),
+            }
+
+    # Clone the repository
+    repo_url = DATASET_REGISTRY["kits19"]["git_repo"]
+    logger.info(f"Cloning KiTS19 repository from {repo_url}...")
+
+    if data_dir.exists() and not force:
+        logger.info(f"Repository already cloned at {data_dir}")
+    else:
+        try:
+            subprocess.run(
+                ["git", "clone", repo_url, str(data_dir)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"Failed to clone KiTS19 repository: {e.stderr}")
+
+    # Install requirements
+    requirements_file = data_dir / "requirements.txt"
+    if requirements_file.exists():
+        logger.info("Installing KiTS19 requirements...")
+        try:
+            subprocess.run(
+                ["pip", "install", "-r", str(requirements_file)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as e:
+            logger.warning(f"Failed to install requirements: {e.stderr}")
+
+    # Download imaging data
+    logger.info("Downloading KiTS19 imaging data (~30GB, this may take a while)...")
+    try:
+        subprocess.run(
+            ["python3", "-m", "starter_code.get_imaging"],
+            check=True,
+            cwd=str(data_dir),
+        )
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            f"Failed to download KiTS19 imaging data: {e}\n"
+            "You can try manually:\n"
+            f"  cd {data_dir}\n"
+            "  python3 -m starter_code.get_imaging"
+        )
+
+    # Count downloaded cases
+    existing_cases = sorted(
+        d for d in cases_dir.iterdir()
+        if d.is_dir() and d.name.startswith("case_")
+        and (d / "imaging.nii.gz").exists()
+    ) if cases_dir.exists() else []
+
+    logger.info(f"KiTS19 dataset ready: {len(existing_cases)} cases at {cases_dir}")
+
+    return {
+        "data_path": str(cases_dir),
+        "num_samples": len(existing_cases),
+    }
+
+
 def download_dataset(
     dataset_name: str,
     output_dir: str,
@@ -1609,6 +1720,8 @@ def download_dataset(
         return download_whisper_mlperf(output_dir)
     elif dataset_name == "coco2014":
         return download_coco2014(output_dir, force)
+    elif dataset_name == "kits19":
+        return download_kits19(output_dir, force)
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
@@ -1621,6 +1734,7 @@ def list_available_datasets() -> Dict[str, str]:
         "openimages": DATASET_REGISTRY["openimages"]["description"],
         "librispeech": DATASET_REGISTRY["librispeech"]["description"],
         "coco2014": DATASET_REGISTRY["coco2014"]["description"],
+        "kits19": DATASET_REGISTRY["kits19"]["description"],
     }
 
 

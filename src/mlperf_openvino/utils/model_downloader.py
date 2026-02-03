@@ -54,6 +54,14 @@ MODEL_REGISTRY: Dict[str, Dict] = {
         },
         "description": "Stable Diffusion XL 1.0 for text-to-image generation",
     },
+    "3d-unet": {
+        "onnx": {
+            "url": "https://zenodo.org/record/5597155/files/3dunet_kits19_128x128x128.onnx",
+            "filename": "3dunet_kits19_128x128x128.onnx",
+            "md5": None,
+        },
+        "description": "3D-UNet nnU-Net for KiTS19 medical image segmentation",
+    },
 }
 
 
