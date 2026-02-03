@@ -238,9 +238,9 @@ models:
       gaussian_sigma_scale: 0.125  # Gaussian weighting sigma
 
     # MLPerf accuracy target (mean Dice score)
-    # Reference FP32 mean Dice: 0.86330
-    accuracy_target: 0.86330  # Reference FP32 mean Dice
-    accuracy_threshold: 0.99  # 99% of reference -> 0.854667
+    # Reference FP32 mean Dice: 0.86170
+    accuracy_target: 0.86170  # Reference FP32 mean Dice
+    accuracy_threshold: 0.99  # 99% of reference -> 0.85308
 
     # Model sources (official MLPerf model)
     sources:

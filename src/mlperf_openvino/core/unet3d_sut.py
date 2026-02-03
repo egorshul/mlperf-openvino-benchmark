@@ -28,7 +28,7 @@ except ImportError:
 
 from .config import BenchmarkConfig, Scenario
 from ..backends.base import BaseBackend
-from ..datasets.kits19 import KiTS19QSL, NUM_CLASSES
+from ..datasets.kits19 import KiTS19QSL, NUM_CLASSES, PADDING_VAL
 
 logger = logging.getLogger(__name__)
 
@@ -151,10 +151,10 @@ class UNet3DSUT:
             # Extract patch
             patch = volume[d:d + pd, h:h + ph, w:w + pw]
 
-            # Pad if necessary (for edge cases)
+            # Pad if necessary (for edge cases where volume < patch_size)
             actual_shape = patch.shape
             if actual_shape != patch_size:
-                padded = np.zeros(patch_size, dtype=np.float32)
+                padded = np.full(patch_size, PADDING_VAL, dtype=np.float32)
                 padded[:actual_shape[0], :actual_shape[1], :actual_shape[2]] = patch
                 patch = padded
 

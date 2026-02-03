@@ -68,25 +68,26 @@ def _compute_sliding_window_positions(
     patch_size: Tuple[int, ...],
     overlap_factor: float = 0.5,
 ) -> List[Tuple[int, ...]]:
-    """Compute patch start positions for sliding window inference.
+    """Compute patch start positions (MLPerf reference: inference_utils.py).
 
-    Uses step_size = patch_size * (1 - overlap_factor), matching MLPerf reference.
+    Uses step_size = patch_size * (1 - overlap_factor), matching the reference
+    get_slice_for_sliding_window function exactly.
     """
-    steps = [max(1, int(p * (1 - overlap_factor))) for p in patch_size]
+    dim = len(patch_size)
+    strides = [int(patch_size[i] * (1 - overlap_factor)) for i in range(dim)]
 
-    ranges = []
-    for dim_size, p_size, step in zip(volume_shape, patch_size, steps):
-        starts = list(range(0, max(dim_size - p_size + 1, 1), step))
-        # Ensure last patch covers the end
-        if starts[-1] + p_size < dim_size:
-            starts.append(dim_size - p_size)
-        ranges.append(starts)
+    # Number of positions per dimension (reference formula)
+    size = [
+        (volume_shape[i] - patch_size[i]) // strides[i] + 1
+        if volume_shape[i] >= patch_size[i] else 1
+        for i in range(dim)
+    ]
 
     positions = []
-    for d in ranges[0]:
-        for h in ranges[1]:
-            for w in ranges[2]:
-                positions.append((d, h, w))
+    for i in range(0, strides[0] * size[0], strides[0]):
+        for j in range(0, strides[1] * size[1], strides[1]):
+            for k in range(0, strides[2] * size[2], strides[2]):
+                positions.append((i, j, k))
 
     return positions
 
@@ -227,8 +228,11 @@ class KiTS19Dataset(BaseDataset):
             seg_file = npy_file.parent / f"{npy_file.stem}_seg.npy"
             self._labels.append(str(seg_file))
 
-    def _load_nifti_file(self, path: str) -> np.ndarray:
-        """Load a NIfTI file and return numpy array with affine."""
+    def _load_nifti_file(self, path: str) -> Tuple[np.ndarray, Tuple[float, ...]]:
+        """Load a NIfTI file and return (data, voxel_spacing).
+
+        Spacing extracted from header pixdim, matching MLPerf reference.
+        """
         try:
             import nibabel as nib
         except ImportError:
@@ -237,12 +241,14 @@ class KiTS19Dataset(BaseDataset):
                 "Install with: pip install nibabel"
             )
         nii = nib.load(path)
-        return np.asarray(nii.dataobj, dtype=np.float32), nii.affine
+        data = np.asarray(nii.dataobj, dtype=np.float32)
+        spacing = tuple(float(s) for s in nii.header["pixdim"][1:4])
+        return data, spacing
 
     def _resample_volume(
         self,
         volume: np.ndarray,
-        affine: np.ndarray,
+        spacing: Tuple[float, ...],
         order: int = 1,
     ) -> np.ndarray:
         """Resample volume to target spacing [1.6, 1.2, 1.2] mm.
@@ -258,16 +264,17 @@ class KiTS19Dataset(BaseDataset):
                 "Install with: pip install scipy"
             )
 
-        # Extract current voxel spacing from affine
-        current_spacing = np.abs(np.diag(affine[:3, :3]))
-
-        # Compute zoom factors
-        zoom_factors = current_spacing / np.array(TARGET_SPACING)
+        zoom_factors = np.array(spacing) / np.array(TARGET_SPACING)
 
         if np.allclose(zoom_factors, 1.0, atol=1e-3):
             return volume
 
-        resampled = zoom(volume, zoom_factors, order=order, mode="nearest")
+        # Match reference: mode="constant", cval=min value, grid_mode=False
+        cval = float(volume.min())
+        resampled = zoom(
+            volume, zoom_factors, order=order,
+            mode="constant", cval=cval, grid_mode=False,
+        )
         return resampled.astype(volume.dtype)
 
     def _preprocess_volume(self, volume: np.ndarray) -> np.ndarray:
@@ -281,6 +288,133 @@ class KiTS19Dataset(BaseDataset):
         volume = (volume - MEAN_VAL) / STDDEV_VAL
         return volume.astype(np.float32)
 
+    def _pad_to_min_shape(
+        self, volume: np.ndarray, label: Optional[np.ndarray] = None,
+    ) -> Any:
+        """Pad volume (and label) to at least patch_size using edge mode.
+
+        Matches MLPerf reference preprocess.py pad_to_min_shape.
+        """
+        shape = volume.shape
+        bounds = [max(0, self.patch_size[i] - shape[i]) for i in range(3)]
+
+        if all(b == 0 for b in bounds):
+            return (volume, label) if label is not None else volume
+
+        paddings = [
+            (bounds[i] // 2, bounds[i] - bounds[i] // 2) for i in range(3)
+        ]
+        volume = np.pad(volume, paddings, mode="edge")
+        if label is not None:
+            label = np.pad(label, paddings, mode="edge")
+            return volume, label
+        return volume
+
+    def _adjust_shape_for_sliding_window(
+        self, volume: np.ndarray, label: Optional[np.ndarray] = None,
+    ) -> Any:
+        """Crop small remainders and pad to stride-aligned dimensions.
+
+        Matches MLPerf reference preprocess.py adjust_shape_for_sliding_window:
+        1. If dimension remainder < stride/2, crop symmetrically.
+        2. Pad with constant value to make divisible by stride and >= patch_size.
+           Image uses PADDING_VAL (-2.2), label uses 0.
+        """
+        shape = list(volume.shape)
+        strides = [
+            int(self.patch_size[i] * (1 - self.overlap_factor))
+            for i in range(3)
+        ]
+
+        # Crop small remainders (< stride/2)
+        remainders = [shape[i] % strides[i] for i in range(3)]
+        crop = [
+            remainders[i] if remainders[i] < strides[i] // 2 else 0
+            for i in range(3)
+        ]
+
+        if any(c > 0 for c in crop):
+            slices = tuple(
+                slice(crop[i] // 2, shape[i] - (crop[i] - crop[i] // 2))
+                for i in range(3)
+            )
+            volume = volume[slices]
+            if label is not None:
+                label = label[slices]
+
+        # Pad to make divisible by stride and >= patch_size
+        shape = list(volume.shape)
+        pad_amounts = [
+            (strides[i] - shape[i] % strides[i]) % strides[i]
+            for i in range(3)
+        ]
+        pad_amounts = [
+            pad_amounts[i]
+            if (shape[i] + pad_amounts[i]) >= self.patch_size[i]
+            else pad_amounts[i] + strides[i]
+            for i in range(3)
+        ]
+
+        if any(p > 0 for p in pad_amounts):
+            paddings = [
+                (pad_amounts[i] // 2, pad_amounts[i] - pad_amounts[i] // 2)
+                for i in range(3)
+            ]
+            volume = np.pad(
+                volume, paddings, mode="constant", constant_values=PADDING_VAL,
+            )
+            if label is not None:
+                label = np.pad(
+                    label, paddings, mode="constant", constant_values=0,
+                )
+
+        return (volume, label) if label is not None else volume
+
+    def _preprocess_nifti_case(self, index: int) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+        """Preprocess a NIfTI case matching full MLPerf reference pipeline.
+
+        Steps (from reference preprocess.py):
+        1. Load NIfTI volume and label
+        2. Resample to target spacing [1.6, 1.2, 1.2] mm
+        3. Normalize intensity (clip + z-score)
+        4. Pad to minimum shape (128^3) using edge mode
+        5. Adjust shape for sliding window (crop + constant pad)
+        """
+        case_dir = Path(self._items[index])
+
+        # Step 1: Load
+        volume, spacing = self._load_nifti_file(str(case_dir / "imaging.nii.gz"))
+
+        seg = None
+        seg_path = Path(self._labels[index])
+        if seg_path.exists():
+            seg_data, _ = self._load_nifti_file(str(seg_path))
+            seg = seg_data.astype(np.uint8)
+
+        # Step 2: Resample
+        volume = self._resample_volume(volume, spacing, order=1)
+        if seg is not None:
+            seg_float = seg.astype(np.float32)
+            seg_float = self._resample_volume(seg_float, spacing, order=0)
+            seg = seg_float.astype(np.uint8)
+
+        # Step 3: Normalize
+        volume = self._preprocess_volume(volume)
+
+        # Step 4: Pad to min shape
+        if seg is not None:
+            volume, seg = self._pad_to_min_shape(volume, seg)
+        else:
+            volume = self._pad_to_min_shape(volume)
+
+        # Step 5: Adjust for sliding window
+        if seg is not None:
+            volume, seg = self._adjust_shape_for_sliding_window(volume, seg)
+        else:
+            volume = self._adjust_shape_for_sliding_window(volume)
+
+        return volume.astype(np.float32), seg
+
     def _load_volume(self, index: int) -> np.ndarray:
         """Load and preprocess a volume by index."""
         path = self._items[index]
@@ -290,7 +424,7 @@ class KiTS19Dataset(BaseDataset):
                 data = pickle.load(f)
             # MLPerf reference pickle: data is a list/tuple, volume at index 0
             volume = np.array(data[0], dtype=np.float32)
-            # Pickle data is already preprocessed (resampled + normalized)
+            # Pickle data is already preprocessed (resampled + normalized + padded)
             return volume
 
         elif self._data_format == "numpy":
@@ -298,11 +432,12 @@ class KiTS19Dataset(BaseDataset):
             return np.load(path).astype(np.float32)
 
         else:
-            # NIfTI: needs resampling + preprocessing
-            imaging_path = Path(path) / "imaging.nii.gz"
-            volume, affine = self._load_nifti_file(str(imaging_path))
-            volume = self._resample_volume(volume, affine, order=1)
-            return self._preprocess_volume(volume)
+            # NIfTI: full preprocessing pipeline (both volume and label together)
+            volume, seg = self._preprocess_nifti_case(index)
+            # Cache segmentation too since it was preprocessed together
+            if seg is not None:
+                self._segmentations[index] = seg
+            return volume
 
     def _load_segmentation(self, index: int) -> np.ndarray:
         """Load ground truth segmentation by index."""
@@ -318,10 +453,18 @@ class KiTS19Dataset(BaseDataset):
             return np.load(path).astype(np.uint8)
 
         else:
-            # NIfTI: needs resampling with nearest interpolation
-            seg, affine = self._load_nifti_file(path)
-            seg = self._resample_volume(seg, affine, order=0)
-            return seg.astype(np.uint8)
+            # NIfTI: preprocessed together with volume
+            # If not yet cached, trigger full preprocessing
+            if index not in self._segmentations:
+                volume, seg = self._preprocess_nifti_case(index)
+                self._volumes[index] = volume
+                if seg is not None:
+                    self._segmentations[index] = seg
+                else:
+                    raise FileNotFoundError(
+                        f"Segmentation not found for case {index}: {path}"
+                    )
+            return self._segmentations[index]
 
     def get_volume(self, index: int) -> np.ndarray:
         """Get preprocessed volume (cached)."""
@@ -430,7 +573,7 @@ class KiTS19QSL(QuerySampleLibrary):
         self,
         data_path: str,
         count: Optional[int] = None,
-        performance_sample_count: int = 43,
+        performance_sample_count: int = 42,
         patch_size: Tuple[int, ...] = PATCH_SIZE,
         overlap_factor: float = OVERLAP_FACTOR,
         **kwargs,

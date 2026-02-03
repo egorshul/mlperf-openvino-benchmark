@@ -525,8 +525,8 @@ class BenchmarkConfig:
                 output_name="output",
                 data_format="NCDHW",
                 dtype="FP32",
-                accuracy_target=0.86330,  # Reference FP32 mean Dice (official MLPerf)
-                accuracy_threshold=0.99,  # 99% of reference -> 0.854667
+                accuracy_target=0.86170,  # Reference FP32 mean Dice (official MLPerf)
+                accuracy_threshold=0.99,  # 99% of reference -> 0.85308
                 preprocessing=PreprocessingConfig(),  # Not used for 3D medical volumes
                 offline=ScenarioConfig(
                     min_duration_ms=600000,  # MLPerf official: 10 minutes
