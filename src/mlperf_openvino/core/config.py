@@ -33,6 +33,15 @@ class ModelType(Enum):
     SDXL = "sdxl"
 
 
+SUPPORTED_SCENARIOS: Dict[ModelType, List["Scenario"]] = {
+    ModelType.RESNET50: [Scenario.OFFLINE, Scenario.SERVER],
+    ModelType.BERT: [Scenario.OFFLINE, Scenario.SERVER],
+    ModelType.RETINANET: [Scenario.OFFLINE, Scenario.SERVER],
+    ModelType.WHISPER: [Scenario.OFFLINE],
+    ModelType.SDXL: [Scenario.OFFLINE, Scenario.SERVER],
+}
+
+
 @dataclass
 class PreprocessingConfig:
     """Image preprocessing configuration."""
@@ -332,12 +341,6 @@ class BenchmarkConfig:
                     min_query_count=1633,  # MLPerf official
                     samples_per_query=1,
                 ),
-                server=ScenarioConfig(
-                    min_duration_ms=600000,  # MLPerf official: 10 minutes
-                    min_query_count=1633,  # MLPerf official
-                    target_latency_ns=1000000000,  # 1 second for ASR
-                    target_qps=500.0,
-                ),
                 onnx_url="https://huggingface.co/openai/whisper-large-v3/resolve/main/model.onnx",
             ),
             dataset=DatasetConfig(
@@ -483,5 +486,12 @@ class BenchmarkConfig:
 
         if self.scenario not in [Scenario.OFFLINE, Scenario.SERVER]:
             errors.append(f"Scenario {self.scenario} is not supported in this version")
+
+        supported = SUPPORTED_SCENARIOS.get(self.model.model_type)
+        if supported and self.scenario not in supported:
+            names = ", ".join(s.value for s in supported)
+            errors.append(
+                f"{self.model.name} only supports {names} scenario per MLCommons specification"
+            )
 
         return errors

@@ -6,7 +6,7 @@ from typing import Optional
 import click
 import numpy as np
 
-from .core.config import BenchmarkConfig, Scenario, TestMode, ModelType
+from .core.config import BenchmarkConfig, Scenario, TestMode, ModelType, SUPPORTED_SCENARIOS
 from .core.benchmark_runner import BenchmarkRunner
 from .utils.model_downloader import download_model
 
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 @click.group()
 @click.version_option(version="1.0.0", prog_name="mlperf-ov")
 def main():
-    """MLPerf v5.1 OpenVINO Benchmark Tool."""
+    """MLPerf OpenVINO Benchmark Tool."""
     pass
 
 
@@ -104,7 +104,7 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         logging.getLogger().setLevel(logging.DEBUG)
 
     click.echo(f"\n{'='*60}")
-    click.echo("MLPerf v5.1 OpenVINO Benchmark")
+    click.echo("MLPerf OpenVINO Benchmark")
     click.echo(f"{'='*60}\n")
 
     if config:
@@ -117,6 +117,13 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
     benchmark_config.scenario = Scenario(scenario)
     benchmark_config.results_dir = output_dir
     benchmark_config.openvino.device = device.upper() if device else "CPU"
+
+    supported = SUPPORTED_SCENARIOS.get(benchmark_config.model.model_type)
+    if supported and benchmark_config.scenario not in supported:
+        names = ", ".join(s.value for s in supported)
+        click.echo(f"Error: {model} does not support {scenario} scenario.")
+        click.echo(f"Supported scenarios for {model}: {names}")
+        sys.exit(1)
 
     if properties:
         from .backends.device_discovery import parse_device_properties, validate_device_properties
@@ -576,13 +583,14 @@ def setup_cmd(model: str, output_dir: str, format: str):
 def list_models():
     """List all supported models with their details."""
     click.echo("\n" + "="*70)
-    click.echo("Supported Models for MLPerf v5.1 OpenVINO Benchmark")
+    click.echo("Supported Models for MLPerf OpenVINO Benchmark")
     click.echo("="*70 + "\n")
 
     models = [
         {
             'name': 'ResNet50-v1.5',
             'id': 'resnet50',
+            'type': ModelType.RESNET50,
             'task': 'Image Classification',
             'dataset': 'ImageNet 2012',
             'metric': 'Top-1 Accuracy',
@@ -591,6 +599,7 @@ def list_models():
         {
             'name': 'BERT-Large',
             'id': 'bert',
+            'type': ModelType.BERT,
             'task': 'Question Answering',
             'dataset': 'SQuAD v1.1',
             'metric': 'F1 Score',
@@ -599,6 +608,7 @@ def list_models():
         {
             'name': 'RetinaNet',
             'id': 'retinanet',
+            'type': ModelType.RETINANET,
             'task': 'Object Detection',
             'dataset': 'OpenImages',
             'metric': 'mAP',
@@ -607,6 +617,7 @@ def list_models():
         {
             'name': 'Whisper Large v3',
             'id': 'whisper',
+            'type': ModelType.WHISPER,
             'task': 'Speech Recognition',
             'dataset': 'LibriSpeech',
             'metric': 'Word Accuracy',
@@ -615,6 +626,7 @@ def list_models():
         {
             'name': 'Stable Diffusion XL',
             'id': 'sdxl',
+            'type': ModelType.SDXL,
             'task': 'Text-to-Image',
             'dataset': 'COCO 2014',
             'metric': 'CLIP Score / FID',
@@ -623,10 +635,13 @@ def list_models():
     ]
 
     for m in models:
+        scenarios = SUPPORTED_SCENARIOS.get(m['type'], [])
+        scenario_str = ", ".join(s.value for s in scenarios)
         click.echo(f"{m['name']} ({m['id']})")
-        click.echo(f"  Task:    {m['task']}")
-        click.echo(f"  Dataset: {m['dataset']}")
-        click.echo(f"  Metric:  {m['metric']} (Target: {m['target']})")
+        click.echo(f"  Task:      {m['task']}")
+        click.echo(f"  Dataset:   {m['dataset']}")
+        click.echo(f"  Metric:    {m['metric']} (Target: {m['target']})")
+        click.echo(f"  Scenarios: {scenario_str}")
         click.echo("")
 
     click.echo("Quick start:")
