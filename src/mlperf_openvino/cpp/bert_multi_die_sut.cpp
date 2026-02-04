@@ -607,8 +607,6 @@ void BertMultiDieSUT::submit_batch(int bucket_idx,
 
         pending_count_.fetch_add(1, std::memory_order_relaxed);
         ctx->request.start_async();
-        // In accuracy mode, serialize execution to avoid NPU non-determinism
-        // caused by concurrent InferRequests on the same die.
         if (store_predictions_) {
             ctx->request.wait();
         }
