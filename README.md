@@ -4,13 +4,14 @@ MLPerf Inference benchmark implementation using OpenVINO backend.
 
 ## Supported Models
 
-| Model | Task | Dataset | Scenario |
-|-------|------|---------|----------|
-| ResNet50-v1.5 | Image Classification | ImageNet 2012 | Offline, Server |
-| BERT-Large | Question Answering | SQuAD v1.1 | Offline, Server |
-| RetinaNet | Object Detection | OpenImages | Offline, Server |
-| Whisper Large v3 | Speech Recognition | LibriSpeech | Offline, Server |
-| Stable Diffusion XL | Text-to-Image | COCO 2014 | Offline, Server |
+| Model | Task | Dataset | Metric | Target (99%) | Scenario |
+|-------|------|---------|--------|--------------|----------|
+| ResNet50-v1.5 | Image Classification | ImageNet 2012 | Top-1 Accuracy | ≥ 75.70% | Offline, Server |
+| BERT-Large | Question Answering | SQuAD v1.1 | F1 Score | ≥ 89.97% | Offline, Server |
+| RetinaNet | Object Detection | OpenImages | mAP | ≥ 37.19% | Offline, Server |
+| Whisper Large v3 | Speech Recognition | LibriSpeech | Word Accuracy | ≥ 96.95% | Offline, Server |
+| Stable Diffusion XL | Text-to-Image | COCO 2014 | CLIP Score | 31.69 — 31.81 | Offline, Server |
+| | | | FID Score | 23.01 — 23.95 | |
 
 ## Installation
 
