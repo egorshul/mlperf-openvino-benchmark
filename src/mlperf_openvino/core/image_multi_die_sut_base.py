@@ -21,9 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 class ImageMultiDieSUTBase(ABC):
-    """Base class for image model multi-die SUTs with common LoadGen integration."""
 
-    # Subclass configuration - override in child classes
     MODEL_NAME: str = "Image"
     DEFAULT_OFFLINE_BATCH_SIZE: int = 1
     DEFAULT_OFFLINE_NIREQ_MULTIPLIER: int = 4
@@ -57,24 +55,20 @@ class ImageMultiDieSUTBase(ABC):
 
         self.input_name = config.model.input_name
 
-        # Build compile properties
         compile_props = {}
         if hasattr(config.openvino, 'device_properties') and config.openvino.device_properties:
             compile_props = dict(config.openvino.device_properties)
 
-        # Check input layout (default NHWC)
         use_nhwc = True
         if hasattr(config.model, 'preprocessing') and config.model.preprocessing:
             use_nhwc = getattr(config.model.preprocessing, 'output_layout', 'NHWC') == 'NHWC'
 
-        # Get nireq_multiplier
         server_config = config.model.server if hasattr(config.model, 'server') else None
         if scenario == Scenario.SERVER:
             nireq_multiplier = getattr(server_config, 'nireq_multiplier', self.DEFAULT_SERVER_NIREQ_MULTIPLIER) if server_config else self.DEFAULT_SERVER_NIREQ_MULTIPLIER
         else:
             nireq_multiplier = self.DEFAULT_OFFLINE_NIREQ_MULTIPLIER
 
-        # Create C++ SUT
         device_prefix = config.openvino.get_device_prefix()
         self._cpp_sut = self._create_cpp_sut(
             config.model.model_path,
@@ -85,11 +79,9 @@ class ImageMultiDieSUTBase(ABC):
             nireq_multiplier
         )
 
-        # Set specific target devices if selected (e.g., NPU.0)
         if config.openvino.is_specific_die():
             self._cpp_sut.set_target_devices([config.openvino.device])
 
-        # Statistics
         self._start_time = 0.0
         self._query_count = 0
         self._server_callback_set = False
@@ -100,7 +92,6 @@ class ImageMultiDieSUTBase(ABC):
 
     @abstractmethod
     def _check_cpp_availability(self) -> None:
-        """Check if C++ SUT is available. Raises ImportError if not."""
         pass
 
     @abstractmethod
@@ -113,16 +104,13 @@ class ImageMultiDieSUTBase(ABC):
         use_nhwc: bool,
         nireq_multiplier: int
     ) -> Any:
-        """Create the model-specific C++ SUT instance."""
         pass
 
     @abstractmethod
     def get_predictions(self) -> Dict[int, Any]:
-        """Get stored predictions in model-specific format."""
         pass
 
     def load(self, is_accuracy_mode: bool = False) -> None:
-        """Load and compile the model."""
         if self.scenario == Scenario.SERVER:
             server_config = self.config.model.server if hasattr(self.config.model, 'server') else None
             if server_config and getattr(server_config, 'explicit_batching', False):
@@ -142,7 +130,6 @@ class ImageMultiDieSUTBase(ABC):
         )
 
     def warmup(self, iterations: int = 2) -> None:
-        """Run warmup inferences on all dies."""
         if not self.is_loaded:
             raise RuntimeError("Model not loaded, call load() first")
         self._cpp_sut.warmup(iterations)
@@ -208,7 +195,6 @@ class ImageMultiDieSUTBase(ABC):
             self._cpp_qsl_registered = False
 
     def _get_input_data(self, sample_idx: int) -> np.ndarray:
-        """Get input data for a sample."""
         if hasattr(self.qsl, '_loaded_samples') and sample_idx in self.qsl._loaded_samples:
             return self.qsl._loaded_samples[sample_idx]
         else:
@@ -216,7 +202,6 @@ class ImageMultiDieSUTBase(ABC):
             return features.get("input", features.get(self.input_name))
 
     def _issue_query_offline(self, query_samples: List) -> None:
-        """Process queries in Offline mode with batching."""
         import sys
 
         self._start_time = time.time()
@@ -229,7 +214,6 @@ class ImageMultiDieSUTBase(ABC):
 
         print(f"[Offline] {num_samples} samples, batch_size={batch_size}", file=sys.stderr)
 
-        # Phase 1: Preprocessing + Submit
         print(f"[Preprocess] ", end="", file=sys.stderr)
         i = 0
         batches_submitted = 0
@@ -254,6 +238,7 @@ class ImageMultiDieSUTBase(ABC):
             if actual_batch_size == batch_size:
                 batched_input = np.stack(batch_data, axis=0)
             else:
+                # Pad incomplete batch to full batch size
                 padded = batch_data + [batch_data[-1]] * (batch_size - actual_batch_size)
                 batched_input = np.stack(padded, axis=0)
 
@@ -274,7 +259,6 @@ class ImageMultiDieSUTBase(ABC):
 
         print(f" {batches_submitted}/{num_batches} batches", file=sys.stderr)
 
-        # Phase 2: Wait for completion with progress
         print(f"[Inference] ", end="", file=sys.stderr)
         last_completed = 0
         wait_start = time.time()
@@ -308,7 +292,6 @@ class ImageMultiDieSUTBase(ABC):
         self._query_count += 1
 
     def _issue_query_server(self, query_samples: List) -> None:
-        """Process queries in Server mode."""
         if not self._server_callback_set:
             self._cpp_sut.enable_direct_loadgen(True)
             self._server_callback_set = True
@@ -322,7 +305,6 @@ class ImageMultiDieSUTBase(ABC):
             sample_indices = [qs.index for qs in query_samples]
             self._cpp_sut.issue_queries_server_fast(query_ids, sample_indices)
         else:
-            # Fallback path
             for qs in query_samples:
                 input_data = self._get_input_data(qs.index)
                 if input_data.ndim == 3:
@@ -339,7 +321,6 @@ class ImageMultiDieSUTBase(ABC):
         self._query_count += 1
 
     def issue_queries(self, query_samples: List) -> None:
-        """Process incoming queries."""
         if self.scenario == Scenario.OFFLINE:
             self._issue_query_offline(query_samples)
         elif self.scenario == Scenario.SERVER:
@@ -348,15 +329,12 @@ class ImageMultiDieSUTBase(ABC):
             raise ValueError(f"Unsupported scenario: {self.scenario}")
 
     def flush_queries(self) -> None:
-        """Flush pending queries."""
         self._cpp_sut.wait_all()
 
     def get_sut(self):
-        """Get LoadGen SUT object."""
         return lg.ConstructSUT(self.issue_queries, self.flush_queries)
 
     def supports_native_benchmark(self) -> bool:
-        """Check if native C++ benchmark is supported."""
         return self.scenario == Scenario.SERVER
 
     def run_native_benchmark(
@@ -364,7 +342,6 @@ class ImageMultiDieSUTBase(ABC):
         test_settings: "lg.TestSettings",
         log_settings: "lg.LogSettings",
     ) -> None:
-        """Run benchmark with pure C++ SUT."""
         if not self.supports_native_benchmark():
             raise RuntimeError("Native benchmark not supported for this scenario")
 
@@ -414,7 +391,6 @@ class ImageMultiDieSUTBase(ABC):
         self.qsl.unload_query_samples(sample_indices)
 
     def get_qsl(self):
-        """Get LoadGen QSL object."""
         return lg.ConstructQSL(
             self.qsl.total_sample_count,
             self.qsl.performance_sample_count,
@@ -423,12 +399,10 @@ class ImageMultiDieSUTBase(ABC):
         )
 
     def set_store_predictions(self, store: bool) -> None:
-        """Enable/disable prediction storage."""
         self._cpp_sut.set_store_predictions(store)
         self._is_accuracy_mode = store
 
     def reset(self) -> None:
-        """Reset state."""
         self._cpp_sut.reset_counters()
         self._query_count = 0
         self._server_callback_set = False

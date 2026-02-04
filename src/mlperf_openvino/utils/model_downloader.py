@@ -1,7 +1,3 @@
-"""
-Model downloader utility for MLPerf OpenVINO Benchmark.
-"""
-
 import hashlib
 import logging
 import os
@@ -14,13 +10,12 @@ from urllib.error import URLError
 logger = logging.getLogger(__name__)
 
 
-# Model download URLs and checksums
 MODEL_REGISTRY: Dict[str, Dict] = {
     "resnet50": {
         "onnx": {
             "url": "https://zenodo.org/record/4735647/files/resnet50_v1.onnx",
             "filename": "resnet50_v1.onnx",
-            "md5": None,  # Add checksum if available
+            "md5": None,
         },
         "description": "ResNet50-v1.5 for ImageNet classification",
     },
@@ -58,60 +53,42 @@ MODEL_REGISTRY: Dict[str, Dict] = {
 
 
 def _download_file(url: str, destination: str, show_progress: bool = True) -> None:
-    """
-    Download a file from URL.
-    
-    Args:
-        url: Source URL
-        destination: Destination file path
-        show_progress: Show download progress
-    """
     logger.info(f"Downloading from {url}")
-    
+
     try:
         if show_progress:
             def progress_hook(block_num, block_size, total_size):
                 downloaded = block_num * block_size
                 if total_size > 0:
                     percent = min(100, (downloaded / total_size) * 100)
-                    print(f"\rProgress: {percent:.1f}% ({downloaded / 1024 / 1024:.1f} MB)", 
+                    print(f"\rProgress: {percent:.1f}% ({downloaded / 1024 / 1024:.1f} MB)",
                           end="", flush=True)
-            
+
             urllib.request.urlretrieve(url, destination, progress_hook)
-            print()  # New line after progress
+            print()
         else:
             urllib.request.urlretrieve(url, destination)
-        
+
         logger.info(f"Downloaded to {destination}")
-        
+
     except URLError as e:
         raise RuntimeError(f"Failed to download {url}: {e}")
 
 
 def _verify_checksum(file_path: str, expected_md5: str) -> bool:
-    """
-    Verify file checksum.
-    
-    Args:
-        file_path: Path to file
-        expected_md5: Expected MD5 hash
-        
-    Returns:
-        True if checksum matches
-    """
     logger.info("Verifying checksum...")
-    
+
     md5_hash = hashlib.md5()
     with open(file_path, "rb") as f:
         for chunk in iter(lambda: f.read(8192), b""):
             md5_hash.update(chunk)
-    
+
     actual_md5 = md5_hash.hexdigest()
-    
+
     if actual_md5 != expected_md5:
         logger.warning(f"Checksum mismatch: expected {expected_md5}, got {actual_md5}")
         return False
-    
+
     logger.info("Checksum verified")
     return True
 
@@ -122,41 +99,25 @@ def download_model(
     format: str = "onnx",
     force: bool = False
 ) -> str:
-    """
-    Download a model.
-    
-    Args:
-        model_name: Name of the model (e.g., 'resnet50')
-        output_dir: Directory to save the model
-        format: Model format ('onnx' or 'openvino')
-        force: Force re-download even if file exists
-        
-    Returns:
-        Path to downloaded model file
-    """
     if model_name not in MODEL_REGISTRY:
         available = ", ".join(MODEL_REGISTRY.keys())
         raise ValueError(f"Unknown model: {model_name}. Available: {available}")
-    
+
     model_info = MODEL_REGISTRY[model_name]
-    
+
     if format not in model_info:
         raise ValueError(f"Format '{format}' not available for {model_name}")
-    
+
     format_info = model_info[format]
-    
-    # Create output directory
+
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    
-    # Destination file path
+
     dest_file = output_path / format_info["filename"]
-    
-    # Check if already downloaded
+
     if dest_file.exists() and not force:
         logger.info(f"Model already exists: {dest_file}")
-        
-        # Verify checksum if available
+
         if format_info.get("md5"):
             if _verify_checksum(str(dest_file), format_info["md5"]):
                 return str(dest_file)
@@ -164,26 +125,22 @@ def download_model(
                 logger.warning("Checksum mismatch, re-downloading...")
         else:
             return str(dest_file)
-    
-    # Download
+
     temp_file = str(dest_file) + ".tmp"
     try:
         _download_file(format_info["url"], temp_file)
-        
-        # Verify checksum
+
         if format_info.get("md5"):
             if not _verify_checksum(temp_file, format_info["md5"]):
                 raise RuntimeError("Downloaded file checksum mismatch")
-        
-        # Move to final destination
+
         shutil.move(temp_file, str(dest_file))
-        
+
     except Exception as e:
-        # Clean up temp file
         if os.path.exists(temp_file):
             os.remove(temp_file)
         raise
-    
+
     return str(dest_file)
 
 
@@ -192,49 +149,29 @@ def convert_to_openvino(
     output_dir: str,
     compress_to_fp16: bool = True
 ) -> str:
-    """
-    Convert ONNX model to OpenVINO IR format.
-    
-    Args:
-        onnx_path: Path to ONNX model
-        output_dir: Directory to save IR model
-        compress_to_fp16: Whether to compress weights to FP16
-        
-    Returns:
-        Path to OpenVINO IR model (.xml file)
-    """
     try:
         import openvino as ov
     except ImportError:
         raise ImportError("OpenVINO is required for model conversion")
-    
+
     logger.info(f"Converting {onnx_path} to OpenVINO IR...")
-    
-    # Read ONNX model
+
     model = ov.Core().read_model(onnx_path)
-    
-    # Output path
+
     onnx_name = Path(onnx_path).stem
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    
+
     xml_path = output_path / f"{onnx_name}.xml"
-    
-    # Save model
+
     ov.save_model(model, str(xml_path), compress_to_fp16=compress_to_fp16)
-    
+
     logger.info(f"Converted model saved to {xml_path}")
-    
+
     return str(xml_path)
 
 
 def list_available_models() -> Dict[str, str]:
-    """
-    List available models for download.
-    
-    Returns:
-        Dictionary mapping model names to descriptions
-    """
     return {
         name: info.get("description", "No description")
         for name, info in MODEL_REGISTRY.items()
@@ -246,22 +183,11 @@ def download_whisper_model(
     model_id: str = "openai/whisper-large-v3",
     export_to_openvino: bool = True,
 ) -> Dict[str, str]:
-    """
-    Download and optionally export Whisper model to OpenVINO format.
-    
-    Args:
-        output_dir: Directory to save the model
-        model_id: HuggingFace model ID
-        export_to_openvino: Whether to export to OpenVINO IR format
-        
-    Returns:
-        Dictionary with paths to encoder and decoder models
-    """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    
+
     model_name = model_id.split("/")[-1]
-    
+
     if export_to_openvino:
         return _export_whisper_to_openvino(output_dir, model_id)
     else:
@@ -269,16 +195,6 @@ def download_whisper_model(
 
 
 def _download_whisper_from_hf(output_dir: str, model_id: str) -> Dict[str, str]:
-    """
-    Download Whisper model from HuggingFace.
-    
-    Args:
-        output_dir: Output directory
-        model_id: HuggingFace model ID
-        
-    Returns:
-        Dictionary with model paths
-    """
     try:
         from transformers import WhisperForConditionalGeneration, WhisperProcessor
     except ImportError:
@@ -286,22 +202,20 @@ def _download_whisper_from_hf(output_dir: str, model_id: str) -> Dict[str, str]:
             "transformers is required for Whisper download. "
             "Install with: pip install transformers"
         )
-    
+
     logger.info(f"Downloading Whisper model: {model_id}")
-    
+
     output_path = Path(output_dir)
     model_path = output_path / model_id.split("/")[-1]
-    
-    # Download model and processor
+
     model = WhisperForConditionalGeneration.from_pretrained(model_id)
     processor = WhisperProcessor.from_pretrained(model_id)
-    
-    # Save locally
+
     model.save_pretrained(str(model_path))
     processor.save_pretrained(str(model_path))
-    
+
     logger.info(f"Model saved to {model_path}")
-    
+
     return {
         "model_path": str(model_path),
         "processor_path": str(model_path),
@@ -309,19 +223,13 @@ def _download_whisper_from_hf(output_dir: str, model_id: str) -> Dict[str, str]:
 
 
 def _configure_hf_download() -> None:
-    """
-    Configure HuggingFace Hub for reliable large file downloads.
-
-    Sets timeouts and enables resume for interrupted downloads.
-    """
+    """Configure HuggingFace Hub for reliable large file downloads."""
     try:
         from huggingface_hub import constants
         import os
 
-        # Enable resume downloads (default in newer versions)
         os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
-
-        # Set longer timeout for large files (5 minutes connection, 30 minutes read)
+        # 30 minute timeout for large files
         os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "1800")
 
     except ImportError:
@@ -333,17 +241,6 @@ def _download_with_retry(
     max_retries: int = 3,
     initial_delay: float = 2.0,
 ) -> Any:
-    """
-    Execute download function with retry logic and exponential backoff.
-
-    Args:
-        download_func: Function to call for download
-        max_retries: Maximum number of retry attempts
-        initial_delay: Initial delay between retries in seconds
-
-    Returns:
-        Result from download_func
-    """
     import time
 
     last_error = None
@@ -356,7 +253,6 @@ def _download_with_retry(
             last_error = e
             error_str = str(e).lower()
 
-            # Check if it's a retryable error
             retryable = any(x in error_str for x in [
                 "timeout", "connection", "network", "reset",
                 "incomplete", "aborted", "refused"
@@ -370,29 +266,18 @@ def _download_with_retry(
                 f"Retrying in {delay:.0f}s..."
             )
             time.sleep(delay)
-            delay *= 2  # Exponential backoff
+            delay *= 2
 
     raise RuntimeError(f"Download failed after {max_retries + 1} attempts: {last_error}")
 
 
 def _find_openvino_model(model_dir: Path, base_name: str) -> Optional[Path]:
-    """
-    Find OpenVINO model file with various naming conventions.
-
-    Args:
-        model_dir: Directory containing model files
-        base_name: Base name (e.g., 'encoder_model', 'decoder_with_past_model')
-
-    Returns:
-        Path to model file if found, None otherwise
-    """
-    # All possible naming patterns
     candidates = [
         model_dir / f"openvino_{base_name}.xml",
         model_dir / f"{base_name}.xml",
     ]
 
-    # For decoder_with_past, also check merged decoder
+    # decoder_with_past may also be stored as a merged decoder
     if base_name == "decoder_with_past_model":
         candidates.extend([
             model_dir / "openvino_decoder_model_merged.xml",
@@ -407,16 +292,6 @@ def _find_openvino_model(model_dir: Path, base_name: str) -> Optional[Path]:
 
 
 def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str]:
-    """
-    Export Whisper model to OpenVINO IR format with KV-cache support.
-
-    Args:
-        output_dir: Output directory
-        model_id: HuggingFace model ID
-
-    Returns:
-        Dictionary with paths to encoder, decoder, and decoder_with_past IR models
-    """
     try:
         from optimum.exporters.openvino import main_export
         from transformers import WhisperProcessor
@@ -431,7 +306,6 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
     model_name = model_id.split("/")[-1]
     ov_model_path = output_path / f"{model_name}-openvino"
 
-    # Check if already exported (encoder + decoder is sufficient)
     if ov_model_path.exists():
         encoder_path = _find_openvino_model(ov_model_path, "encoder_model")
         decoder_path = _find_openvino_model(ov_model_path, "decoder_model")
@@ -443,7 +317,6 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
                 "decoder_path": str(decoder_path),
                 "model_path": str(ov_model_path),
             }
-            # Optional: check for decoder_with_past
             decoder_with_past = _find_openvino_model(ov_model_path, "decoder_with_past_model")
             if decoder_with_past:
                 result["decoder_with_past_path"] = str(decoder_with_past)
@@ -453,18 +326,15 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
 
     logger.info(f"Exporting {model_id} to OpenVINO IR...")
 
-    # Export using optimum Python API
     main_export(
         model_name_or_path=model_id,
         output=str(ov_model_path),
         task="automatic-speech-recognition-with-past",
     )
 
-    # Save processor
     processor = WhisperProcessor.from_pretrained(model_id)
     processor.save_pretrained(str(ov_model_path))
 
-    # Verify models were created
     encoder_path = _find_openvino_model(ov_model_path, "encoder_model")
     decoder_path = _find_openvino_model(ov_model_path, "decoder_model")
     decoder_with_past_path = _find_openvino_model(ov_model_path, "decoder_with_past_model")
@@ -492,18 +362,6 @@ def export_whisper_encoder_only(
     output_dir: str,
     model_id: str = "openai/whisper-large-v3",
 ) -> str:
-    """
-    Export only the Whisper encoder to ONNX format.
-    
-    Useful for encoder-only benchmarking or using external decoder.
-    
-    Args:
-        output_dir: Output directory
-        model_id: HuggingFace model ID
-        
-    Returns:
-        Path to encoder ONNX model
-    """
     try:
         import torch
         from transformers import WhisperForConditionalGeneration
@@ -512,30 +370,28 @@ def export_whisper_encoder_only(
             "torch and transformers are required. "
             "Install with: pip install torch transformers"
         )
-    
+
     logger.info(f"Exporting Whisper encoder: {model_id}")
-    
+
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    
+
     model_name = model_id.split("/")[-1]
     encoder_path = output_path / f"{model_name}_encoder.onnx"
-    
+
     if encoder_path.exists():
         logger.info(f"Encoder already exists: {encoder_path}")
         return str(encoder_path)
-    
-    # Load model
+
     model = WhisperForConditionalGeneration.from_pretrained(model_id)
     encoder = model.get_encoder()
     encoder.eval()
-    
-    # Create dummy input (batch=1, n_mels=80, time=3000 for 30 seconds)
+
+    # batch=1, n_mels=80, time=3000 (30 seconds)
     dummy_input = torch.randn(1, 80, 3000)
-    
-    # Export to ONNX
+
     logger.info(f"Exporting to {encoder_path}...")
-    
+
     torch.onnx.export(
         encoder,
         dummy_input,
@@ -548,7 +404,7 @@ def export_whisper_encoder_only(
         },
         opset_version=14,
     )
-    
+
     logger.info(f"Encoder exported to {encoder_path}")
 
     return str(encoder_path)
@@ -559,17 +415,6 @@ def download_sdxl_model(
     model_id: str = "stabilityai/stable-diffusion-xl-base-1.0",
     export_to_openvino: bool = True,
 ) -> Dict[str, str]:
-    """
-    Download and optionally export SDXL model to OpenVINO format.
-
-    Args:
-        output_dir: Directory to save the model
-        model_id: HuggingFace model ID
-        export_to_openvino: Whether to export to OpenVINO IR format
-
-    Returns:
-        Dictionary with paths to model components
-    """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -582,16 +427,6 @@ def download_sdxl_model(
 
 
 def _download_sdxl_from_hf(output_dir: str, model_id: str) -> Dict[str, str]:
-    """
-    Download SDXL model from HuggingFace.
-
-    Args:
-        output_dir: Output directory
-        model_id: HuggingFace model ID
-
-    Returns:
-        Dictionary with model paths
-    """
     try:
         from diffusers import StableDiffusionXLPipeline
     except ImportError:
@@ -605,7 +440,6 @@ def _download_sdxl_from_hf(output_dir: str, model_id: str) -> Dict[str, str]:
     output_path = Path(output_dir)
     model_path = output_path / model_id.split("/")[-1]
 
-    # Download pipeline
     def do_download():
         return StableDiffusionXLPipeline.from_pretrained(
             model_id,
@@ -614,7 +448,6 @@ def _download_sdxl_from_hf(output_dir: str, model_id: str) -> Dict[str, str]:
 
     pipeline = _download_with_retry(do_download, max_retries=3)
 
-    # Save locally
     pipeline.save_pretrained(str(model_path))
 
     logger.info(f"Model saved to {model_path}")
@@ -625,19 +458,6 @@ def _download_sdxl_from_hf(output_dir: str, model_id: str) -> Dict[str, str]:
 
 
 def _export_sdxl_to_openvino(output_dir: str, model_id: str) -> Dict[str, str]:
-    """
-    Export SDXL model to OpenVINO IR format.
-
-    Uses Optimum-Intel for optimal OpenVINO export with all components
-    (text encoders, UNet, VAE).
-
-    Args:
-        output_dir: Output directory
-        model_id: HuggingFace model ID
-
-    Returns:
-        Dictionary with paths to OpenVINO IR models
-    """
     try:
         from optimum.intel import OVStableDiffusionXLPipeline
     except ImportError:
@@ -646,7 +466,6 @@ def _export_sdxl_to_openvino(output_dir: str, model_id: str) -> Dict[str, str]:
             "Install with: pip install optimum[openvino] diffusers"
         )
 
-    # Configure HuggingFace Hub for reliable downloads
     _configure_hf_download()
 
     logger.info(f"Exporting SDXL model to OpenVINO: {model_id}")
@@ -655,7 +474,6 @@ def _export_sdxl_to_openvino(output_dir: str, model_id: str) -> Dict[str, str]:
     model_name = model_id.split("/")[-1]
     ov_model_path = output_path / f"{model_name}-openvino"
 
-    # Check if already exported
     if ov_model_path.exists():
         unet_path = ov_model_path / "unet" / "openvino_model.xml"
         vae_path = ov_model_path / "vae_decoder" / "openvino_model.xml"
@@ -668,13 +486,12 @@ def _export_sdxl_to_openvino(output_dir: str, model_id: str) -> Dict[str, str]:
                 "vae_decoder_path": str(vae_path),
             }
 
-    # Export model with retry logic
     logger.info("Downloading and exporting SDXL model (this may take a long time)...")
     logger.info("Large files (6+ GB) - download will resume if interrupted.")
 
     def do_export():
-        # load_in_8bit=False prevents NNCF int8 weight compression
-        # which degrades accuracy for MLCommons closed division
+        # load_in_8bit=False avoids NNCF int8 compression which degrades
+        # accuracy for MLCommons closed division
         return OVStableDiffusionXLPipeline.from_pretrained(
             model_id,
             export=True,
@@ -684,7 +501,6 @@ def _export_sdxl_to_openvino(output_dir: str, model_id: str) -> Dict[str, str]:
 
     pipeline = _download_with_retry(do_export, max_retries=3)
 
-    # Save model
     pipeline.save_pretrained(str(ov_model_path))
 
     logger.info(f"OpenVINO model saved to {ov_model_path}")
@@ -704,33 +520,16 @@ def download_retinanet_model(
     convert_to_openvino: bool = True,
     force: bool = False,
 ) -> Dict[str, Any]:
-    """
-    Download MLPerf RetinaNet model and prepare with multiple batch sizes.
-
-    Downloads the pre-converted ONNX model from Zenodo and creates
-    OpenVINO IR models for different batch sizes (1, 2, 4, 8).
-
-    Args:
-        output_dir: Directory to save the models
-        batch_sizes: List of batch sizes to create (default: [1, 2, 4, 8])
-        convert_to_openvino: Whether to convert to OpenVINO IR format
-        force: Force re-download even if files exist
-
-    Returns:
-        Dictionary with paths to models for each batch size
-    """
     if batch_sizes is None:
         batch_sizes = [1, 2, 4, 8]
 
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    # MLPerf RetinaNet ONNX model from Zenodo
     onnx_url = "https://zenodo.org/record/6617879/files/resnext50_32x4d_fpn.onnx"
     onnx_filename = "retinanet.onnx"
     onnx_path = output_path / onnx_filename
 
-    # Download ONNX model if not exists
     if not onnx_path.exists() or force:
         logger.info(f"Downloading RetinaNet ONNX model from Zenodo...")
         temp_file = str(onnx_path) + ".tmp"
@@ -752,7 +551,6 @@ def download_retinanet_model(
     if not convert_to_openvino:
         return result
 
-    # Convert to OpenVINO IR for each batch size
     logger.info(f"Converting RetinaNet to OpenVINO IR with batch sizes: {batch_sizes}")
 
     try:
@@ -774,26 +572,21 @@ def download_retinanet_model(
 
         logger.info(f"  Converting batch size {batch_size}...")
 
-        # Read ONNX model
         model = core.read_model(str(onnx_path))
 
-        # Set static batch size for input
-        # RetinaNet input: [N, 3, 800, 800] - set N to batch_size
+        # RetinaNet input: [N, 3, 800, 800] - set N to static batch_size
         for input_node in model.inputs:
             input_shape = input_node.get_partial_shape()
             if input_shape.rank.get_length() == 4:
-                # Set batch dimension to static value
                 input_shape[0] = batch_size
                 model.reshape({input_node: input_shape})
                 logger.info(f"    Input shape set to: {input_shape}")
 
-        # Save model with FP16 compression
         ov.save_model(model, str(xml_path), compress_to_fp16=True)
         logger.info(f"    Saved to: {xml_path}")
 
         result["batch_models"][batch_size] = str(xml_path)
 
-    # Set default model path (batch size 1)
     if 1 in result["batch_models"]:
         result["model_path"] = result["batch_models"][1]
     elif result["batch_models"]:
@@ -810,24 +603,12 @@ def get_retinanet_model_path(
     models_dir: str,
     batch_size: int = 1,
 ) -> Optional[str]:
-    """
-    Get path to RetinaNet model for a specific batch size.
-
-    Args:
-        models_dir: Directory containing models
-        batch_size: Desired batch size
-
-    Returns:
-        Path to model file or None if not found
-    """
     models_path = Path(models_dir)
 
-    # Try batch-specific OpenVINO IR
     batch_xml = models_path / f"retinanet_bs{batch_size}" / f"retinanet_bs{batch_size}.xml"
     if batch_xml.exists():
         return str(batch_xml)
 
-    # Fall back to ONNX
     onnx_path = models_path / "retinanet.onnx"
     if onnx_path.exists():
         return str(onnx_path)

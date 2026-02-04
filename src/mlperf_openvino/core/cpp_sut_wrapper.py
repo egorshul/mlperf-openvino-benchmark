@@ -1,11 +1,3 @@
-"""
-Wrapper for C++ SUT that integrates with the MLPerf LoadGen interface.
-
-This module provides a Python wrapper around the C++ SUT extension,
-handling the interface between LoadGen callbacks and C++ inference.
-The actual inference runs in C++ without GIL for maximum throughput.
-"""
-
 import logging
 import sys
 import time
@@ -25,7 +17,6 @@ except ImportError:
 from ..datasets.base import QuerySampleLibrary
 from ..core.config import BenchmarkConfig, Scenario
 
-# Try to import C++ extension
 try:
     from ..cpp import (
         ResNetCppSUT, BertCppSUT, RetinaNetCppSUT,
@@ -41,7 +32,6 @@ logger = logging.getLogger(__name__)
 
 
 class ProgressMonitor:
-    """Progress bar monitor for SUT inference."""
 
     def __init__(
         self,
@@ -59,27 +49,23 @@ class ProgressMonitor:
         self._start_time = 0.0
 
     def start(self):
-        """Start progress monitoring thread."""
         self._stop_event.clear()
         self._start_time = time.time()
         self._thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self._thread.start()
 
     def stop(self):
-        """Stop progress monitoring and print final status."""
         self._stop_event.set()
         if self._thread:
             self._thread.join(timeout=1.0)
         self._print_progress(final=True)
 
     def _monitor_loop(self):
-        """Background thread that updates progress bar."""
         while not self._stop_event.is_set():
             self._print_progress()
             self._stop_event.wait(self.update_interval)
 
     def _print_progress(self, final: bool = False):
-        """Print progress bar to stderr."""
         completed = self.get_completed()
         total = self.total_samples
         elapsed = time.time() - self._start_time
@@ -90,7 +76,6 @@ class ProgressMonitor:
             filled = int(bar_width * completed / total)
             bar = "\u2588" * filled + "\u2591" * (bar_width - filled)
 
-            # Calculate throughput
             throughput = completed / elapsed if elapsed > 0 else 0
 
             status = f"\r{self.name}: [{bar}] {completed}/{total} ({pct:.1f}%) | {throughput:.1f} samples/s"
@@ -105,17 +90,6 @@ class ProgressMonitor:
 
 
 class ResNetCppSUTWrapper:
-    """
-    Wrapper for ResNet C++ SUT that provides MLPerf LoadGen interface.
-
-    This class handles:
-    - LoadGen integration (issue_queries, flush_queries)
-    - QSL sample loading and caching
-    - Response callback from C++ to LoadGen
-    - Statistics and progress monitoring
-
-    The actual inference runs in C++ without Python GIL for maximum throughput.
-    """
 
     def __init__(
         self,
@@ -124,7 +98,6 @@ class ResNetCppSUTWrapper:
         qsl: QuerySampleLibrary,
         scenario: Scenario = Scenario.OFFLINE,
     ):
-        """Initialize the ResNet C++ SUT wrapper."""
         if not LOADGEN_AVAILABLE:
             raise ImportError(
                 "MLPerf LoadGen is not installed. Please install with: "
@@ -165,21 +138,13 @@ class ResNetCppSUTWrapper:
         # Enable storing predictions for accuracy mode
         self._cpp_sut.set_store_predictions(True)
 
-        # Set up response callback
         self._setup_response_callback()
 
         self._progress_monitor: Optional[ProgressMonitor] = None
 
     def _setup_response_callback(self):
-        """Set up the callback that C++ uses to notify LoadGen."""
-
         def response_callback(query_id: int, output_data):
-            """
-            Called from C++ when inference completes.
-
-            This runs in C++ thread but needs GIL for LoadGen call.
-            The C++ binding handles GIL acquisition.
-            """
+            # Called from C++ thread; C++ binding handles GIL acquisition
             try:
                 if output_data is not None:
                     response = lg.QuerySampleResponse(
@@ -194,14 +159,13 @@ class ResNetCppSUTWrapper:
                 lg.QuerySamplesComplete([response])
             except Exception as e:
                 logger.error(f"Response callback error: {e}")
-                # Still try to complete to avoid hang
+                # Still try to complete to avoid LoadGen hang
                 response = lg.QuerySampleResponse(query_id, 0, 0)
                 lg.QuerySamplesComplete([response])
 
         self._cpp_sut.set_response_callback(response_callback)
 
     def issue_queries(self, query_samples: List["lg.QuerySample"]) -> None:
-        """Process incoming queries using C++ SUT."""
         if self._progress_monitor is None:
             self._progress_monitor = ProgressMonitor(
                 total_samples=self.qsl.total_sample_count,
@@ -224,30 +188,25 @@ class ResNetCppSUTWrapper:
                 features = qsl.get_features(sample_idx)
                 input_data = features.get("input", features.get(input_name))
 
-            # Ensure float32 for C++ SUT
             if input_data.dtype != np.float32:
                 input_data = input_data.astype(np.float32)
 
-            # Ensure contiguous array
             if not input_data.flags['C_CONTIGUOUS']:
                 input_data = np.ascontiguousarray(input_data)
 
-            # Start async inference in C++ (GIL released during inference!)
+            # GIL released during C++ inference
             cpp_sut.start_async(input_data, query_id, sample_idx)
 
     def flush_queries(self) -> None:
-        """Flush any pending queries."""
         self._cpp_sut.wait_all()
         if self._progress_monitor:
             self._progress_monitor.stop()
             self._progress_monitor = None
 
     def get_sut(self) -> "lg.ConstructSUT":
-        """Get the LoadGen SUT object."""
         return lg.ConstructSUT(self.issue_queries, self.flush_queries)
 
     def get_qsl(self) -> "lg.ConstructQSL":
-        """Get the LoadGen QSL object."""
         return lg.ConstructQSL(
             self.qsl.total_sample_count,
             self.qsl.performance_sample_count,
@@ -257,38 +216,26 @@ class ResNetCppSUTWrapper:
 
     @property
     def name(self) -> str:
-        """Get SUT name."""
         return f"OpenVINO-Cpp-{self.config.model.name}"
 
     @property
     def _sample_count(self) -> int:
-        """Get number of completed samples (for compatibility with benchmark_runner)."""
         return self._cpp_sut.get_completed_count()
 
     @property
     def _query_count(self) -> int:
-        """Get number of issued queries (for compatibility with benchmark_runner)."""
         return self._cpp_sut.get_issued_count()
 
     def get_predictions(self) -> Dict[int, Any]:
-        """Get all predictions (for accuracy mode)."""
         # C++ returns Dict[int, List[float]], convert to numpy arrays
         raw_predictions = self._cpp_sut.get_predictions()
         return {idx: np.array(pred, dtype=np.float32) for idx, pred in raw_predictions.items()}
 
     def reset(self) -> None:
-        """Reset SUT state."""
         self._cpp_sut.reset_counters()
 
 
 class BertCppSUTWrapper:
-    """
-    Wrapper for BERT C++ SUT with 3 int64 inputs and 2 float32 outputs.
-
-    Optimized for BERT Question Answering:
-    - input_ids, attention_mask, token_type_ids (int64)
-    - start_logits, end_logits (float32)
-    """
 
     def __init__(
         self,
@@ -333,13 +280,11 @@ class BertCppSUTWrapper:
         # Enable storing predictions for accuracy mode
         self._cpp_sut.set_store_predictions(True)
 
-        # Set up response callback
         self._setup_response_callback()
 
         self._progress_monitor: Optional[ProgressMonitor] = None
 
     def _setup_response_callback(self):
-        """Set up the callback that C++ uses to notify LoadGen."""
         import array
 
         dummy_data = array.array('B', [0] * 8)
@@ -352,7 +297,6 @@ class BertCppSUTWrapper:
         self._cpp_sut.set_response_callback(response_callback)
 
     def issue_queries(self, query_samples: List[Any]) -> None:
-        """Process incoming queries using BERT C++ SUT."""
         if self._progress_monitor is None:
             self._progress_monitor = ProgressMonitor(
                 total_samples=self.qsl.total_sample_count,
@@ -375,18 +319,15 @@ class BertCppSUTWrapper:
             )
 
     def flush_queries(self) -> None:
-        """Flush any pending queries."""
         self._cpp_sut.wait_all()
         if self._progress_monitor:
             self._progress_monitor.stop()
             self._progress_monitor = None
 
     def get_sut(self) -> "lg.ConstructSUT":
-        """Get the LoadGen SUT object."""
         return lg.ConstructSUT(self.issue_queries, self.flush_queries)
 
     def get_qsl(self) -> "lg.ConstructQSL":
-        """Get the LoadGen QSL object."""
         return lg.ConstructQSL(
             self.qsl.total_sample_count,
             self.qsl.performance_sample_count,
@@ -407,7 +348,6 @@ class BertCppSUTWrapper:
         return self._cpp_sut.get_issued_count()
 
     def get_predictions(self) -> Dict[int, tuple]:
-        """Get all predictions as dict of {sample_idx: (start_logits, end_logits)}."""
         raw_preds = self._cpp_sut.get_predictions()
         # Convert from dict with 'start_logits' and 'end_logits' keys to tuple
         result = {}
@@ -418,26 +358,21 @@ class BertCppSUTWrapper:
         return result
 
     def reset(self) -> None:
-        """Reset SUT state."""
         self._cpp_sut.reset_counters()
 
     def compute_accuracy(self) -> Dict[str, float]:
-        """Compute BERT accuracy metrics (F1 and Exact Match)."""
         predictions = self.get_predictions()
 
         if not predictions:
             return {'f1': 0.0, 'exact_match': 0.0, 'num_samples': 0}
 
-        # Extract indices in sorted order
         indices = sorted(predictions.keys())
 
-        # Use dataset's postprocess to get answer texts
         pred_texts = self.qsl.dataset.postprocess(
             [(predictions[idx][0], predictions[idx][1]) for idx in indices],
             indices
         )
 
-        # Compute F1 and EM using dataset's method
         return self.qsl.dataset.compute_accuracy(pred_texts, indices)
 
 
@@ -448,7 +383,6 @@ def create_sut(
     scenario: Scenario = Scenario.SERVER,
     force_python: bool = False,
 ):
-    """Factory function to create the best available SUT."""
     # Accelerator devices are not supported by C++ SUT - they require MultiDeviceSUT
     if config.openvino.is_accelerator_device():
         device = config.openvino.device
@@ -477,7 +411,6 @@ def create_bert_sut(
     scenario: Scenario = Scenario.OFFLINE,
     force_python: bool = False,
 ):
-    """Factory function to create BERT SUT."""
     # Accelerator devices are not supported by C++ SUT - they require MultiDeviceSUT
     if config.openvino.is_accelerator_device():
         device = config.openvino.device
@@ -500,13 +433,6 @@ def create_bert_sut(
 
 
 class RetinaNetCppSUTWrapper:
-    """
-    Wrapper for RetinaNet C++ SUT with object detection outputs.
-
-    Optimized for RetinaNet Object Detection:
-    - 1 input: float32 image
-    - 3 outputs: boxes, scores, labels
-    """
 
     def __init__(
         self,
@@ -554,13 +480,11 @@ class RetinaNetCppSUTWrapper:
         # Enable storing predictions for accuracy mode
         self._cpp_sut.set_store_predictions(True)
 
-        # Set up response callback
         self._setup_response_callback()
 
         self._progress_monitor: Optional[ProgressMonitor] = None
 
     def _setup_response_callback(self):
-        """Set up the callback that C++ uses to notify LoadGen."""
         import array
 
         dummy_data = array.array('B', [0] * 8)
@@ -573,7 +497,6 @@ class RetinaNetCppSUTWrapper:
         self._cpp_sut.set_response_callback(response_callback)
 
     def issue_queries(self, query_samples: List[Any]) -> None:
-        """Process incoming queries using RetinaNet C++ SUT."""
         if self._progress_monitor is None:
             self._progress_monitor = ProgressMonitor(
                 total_samples=self.qsl.total_sample_count,
@@ -592,18 +515,15 @@ class RetinaNetCppSUTWrapper:
             self._cpp_sut.start_async(input_data, query_id, sample_idx)
 
     def flush_queries(self) -> None:
-        """Flush any pending queries."""
         self._cpp_sut.wait_all()
         if self._progress_monitor:
             self._progress_monitor.stop()
             self._progress_monitor = None
 
     def get_sut(self) -> "lg.ConstructSUT":
-        """Get the LoadGen SUT object."""
         return lg.ConstructSUT(self.issue_queries, self.flush_queries)
 
     def get_qsl(self) -> "lg.ConstructQSL":
-        """Get the LoadGen QSL object."""
         return lg.ConstructQSL(
             self.qsl.total_sample_count,
             self.qsl.performance_sample_count,
@@ -624,13 +544,9 @@ class RetinaNetCppSUTWrapper:
         return self._cpp_sut.get_issued_count()
 
     def get_predictions(self) -> Dict[int, Dict[str, np.ndarray]]:
-        """Get all predictions as dict of {sample_idx: {boxes, scores, labels}}.
-
-        Note: MLPerf RetinaNet ONNX model outputs:
-        - boxes: [N, 4] in PIXEL coordinates [0, 800], format [x1, y1, x2, y2]
-        - scores: [N] confidence scores
-        - labels: [N] ORIGINAL OpenImages category IDs (not 0-indexed!)
-        """
+        """Note: MLPerf RetinaNet ONNX model outputs boxes in PIXEL coordinates [0, 800]
+        as [x1, y1, x2, y2], scores as [N] confidence, labels as ORIGINAL OpenImages
+        category IDs (not 0-indexed)."""
         raw_preds = self._cpp_sut.get_predictions()
         result = {}
 
@@ -639,11 +555,9 @@ class RetinaNetCppSUTWrapper:
             scores = np.array(pred['scores'], dtype=np.float32)
             labels = np.array(pred['labels'], dtype=np.float32) if pred['labels'].size > 0 else np.array([])
 
-            # Reshape boxes to [N, 4]
+            # Reshape boxes to [N, 4]; keep pixel coordinates as-is for coco_eval
             if len(boxes) > 0 and len(boxes) % 4 == 0:
                 boxes = boxes.reshape(-1, 4)
-                # Model outputs boxes in PIXEL coordinates [0, 800]
-                # Keep as-is, coco_eval expects pixel coordinates
 
             result[idx] = {
                 'boxes': boxes,
@@ -653,11 +567,9 @@ class RetinaNetCppSUTWrapper:
         return result
 
     def reset(self) -> None:
-        """Reset SUT state."""
         self._cpp_sut.reset_counters()
 
     def compute_accuracy(self) -> Dict[str, float]:
-        """Compute mAP accuracy using pycocotools (official MLPerf method)."""
         predictions = self.get_predictions()
 
         if not predictions:
@@ -665,12 +577,10 @@ class RetinaNetCppSUTWrapper:
                           f"completed={self._cpp_sut.get_completed_count()})")
             return {'mAP': 0.0, 'num_samples': 0}
 
-        # Try to use pycocotools for accurate mAP calculation
         try:
             from ..datasets.coco_eval import evaluate_openimages_accuracy, PYCOCOTOOLS_AVAILABLE
 
             if PYCOCOTOOLS_AVAILABLE:
-                # Find COCO annotations file
                 coco_file = None
                 data_path = Path(self.qsl.dataset.data_path)
 
@@ -686,8 +596,7 @@ class RetinaNetCppSUTWrapper:
                 if coco_file:
                     logger.debug(f"Using pycocotools with {coco_file}")
 
-                    # Get sample_idx to filename mapping for correct COCO image_id lookup
-                    # This is CRITICAL - dataset order may differ from COCO annotation order!
+                    # CRITICAL: dataset order may differ from COCO annotation order
                     sample_to_filename = None
                     if hasattr(self.qsl, 'get_sample_to_filename_mapping'):
                         sample_to_filename = self.qsl.get_sample_to_filename_mapping()
@@ -697,8 +606,8 @@ class RetinaNetCppSUTWrapper:
                         predictions=predictions,
                         coco_annotations_file=coco_file,
                         input_size=800,
-                        model_labels_zero_indexed=True,  # Model outputs 0-indexed labels (0-263), add +1 for category_ids (1-264)
-                        boxes_in_pixels=True,  # Model outputs boxes in pixel coords [0,800]
+                        model_labels_zero_indexed=True,
+                        boxes_in_pixels=True,
                         sample_to_filename=sample_to_filename,
                     )
                 else:
@@ -725,7 +634,6 @@ def create_retinanet_sut(
     scenario: Scenario = Scenario.OFFLINE,
     force_python: bool = False,
 ):
-    """Factory function to create RetinaNet SUT."""
     # Accelerator devices are not supported by C++ SUT - they require MultiDeviceSUT
     if config.openvino.is_accelerator_device():
         device = config.openvino.device

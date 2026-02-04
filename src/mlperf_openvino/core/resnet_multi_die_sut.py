@@ -1,5 +1,3 @@
-"""ResNet multi-die SUT wrapper using ImageMultiDieSUTBase."""
-
 import logging
 from typing import Any, Dict
 
@@ -60,11 +58,9 @@ class ResNetMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
         )
 
     def get_predictions(self) -> Dict[int, Any]:
-        """Get stored predictions."""
         cpp_preds = self._cpp_sut.get_predictions()
         return {idx: np.array(pred) for idx, pred in cpp_preds.items()}
 
 
 def is_resnet_multi_die_cpp_available() -> bool:
-    """Check if C++ multi-die SUT is available."""
     return CPP_SUT_AVAILABLE and LOADGEN_AVAILABLE

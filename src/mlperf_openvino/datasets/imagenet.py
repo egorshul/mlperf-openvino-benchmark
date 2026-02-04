@@ -26,16 +26,6 @@ logger = logging.getLogger(__name__)
 
 
 class ImageNetDataset(BaseDataset):
-    """
-    ImageNet validation dataset for image classification.
-
-    Expected directory structure:
-        data_path/
-            val/
-                ILSVRC2012_val_00000001.JPEG
-                ...
-            val_map.txt  # Format: filename label
-    """
 
     def __init__(
         self,
@@ -47,7 +37,6 @@ class ImageNetDataset(BaseDataset):
         use_opencv: bool = True,
         **kwargs
     ):
-        """Initialize ImageNet dataset."""
         if not PIL_AVAILABLE and not CV2_AVAILABLE:
             raise ImportError("Either Pillow or OpenCV is required")
 
@@ -62,7 +51,6 @@ class ImageNetDataset(BaseDataset):
         self._preprocessed_cache: Dict[int, np.ndarray] = {}
 
     def load(self) -> None:
-        """Load the dataset metadata."""
         if self._loaded:
             logger.warning("Dataset already loaded")
             return
@@ -85,7 +73,6 @@ class ImageNetDataset(BaseDataset):
         self._loaded = True
 
     def _load_from_val_map(self, val_map_path: Path, data_path: Path) -> None:
-        """Load dataset from val_map.txt file."""
         with open(val_map_path, "r") as f:
             for line in f:
                 parts = line.strip().split()
@@ -103,7 +90,6 @@ class ImageNetDataset(BaseDataset):
                         self._labels.append(label)
 
     def _load_from_directory(self, data_path: Path) -> None:
-        """Load dataset by scanning directory."""
         val_dir = data_path / "val" if (data_path / "val").exists() else data_path
 
         extensions = {".jpg", ".jpeg", ".png", ".JPEG", ".JPG", ".PNG"}
@@ -116,20 +102,17 @@ class ImageNetDataset(BaseDataset):
                 self._labels.append(-1)
 
     def _preprocess_image(self, image_path: str) -> np.ndarray:
-        """Preprocess a single image following MLCommons reference (pre_process_vgg)."""
+        # Following MLCommons pre_process_vgg reference
         if self.use_opencv:
             return self._preprocess_image_opencv(image_path)
         else:
             return self._preprocess_image_pil(image_path)
 
     def _preprocess_image_opencv(self, image_path: str) -> np.ndarray:
-        """OpenCV implementation - faster preprocessing."""
-        # OpenCV loads as BGR
         img = cv2.imread(image_path)
         if img is None:
             raise ValueError(f"Failed to load image: {image_path}")
 
-        # MLCommons reference uses RGB
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
         if self.preprocessing and self.preprocessing.center_crop:
@@ -140,8 +123,8 @@ class ImageNetDataset(BaseDataset):
         # MLCommons uses scale=87.5%, so target_size / 0.875 ~ 256 for 224
         h, w = img.shape[:2]
         scale = 87.5
-        new_height = int(100.0 * crop_h / scale)  # 256 for crop_h=224
-        new_width = int(100.0 * crop_w / scale)   # 256 for crop_w=224
+        new_height = int(100.0 * crop_h / scale)
+        new_width = int(100.0 * crop_w / scale)
 
         if h > w:
             new_w = new_width
@@ -150,7 +133,7 @@ class ImageNetDataset(BaseDataset):
             new_h = new_height
             new_w = int(new_width * w / h)
 
-        # cv2.INTER_AREA is best for downscaling (matches MLCommons reference)
+        # cv2.INTER_AREA matches MLCommons reference for downscaling
         img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
         h, w = img.shape[:2]
@@ -178,7 +161,6 @@ class ImageNetDataset(BaseDataset):
         return img_array
 
     def _preprocess_image_pil(self, image_path: str) -> np.ndarray:
-        """PIL implementation - fallback when OpenCV unavailable."""
         img = Image.open(image_path).convert("RGB")
 
         if self.preprocessing.center_crop:
@@ -189,8 +171,8 @@ class ImageNetDataset(BaseDataset):
         # MLCommons uses scale=87.5%, so target_size / 0.875 ~ 256 for 224
         w, h = img.size
         scale = 87.5
-        new_height = int(100.0 * crop_h / scale)  # 256 for crop_h=224
-        new_width = int(100.0 * crop_w / scale)   # 256 for crop_w=224
+        new_height = int(100.0 * crop_h / scale)
+        new_width = int(100.0 * crop_w / scale)
 
         if h > w:
             new_w = new_width
@@ -218,7 +200,6 @@ class ImageNetDataset(BaseDataset):
         std = np.array(self.preprocessing.std, dtype=np.float32)
         img_array = img_array / std
 
-        # NHWC is default, model handles conversion via PrePostProcessor
         output_layout = getattr(self.preprocessing, 'output_layout', 'NHWC')
         if output_layout == "NCHW":
             img_array = np.transpose(img_array, (2, 0, 1))  # HWC -> CHW
@@ -229,7 +210,6 @@ class ImageNetDataset(BaseDataset):
         return img_array
 
     def get_sample(self, index: int) -> Tuple[np.ndarray, int]:
-        """Get a preprocessed sample by index."""
         if not self._loaded:
             self.load()
 
@@ -245,7 +225,6 @@ class ImageNetDataset(BaseDataset):
         return preprocessed, self._labels[index]
 
     def get_samples(self, indices: List[int]) -> Tuple[np.ndarray, List[int]]:
-        """Get multiple preprocessed samples."""
         if not self._loaded:
             self.load()
 
@@ -266,12 +245,11 @@ class ImageNetDataset(BaseDataset):
         results: np.ndarray,
         indices: List[int]
     ) -> List[int]:
-        """Postprocess inference results to get predicted classes."""
         predictions = []
 
         if results.dtype in (np.int64, np.int32):
             # Model already computed argmax (e.g., ArgMax:0 output)
-            # MLPerf ResNet50 ONNX uses 1-based indexing (1-1000 for ImageNet)
+            # MLPerf ResNet50 ONNX uses 1-based indexing (1-1000)
             results = results.flatten()
             for idx in results:
                 pred = int(idx) - 1  # MLCommons offset=-1
@@ -283,8 +261,8 @@ class ImageNetDataset(BaseDataset):
 
             num_classes = results.shape[1]
 
-            # Single value per sample = already argmax'd class index (stored as float)
             if num_classes == 1:
+                # Single value = already argmax'd class index (stored as float)
                 for i in range(results.shape[0]):
                     pred = int(results[i, 0]) - 1  # MLCommons offset=-1
                     pred = max(0, min(999, pred))
@@ -303,7 +281,6 @@ class ImageNetDataset(BaseDataset):
         predictions: List[int],
         labels: List[int]
     ) -> Dict[str, float]:
-        """Compute Top-1 accuracy."""
         if len(predictions) != len(labels):
             raise ValueError("Predictions and labels must have the same length")
 
@@ -318,7 +295,6 @@ class ImageNetDataset(BaseDataset):
 
 
 class ImageNetQSL(QuerySampleLibrary):
-    """ImageNet Query Sample Library for MLPerf LoadGen."""
 
     def __init__(
         self,
@@ -329,7 +305,6 @@ class ImageNetQSL(QuerySampleLibrary):
         performance_sample_count: int = 1024,
         **kwargs
     ):
-        """Initialize ImageNet QSL."""
         self._dataset = ImageNetDataset(
             data_path=data_path,
             val_map_path=val_map_path,
@@ -343,11 +318,9 @@ class ImageNetQSL(QuerySampleLibrary):
         self._loaded_samples: Dict[int, np.ndarray] = {}
 
     def load(self) -> None:
-        """Load the dataset."""
         self._dataset.load()
 
     def load_query_samples(self, sample_list: List[int]) -> None:
-        """Load samples into memory with parallel preprocessing."""
         if not self._dataset.is_loaded:
             self._dataset.load()
 
@@ -391,13 +364,11 @@ class ImageNetQSL(QuerySampleLibrary):
             sys.stderr.flush()
 
     def unload_query_samples(self, sample_list: List[int]) -> None:
-        """Unload samples from memory."""
         for sample_id in sample_list:
             if sample_id in self._loaded_samples:
                 del self._loaded_samples[sample_id]
 
     def get_features(self, sample_id: int) -> Dict[str, np.ndarray]:
-        """Get features for a sample."""
         if sample_id in self._loaded_samples:
             data = self._loaded_samples[sample_id]
         else:
@@ -406,22 +377,18 @@ class ImageNetQSL(QuerySampleLibrary):
         return {"input": data}
 
     def get_label(self, sample_id: int) -> int:
-        """Get label for a sample."""
         return self._dataset._labels[sample_id]
 
     @property
     def total_sample_count(self) -> int:
-        """Get total number of samples."""
         if not self._dataset.is_loaded:
             self._dataset.load()
         return self._dataset.sample_count
 
     @property
     def performance_sample_count(self) -> int:
-        """Get number of samples for performance testing."""
         return min(self._performance_sample_count, self.total_sample_count)
 
     @property
     def dataset(self) -> ImageNetDataset:
-        """Get underlying dataset."""
         return self._dataset

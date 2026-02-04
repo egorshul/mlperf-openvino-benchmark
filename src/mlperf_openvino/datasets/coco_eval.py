@@ -1,9 +1,4 @@
-"""
-COCO evaluation for RetinaNet Object Detection.
-
-Uses pycocotools for accurate mAP calculation following MLPerf reference implementation.
-Based on: https://github.com/mlcommons/inference/blob/master/vision/classification_and_detection/tools/accuracy-openimages.py
-"""
+# Reference: https://github.com/mlcommons/inference/blob/master/vision/classification_and_detection/tools/accuracy-openimages.py
 
 import json
 import logging
@@ -32,7 +27,6 @@ def evaluate_openimages_accuracy(
     boxes_in_pixels: bool = True,
     sample_to_filename: Optional[Dict[int, str]] = None,
 ) -> Dict[str, float]:
-    """Evaluate RetinaNet predictions using COCO API (official MLPerf method)."""
     if not PYCOCOTOOLS_AVAILABLE:
         logger.error("pycocotools not available, cannot compute accurate mAP")
         return {'mAP': 0.0, 'error': 'pycocotools not installed'}
@@ -42,7 +36,6 @@ def evaluate_openimages_accuracy(
     filename_to_image_id = {}
     for img_id, img_info in coco_gt.imgs.items():
         filename = img_info.get('file_name', '')
-        # Normalize filename (remove extension for comparison)
         base_name = filename.replace('.jpg', '').replace('.jpeg', '').replace('.png', '')
         filename_to_image_id[base_name] = img_id
         filename_to_image_id[filename] = img_id
@@ -50,7 +43,6 @@ def evaluate_openimages_accuracy(
     sample_to_image_id = {}
 
     if sample_to_filename:
-        # Use provided filename mapping (correct way)
         for sample_idx, filename in sample_to_filename.items():
             base_name = filename.replace('.jpg', '').replace('.jpeg', '').replace('.png', '')
             if base_name in filename_to_image_id:
@@ -74,16 +66,16 @@ def evaluate_openimages_accuracy(
     # If we see category_ids > 264, the annotations file needs regeneration
     max_cat_id = max(cat_ids) if cat_ids else 0
     min_cat_id = min(cat_ids) if cat_ids else 0
-    if max_cat_id > 300:  # Old format used all ~600 OpenImages classes
+    if max_cat_id > 300:
         logger.warning(f"COCO annotations have category_ids up to {max_cat_id}")
         logger.warning("This suggests the annotations file was created with OLD format.")
         logger.warning("Please delete openimages-mlperf.json and re-run to regenerate with correct category_ids (1-264).")
 
     all_model_labels = []
-    for pred in list(predictions.values())[:100]:  # Sample first 100 predictions
+    for pred in list(predictions.values())[:100]:
         labels = pred.get('labels', np.array([]))
         if len(labels) > 0:
-            all_model_labels.extend(labels[:10].tolist())  # First 10 labels per image
+            all_model_labels.extend(labels[:10].tolist())
 
     if all_model_labels:
         min_label = int(min(all_model_labels))
@@ -92,7 +84,6 @@ def evaluate_openimages_accuracy(
         logger.debug(f"COCO category_id range: {min_cat_id} to {max_cat_id}")
 
         if model_labels_zero_indexed:
-            # If model outputs 0-indexed and min is 0, we add +1
             if min_label == 0 and min_cat_id == 1:
                 logger.debug("Auto-detected: Model uses 0-indexed labels, will add +1")
             elif min_label >= 1 and min_cat_id == 1:
@@ -114,7 +105,6 @@ def evaluate_openimages_accuracy(
         if len(boxes) == 0:
             continue
 
-        # Get image_id for this sample - MUST use correct mapping!
         if sample_idx not in sample_to_image_id:
             logger.warning(f"Sample {sample_idx} not found in mapping, skipping")
             continue
@@ -130,12 +120,11 @@ def evaluate_openimages_accuracy(
             img_width = img_height = input_size
 
         for box, score, label in zip(boxes, scores, labels):
-            # MLPerf RetinaNet ONNX model outputs boxes in [x1, y1, x2, y2] format
+            # MLPerf RetinaNet ONNX outputs boxes in [x1, y1, x2, y2] format
             x1, y1, x2, y2 = box
 
             if boxes_in_pixels:
-                # Boxes are in model input coordinates [0, input_size]
-                # Scale to original image dimensions for COCO evaluation
+                # Boxes in model input coordinates [0, input_size] -> scale to original image
                 scale_x = img_width / input_size
                 scale_y = img_height / input_size
                 x1_px = x1 * scale_x
@@ -143,7 +132,7 @@ def evaluate_openimages_accuracy(
                 x2_px = x2 * scale_x
                 y2_px = y2 * scale_y
             else:
-                # Boxes are normalized [0, 1] - scale to image dimensions
+                # Boxes normalized [0, 1] -> scale to image dimensions
                 x1_px = x1 * img_width
                 y1_px = y1 * img_height
                 x2_px = x2 * img_width
@@ -153,7 +142,6 @@ def evaluate_openimages_accuracy(
             bbox_width = x2_px - x1_px
             bbox_height = y2_px - y1_px
 
-            # Category ID - model outputs ORIGINAL OpenImages category IDs
             category_id = int(label)
             if model_labels_zero_indexed:
                 category_id = category_id + 1
@@ -238,11 +226,8 @@ def convert_predictions_for_mlperf(
     image_heights: Dict[int, int],
     image_widths: Dict[int, int],
 ) -> List[np.ndarray]:
-    """Convert predictions to MLPerf accuracy log format.
-
-    MLPerf format: 7-element array per detection
-    [image_id, ymin, xmin, ymax, xmax, score, class]
-    """
+    # MLPerf format: 7-element array per detection
+    # [image_id, ymin, xmin, ymax, xmax, score, class]
     results = []
 
     for sample_idx, pred in predictions.items():
@@ -254,12 +239,10 @@ def convert_predictions_for_mlperf(
             continue
 
         for box, score, label in zip(boxes, scores, labels):
-            # MLPerf format: [id, ymin, xmin, ymax, xmax, score, class]
-            # boxes are in [x1, y1, x2, y2] normalized format
             x1, y1, x2, y2 = box
 
             detection = np.array([
-                sample_idx,  # image_id (or sample index)
+                sample_idx,  # image_id
                 y1,          # ymin (normalized)
                 x1,          # xmin (normalized)
                 y2,          # ymax (normalized)

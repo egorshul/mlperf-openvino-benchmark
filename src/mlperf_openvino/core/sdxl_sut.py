@@ -110,7 +110,6 @@ class SDXLOptimumSUT:
         self._load_pipeline()
 
     def _load_pipeline(self) -> None:
-        """Load SDXL pipeline with MLCommons-compliant scheduler."""
         device = self.config.openvino.device if hasattr(self.config, "openvino") else "CPU"
         print(f"[SDXL] Compiling on {device} ...", file=sys.stderr, flush=True)
 
@@ -170,7 +169,6 @@ class SDXLOptimumSUT:
         pass
 
     def _process_sample(self, sample_idx: int) -> np.ndarray:
-        """Generate a single image with MLCommons-compliant parameters."""
         features = self.qsl.get_features(sample_idx)
         prompt = features["prompt"]
         guidance_scale = features.get("guidance_scale", self.guidance_scale)
@@ -220,7 +218,6 @@ class SDXLOptimumSUT:
         return image
 
     def _process_batch(self, sample_indices: List[int]) -> List[np.ndarray]:
-        """Generate a batch of images with MLCommons-compliant parameters."""
         import torch
 
         prompts = []
@@ -274,7 +271,6 @@ class SDXLOptimumSUT:
             self._issue_query_server(query_samples)
 
     def _issue_query_offline(self, query_samples: List[Any]) -> None:
-        """Process queries for Offline scenario."""
         total = len(query_samples)
         self._start_time = time.time()
         responses = []
@@ -315,7 +311,6 @@ class SDXLOptimumSUT:
         lg.QuerySamplesComplete(responses)
 
     def _issue_query_server(self, query_samples: List[Any]) -> None:
-        """Process queries for Server scenario."""
         for sample in query_samples:
             sample_idx = sample.index
             image = self._process_sample(sample_idx)
@@ -405,7 +400,6 @@ class SDXLManualSUT:
         self._load_components()
 
     def _load_components(self) -> None:
-        """Load SDXL model components."""
         try:
             import openvino as ov
         except ImportError:
@@ -485,13 +479,6 @@ class SDXLManualSUT:
             )
 
     def _encode_prompt(self, prompt: str):
-        """Encode text prompt using CLIP text encoders.
-
-        Returns:
-            Tuple of (prompt_embeds, pooled_prompt_embeds):
-            - prompt_embeds: [1, 77, 2048] concatenated hidden states
-            - pooled_prompt_embeds: [1, 1280] pooled output from text_encoder_2
-        """
         if self.tokenizer is None:
             raise RuntimeError("Tokenizer not loaded")
 
@@ -532,7 +519,6 @@ class SDXLManualSUT:
         return prompt_embeds, pooled_prompt_embeds
 
     def _generate_latents(self, batch_size: int = 1) -> np.ndarray:
-        """Generate initial random latents."""
         latent_size = self.image_size // 8
         latents = np.random.randn(
             batch_size, 4, latent_size, latent_size
@@ -547,15 +533,6 @@ class SDXLManualSUT:
         pooled_embeds: Optional[np.ndarray] = None,
         time_ids: Optional[np.ndarray] = None,
     ) -> np.ndarray:
-        """Perform one denoising step with UNet.
-
-        Args:
-            latents: Current latents [1, 4, 128, 128]
-            prompt_embeds: Concatenated [negative, positive] hidden states [2, 77, 2048]
-            timestep: Current timestep
-            pooled_embeds: Concatenated [negative, positive] pooled embeddings [2, 1280]
-            time_ids: Time conditioning [2, 6]
-        """
         latent_input = np.concatenate([latents] * 2)
 
         if self.scheduler is not None:
@@ -596,7 +573,6 @@ class SDXLManualSUT:
         return noise_pred
 
     def _decode_latents(self, latents: np.ndarray) -> np.ndarray:
-        """Decode latents to image using VAE decoder."""
         latents = latents / 0.13025
         image = self.vae_decoder(latents)[0]
         image = (image / 2 + 0.5).clip(0, 1)
@@ -613,7 +589,6 @@ class SDXLManualSUT:
         pass
 
     def _process_sample(self, sample_idx: int) -> np.ndarray:
-        """Generate image for a sample (MLCommons-compliant)."""
         features = self.qsl.get_features(sample_idx)
         prompt = features['prompt']
         prompt_embeds, pooled_prompt_embeds = self._encode_prompt(prompt)
@@ -681,7 +656,6 @@ class SDXLManualSUT:
             self._issue_query_server(query_samples)
 
     def _issue_query_offline(self, query_samples: List[Any]) -> None:
-        """Process queries for Offline scenario."""
         total = len(query_samples)
         self._start_time = time.time()
         responses = []
@@ -707,7 +681,6 @@ class SDXLManualSUT:
         lg.QuerySamplesComplete(responses)
 
     def _issue_query_server(self, query_samples: List[Any]) -> None:
-        """Process queries for Server scenario."""
         for sample in query_samples:
             sample_idx = sample.index
             image = self._process_sample(sample_idx)

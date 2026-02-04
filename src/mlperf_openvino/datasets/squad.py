@@ -14,7 +14,6 @@ from .base import BaseDataset, QuerySampleLibrary
 
 logger = logging.getLogger(__name__)
 
-# BERT tokenization constants
 MAX_SEQ_LENGTH = 384
 MAX_QUERY_LENGTH = 64
 DOC_STRIDE = 128
@@ -23,13 +22,11 @@ N_BEST_SIZE = 20
 
 
 def _get_best_indexes(logits: np.ndarray, n_best: int = N_BEST_SIZE) -> List[int]:
-    """Get the n-best logit indices sorted by score."""
     index_and_score = sorted(enumerate(logits), key=lambda x: x[1], reverse=True)
     return [idx for idx, _ in index_and_score[:n_best]]
 
 
 def normalize_answer(s: str) -> str:
-    """Normalize answer: lowercase, remove punctuation, articles, and extra whitespace."""
     def remove_articles(text):
         return re.sub(r'\b(a|an|the)\b', ' ', text)
 
@@ -47,7 +44,6 @@ def normalize_answer(s: str) -> str:
 
 
 def compute_f1(prediction: str, ground_truth: str) -> float:
-    """Compute F1 score between prediction and ground truth."""
     prediction_tokens = normalize_answer(prediction).split()
     ground_truth_tokens = normalize_answer(ground_truth).split()
 
@@ -65,20 +61,12 @@ def compute_f1(prediction: str, ground_truth: str) -> float:
 
 
 def compute_exact_match(prediction: str, ground_truth: str) -> float:
-    """Compute exact match score."""
     return float(normalize_answer(prediction) == normalize_answer(ground_truth))
 
 
 class BertTokenizer:
-    """
-    Simple BERT tokenizer for SQuAD.
-
-    For production use, consider using transformers library.
-    This is a simplified version for basic functionality.
-    """
 
     def __init__(self, vocab_file: Optional[str] = None):
-        """Initialize tokenizer."""
         self._vocab = {}
         self._inv_vocab = {}
         self._do_lower_case = True
@@ -89,7 +77,6 @@ class BertTokenizer:
             self._load_from_transformers()
 
     def _load_vocab(self, vocab_file: str) -> None:
-        """Load vocabulary from file."""
         with open(vocab_file, 'r', encoding='utf-8') as f:
             for idx, line in enumerate(f):
                 token = line.strip()
@@ -98,7 +85,6 @@ class BertTokenizer:
         logger.info(f"Loaded vocab with {len(self._vocab)} tokens")
 
     def _load_from_transformers(self) -> None:
-        """Load tokenizer from transformers library."""
         try:
             from transformers import BertTokenizer as HFBertTokenizer
             self._hf_tokenizer = HFBertTokenizer.from_pretrained('bert-large-uncased-whole-word-masking-finetuned-squad')
@@ -113,7 +99,6 @@ class BertTokenizer:
             self._hf_tokenizer = None
 
     def tokenize(self, text: str) -> List[str]:
-        """Tokenize text into word pieces."""
         if hasattr(self, '_hf_tokenizer') and self._hf_tokenizer is not None:
             return self._hf_tokenizer.tokenize(text)
 
@@ -125,7 +110,6 @@ class BertTokenizer:
         return tokens
 
     def convert_tokens_to_ids(self, tokens: List[str]) -> List[int]:
-        """Convert tokens to vocabulary IDs."""
         if hasattr(self, '_hf_tokenizer') and self._hf_tokenizer is not None:
             return self._hf_tokenizer.convert_tokens_to_ids(tokens)
 
@@ -136,7 +120,6 @@ class BertTokenizer:
         return ids
 
     def convert_ids_to_tokens(self, ids: List[int]) -> List[str]:
-        """Convert vocabulary IDs to tokens."""
         if hasattr(self, '_hf_tokenizer') and self._hf_tokenizer is not None:
             return self._hf_tokenizer.convert_ids_to_tokens(ids)
 
@@ -152,7 +135,6 @@ class BertTokenizer:
         max_length: int = MAX_SEQ_LENGTH,
         padding: bool = True,
     ) -> Dict[str, Any]:
-        """Encode question and context for BERT with token-to-original mapping."""
         doc_tokens = context.split()
 
         char_to_word_offset = []
@@ -210,7 +192,6 @@ class BertTokenizer:
         max_length: int = MAX_SEQ_LENGTH,
         padding: bool = True,
     ) -> Dict[str, np.ndarray]:
-        """Encode question and context for BERT."""
         result = self.encode_with_mapping(question, context, max_length, padding)
         return {
             'input_ids': result['input_ids'],
@@ -219,7 +200,6 @@ class BertTokenizer:
         }
 
     def decode(self, token_ids: List[int]) -> str:
-        """Decode token IDs to text."""
         if hasattr(self, '_hf_tokenizer') and self._hf_tokenizer is not None:
             return self._hf_tokenizer.decode(token_ids, skip_special_tokens=True)
 
@@ -230,14 +210,6 @@ class BertTokenizer:
 
 
 class SQuADDataset(BaseDataset):
-    """
-    SQuAD v1.1 dataset for BERT Question Answering benchmark.
-
-    SQuAD (Stanford Question Answering Dataset) contains questions
-    posed by crowdworkers on a set of Wikipedia articles.
-
-    Expected file: dev-v1.1.json
-    """
 
     def __init__(
         self,
@@ -248,7 +220,6 @@ class SQuADDataset(BaseDataset):
         max_query_length: int = MAX_QUERY_LENGTH,
         doc_stride: int = DOC_STRIDE,
     ):
-        """Initialize SQuAD dataset."""
         super().__init__(data_path=data_path, count=count)
 
         self.data_path = Path(data_path)
@@ -264,7 +235,6 @@ class SQuADDataset(BaseDataset):
         self._is_loaded = False
 
     def load(self) -> None:
-        """Load and preprocess the dataset."""
         if self._is_loaded:
             return
 
@@ -297,7 +267,6 @@ class SQuADDataset(BaseDataset):
         self._is_loaded = True
 
     def _parse_squad_data(self, data: Dict) -> None:
-        """Parse SQuAD JSON data into examples."""
         for article in data['data']:
             title = article.get('title', '')
 
@@ -325,7 +294,6 @@ class SQuADDataset(BaseDataset):
                     })
 
     def _create_features(self) -> None:
-        """Create tokenized features from examples with token-to-original mapping."""
         self._features = []
 
         for idx, sample in enumerate(self._samples):
@@ -361,7 +329,6 @@ class SQuADDataset(BaseDataset):
         return len(self._features)
 
     def get_sample(self, index: int) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
-        """Get preprocessed sample."""
         if not self._is_loaded:
             self.load()
 
@@ -382,7 +349,6 @@ class SQuADDataset(BaseDataset):
         return features, sample_info
 
     def get_samples(self, indices: List[int]) -> Tuple[Dict[str, np.ndarray], List[Dict]]:
-        """Get batch of samples."""
         if not self._is_loaded:
             self.load()
 
@@ -408,7 +374,6 @@ class SQuADDataset(BaseDataset):
         results: Union[np.ndarray, Tuple[np.ndarray, np.ndarray], List[Tuple[np.ndarray, np.ndarray]]],
         indices: List[int]
     ) -> List[str]:
-        """Postprocess BERT outputs to extract answer spans."""
         if isinstance(results, list):
             start_logits = [np.asarray(r[0]) for r in results]
             end_logits = [np.asarray(r[1]) for r in results]
@@ -434,7 +399,6 @@ class SQuADDataset(BaseDataset):
             s_logits = start_logits[i]
             e_logits = end_logits[i]
 
-            # Find context boundaries
             # token_type_id: 0 = [CLS] question [SEP], 1 = context [SEP]
             context_start = 0
             context_end = len(token_type_ids) - 1
@@ -500,7 +464,6 @@ class SQuADDataset(BaseDataset):
         predictions: List[str],
         indices: List[int]
     ) -> Dict[str, float]:
-        """Compute F1 and Exact Match scores."""
         f1_scores = []
         em_scores = []
 
@@ -527,7 +490,6 @@ class SQuADDataset(BaseDataset):
         }
 
     def get_ground_truth(self, index: int) -> List[str]:
-        """Get ground truth answers for a sample."""
         feature = self._features[index]
         example_idx = feature['example_index']
         sample = self._samples[example_idx]
@@ -535,11 +497,6 @@ class SQuADDataset(BaseDataset):
 
 
 class SQuADQSL(QuerySampleLibrary):
-    """
-    Query Sample Library for SQuAD dataset.
-
-    Implements the MLPerf LoadGen QSL interface for BERT benchmark.
-    """
 
     # Sequence length buckets for optimized inference
     SEQ_BUCKETS = [128, 165, 256, 384]
@@ -552,7 +509,6 @@ class SQuADQSL(QuerySampleLibrary):
         performance_sample_count: int = 10833,  # MLPerf default
         max_seq_length: int = MAX_SEQ_LENGTH,
     ):
-        """Initialize SQuAD QSL."""
         super().__init__()
 
         self.dataset = SQuADDataset(
@@ -569,7 +525,6 @@ class SQuADQSL(QuerySampleLibrary):
 
     @staticmethod
     def get_bucket_index(seq_len: int) -> int:
-        """Get bucket index for a sequence length."""
         for i, bucket in enumerate(SQuADQSL.SEQ_BUCKETS):
             if seq_len <= bucket:
                 return i
@@ -577,13 +532,11 @@ class SQuADQSL(QuerySampleLibrary):
 
     @staticmethod
     def get_bucket_seq_len(bucket_idx: int) -> int:
-        """Get sequence length for a bucket index."""
         if 0 <= bucket_idx < len(SQuADQSL.SEQ_BUCKETS):
             return SQuADQSL.SEQ_BUCKETS[bucket_idx]
         return SQuADQSL.SEQ_BUCKETS[-1]
 
     def get_actual_seq_len(self, sample_idx: int) -> int:
-        """Get actual (non-padded) sequence length for a sample."""
         if sample_idx in self._sample_seq_lengths:
             return self._sample_seq_lengths[sample_idx]
 
@@ -595,13 +548,11 @@ class SQuADQSL(QuerySampleLibrary):
         return actual_len
 
     def get_sample_bucket(self, sample_idx: int) -> int:
-        """Get bucket index for a sample."""
         if sample_idx not in self._sample_buckets:
             self.get_actual_seq_len(sample_idx)
         return self._sample_buckets.get(sample_idx, len(self.SEQ_BUCKETS) - 1)
 
     def load(self) -> None:
-        """Load the dataset."""
         self.dataset.load()
 
     @property
@@ -615,7 +566,6 @@ class SQuADQSL(QuerySampleLibrary):
         return min(self._performance_sample_count, self.total_sample_count)
 
     def load_query_samples(self, sample_indices: List[int]) -> None:
-        """Load samples into memory with optimized int64 format for C++ SUT."""
         if not self.dataset._is_loaded:
             self.dataset.load()
 
@@ -643,12 +593,10 @@ class SQuADQSL(QuerySampleLibrary):
                 self._sample_buckets[idx] = self.get_bucket_index(actual_len)
 
     def unload_query_samples(self, sample_indices: List[int]) -> None:
-        """Unload samples from memory."""
         for idx in sample_indices:
             self._loaded_samples.pop(idx, None)
 
     def get_features(self, sample_index: int) -> Dict[str, np.ndarray]:
-        """Get input features for a sample."""
         if sample_index in self._loaded_samples:
             return self._loaded_samples[sample_index]
 
@@ -656,5 +604,4 @@ class SQuADQSL(QuerySampleLibrary):
         return features
 
     def get_label(self, sample_index: int) -> List[str]:
-        """Get ground truth answers for a sample."""
         return self.dataset.get_ground_truth(sample_index)

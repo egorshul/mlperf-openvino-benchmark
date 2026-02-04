@@ -1,13 +1,3 @@
-"""
-Dataset downloader utility for MLPerf OpenVINO Benchmark.
-
-Downloads and prepares datasets required for MLPerf benchmarks:
-- ImageNet 2012 validation set (50,000 images) for ResNet50
-- LibriSpeech dev-clean + dev-other for Whisper
-
-Based on official MLCommons scripts and documentation.
-"""
-
 import hashlib
 import logging
 import os
@@ -22,7 +12,6 @@ from urllib.error import URLError
 logger = logging.getLogger(__name__)
 
 
-# Dataset registry with download URLs
 DATASET_REGISTRY: Dict[str, Dict] = {
     "imagenet": {
         "description": "ImageNet 2012 validation set (50,000 images) for ResNet50",
@@ -134,7 +123,7 @@ DATASET_REGISTRY: Dict[str, Dict] = {
             "size_mb": 10,
         },
         "latents": {
-            # Single shared latent tensor (1, 4, 128, 128) ≈ 256KB
+            # Single shared latent tensor (1, 4, 128, 128) ~256KB
             "url": "https://github.com/mlcommons/inference/raw/master/text_to_image/tools/latents.pt",
             "filename": "latents.pt",
             "size_mb": 1,
@@ -156,9 +145,8 @@ def _download_file(
     show_progress: bool = True,
     expected_size_mb: Optional[float] = None
 ) -> None:
-    """Download a file from URL with progress indication."""
     logger.info(f"Downloading from {url}")
-    
+
     try:
         if show_progress:
             def progress_hook(block_num, block_size, total_size):
@@ -167,50 +155,48 @@ def _download_file(
                     percent = min(100, (downloaded / total_size) * 100)
                     downloaded_mb = downloaded / (1024 * 1024)
                     total_mb = total_size / (1024 * 1024)
-                    print(f"\rDownloading: {percent:.1f}% ({downloaded_mb:.1f}/{total_mb:.1f} MB)", 
+                    print(f"\rDownloading: {percent:.1f}% ({downloaded_mb:.1f}/{total_mb:.1f} MB)",
                           end="", flush=True)
                 elif expected_size_mb:
                     downloaded_mb = downloaded / (1024 * 1024)
-                    print(f"\rDownloading: {downloaded_mb:.1f}/{expected_size_mb:.0f} MB", 
+                    print(f"\rDownloading: {downloaded_mb:.1f}/{expected_size_mb:.0f} MB",
                           end="", flush=True)
-            
+
             urllib.request.urlretrieve(url, destination, progress_hook)
             print()
         else:
             urllib.request.urlretrieve(url, destination)
-        
+
         logger.info(f"Downloaded to {destination}")
-        
+
     except URLError as e:
         raise RuntimeError(f"Failed to download {url}: {e}")
 
 
 def _verify_md5(file_path: str, expected_md5: str) -> bool:
-    """Verify file MD5 checksum."""
     logger.info("Verifying checksum...")
-    
+
     md5_hash = hashlib.md5()
     with open(file_path, "rb") as f:
         for chunk in iter(lambda: f.read(8192), b""):
             md5_hash.update(chunk)
-    
+
     actual_md5 = md5_hash.hexdigest()
-    
+
     if actual_md5 != expected_md5:
         logger.warning(f"Checksum mismatch: expected {expected_md5}, got {actual_md5}")
         return False
-    
+
     logger.info("Checksum verified")
     return True
 
 
 def _extract_archive(archive_path: str, output_dir: str) -> str:
-    """Extract tar.gz or tar archive."""
     logger.info(f"Extracting {archive_path}...")
-    
+
     archive_path = Path(archive_path)
     output_dir = Path(output_dir)
-    
+
     if str(archive_path).endswith('.tar.gz') or str(archive_path).endswith('.tgz'):
         with tarfile.open(archive_path, 'r:gz') as tar:
             tar.extractall(output_dir)
@@ -219,7 +205,7 @@ def _extract_archive(archive_path: str, output_dir: str) -> str:
             tar.extractall(output_dir)
     else:
         raise ValueError(f"Unsupported archive format: {archive_path}")
-    
+
     logger.info(f"Extracted to {output_dir}")
     return str(output_dir)
 
@@ -229,29 +215,14 @@ def download_imagenet(
     force: bool = False,
     preprocess: bool = True
 ) -> Dict[str, str]:
-    """
-    Download and prepare ImageNet 2012 validation dataset for ResNet50.
-    
-    Downloads from: https://image-net.org/data/ILSVRC/2012/ILSVRC2012_img_val.tar
-    
-    Args:
-        output_dir: Directory to save dataset
-        force: Force re-download even if exists
-        preprocess: Whether to preprocess images for ResNet50
-        
-    Returns:
-        Dictionary with dataset paths
-    """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    
+
     data_dir = output_path / "imagenet"
     val_dir = data_dir / "val"
     val_map_file = data_dir / "val_map.txt"
-    
-    # Check if already downloaded and extracted
+
     if val_dir.exists() and val_map_file.exists() and not force:
-        # Count images
         image_count = len(list(val_dir.glob("*.JPEG")))
         if image_count >= 50000:
             logger.info(f"ImageNet already exists at {data_dir} with {image_count} images")
@@ -261,15 +232,13 @@ def download_imagenet(
                 "val_map": str(val_map_file),
                 "num_samples": image_count,
             }
-    
-    # Create directories
+
     data_dir.mkdir(parents=True, exist_ok=True)
     val_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Download ImageNet validation set
+
     dataset_info = DATASET_REGISTRY["imagenet"]
     archive_path = output_path / dataset_info["filename"]
-    
+
     if not archive_path.exists() or force:
         logger.info(f"Downloading ImageNet validation set (~{dataset_info['size_gb']} GB)...")
         logger.info("This may take a while...")
@@ -278,25 +247,22 @@ def download_imagenet(
             str(archive_path),
             expected_size_mb=dataset_info["size_gb"] * 1024
         )
-    
-    # Extract images to val directory
+
     if not list(val_dir.glob("*.JPEG")):
         logger.info("Extracting images...")
         _extract_archive(str(archive_path), str(val_dir))
-    
-    # Download val_map.txt (labels file)
+
     if not val_map_file.exists():
         logger.info("Downloading val_map.txt...")
         _download_file(dataset_info["val_map_url"], str(val_map_file))
-    
-    # Preprocess if requested
+
     if preprocess:
         preprocessed_dir = data_dir / "preprocessed"
         _preprocess_imagenet(val_dir, preprocessed_dir, val_map_file)
-    
+
     image_count = len(list(val_dir.glob("*.JPEG")))
     logger.info(f"ImageNet dataset ready: {image_count} images")
-    
+
     return {
         "data_path": str(data_dir),
         "val_dir": str(val_dir),
@@ -310,50 +276,37 @@ def _preprocess_imagenet(
     output_dir: Path,
     val_map_file: Path
 ) -> None:
-    """
-    Preprocess ImageNet images for ResNet50.
-    
-    Applies:
-    - Resize to 256x256
-    - Center crop to 224x224
-    - Normalize with ImageNet mean/std
-    - Save as numpy arrays
-    """
     try:
         import numpy as np
         from PIL import Image
     except ImportError:
         logger.warning("PIL/numpy not available, skipping preprocessing")
         return
-    
+
     output_dir.mkdir(parents=True, exist_ok=True)
-    
-    # ImageNet preprocessing parameters
+
     resize_size = 256
     crop_size = 224
     mean = np.array([123.68, 116.78, 103.94], dtype=np.float32)  # RGB
-    
-    # Read val_map.txt
+
     with open(val_map_file, 'r') as f:
         lines = f.readlines()
-    
+
     logger.info(f"Preprocessing {len(lines)} images...")
-    
+
     for i, line in enumerate(lines):
         parts = line.strip().split()
         if len(parts) < 2:
             continue
-        
+
         img_name = parts[0]
         img_path = val_dir / img_name
-        
+
         if not img_path.exists():
             continue
-        
-        # Load and preprocess
+
         img = Image.open(img_path).convert('RGB')
-        
-        # Resize maintaining aspect ratio
+
         w, h = img.size
         if w < h:
             new_w = resize_size
@@ -362,24 +315,21 @@ def _preprocess_imagenet(
             new_h = resize_size
             new_w = int(w * resize_size / h)
         img = img.resize((new_w, new_h), Image.BILINEAR)
-        
-        # Center crop
+
         w, h = img.size
         left = (w - crop_size) // 2
         top = (h - crop_size) // 2
         img = img.crop((left, top, left + crop_size, top + crop_size))
-        
-        # Convert to numpy and normalize
+
         img_array = np.array(img, dtype=np.float32)
         img_array = img_array - mean
-        
-        # Save preprocessed image
+
         output_file = output_dir / f"{img_name.replace('.JPEG', '.npy')}"
         np.save(output_file, img_array)
-        
+
         if (i + 1) % 5000 == 0:
             logger.info(f"Preprocessed {i + 1}/{len(lines)} images")
-    
+
     logger.info(f"Preprocessing complete: {output_dir}")
 
 
@@ -388,26 +338,11 @@ def download_librispeech(
     subset: str = "mlperf",
     force: bool = False
 ) -> Dict[str, str]:
-    """
-    Download LibriSpeech dataset for Whisper benchmark.
-
-    For MLPerf submissions, use subset="mlperf" which downloads
-    both dev-clean and dev-other.
-
-    Args:
-        output_dir: Directory to save dataset
-        subset: "mlperf" (dev-clean + dev-other), "dev-clean", "dev-other", etc.
-        force: Force re-download
-
-    Returns:
-        Dictionary with dataset paths
-    """
     import json
 
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    # Handle MLPerf subset (dev-clean + dev-other)
     if subset == "mlperf":
         logger.info("Downloading MLPerf LibriSpeech (dev-clean + dev-other)...")
 
@@ -420,24 +355,20 @@ def download_librispeech(
             results["subsets"].append(sub_result)
             total_samples += sub_result.get("num_samples", 0)
 
-            # Load manifest entries from subset
             manifest_path = sub_result.get("manifest_path")
             if manifest_path and Path(manifest_path).exists():
                 with open(manifest_path, 'r') as f:
                     entries = json.load(f)
                     all_manifest_entries.extend(entries)
 
-        # Create combined directory
         mlperf_dir = output_path / "librispeech" / "mlperf"
         mlperf_dir.mkdir(parents=True, exist_ok=True)
 
-        # Create combined manifest
         combined_manifest = mlperf_dir / "manifest.json"
         with open(combined_manifest, 'w') as f:
             json.dump(all_manifest_entries, f, indent=2)
         logger.info(f"Created combined manifest with {len(all_manifest_entries)} entries")
 
-        # Create combined transcripts file
         combined_transcripts = mlperf_dir / "transcripts.txt"
         with open(combined_transcripts, 'w', encoding='utf-8') as f:
             for entry in all_manifest_entries:
@@ -454,7 +385,6 @@ def download_librispeech(
         logger.info(f"LibriSpeech MLPerf ready: {total_samples} samples at {mlperf_dir}")
         return results
 
-    # Single subset
     return _download_librispeech_subset(output_path, subset, force)
 
 
@@ -463,7 +393,6 @@ def _download_librispeech_subset(
     subset: str,
     force: bool = False
 ) -> Dict[str, str]:
-    """Download a single LibriSpeech subset."""
     dataset_info = DATASET_REGISTRY["librispeech"].get(subset)
     if not dataset_info or not isinstance(dataset_info, dict):
         available = [k for k, v in DATASET_REGISTRY["librispeech"].items()
@@ -475,10 +404,8 @@ def _download_librispeech_subset(
     transcript_file = data_dir / "transcripts.txt"
     manifest_file = data_dir / "manifest.json"
 
-    # Check if already exists
     if data_dir.exists() and transcript_file.exists() and not force:
         logger.info(f"LibriSpeech {subset} already exists at {data_dir}")
-        # Count actual audio files
         actual_count = len(list(audio_dir.glob("*.flac"))) if audio_dir.exists() else 0
         return {
             "data_path": str(data_dir),
@@ -488,7 +415,6 @@ def _download_librispeech_subset(
             "num_samples": actual_count or dataset_info["num_samples"],
         }
 
-    # Download
     archive_path = output_path / dataset_info["filename"]
 
     if not archive_path.exists() or force:
@@ -499,22 +425,19 @@ def _download_librispeech_subset(
             expected_size_mb=dataset_info["size_mb"]
         )
 
-        # Verify checksum
         if dataset_info.get("md5"):
             if not _verify_md5(str(archive_path), dataset_info["md5"]):
                 archive_path.unlink()
                 raise RuntimeError("Checksum verification failed")
 
-    # Extract
     _extract_archive(str(archive_path), str(output_path))
 
-    # Organize: move from LibriSpeech/dev-clean to librispeech/dev-clean
+    # Reorganize from LibriSpeech/dev-clean to librispeech/dev-clean
     extracted_dir = output_path / dataset_info["extracted_dir"]
 
     data_dir.mkdir(parents=True, exist_ok=True)
     audio_dir.mkdir(exist_ok=True)
 
-    # Process and create transcripts + manifest
     actual_count = _process_librispeech(extracted_dir, audio_dir, transcript_file, manifest_file)
 
     logger.info(f"LibriSpeech {subset} ready at {data_dir}")
@@ -534,21 +457,9 @@ def _process_librispeech(
     transcript_file: Path,
     manifest_file: Optional[Path] = None
 ) -> int:
-    """
-    Process LibriSpeech directory structure.
-
-    LibriSpeech format:
-        speaker_id/chapter_id/speaker_id-chapter_id-utterance_id.flac
-        speaker_id/chapter_id/speaker_id-chapter_id.trans.txt
-
-    Creates:
-        audio/speaker_id-chapter_id-utterance_id.flac (copies or symlinks)
-        transcripts.txt
-        manifest.json (MLPerf format, optional)
-
-    Returns:
-        Number of processed audio files
-    """
+    # LibriSpeech directory format:
+    #   speaker_id/chapter_id/speaker_id-chapter_id-utterance_id.flac
+    #   speaker_id/chapter_id/speaker_id-chapter_id.trans.txt
     import json
 
     try:
@@ -571,7 +482,6 @@ def _process_librispeech(
             if not chapter_dir.is_dir():
                 continue
 
-            # Read transcripts
             chapter_transcripts = {}
             for trans_file in chapter_dir.glob("*.trans.txt"):
                 with open(trans_file, 'r', encoding='utf-8') as f:
@@ -582,11 +492,9 @@ def _process_librispeech(
                             if len(parts) == 2:
                                 chapter_transcripts[parts[0]] = parts[1]
 
-            # Process audio files
             for audio_file in sorted(chapter_dir.glob("*.flac")):
                 utterance_id = audio_file.stem
 
-                # Copy audio file
                 dest_audio = audio_dir / audio_file.name
                 if not dest_audio.exists():
                     shutil.copy2(audio_file, dest_audio)
@@ -594,7 +502,6 @@ def _process_librispeech(
                 transcript = chapter_transcripts.get(utterance_id, "")
                 transcripts.append((utterance_id, transcript))
 
-                # Get audio duration for manifest
                 duration = 0.0
                 if has_soundfile and dest_audio.exists():
                     try:
@@ -603,7 +510,6 @@ def _process_librispeech(
                     except Exception:
                         pass
 
-                # Create manifest entry (MLPerf format)
                 manifest_entries.append({
                     "audio_filepath": str(dest_audio),
                     "text": transcript,
@@ -613,12 +519,10 @@ def _process_librispeech(
 
                 audio_count += 1
 
-    # Write transcripts (simple format)
     with open(transcript_file, 'w', encoding='utf-8') as f:
         for audio_id, transcript in transcripts:
             f.write(f"{audio_id} {transcript}\n")
 
-    # Write JSON manifest (MLPerf format)
     if manifest_file:
         with open(manifest_file, 'w', encoding='utf-8') as f:
             json.dump(manifest_entries, f, indent=2)
@@ -629,27 +533,16 @@ def _process_librispeech(
 
 
 def download_whisper_mlperf(output_dir: str) -> Dict[str, str]:
-    """
-    Download pre-processed LibriSpeech for MLPerf Whisper using official MLCommons script.
-    
-    Uses the R2 downloader from MLCommons.
-    
-    Args:
-        output_dir: Directory to save dataset
-        
-    Returns:
-        Dictionary with paths
-    """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    
+
     cmd = DATASET_REGISTRY["whisper-mlperf"]["download_cmd"].format(
         output_dir=output_path / "whisper-dataset"
     )
-    
+
     logger.info("Downloading MLPerf Whisper dataset using R2 downloader...")
     logger.info(f"Command: {cmd}")
-    
+
     try:
         subprocess.run(cmd, shell=True, check=True)
         return {
@@ -667,17 +560,6 @@ def download_squad(
     subset: str = "dev",
     force: bool = False
 ) -> Dict[str, str]:
-    """
-    Download SQuAD v1.1 dataset for BERT Question Answering.
-
-    Args:
-        output_dir: Directory to save dataset
-        subset: "dev" or "train"
-        force: Force re-download
-
-    Returns:
-        Dictionary with dataset paths
-    """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -686,7 +568,6 @@ def download_squad(
 
     dataset_info = DATASET_REGISTRY["squad"]
 
-    # Download dev set by default
     if subset in dataset_info:
         subset_info = dataset_info[subset]
         data_file = data_dir / subset_info["filename"]
@@ -699,7 +580,6 @@ def download_squad(
                 expected_size_mb=subset_info.get("size_mb")
             )
 
-    # Also download vocab file
     if "vocab" in dataset_info:
         vocab_info = dataset_info["vocab"]
         vocab_file = data_dir / vocab_info["filename"]
@@ -719,7 +599,6 @@ def download_squad(
 
 
 def _download_openimages_image(args) -> Optional[str]:
-    """Download a single OpenImages image from S3."""
     image_id, images_dir = args
 
     try:
@@ -751,26 +630,6 @@ def download_openimages(
     max_images: Optional[int] = None,
     num_workers: int = 8
 ) -> Dict[str, str]:
-    """
-    Download OpenImages validation set for RetinaNet Object Detection.
-
-    Uses official MLCommons approach:
-    1. Download annotations from Google Cloud Storage
-    2. Extract image IDs from annotations
-    3. Download images from AWS S3 open-images-dataset bucket
-    4. Convert annotations to COCO format
-
-    Based on: https://github.com/mlcommons/inference/tree/master/vision/classification_and_detection
-
-    Args:
-        output_dir: Directory to save dataset
-        force: Force re-download
-        max_images: Maximum number of images to download (None = all validation images)
-        num_workers: Number of parallel download workers
-
-    Returns:
-        Dictionary with dataset paths
-    """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -781,11 +640,10 @@ def download_openimages(
     annotations_dir = data_dir / "annotations"
     annotations_dir.mkdir(parents=True, exist_ok=True)
 
-    # Check if already downloaded
     existing_images = list(images_dir.glob("*.jpg"))
     coco_annotations = annotations_dir / "openimages-mlperf.json"
-    # Only use quick check if max_images is explicitly specified
-    # Otherwise, we need to filter by MLPerf classes to determine actual count
+    # Only use quick check if max_images is explicitly specified;
+    # otherwise we need to filter by MLPerf classes to determine actual count
     if max_images and len(existing_images) >= max_images and coco_annotations.exists() and not force:
         logger.info(f"OpenImages already downloaded: {len(existing_images)} images")
         return {
@@ -795,11 +653,9 @@ def download_openimages(
             "num_samples": len(existing_images),
         }
 
-    # URLs for OpenImages v5 annotations (compatible with MLPerf)
     ANNOTATIONS_URL = "https://storage.googleapis.com/openimages/v5/validation-annotations-bbox.csv"
     CLASS_NAMES_URL = "https://storage.googleapis.com/openimages/v5/class-descriptions-boxable.csv"
 
-    # Step 1: Download annotations
     annotations_file = annotations_dir / "validation-annotations-bbox.csv"
     if not annotations_file.exists() or force:
         logger.info("Downloading annotations...")
@@ -810,8 +666,7 @@ def download_openimages(
         logger.info("Downloading class descriptions...")
         _download_file(CLASS_NAMES_URL, str(class_names_file))
 
-    # Step 2: Get MLPerf classes and filter annotations
-    # Official MLPerf uses these 264 classes from openimages_mlperf.sh
+    # Official MLPerf 264 classes
     # See: https://github.com/mlcommons/inference/blob/master/vision/classification_and_detection/tools/openimages_mlperf.sh
     MLPERF_CLASSES = [
         "Airplane", "Antelope", "Apple", "Backpack", "Balloon", "Banana",
@@ -866,7 +721,6 @@ def download_openimages(
 
     import csv
 
-    # Load class name to LabelName mapping
     logger.info("Loading class descriptions...")
     class_name_to_label = {}
     with open(class_names_file, 'r') as f:
@@ -876,7 +730,6 @@ def download_openimages(
                 label_name, display_name = row[0], row[1]
                 class_name_to_label[display_name] = label_name
 
-    # Get LabelNames for MLPerf classes
     mlperf_labels = set()
     missing_classes = []
     for class_name in MLPERF_CLASSES:
@@ -891,7 +744,6 @@ def download_openimages(
         logger.info(f"  This is expected - not all model classes appear in the validation set.")
         logger.debug(f"  Missing classes: {missing_classes[:20]}{'...' if len(missing_classes) > 20 else ''}")
 
-    # Extract image IDs that have MLPerf class annotations
     logger.info("Extracting image IDs with MLPerf classes...")
     image_ids = []
     seen_ids = set()
@@ -908,12 +760,10 @@ def download_openimages(
 
     logger.info(f"Found {len(image_ids)} images with MLPerf classes")
 
-    # Apply max_images limit only if explicitly specified
     if max_images and max_images < len(image_ids):
         image_ids = image_ids[:max_images]
         logger.info(f"Limited to {max_images} images (user specified)")
 
-    # Check if already complete (all filtered images downloaded)
     existing = set(p.stem for p in images_dir.glob("*.jpg"))
     if len(existing) >= len(image_ids) and coco_annotations.exists() and not force:
         logger.info(f"OpenImages already complete: {len(existing)} images (MLPerf filtered: {len(image_ids)})")
@@ -924,14 +774,12 @@ def download_openimages(
             "num_samples": len(existing),
         }
 
-    # Step 3: Download images from S3
     to_download = [img_id for img_id in image_ids if img_id not in existing]
 
     if to_download:
         logger.info(f"Downloading {len(to_download)} images ({len(existing)} already exist)...")
         _download_openimages_from_s3(to_download, images_dir, num_workers)
 
-    # Step 4: Convert to COCO format
     logger.info("Converting annotations to COCO format...")
     _convert_openimages_to_coco(
         annotations_file=annotations_file,
@@ -957,22 +805,16 @@ def _download_openimages_from_s3(
     images_dir: Path,
     num_workers: int = 8
 ) -> List[str]:
-    """Download images from AWS S3 open-images-dataset bucket.
-
-    Returns:
-        List of failed image IDs
-    """
     import time
     import ssl
     import urllib.request
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    # Disable SSL verification globally for this download
+    # Disable SSL verification for this download
     ssl_context = ssl.create_default_context()
     ssl_context.check_hostname = False
     ssl_context.verify_mode = ssl.CERT_NONE
 
-    # Try to use requests for better handling
     requests_session = None
     try:
         import requests
@@ -980,13 +822,11 @@ def _download_openimages_from_s3(
         from urllib3.util.retry import Retry
 
         requests_session = requests.Session()
-        requests_session.verify = False  # Disable SSL verification
+        requests_session.verify = False
 
-        # Suppress SSL warnings
         import urllib3
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-        # Configure retries
         retry = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
         adapter = HTTPAdapter(max_retries=retry)
         requests_session.mount('https://', adapter)
@@ -994,7 +834,6 @@ def _download_openimages_from_s3(
     except ImportError:
         pass
 
-    # Alternative download URLs for fallback
     DOWNLOAD_URLS = [
         "https://s3.amazonaws.com/open-images-dataset/validation/{image_id}.jpg",
         "https://open-images-dataset.s3.amazonaws.com/validation/{image_id}.jpg",
@@ -1003,12 +842,10 @@ def _download_openimages_from_s3(
     def download_one(image_id: str, force_redownload: bool = False) -> Optional[str]:
         dest = images_dir / f"{image_id}.jpg"
 
-        # Check if file exists and is valid (> 1KB)
         if dest.exists() and not force_redownload:
             if dest.stat().st_size > 1000:
                 return image_id
             else:
-                # File is corrupted, delete and re-download
                 dest.unlink()
 
         last_error = None
@@ -1027,19 +864,17 @@ def _download_openimages_from_s3(
                         with urllib.request.urlopen(req, context=ssl_context, timeout=60) as resp:
                             content = resp.read()
 
-                    # Verify content size before writing
                     if len(content) < 1000:
                         last_error = f"Content too small ({len(content)} bytes)"
                         if attempt < 2:
                             time.sleep(2 ** attempt)
                             continue
                         else:
-                            break  # Try next URL
+                            break
 
                     with open(dest, 'wb') as f:
                         f.write(content)
 
-                    # Verify written file
                     if dest.stat().st_size > 1000:
                         return image_id
                     else:
@@ -1048,16 +883,15 @@ def _download_openimages_from_s3(
                         if attempt < 2:
                             time.sleep(2 ** attempt)
                             continue
-                        break  # Try next URL
+                        break
 
                 except Exception as e:
                     last_error = str(e)
                     if attempt < 2:
                         time.sleep(2 ** attempt)
                     else:
-                        break  # Try next URL
+                        break
 
-        # All URLs failed
         if dest.exists():
             dest.unlink()
         return None
@@ -1085,7 +919,6 @@ def _download_openimages_from_s3(
     print()
     logger.info(f"Downloaded {downloaded} images, {failed} failed")
 
-    # Log failed image IDs
     if failed_ids:
         failed_log = images_dir.parent.parent / "failed_downloads.txt"
         with open(failed_log, 'w') as f:
@@ -1104,16 +937,13 @@ def _convert_openimages_to_coco(
     images_dir: Path,
     output_file: Path,
 ) -> None:
-    """Convert OpenImages annotations to COCO format.
-
-    IMPORTANT: Uses only the 264 MLPerf classes with sequential category_ids (1-264).
+    """Uses only the 264 MLPerf classes with sequential category_ids (1-264).
     This matches the MLPerf RetinaNet model output format where class indices
-    correspond to the alphabetically sorted MLPerf class list.
-    """
+    correspond to the alphabetically sorted MLPerf class list."""
     import csv
     import json
 
-    # MLPerf uses these 264 classes (alphabetically sorted - this is the model's class order!)
+    # MLPerf 264 classes, alphabetically sorted (this is the model's class order)
     MLPERF_CLASSES = [
         "Airplane", "Antelope", "Apple", "Backpack", "Balloon", "Banana",
         "Barrel", "Baseball bat", "Baseball glove", "Bee", "Beer", "Bench",
@@ -1165,7 +995,6 @@ def _convert_openimages_to_coco(
         "Woman", "Zebra", "Zucchini",
     ]
 
-    # Load display name -> LabelName mapping from class descriptions
     display_to_label = {}
     with open(class_names_file, 'r') as f:
         reader = csv.reader(f)
@@ -1174,21 +1003,19 @@ def _convert_openimages_to_coco(
                 label_name, display_name = row[0], row[1]
                 display_to_label[display_name] = label_name
 
-    # Build class_map with SEQUENTIAL category_ids (1-264) for MLPerf classes ONLY
-    # This matches the model's output class indices (0-263) when we add 1
-    class_map = {}  # LabelName -> class_id (1-indexed, sequential)
-    class_names = {}  # class_id -> display_name
+    # Sequential category_ids (1-264) matching model output class indices (0-263) + 1
+    class_map = {}
+    class_names = {}
 
     for idx, display_name in enumerate(MLPERF_CLASSES):
         if display_name in display_to_label:
             label_name = display_to_label[display_name]
-            class_id = idx + 1  # 1-indexed: class 0 -> category_id 1
+            class_id = idx + 1  # 1-indexed
             class_map[label_name] = class_id
             class_names[class_id] = display_name
 
     logger.info(f"Built class mapping for {len(class_map)} MLPerf classes (category_ids 1-{len(class_map)})")
 
-    # Load annotations
     image_id_set = set(image_ids)
     annotations_by_image = {}
 
@@ -1213,7 +1040,6 @@ def _convert_openimages_to_coco(
                 'IsGroupOf': int(row.get('IsGroupOf', 0)),
             })
 
-    # Build COCO format
     coco = {
         'info': {
             'description': 'OpenImages MLPerf subset',
@@ -1233,7 +1059,6 @@ def _convert_openimages_to_coco(
         if not img_path.exists():
             continue
 
-        # Get image dimensions
         try:
             from PIL import Image
             with Image.open(img_path) as img:
@@ -1249,7 +1074,6 @@ def _convert_openimages_to_coco(
             'height': height,
         })
 
-        # Add annotations for this image
         for ann in annotations_by_image.get(image_id, []):
             label_name = ann['LabelName']
             if label_name not in class_map:
@@ -1274,7 +1098,6 @@ def _convert_openimages_to_coco(
             })
             annotation_id += 1
 
-    # Write COCO JSON
     with open(output_file, 'w') as f:
         json.dump(coco, f)
 
@@ -1287,18 +1110,6 @@ def _resize_coco_images(
     prompts_file: Path,
     target_size: int = 1024
 ) -> int:
-    """
-    Resize COCO images to target size for SDXL FID computation.
-
-    Args:
-        source_dir: Directory with original COCO images (val2014)
-        output_dir: Directory to save resized images (coco-1024)
-        prompts_file: TSV file with image IDs to resize
-        target_size: Target image size (1024 for SDXL)
-
-    Returns:
-        Number of images resized
-    """
     try:
         from PIL import Image
     except ImportError:
@@ -1307,7 +1118,6 @@ def _resize_coco_images(
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Read image IDs from prompts file
     image_ids = []
     with open(prompts_file, 'r') as f:
         for line in f:
@@ -1319,10 +1129,8 @@ def _resize_coco_images(
 
     resized_count = 0
     for i, image_id in enumerate(image_ids):
-        # Find source image
         source_path = source_dir / f"COCO_val2014_{int(image_id):012d}.jpg"
         if not source_path.exists():
-            # Try alternative naming
             source_path = source_dir / f"{image_id}.jpg"
             if not source_path.exists():
                 continue
@@ -1334,23 +1142,18 @@ def _resize_coco_images(
 
         try:
             with Image.open(source_path) as img:
-                # Convert to RGB if needed
                 if img.mode != 'RGB':
                     img = img.convert('RGB')
 
-                # Resize to target size (center crop + resize)
                 width, height = img.size
                 min_dim = min(width, height)
 
-                # Center crop to square
                 left = (width - min_dim) // 2
                 top = (height - min_dim) // 2
                 img = img.crop((left, top, left + min_dim, top + min_dim))
 
-                # Resize to target
                 img = img.resize((target_size, target_size), Image.LANCZOS)
 
-                # Save as PNG
                 img.save(output_path, 'PNG')
                 resized_count += 1
 
@@ -1370,21 +1173,6 @@ def download_coco2014(
     download_images: bool = False,
     num_samples: int = 5000
 ) -> Dict[str, str]:
-    """
-    Download COCO 2014 captions dataset for SDXL text-to-image benchmark.
-
-    For MLPerf SDXL benchmark, downloads the captions from COCO 2014 validation set
-    and creates a prompt file in the MLCommons format.
-
-    Args:
-        output_dir: Directory to save dataset
-        force: Force re-download
-        download_images: Whether to download reference images (large, ~6GB)
-        num_samples: Number of samples to use (MLPerf uses 5000)
-
-    Returns:
-        Dictionary with dataset paths
-    """
     import json
     import zipfile
 
@@ -1396,7 +1184,6 @@ def download_coco2014(
 
     dataset_info = DATASET_REGISTRY["coco2014"]
 
-    # Download annotations
     annotations_zip = output_path / dataset_info["captions"]["filename"]
     annotations_dir = data_dir / "annotations"
 
@@ -1411,12 +1198,10 @@ def download_coco2014(
                 expected_size_mb=dataset_info["captions"]["size_mb"]
             )
 
-        # Extract annotations
         logger.info("Extracting annotations...")
         with zipfile.ZipFile(annotations_zip, 'r') as zip_ref:
             zip_ref.extractall(data_dir)
 
-    # Load captions and create prompts file
     prompts_file = data_dir / "coco-1024.tsv"
     prompts_txt = data_dir / "prompts.txt"
 
@@ -1433,12 +1218,11 @@ def download_coco2014(
             if image_id not in image_to_caption:
                 image_to_caption[image_id] = ann['caption']
 
-        # Create image_id to filename mapping
         id_to_filename = {}
         for img in coco_data['images']:
             id_to_filename[img['id']] = img['file_name']
 
-        # Write prompts in TSV format (MLCommons format)
+        # TSV format: image_id<tab>caption
         with open(prompts_file, 'w', encoding='utf-8') as tsv_f, \
              open(prompts_txt, 'w', encoding='utf-8') as txt_f:
 
@@ -1447,25 +1231,20 @@ def download_coco2014(
                 if count >= num_samples:
                     break
 
-                # Clean caption
                 caption = caption.strip().replace('\t', ' ').replace('\n', ' ')
 
-                # TSV format: image_id<tab>caption
                 tsv_f.write(f"{image_id}\t{caption}\n")
-                # Simple text format: one caption per line
                 txt_f.write(f"{caption}\n")
                 count += 1
 
         logger.info(f"Created prompts file with {count} samples")
 
-    # Download and resize reference images for FID computation
     images_dir = data_dir / "coco-1024"
 
     if download_images:
         images_zip = output_path / dataset_info["images"]["filename"]
         val_dir = data_dir / "val2014"
 
-        # Download if needed
         if not val_dir.exists() and not images_dir.exists():
             if not images_zip.exists() or force:
                 logger.info(f"Downloading COCO 2014 validation images (~{dataset_info['images']['size_gb']} GB)...")
@@ -1476,17 +1255,14 @@ def download_coco2014(
                     expected_size_mb=dataset_info["images"]["size_gb"] * 1024
                 )
 
-            # Extract images
             logger.info("Extracting images...")
             with zipfile.ZipFile(images_zip, 'r') as zip_ref:
                 zip_ref.extractall(data_dir)
 
-        # Resize images to 1024x1024 for SDXL FID computation
         if val_dir.exists() and not images_dir.exists():
             logger.info("Resizing images to 1024x1024 for SDXL benchmark...")
             _resize_coco_images(val_dir, images_dir, prompts_file, target_size=1024)
 
-    # Download MLCommons pre-computed files for official submission
     fid_stats_file = data_dir / "val2014.npz"
     # MLCommons expects latents/latents.pt (subdirectory)
     latents_dir = data_dir / "latents"
@@ -1494,7 +1270,7 @@ def download_coco2014(
     latents_file = latents_dir / "latents.pt"
     mlcommons_captions = data_dir / "captions_source.tsv"
 
-    # Download FID statistics (required for MLCommons-compliant FID computation)
+    # Required for MLCommons-compliant FID computation
     if "fid_statistics" in dataset_info:
         if not fid_stats_file.exists() or force:
             logger.info("Downloading MLCommons FID statistics (val2014.npz)...")
@@ -1508,8 +1284,8 @@ def download_coco2014(
                 logger.warning(f"Failed to download FID statistics: {e}")
                 logger.warning("FID computation will use reference images instead (not MLCommons-compliant)")
 
-    # Download pre-generated latents (required for reproducibility in closed division)
-    # MLCommons latents.pt is a single tensor (1, 4, 128, 128) ≈ 256KB, shared by all samples
+    # Required for reproducibility in closed division
+    # MLCommons latents.pt is a single tensor (1, 4, 128, 128) ~256KB, shared by all samples
     if "latents" in dataset_info:
         if not latents_file.exists() or force:
             logger.info("Downloading MLCommons pre-generated latents...")
@@ -1523,7 +1299,6 @@ def download_coco2014(
                 logger.warning(f"Failed to download latents: {e}")
                 logger.warning("Latents will be generated locally at first run (seed=0)")
 
-    # Download official MLCommons captions file
     # For closed division, the EXACT MLCommons prompts must be used
     if "captions_tsv" in dataset_info:
         if not mlcommons_captions.exists() or force:
@@ -1549,7 +1324,6 @@ def download_coco2014(
                     if not line:
                         continue
                     parts = line.split('\t')
-                    # Skip header
                     if parts[0] == 'id':
                         continue
                     if len(parts) >= 3:
@@ -1563,7 +1337,6 @@ def download_coco2014(
                 f"({count} prompts)"
             )
 
-    # Count samples
     actual_samples = sum(1 for _ in open(prompts_file, 'r'))
 
     logger.info(f"COCO 2014 dataset ready at {data_dir}")
@@ -1585,18 +1358,6 @@ def download_dataset(
     subset: Optional[str] = None,
     force: bool = False
 ) -> Dict[str, str]:
-    """
-    Download a dataset by name.
-
-    Args:
-        dataset_name: "imagenet", "squad", "openimages", "librispeech", or "coco2014"
-        output_dir: Directory to save dataset
-        subset: Optional subset name
-        force: Force re-download
-
-    Returns:
-        Dictionary with dataset paths
-    """
     if dataset_name == "imagenet":
         return download_imagenet(output_dir, force)
     elif dataset_name == "squad":
@@ -1614,7 +1375,6 @@ def download_dataset(
 
 
 def list_available_datasets() -> Dict[str, str]:
-    """List available datasets."""
     return {
         "imagenet": DATASET_REGISTRY["imagenet"]["description"],
         "squad": DATASET_REGISTRY["squad"]["description"],
@@ -1625,25 +1385,12 @@ def list_available_datasets() -> Dict[str, str]:
 
 
 def get_dataset_info(dataset_name: str) -> Dict:
-    """Get dataset information."""
     if dataset_name not in DATASET_REGISTRY:
         raise ValueError(f"Unknown dataset: {dataset_name}")
     return DATASET_REGISTRY[dataset_name]
 
 
 def redownload_corrupted_openimages(data_path: str, num_workers: int = 8) -> int:
-    """
-    Re-download corrupted OpenImages files.
-
-    Checks for corrupted images (< 1KB or unreadable) and re-downloads them.
-
-    Args:
-        data_path: Path to OpenImages dataset directory
-        num_workers: Number of parallel download workers
-
-    Returns:
-        Number of files re-downloaded
-    """
     from PIL import Image
 
     data_dir = Path(data_path)
@@ -1655,18 +1402,15 @@ def redownload_corrupted_openimages(data_path: str, num_workers: int = 8) -> int
         logger.error(f"Images directory not found in {data_path}")
         return 0
 
-    # Find corrupted images
     corrupted = []
     logger.info("Checking for corrupted images...")
 
     for img_path in images_dir.glob("*.jpg"):
         try:
-            # Check file size
             if img_path.stat().st_size < 1000:
                 corrupted.append(img_path.stem)
                 continue
 
-            # Try to open image
             with Image.open(img_path) as img:
                 img.verify()
         except Exception:
@@ -1678,16 +1422,13 @@ def redownload_corrupted_openimages(data_path: str, num_workers: int = 8) -> int
 
     logger.info(f"Found {len(corrupted)} corrupted images, re-downloading...")
 
-    # Delete corrupted files
     for image_id in corrupted:
         img_path = images_dir / f"{image_id}.jpg"
         if img_path.exists():
             img_path.unlink()
 
-    # Re-download
     _download_openimages_from_s3(corrupted, images_dir, num_workers)
 
-    # Also clear preprocessed cache for these images
     cache_dir = data_dir / "preprocessed_cache"
     if cache_dir.exists():
         for image_id in corrupted:

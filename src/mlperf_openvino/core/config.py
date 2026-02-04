@@ -1,6 +1,4 @@
-"""
-Configuration management for MLPerf OpenVINO Benchmark.
-"""
+"""Configuration for MLPerf OpenVINO Benchmark."""
 
 from dataclasses import dataclass, field
 from enum import Enum
@@ -64,27 +62,23 @@ class OpenVINOConfig:
     device_properties: Dict[str, str] = field(default_factory=dict)
 
     def get_device_prefix(self) -> str:
-        """Get the device prefix (e.g., 'NPU' from 'NPU.0' or 'NPU')."""
         device = self.device.upper()
         if "." in device:
             return device.split(".")[0]
         return device
 
     def is_accelerator_device(self) -> bool:
-        """Check if the configured device is a multi-die accelerator (not CPU/GPU)."""
         device = self.device.upper()
         return device not in ("CPU", "GPU", "AUTO", "MULTI", "HETERO")
 
 
     def is_multi_device(self) -> bool:
-        """Check if using multiple dies (device without die number like 'NPU' not 'NPU.0')."""
         device = self.device.upper()
         if not self.is_accelerator_device():
             return False
         return "." not in device
 
     def is_specific_die(self) -> bool:
-        """Check if a specific die is selected (e.g., 'NPU.0')."""
         device = self.device.upper()
         if not self.is_accelerator_device():
             return False
@@ -92,49 +86,6 @@ class OpenVINOConfig:
             return False
         suffix = device.split(".", 1)[1]
         return suffix.isdigit()
-
-    def to_properties(self) -> Dict[str, Any]:
-        """Convert to OpenVINO properties dictionary."""
-        if self.is_accelerator_device():
-            return self.to_accelerator_properties()
-        else:
-            return self.to_cpu_properties()
-
-    def to_cpu_properties(self) -> Dict[str, Any]:
-        """Get CPU-specific compilation properties."""
-        properties = {
-            "NUM_STREAMS": self.num_streams if self.num_streams != "AUTO" else "AUTO",
-            "INFERENCE_NUM_THREADS": self.num_threads if self.num_threads > 0 else None,
-            "CACHE_DIR": self.cache_dir,
-            "PERFORMANCE_HINT": self.performance_hint,
-        }
-
-        properties["AFFINITY"] = "CORE" if self.bind_thread else "NONE"
-        if self.threads_per_stream > 0:
-            properties["INFERENCE_THREADS_PER_STREAM"] = self.threads_per_stream
-
-        return {k: v for k, v in properties.items() if v is not None}
-
-    def to_accelerator_properties(self) -> Dict[str, Any]:
-        """Get accelerator-specific compilation properties."""
-        properties = {
-            "NUM_STREAMS": self.num_streams if self.num_streams != "AUTO" else "AUTO",
-            "CACHE_DIR": self.cache_dir,
-            "PERFORMANCE_HINT": self.performance_hint,
-        }
-
-        for key, value in self.device_properties.items():
-            try:
-                if value.isdigit():
-                    properties[key] = int(value)
-                elif value.upper() in ('TRUE', 'FALSE'):
-                    properties[key] = value.upper() == 'TRUE'
-                else:
-                    properties[key] = value
-            except (AttributeError, ValueError):
-                properties[key] = value
-
-        return {k: v for k, v in properties.items() if v is not None}
 
 
 @dataclass

@@ -22,24 +22,6 @@ class SUTFactory:
         decoder_path: Optional[str] = None,
         model_path: Optional[str] = None,
     ) -> Any:
-        """Create the appropriate multi-die SUT for the given model type.
-
-        Args:
-            model_type: Type of model (RESNET50, BERT, RETINANET, WHISPER, SDXL)
-            config: Benchmark configuration
-            qsl: Query Sample Library
-            backend: Optional backend for fallback (Python SUTs)
-            encoder_path: Path to encoder model (for Whisper)
-            decoder_path: Path to decoder model (for Whisper)
-            model_path: Path to model directory (for SDXL)
-
-        Returns:
-            Configured SUT instance
-
-        Raises:
-            RuntimeError: If C++ SUT not available and no backend provided
-            ValueError: If model type not supported
-        """
         is_accuracy_mode = config.test_mode == TestMode.ACCURACY_ONLY
 
         if model_type == ModelType.RESNET50:

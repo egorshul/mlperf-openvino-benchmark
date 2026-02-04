@@ -1,5 +1,3 @@
-"""Whisper ASR Multi-Die System Under Test."""
-
 import array
 import logging
 import re
@@ -53,9 +51,7 @@ def _print_progress(completed: int, total: int, start_time: float) -> None:
 
 
 class WhisperMultiDieSUT:
-    """Whisper ASR SUT for multi-die accelerators.
-
-    Loads one OVModelForSpeechSeq2Seq per die with the encoder compiled
+    """Loads one OVModelForSpeechSeq2Seq per die with the encoder compiled
     on the accelerator and the decoder on CPU. Offline mode distributes
     samples across dies in parallel; Server mode uses round-robin dispatch.
     """
@@ -95,7 +91,6 @@ class WhisperMultiDieSUT:
         self._setup_models()
 
     def _discover_device_dies(self, device: str) -> List[str]:
-        """Return sorted list of sub-device identifiers (e.g. NPU.0, NPU.1)."""
         import openvino as ov
 
         core = ov.Core()
@@ -103,7 +98,6 @@ class WhisperMultiDieSUT:
         return sorted(d for d in core.available_devices if pattern.match(d))
 
     def _setup_models(self) -> None:
-        """Load one model per accelerator die."""
         from transformers import AutoProcessor
 
         if not OPTIMUM_AVAILABLE:
@@ -156,7 +150,6 @@ class WhisperMultiDieSUT:
         )
 
     def _load_optimum_model(self) -> Any:
-        """Load OVModelForSpeechSeq2Seq on CPU."""
         model_dir = str(self.model_path)
         try:
             return OVModelForSpeechSeq2Seq.from_pretrained(
@@ -174,7 +167,6 @@ class WhisperMultiDieSUT:
         )
 
     def _patch_encoder_device(self, model: Any, die: str) -> None:
-        """Recompile encoder on the target accelerator die."""
         import openvino as ov
 
         core = ov.Core()
@@ -193,7 +185,6 @@ class WhisperMultiDieSUT:
         model.encoder.request = core.compile_model(encoder_model, die, ov_config)
 
     def _process_sample(self, sample_idx: int, model: Any) -> str:
-        """Transcribe a single audio sample."""
         import torch
 
         features = self.qsl.get_features(sample_idx)
@@ -220,7 +211,6 @@ class WhisperMultiDieSUT:
             self._issue_queries_server(query_samples)
 
     def _issue_queries_offline(self, query_samples: List[Any]) -> None:
-        """Offline: distribute samples across dies and run in parallel."""
         total = len(query_samples)
         num_dies = len(self._models)
         self._start_time = time.time()
@@ -232,7 +222,7 @@ class WhisperMultiDieSUT:
             self._issue_queries_offline_sequential(query_samples)
             return
 
-        # Round-robin distribution
+        # Round-robin distribution across dies
         die_batches: List[List[Tuple[Any, int]]] = [[] for _ in range(num_dies)]
         for i, sample in enumerate(query_samples):
             die_batches[i % num_dies].append((sample, sample.index))
@@ -278,7 +268,6 @@ class WhisperMultiDieSUT:
         lg.QuerySamplesComplete(responses)
 
     def _issue_queries_offline_sequential(self, query_samples: List[Any]) -> None:
-        """Single-die Offline path."""
         total = len(query_samples)
         responses = []
         arrays = []
@@ -301,7 +290,6 @@ class WhisperMultiDieSUT:
         lg.QuerySamplesComplete(responses)
 
     def _issue_queries_server(self, query_samples: List[Any]) -> None:
-        """Server: round-robin across dies, respond per query."""
         for sample in query_samples:
             sample_idx = sample.index
             _name, model = self._models[self._model_index]

@@ -1,5 +1,3 @@
-"""Whisper ASR System Under Test implementations."""
-
 import array
 import logging
 import sys
@@ -50,7 +48,7 @@ def _print_progress(completed: int, total: int, start_time: float) -> None:
 
 
 def _generate_quiet(model, input_features, **kwargs):
-    """Call model.generate() suppressing benign HF warnings."""
+    """Suppress benign HuggingFace warnings during model.generate()."""
     import warnings
 
     tf_logger = logging.getLogger("transformers")
@@ -68,7 +66,6 @@ def _generate_quiet(model, input_features, **kwargs):
 
 
 class WhisperOptimumSUT:
-    """Whisper ASR SUT using Optimum-Intel OVModelForSpeechSeq2Seq."""
 
     def __init__(
         self,
@@ -209,7 +206,6 @@ class WhisperOptimumSUT:
 
 
 class WhisperSUT:
-    """Whisper ASR SUT with manual encoder-decoder inference (fallback)."""
 
     SOT_TOKEN = 50258
     EOT_TOKEN = 50257
@@ -451,7 +447,6 @@ class WhisperSUT:
 
 
 class WhisperEncoderOnlySUT:
-    """Whisper encoder-only SUT for benchmarking encoder performance."""
 
     def __init__(
         self,

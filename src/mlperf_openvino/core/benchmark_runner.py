@@ -531,11 +531,6 @@ class BenchmarkRunner:
         return self._results
 
     def _save_mlperf_accuracy_log(self) -> None:
-        """Save accuracy results in MLPerf-compatible format.
-
-        Writes mlperf_log_accuracy.json to the results directory.
-        This file is required for official MLPerf submission.
-        """
         if not self._accuracy_results:
             return
 
@@ -696,30 +691,6 @@ class BenchmarkRunner:
             if not fid_valid:
                 logger.warning(f"  FID Score {fid_score:.4f} not in [23.01086, 23.95007]")
 
-    def run_accuracy(self) -> Dict[str, float]:
-        """Run accuracy-only test."""
-        original_mode = self.config.test_mode
-        self.config.test_mode = TestMode.ACCURACY_ONLY
-
-        try:
-            self.run()
-        finally:
-            self.config.test_mode = original_mode
-
-        return self._accuracy_results
-
-    def run_performance(self) -> Dict[str, Any]:
-        """Run performance-only test."""
-        original_mode = self.config.test_mode
-        self.config.test_mode = TestMode.PERFORMANCE_ONLY
-
-        try:
-            results = self.run()
-        finally:
-            self.config.test_mode = original_mode
-
-        return results
-
     def save_results(self, output_path: Optional[str] = None) -> str:
         """Save benchmark results to file."""
         if output_path is None:
@@ -734,33 +705,6 @@ class BenchmarkRunner:
 
         logger.info(f"Results saved to {output_path}")
         return str(output_path)
-
-    def get_system_info(self) -> Dict[str, Any]:
-        """Get system information."""
-        import platform
-
-        try:
-            import psutil
-            cpu_info = {
-                "physical_cores": psutil.cpu_count(logical=False),
-                "logical_cores": psutil.cpu_count(logical=True),
-                "frequency_mhz": psutil.cpu_freq().current if psutil.cpu_freq() else None,
-                "memory_gb": psutil.virtual_memory().total / (1024**3),
-            }
-        except ImportError:
-            cpu_info = {}
-
-        info = {
-            "platform": platform.platform(),
-            "python_version": platform.python_version(),
-            "processor": platform.processor(),
-            **cpu_info,
-        }
-
-        if self.backend and self.backend.is_loaded:
-            info["backend"] = self.backend.get_info()
-
-        return info
 
     def print_summary(self) -> None:
         """Print accuracy summary to console."""

@@ -1,5 +1,3 @@
-"""CLI for MLPerf OpenVINO Benchmark."""
-
 import logging
 import sys
 from pathlib import Path
@@ -12,7 +10,6 @@ from .core.config import BenchmarkConfig, Scenario, TestMode, ModelType
 from .core.benchmark_runner import BenchmarkRunner
 from .utils.model_downloader import download_model
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -23,24 +20,11 @@ logger = logging.getLogger(__name__)
 @click.group()
 @click.version_option(version="1.0.0", prog_name="mlperf-ov")
 def main():
-    """
-    MLPerf v5.1 OpenVINO Benchmark Tool
-
-    A benchmark tool for measuring CPU inference performance using OpenVINO,
-    compatible with MLPerf Inference v5.1 specifications.
-
-    Supported models:
-    - ResNet50 (Image Classification on ImageNet)
-    - BERT-Large (Question Answering on SQuAD)
-    - RetinaNet (Object Detection on OpenImages)
-    - Whisper (Speech Recognition on LibriSpeech)
-    - SDXL (Text-to-Image on COCO 2014)
-    """
+    """MLPerf v5.1 OpenVINO Benchmark Tool."""
     pass
 
 
 def get_default_config(model: str) -> BenchmarkConfig:
-    """Get default configuration for a model."""
     if model == 'resnet50':
         return BenchmarkConfig.default_resnet50()
     elif model == 'bert':
@@ -115,23 +99,7 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         target_latency_ns: int, count: int, warmup: int, nireq_multiplier: int,
         auto_batch_timeout_ms: int, optimal_batch_size: int,
         explicit_batching: bool, batch_timeout_us: Optional[int], verbose: bool):
-    """
-    Run MLPerf benchmark.
-
-    Examples:
-
-        # ResNet50 benchmark
-        mlperf-ov run --model resnet50 --scenario Offline --mode performance
-
-        # BERT benchmark
-        mlperf-ov run --model bert --model-path ./models/bert.onnx --data-path ./data/squad
-
-        # RetinaNet benchmark
-        mlperf-ov run --model retinanet --mode accuracy
-
-        # Whisper benchmark
-        mlperf-ov run --model whisper --data-path ./data/librispeech
-    """
+    """Run MLPerf benchmark."""
     if verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
@@ -223,18 +191,16 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
             scenario_config.target_latency_ns = target_latency_ns
             click.echo(f"Custom target latency: {target_latency_ns / 1e6:.1f}ms (Open Division)")
 
-        # Explicit batching (Intel-style) for Server mode
         if explicit_batching:
             scenario_config.explicit_batching = True
             scenario_config.batch_timeout_us = batch_timeout_us if batch_timeout_us is not None else 2000
-            # Use CLI override if specified, otherwise default to 6 for explicit batching
+            # Default to nireq_multiplier=6 for explicit batching if not overridden
             if nireq_multiplier is None:
                 scenario_config.nireq_multiplier = 6
             explicit_batch = batch_size if batch_size > 1 else 8
             scenario_config.explicit_batch_size = explicit_batch
             click.echo(f"Explicit batching: batch={explicit_batch}, timeout={scenario_config.batch_timeout_us}us, nireq={scenario_config.nireq_multiplier}")
 
-    # Validate configuration
     if not benchmark_config.model.model_path:
         click.echo("Error: Model path is required. Use --model-path or download the model first.")
         click.echo(f"Run: mlperf-ov download --model {model}")
@@ -245,7 +211,6 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         _print_dataset_help(model)
         sys.exit(1)
 
-    # Print configuration summary
     click.echo(f"Model: {benchmark_config.model.name}")
     click.echo(f"Task: {benchmark_config.model.task}")
     click.echo(f"Mode: {mode}")
@@ -297,14 +262,12 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
 
 
 def _validate_accelerator_device(device: str) -> None:
-    """Validate accelerator device availability (silent unless error)."""
     try:
         from openvino import Core
         from .backends.device_discovery import validate_accelerator_device
 
         core = Core()
 
-        # Validate device
         is_valid, error = validate_accelerator_device(core, device)
         if not is_valid:
             click.echo(f"Error: {error}")
@@ -321,7 +284,6 @@ def _validate_accelerator_device(device: str) -> None:
 
 
 def _print_dataset_help(model: str) -> None:
-    """Print dataset download help for a model."""
     if model == 'resnet50':
         click.echo("Please download the ImageNet validation dataset.")
         click.echo("Run: mlperf-ov download-dataset --dataset imagenet")
@@ -349,19 +311,7 @@ def _print_dataset_help(model: str) -> None:
 @click.option('--batch-sizes', type=str, default='1,2,4,8',
               help='Batch sizes for RetinaNet (comma-separated, default: 1,2,4,8)')
 def download_model_cmd(model: str, output_dir: str, format: str, batch_sizes: str):
-    """
-    Download model files.
-
-    Examples:
-
-        mlperf-ov download-model --model resnet50 --output-dir ./models
-
-        mlperf-ov download-model --model bert --format onnx
-
-        mlperf-ov download-model --model whisper --format openvino
-
-        mlperf-ov download-model --model retinanet --format openvino --batch-sizes 1,2,4,8
-    """
+    """Download model files."""
     click.echo(f"Downloading {model} model...")
 
     output_path = Path(output_dir)
@@ -375,7 +325,7 @@ def download_model_cmd(model: str, output_dir: str, format: str, batch_sizes: st
                 click.echo("  Note: Whisper requires OpenVINO format, using --format openvino")
             paths = download_whisper_model(
                 str(output_path),
-                export_to_openvino=True,  # Always export to OpenVINO IR
+                export_to_openvino=True,
             )
             click.echo(f"Model downloaded to: {paths['model_path']}")
             if 'encoder_path' in paths:
@@ -393,7 +343,6 @@ def download_model_cmd(model: str, output_dir: str, format: str, batch_sizes: st
             click.echo(f"Model downloaded to: {paths['model_path']}")
         elif model == 'retinanet':
             from .utils.model_downloader import download_retinanet_model
-            # Parse batch sizes
             bs_list = [int(x.strip()) for x in batch_sizes.split(',')]
             convert_to_openvino = (format == 'openvino')
             paths = download_retinanet_model(
@@ -487,34 +436,11 @@ def info():
 @click.option('--force', is_flag=True, help='Force re-download')
 def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str],
                          count: Optional[int], with_images: bool, force: bool):
-    """
-    Download dataset files.
-
-    Examples:
-
-        # Download ImageNet validation subset
-        mlperf-ov download-dataset --dataset imagenet
-
-        # Download SQuAD v1.1
-        mlperf-ov download-dataset --dataset squad
-
-        # Download OpenImages validation set
-        mlperf-ov download-dataset --dataset openimages
-
-        # Download LibriSpeech dev-clean
-        mlperf-ov download-dataset --dataset librispeech --subset dev-clean
-
-        # Download COCO 2014 captions for SDXL (prompts only)
-        mlperf-ov download-dataset --dataset coco2014
-
-        # Download COCO 2014 with reference images for FID computation
-        mlperf-ov download-dataset --dataset coco2014 --with-images
-    """
+    """Download dataset files."""
     from .utils.dataset_downloader import download_dataset, get_dataset_info
 
     click.echo(f"\nDownloading {dataset} dataset...")
 
-    # Show dataset info
     try:
         info = get_dataset_info(dataset)
         click.echo(f"Description: {info.get('description', 'N/A')}")
@@ -531,11 +457,9 @@ def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str],
     click.echo("")
 
     try:
-        # Special handling for OpenImages with count limit
         if dataset == 'openimages':
             from .utils.dataset_downloader import download_openimages
             paths = download_openimages(output_dir, force=force, max_images=count)
-        # Special handling for COCO 2014 with images
         elif dataset == 'coco2014':
             from .utils.dataset_downloader import download_coco2014
             paths = download_coco2014(output_dir, force=force, download_images=with_images)
@@ -565,29 +489,7 @@ def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str],
 @click.option('--format', '-f', type=click.Choice(['onnx', 'openvino']),
               default='onnx', help='Model format')
 def setup_cmd(model: str, output_dir: str, format: str):
-    """
-    Download both model and dataset for a benchmark.
-
-    This is a convenience command that downloads everything needed
-    to run a benchmark.
-
-    Examples:
-
-        # Set up ResNet50 benchmark
-        mlperf-ov setup --model resnet50
-
-        # Set up BERT benchmark
-        mlperf-ov setup --model bert
-
-        # Set up RetinaNet benchmark (downloads ONNX and creates OpenVINO IR with batch sizes 1,2,4,8)
-        mlperf-ov setup --model retinanet --format openvino
-
-        # Set up Whisper benchmark with OpenVINO format
-        mlperf-ov setup --model whisper --format openvino
-
-        # Set up SDXL benchmark
-        mlperf-ov setup --model sdxl --format openvino
-    """
+    """Download both model and dataset for a benchmark."""
     from .utils.model_downloader import download_model, download_whisper_model, download_sdxl_model
     from .utils.model_downloader import download_retinanet_model
     from .utils.dataset_downloader import download_dataset
@@ -603,13 +505,12 @@ def setup_cmd(model: str, output_dir: str, format: str):
     click.echo("Step 1: Downloading model...")
     try:
         if model == 'whisper':
-            # Whisper always needs OpenVINO IR format for inference
-            # (WhisperOptimumSUT requires .xml/.bin files, not safetensors)
+            # Whisper requires OpenVINO IR format (WhisperOptimumSUT needs .xml/.bin files)
             if format != 'openvino':
                 click.echo("  Note: Whisper requires OpenVINO format, using --format openvino")
             model_paths = download_whisper_model(
                 str(models_dir),
-                export_to_openvino=True,  # Always export to OpenVINO IR
+                export_to_openvino=True,
             )
             model_path = model_paths['model_path']
         elif model == 'sdxl':
@@ -620,7 +521,6 @@ def setup_cmd(model: str, output_dir: str, format: str):
             )
             model_path = model_paths['model_path']
         elif model == 'retinanet':
-            # RetinaNet: download ONNX and convert to OpenVINO with batch sizes 1, 2, 4, 8
             convert_to_openvino = (format == 'openvino')
             model_paths = download_retinanet_model(
                 str(models_dir),
@@ -640,7 +540,6 @@ def setup_cmd(model: str, output_dir: str, format: str):
         click.echo(f"  Error: {e}")
         sys.exit(1)
 
-    # Download dataset
     click.echo("Step 2: Downloading dataset...")
     try:
         if model == 'resnet50':
@@ -660,7 +559,6 @@ def setup_cmd(model: str, output_dir: str, format: str):
         click.echo(f"  Error: {e}")
         sys.exit(1)
 
-    # Print usage instructions
     click.echo(f"{'='*60}")
     click.echo("Setup complete! Run benchmark with:")
     click.echo(f"{'='*60}\n")

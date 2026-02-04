@@ -1,4 +1,4 @@
-"""MLPerf System Under Test (SUT) implementation for OpenVINO."""
+"""Generic SUT implementation for OpenVINO."""
 
 import array
 import logging
@@ -89,14 +89,6 @@ class OpenVINOSUT:
             self._setup_async_server()
 
     def _setup_async_server(self) -> None:
-        """
-        Setup optimized async inference for Server mode.
-
-        Uses AsyncInferQueue directly (like Intel MLPerf submissions):
-        - No Python worker threads (OpenVINO handles threading)
-        - GIL released during inference
-        - Immediate callback response
-        """
         self._start_time = time.time()
         self._issued_count = 0
 
@@ -118,18 +110,13 @@ class OpenVINOSUT:
 
         self._async_queue = AsyncInferQueue(compiled_model, num_requests)
 
-        # Define minimal callback - runs in OpenVINO thread (GIL acquired only for response)
         def inference_callback(infer_request, userdata):
-            """Minimal callback: get output and send response immediately."""
             query_id, sample_idx = userdata
 
             try:
-                # Get output tensor directly (minimal copy)
                 output = infer_request.get_output_tensor(0).data
-
                 self._predictions[sample_idx] = output.copy()
 
-                # Send response immediately using output data pointer
                 response = lg.QuerySampleResponse(
                     query_id,
                     output.ctypes.data,
@@ -224,12 +211,6 @@ class OpenVINOSUT:
         return results
 
     def _issue_query_offline(self, query_samples: List["lg.QuerySample"]) -> None:
-        """
-        Process queries in Offline mode.
-
-        In Offline mode, all samples are sent at once and processed
-        as fast as possible for maximum throughput.
-        """
         responses = []
         response_arrays = []  # Keep arrays alive until QuerySamplesComplete!
 
@@ -271,15 +252,6 @@ class OpenVINOSUT:
         self._query_count += 1
 
     def _issue_query_server(self, query_samples: List["lg.QuerySample"]) -> None:
-        """
-        Process queries in Server mode using direct AsyncInferQueue.
-
-        Optimized approach (like Intel/NVIDIA MLPerf submissions):
-        - Direct start_async on AsyncInferQueue (non-blocking when slots available)
-        - GIL released during inference wait
-        - Callback handles response immediately
-        """
-        # Cache references for faster access in hot path
         qsl = self.qsl
         async_queue = self._async_queue
         input_name = self.input_name
@@ -289,20 +261,15 @@ class OpenVINOSUT:
             sample_idx = qs.index
             query_id = qs.id
 
-            # Get input data directly from QSL cache (fastest path)
             if hasattr(qsl, '_loaded_samples') and sample_idx in qsl._loaded_samples:
                 input_data = qsl._loaded_samples[sample_idx]
             else:
                 features = qsl.get_features(sample_idx)
                 input_data = features.get("input", features.get(input_name))
 
-            # Convert dtype if needed (avoid copy if already correct)
             if input_dtype is not None and input_data.dtype != input_dtype:
                 input_data = input_data.astype(input_dtype, copy=False)
 
-            # Start async inference directly on AsyncInferQueue
-            # This is NON-BLOCKING when there's a free slot
-            # When all slots busy, it waits (with GIL released!)
             async_queue.start_async({input_name: input_data}, userdata=(query_id, sample_idx))
             self._issued_count += 1
 
