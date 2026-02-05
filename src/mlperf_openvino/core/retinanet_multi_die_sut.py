@@ -19,6 +19,7 @@ except ImportError:
     lg = None
 
 from .image_multi_die_sut_base import ImageMultiDieSUTBase
+from .config import Scenario
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,12 @@ class RetinaNetMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
     DEFAULT_EXPLICIT_BATCH_SIZE = 2  # Smaller for large inputs
     DEFAULT_BATCH_TIMEOUT_US = 1000  # Longer timeout for large input
     BATCH_SERVER_ACCURACY = True  # Use Offline-style batch dispatch for Server accuracy
+
+    def supports_native_benchmark(self) -> bool:
+        # RetinaNet accuracy uses OpenImagesQSL with 24K samples that can't be
+        # preloaded into C++ (lazy LRU cache). Disable native path for accuracy
+        # so it goes through Python SUT with batch dispatch (BATCH_SERVER_ACCURACY).
+        return self.scenario == Scenario.SERVER and not self._is_accuracy_mode
 
     def _check_cpp_availability(self) -> None:
         if not CPP_SUT_AVAILABLE:
