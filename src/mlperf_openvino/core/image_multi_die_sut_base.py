@@ -155,7 +155,7 @@ class ImageMultiDieSUTBase(ABC):
         return self._cpp_sut.get_completed_count()
 
     def _prevalidate_qsl_data(self) -> None:
-        """Register QSL data pointers in C++ for fast work-queue dispatch."""
+        """Register QSL data pointers in C++ for fast Server mode dispatch."""
         self._qsl_data_ready = False
         self._cpp_qsl_registered = False
 
@@ -212,35 +212,11 @@ class ImageMultiDieSUTBase(ABC):
         self._cpp_sut.reset_counters()
         self._cpp_sut.enable_direct_loadgen(True)
 
-        num_samples = len(query_samples)
-
-        # Try fast C++ work-queue dispatch (avoids Python-loop bottleneck).
-        # Pre-register QSL data pointers in C++ so issue threads can memcpy
-        # directly, bypassing per-sample Python→C++ overhead entirely.
-        if not self._qsl_validated:
-            self._prevalidate_qsl_data()
-            self._qsl_validated = True
-
-        if self._cpp_qsl_registered:
-            num_dies = self._cpp_sut.get_num_dies()
-            print(f"[Offline] {num_samples} samples via C++ work queue ({num_dies} dies)", file=sys.stderr)
-
-            # Push all queries to C++ work queue — per-die issue threads
-            # pull and dispatch in parallel with per-die request affinity.
-            query_ids = [qs.id for qs in query_samples]
-            sample_indices = [qs.index for qs in query_samples]
-            self._cpp_sut.issue_queries_server_fast(query_ids, sample_indices)
-
-            # Wait for completion with progress
-            self._wait_offline_completion(num_samples)
-            return
-
-        # Fallback: serial Python batch submission (used when QSL data
-        # can't be registered in C++, e.g. non-float32 or non-contiguous).
         batch_size = self.batch_size
+        num_samples = len(query_samples)
         num_batches = (num_samples + batch_size - 1) // batch_size
 
-        print(f"[Offline] {num_samples} samples, batch_size={batch_size} (Python loop)", file=sys.stderr)
+        print(f"[Offline] {num_samples} samples, batch_size={batch_size}", file=sys.stderr)
 
         print(f"[Preprocess] ", end="", file=sys.stderr)
         i = 0
@@ -287,12 +263,6 @@ class ImageMultiDieSUTBase(ABC):
 
         print(f" {batches_submitted}/{num_batches} batches", file=sys.stderr)
 
-        self._wait_offline_completion(num_samples)
-
-    def _wait_offline_completion(self, num_samples: int) -> None:
-        """Poll C++ completed count until all samples are done."""
-        import sys
-
         print(f"[Inference] ", end="", file=sys.stderr)
         last_completed = 0
         wait_start = time.time()
@@ -315,7 +285,7 @@ class ImageMultiDieSUTBase(ABC):
                 print(f"\n[WARN] Stalled at {completed}/{num_samples}", file=sys.stderr)
                 wait_start = time.time()
 
-            time.sleep(0.01)
+            time.sleep(0.1)
 
         while dots_printed < 10:
             print(".", end="", file=sys.stderr, flush=True)
@@ -376,7 +346,7 @@ class ImageMultiDieSUTBase(ABC):
         self._cpp_sut.wait_all()
 
     def _flush_accuracy_queries(self) -> None:
-        """Process accumulated Server accuracy queries using Offline-style dispatch."""
+        """Process accumulated Server accuracy queries using Offline-style batching."""
         import sys
 
         query_samples = self._pending_accuracy_queries
@@ -389,25 +359,8 @@ class ImageMultiDieSUTBase(ABC):
         self._cpp_sut.reset_counters()
         self._cpp_sut.enable_direct_loadgen(True)
 
-        num_samples = len(query_samples)
-
-        # Try fast C++ work-queue dispatch
-        if not self._qsl_validated:
-            self._prevalidate_qsl_data()
-            self._qsl_validated = True
-
-        if self._cpp_qsl_registered:
-            print(f"[Server Accuracy] {num_samples} samples via C++ work queue", file=sys.stderr)
-
-            query_ids = [qs.id for qs in query_samples]
-            sample_indices = [qs.index for qs in query_samples]
-            self._cpp_sut.issue_queries_server_fast(query_ids, sample_indices)
-
-            self._wait_offline_completion(num_samples)
-            return
-
-        # Fallback: serial Python batch submission
         batch_size = self.batch_size
+        num_samples = len(query_samples)
         num_batches = (num_samples + batch_size - 1) // batch_size
 
         print(f"[Server Accuracy] {num_samples} samples, batch_size={batch_size}", file=sys.stderr)
@@ -455,7 +408,27 @@ class ImageMultiDieSUTBase(ABC):
 
         print(f" {batches_submitted}/{num_batches} batches", file=sys.stderr)
 
-        self._wait_offline_completion(num_samples)
+        # Wait for all inferences to complete
+        last_completed = 0
+        wait_start = time.time()
+
+        while True:
+            completed = self._cpp_sut.get_completed_count()
+            if completed >= num_samples:
+                break
+
+            if completed > last_completed:
+                last_completed = completed
+                wait_start = time.time()
+            elif time.time() - wait_start > 30:
+                print(f"\n[WARN] Stalled at {completed}/{num_samples}", file=sys.stderr)
+                wait_start = time.time()
+
+            time.sleep(0.1)
+
+        elapsed = time.time() - self._start_time
+        print(f"[Server Accuracy] Done: {num_samples} samples ({elapsed:.1f}s)", file=sys.stderr)
+        self._query_count += 1
 
     def get_sut(self):
         return lg.ConstructSUT(self.issue_queries, self.flush_queries)
