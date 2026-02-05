@@ -31,6 +31,7 @@ class RetinaNetMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
     DEFAULT_SERVER_NIREQ_MULTIPLIER = 2
     DEFAULT_EXPLICIT_BATCH_SIZE = 2  # Smaller for large inputs
     DEFAULT_BATCH_TIMEOUT_US = 1000  # Longer timeout for large input
+    BATCH_SERVER_ACCURACY = True  # Use Offline-style batch dispatch for Server accuracy
 
     def _check_cpp_availability(self) -> None:
         if not CPP_SUT_AVAILABLE:

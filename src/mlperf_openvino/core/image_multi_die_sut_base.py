@@ -28,6 +28,7 @@ class ImageMultiDieSUTBase(ABC):
     DEFAULT_SERVER_NIREQ_MULTIPLIER: int = 2
     DEFAULT_EXPLICIT_BATCH_SIZE: int = 4
     DEFAULT_BATCH_TIMEOUT_US: int = 500
+    BATCH_SERVER_ACCURACY: bool = False
 
     def __init__(
         self,
@@ -297,7 +298,7 @@ class ImageMultiDieSUTBase(ABC):
         # using the proven Offline-style batch dispatch. The one-at-a-time Server
         # dispatch path produces incorrect prediction-to-sample associations on
         # multi-die accelerators due to async callback/request reuse timing.
-        if self._is_accuracy_mode:
+        if self._is_accuracy_mode and self.BATCH_SERVER_ACCURACY:
             self._pending_accuracy_queries.extend(query_samples)
             return
 
