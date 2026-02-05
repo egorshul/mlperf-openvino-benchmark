@@ -87,6 +87,7 @@ class ImageMultiDieSUTBase(ABC):
         self._server_callback_set = False
         self._qsl_validated = False
         self._is_accuracy_mode = False
+        self._pending_accuracy_queries = []
 
         logger.debug(f"{self.MODEL_NAME}MultiDieSUT: device_prefix={device_prefix}, batch_size={self.batch_size}")
 
@@ -292,6 +293,14 @@ class ImageMultiDieSUTBase(ABC):
         self._query_count += 1
 
     def _issue_query_server(self, query_samples: List) -> None:
+        # In accuracy mode, accumulate queries and process them in flush_queries
+        # using the proven Offline-style batch dispatch. The one-at-a-time Server
+        # dispatch path produces incorrect prediction-to-sample associations on
+        # multi-die accelerators due to async callback/request reuse timing.
+        if self._is_accuracy_mode:
+            self._pending_accuracy_queries.extend(query_samples)
+            return
+
         if not self._server_callback_set:
             self._cpp_sut.enable_direct_loadgen(True)
             self._server_callback_set = True
@@ -329,7 +338,94 @@ class ImageMultiDieSUTBase(ABC):
             raise ValueError(f"Unsupported scenario: {self.scenario}")
 
     def flush_queries(self) -> None:
+        if self._pending_accuracy_queries:
+            self._flush_accuracy_queries()
         self._cpp_sut.wait_all()
+
+    def _flush_accuracy_queries(self) -> None:
+        """Process accumulated Server accuracy queries using Offline-style batching."""
+        import sys
+
+        query_samples = self._pending_accuracy_queries
+        self._pending_accuracy_queries = []
+
+        if not query_samples:
+            return
+
+        self._start_time = time.time()
+        self._cpp_sut.reset_counters()
+        self._cpp_sut.enable_direct_loadgen(True)
+
+        batch_size = self.batch_size
+        num_samples = len(query_samples)
+        num_batches = (num_samples + batch_size - 1) // batch_size
+
+        print(f"[Server Accuracy] {num_samples} samples, batch_size={batch_size}", file=sys.stderr)
+
+        i = 0
+        batches_submitted = 0
+        while i < num_samples:
+            end_idx = min(i + batch_size, num_samples)
+            actual_batch_size = end_idx - i
+
+            query_ids = []
+            sample_indices = []
+            batch_data = []
+
+            for j in range(i, end_idx):
+                qs = query_samples[j]
+                query_ids.append(qs.id)
+                sample_indices.append(qs.index)
+
+                input_data = self._get_input_data(qs.index)
+                if input_data.ndim == 4 and input_data.shape[0] == 1:
+                    input_data = input_data[0]
+                batch_data.append(input_data)
+
+            if actual_batch_size == batch_size:
+                batched_input = np.stack(batch_data, axis=0)
+            else:
+                padded = batch_data + [batch_data[-1]] * (batch_size - actual_batch_size)
+                batched_input = np.stack(padded, axis=0)
+
+            if batched_input.dtype != np.float32:
+                batched_input = batched_input.astype(np.float32)
+            if not batched_input.flags['C_CONTIGUOUS']:
+                batched_input = np.ascontiguousarray(batched_input)
+
+            self._cpp_sut.start_async_batch(
+                batched_input, query_ids, sample_indices, actual_batch_size
+            )
+
+            batches_submitted += 1
+            if num_batches <= 10 or batches_submitted % max(1, num_batches // 10) == 0:
+                print(".", end="", file=sys.stderr, flush=True)
+
+            i = end_idx
+
+        print(f" {batches_submitted}/{num_batches} batches", file=sys.stderr)
+
+        # Wait for all inferences to complete
+        last_completed = 0
+        wait_start = time.time()
+
+        while True:
+            completed = self._cpp_sut.get_completed_count()
+            if completed >= num_samples:
+                break
+
+            if completed > last_completed:
+                last_completed = completed
+                wait_start = time.time()
+            elif time.time() - wait_start > 30:
+                print(f"\n[WARN] Stalled at {completed}/{num_samples}", file=sys.stderr)
+                wait_start = time.time()
+
+            time.sleep(0.1)
+
+        elapsed = time.time() - self._start_time
+        print(f"[Server Accuracy] Done: {num_samples} samples ({elapsed:.1f}s)", file=sys.stderr)
+        self._query_count += 1
 
     def get_sut(self):
         return lg.ConstructSUT(self.issue_queries, self.flush_queries)
@@ -407,6 +503,7 @@ class ImageMultiDieSUTBase(ABC):
         self._query_count = 0
         self._server_callback_set = False
         self._qsl_validated = False
+        self._pending_accuracy_queries = []
         try:
             self._cpp_sut.clear_sample_data()
         except Exception:
