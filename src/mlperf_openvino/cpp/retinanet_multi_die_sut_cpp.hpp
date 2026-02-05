@@ -188,7 +188,7 @@ private:
 
     // Per-die batch queues - smaller than ResNet due to lower throughput
     static constexpr int BATCH_QUEUE_SIZE = 128;
-    static constexpr int MAX_DIES = 8;
+    static constexpr int MAX_DIES = 16;
     struct BatchItem {
         uint64_t query_ids[64];
         int sample_indices[64];
