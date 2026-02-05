@@ -71,30 +71,54 @@ class OpenVINOConfig:
     device_properties: Dict[str, str] = field(default_factory=dict)
 
     def get_device_prefix(self) -> str:
+        """Extract device prefix: 'NPU' from 'NPU', 'NPU.0', or 'NPU.0,NPU.2'."""
         device = self.device.upper()
-        if "." in device:
-            return device.split(".")[0]
-        return device
+        first = device.split(",")[0].strip()
+        if "." in first:
+            return first.split(".")[0]
+        return first
 
     def is_accelerator_device(self) -> bool:
-        device = self.device.upper()
-        return device not in ("CPU", "GPU", "AUTO", "MULTI", "HETERO")
+        prefix = self.get_device_prefix()
+        return prefix not in ("CPU", "GPU", "AUTO", "MULTI", "HETERO")
 
 
     def is_multi_device(self) -> bool:
+        if not self.is_accelerator_device():
+            return False
+        device = self.device.upper()
+        # "NPU" (all dies) or "NPU.0,NPU.2" (selected dies) — both are multi-device
+        return "," in device or "." not in device
+
+    def is_specific_die(self) -> bool:
+        """Single specific die, e.g. 'NPU.0' (not 'NPU' or 'NPU.0,NPU.2')."""
         device = self.device.upper()
         if not self.is_accelerator_device():
             return False
-        return "." not in device
-
-    def is_specific_die(self) -> bool:
-        device = self.device.upper()
-        if not self.is_accelerator_device():
+        if "," in device:
             return False
         if "." not in device:
             return False
         suffix = device.split(".", 1)[1]
         return suffix.isdigit()
+
+    def get_target_devices(self) -> Optional[List[str]]:
+        """Return explicit device list or None for auto-discovery.
+
+        'NPU'         -> None (discover all)
+        'NPU.0'       -> ['NPU.0']
+        'NPU.0,NPU.2' -> ['NPU.0', 'NPU.2']
+        """
+        device = self.device.upper()
+        if not self.is_accelerator_device():
+            return None
+        if "," in device:
+            return [d.strip() for d in device.split(",")]
+        if "." in device:
+            suffix = device.split(".", 1)[1]
+            if suffix.isdigit():
+                return [device]
+        return None
 
 
 @dataclass

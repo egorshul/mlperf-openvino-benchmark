@@ -95,10 +95,7 @@ class BenchmarkRunner:
             use_nhwc = getattr(self.config.model.preprocessing, 'output_layout', 'NHWC') == 'NHWC'
 
         if self.config.openvino.is_accelerator_device():
-            if self.config.openvino.is_specific_die():
-                target_devices = [device]
-            else:
-                target_devices = None
+            target_devices = self.config.openvino.get_target_devices()
             backend = MultiDeviceBackend(
                 model_path=self.config.model.model_path,
                 config=self.config.openvino,
