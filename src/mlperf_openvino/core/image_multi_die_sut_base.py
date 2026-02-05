@@ -335,7 +335,7 @@ class ImageMultiDieSUTBase(ABC):
         return lg.ConstructSUT(self.issue_queries, self.flush_queries)
 
     def supports_native_benchmark(self) -> bool:
-        return self.scenario == Scenario.SERVER
+        return self.scenario == Scenario.SERVER and not self._is_accuracy_mode
 
     def run_native_benchmark(
         self,
