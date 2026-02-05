@@ -65,12 +65,10 @@ class ImageMultiDieSUTBase(ABC):
             use_nhwc = getattr(config.model.preprocessing, 'output_layout', 'NHWC') == 'NHWC'
 
         server_config = config.model.server if hasattr(config.model, 'server') else None
-        offline_config = config.model.offline if hasattr(config.model, 'offline') else None
         if scenario == Scenario.SERVER:
             nireq_multiplier = getattr(server_config, 'nireq_multiplier', self.DEFAULT_SERVER_NIREQ_MULTIPLIER) if server_config else self.DEFAULT_SERVER_NIREQ_MULTIPLIER
         else:
-            configured = getattr(offline_config, 'nireq_multiplier', 0) if offline_config else 0
-            nireq_multiplier = configured if configured > 0 else self.DEFAULT_OFFLINE_NIREQ_MULTIPLIER
+            nireq_multiplier = self.DEFAULT_OFFLINE_NIREQ_MULTIPLIER
 
         device_prefix = config.openvino.get_device_prefix()
         self._cpp_sut = self._create_cpp_sut(

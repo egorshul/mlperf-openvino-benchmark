@@ -248,7 +248,6 @@ class BenchmarkConfig:
             min_query_count=offline_data.get("min_query_count", 24576),
             samples_per_query=offline_data.get("samples_per_query", 1),
             target_qps=offline_data.get("target_qps", 0.0),
-            nireq_multiplier=offline_data.get("nireq_multiplier", 0),
         )
 
         server_data = model_data.get("server", {})
