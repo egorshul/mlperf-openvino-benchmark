@@ -95,7 +95,19 @@ def get_card_and_die(device_name: str) -> Optional[Tuple[int, int]]:
 
 
 def validate_accelerator_device(core: "Core", device_name: str) -> Tuple[bool, str]:
-    """Validate that an accelerator device is available. Returns (is_valid, error_message)."""
+    """Validate that an accelerator device is available. Returns (is_valid, error_message).
+
+    Supports single device ('NPU', 'NPU.0') and comma-separated multi-die selection ('NPU.0,NPU.2').
+    """
+    # Handle comma-separated device selection (e.g., "NPU.0,NPU.2")
+    if "," in device_name:
+        parts = [p.strip() for p in device_name.split(",")]
+        for part in parts:
+            is_valid, error = validate_accelerator_device(core, part)
+            if not is_valid:
+                return False, error
+        return True, ""
+
     all_devices = core.available_devices
 
     if "." in device_name:

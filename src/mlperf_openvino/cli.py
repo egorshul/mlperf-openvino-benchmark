@@ -55,7 +55,7 @@ def get_default_config(model: str) -> BenchmarkConfig:
 @click.option('--config', '-c', type=click.Path(exists=True),
               help='Path to configuration file')
 @click.option('--device', '-d', type=str, default='CPU',
-              help='Device: CPU (default), NPU (all dies), NPU.0 (specific die)')
+              help='Device: CPU (default), NPU (all dies), NPU.0 (one die), NPU.0,NPU.2 (selected dies)')
 @click.option('--properties', '-p', type=str, default='',
               help='Device-specific properties (KEY=VALUE,KEY2=VALUE2,...)')
 @click.option('--num-threads', type=int, default=0,

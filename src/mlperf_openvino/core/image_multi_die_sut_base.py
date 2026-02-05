@@ -80,8 +80,10 @@ class ImageMultiDieSUTBase(ABC):
             nireq_multiplier
         )
 
-        if config.openvino.is_specific_die():
-            self._cpp_sut.set_target_devices([config.openvino.device])
+        # Set specific target devices if selected (e.g., NPU.0 or NPU.0,NPU.2)
+        target_devices = config.openvino.get_target_devices()
+        if target_devices is not None:
+            self._cpp_sut.set_target_devices(target_devices)
 
         self._start_time = 0.0
         self._query_count = 0

@@ -130,6 +130,9 @@ class SDXLMultiDieSUT:
 
         if target_device == "CPU":
             device_dies = ["CPU"]
+        elif "," in target_device:
+            # Comma-separated die selection (e.g., "NPU.0,NPU.2")
+            device_dies = [p.strip() for p in target_device.split(",")]
         elif re.match(r"^.+\.\d+$", target_device):
             device_dies = [target_device]
         else:

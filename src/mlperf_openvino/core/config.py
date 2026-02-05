@@ -71,30 +71,73 @@ class OpenVINOConfig:
     device_properties: Dict[str, str] = field(default_factory=dict)
 
     def get_device_prefix(self) -> str:
+        """Get the device prefix (e.g., 'NPU' from 'NPU.0', 'NPU', or 'NPU.0,NPU.2')."""
         device = self.device.upper()
+        # Handle comma-separated: "NPU.0,NPU.2" → take first entry
+        if "," in device:
+            first = device.split(",")[0].strip()
+            if "." in first:
+                return first.split(".")[0]
+            return first
         if "." in device:
             return device.split(".")[0]
         return device
 
     def is_accelerator_device(self) -> bool:
-        device = self.device.upper()
-        return device not in ("CPU", "GPU", "AUTO", "MULTI", "HETERO")
-
+        """Check if the configured device is a multi-die accelerator (not CPU/GPU)."""
+        prefix = self.get_device_prefix()
+        return prefix not in ("CPU", "GPU", "AUTO", "MULTI", "HETERO")
 
     def is_multi_device(self) -> bool:
+        """Check if using ALL dies (device without die number like 'NPU', not 'NPU.0' or 'NPU.0,NPU.2')."""
         device = self.device.upper()
         if not self.is_accelerator_device():
             return False
-        return "." not in device
+        return "." not in device and "," not in device
 
     def is_specific_die(self) -> bool:
+        """Check if a single specific die is selected (e.g., 'NPU.0')."""
         device = self.device.upper()
         if not self.is_accelerator_device():
+            return False
+        if "," in device:
             return False
         if "." not in device:
             return False
         suffix = device.split(".", 1)[1]
         return suffix.isdigit()
+
+    def is_selected_dies(self) -> bool:
+        """Check if multiple specific dies are selected (e.g., 'NPU.0,NPU.2')."""
+        device = self.device.upper()
+        if not self.is_accelerator_device():
+            return False
+        if "," not in device:
+            return False
+        parts = [p.strip() for p in device.split(",")]
+        for p in parts:
+            if "." not in p:
+                return False
+            suffix = p.split(".", 1)[1]
+            if not suffix.isdigit():
+                return False
+        return len(parts) >= 2
+
+    def get_target_devices(self) -> Optional[List[str]]:
+        """Get list of target devices for die selection.
+
+        Returns:
+            None if all dies should be used (bare prefix like 'NPU').
+            List of specific device names otherwise (e.g., ['NPU.0'] or ['NPU.0', 'NPU.2']).
+        """
+        if self.is_multi_device():
+            return None
+        device = self.device.upper()
+        if self.is_selected_dies():
+            return [p.strip() for p in device.split(",")]
+        if self.is_specific_die():
+            return [device]
+        return None
 
 
 @dataclass
