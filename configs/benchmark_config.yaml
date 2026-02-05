@@ -127,6 +127,7 @@ models:
       min_duration_ms: 60000  # MLPerf v5.1 official: 600000 (10 min)
       min_query_count: 500  # MLPerf v5.1 official: 24576
       target_qps: 10.0  # MLPerf v5.1 official: not set (defaults to 1000)
+      nireq_multiplier: 6  # Higher than default (2) to overlap NPU/CPU execution
 
     server:
       target_latency_ns: 100000000  # 100ms (from mlperf.conf)

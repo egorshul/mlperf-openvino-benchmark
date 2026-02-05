@@ -215,10 +215,8 @@ class RetinaNetSUT:
         final_scores = []
         final_labels = []
 
-        for class_id in range(NUM_CLASSES):
+        for class_id in np.unique(filtered_labels):
             class_mask = filtered_labels == class_id
-            if not class_mask.any():
-                continue
 
             class_boxes = filtered_boxes[class_mask]
             class_scores = filtered_scores[class_mask]
