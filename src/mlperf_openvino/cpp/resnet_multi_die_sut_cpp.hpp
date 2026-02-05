@@ -175,7 +175,7 @@ private:
 
     // Per-die batch queues (batcher dispatches round-robin, each die has own queue)
     static constexpr int BATCH_QUEUE_SIZE = 256;
-    static constexpr int MAX_DIES = 8;
+    static constexpr int MAX_DIES = 16;
     struct BatchItem {
         uint64_t query_ids[64];
         int sample_indices[64];

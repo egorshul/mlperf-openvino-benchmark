@@ -1,5 +1,3 @@
-"""RetinaNet multi-die SUT wrapper using ImageMultiDieSUTBase."""
-
 import logging
 from pathlib import Path
 from typing import Any, Dict
@@ -21,19 +19,26 @@ except ImportError:
     lg = None
 
 from .image_multi_die_sut_base import ImageMultiDieSUTBase
+from .config import Scenario
 
 logger = logging.getLogger(__name__)
 
 
 class RetinaNetMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
-    """RetinaNet multi-die SUT for NPU accelerators."""
 
     MODEL_NAME = "RetinaNet"
-    DEFAULT_OFFLINE_BATCH_SIZE = 2  # RetinaNet uses larger batches
+    DEFAULT_OFFLINE_BATCH_SIZE = 2  # Larger batches than ResNet
     DEFAULT_OFFLINE_NIREQ_MULTIPLIER = 2  # Lower than ResNet due to 800x800 input
     DEFAULT_SERVER_NIREQ_MULTIPLIER = 2
     DEFAULT_EXPLICIT_BATCH_SIZE = 2  # Smaller for large inputs
     DEFAULT_BATCH_TIMEOUT_US = 1000  # Longer timeout for large input
+    BATCH_SERVER_ACCURACY = True  # Use Offline-style batch dispatch for Server accuracy
+
+    def supports_native_benchmark(self) -> bool:
+        # RetinaNet accuracy uses OpenImagesQSL with 24K samples that can't be
+        # preloaded into C++ (lazy LRU cache). Disable native path for accuracy
+        # so it goes through Python SUT with batch dispatch (BATCH_SERVER_ACCURACY).
+        return self.scenario == Scenario.SERVER and not self._is_accuracy_mode
 
     def _check_cpp_availability(self) -> None:
         if not CPP_SUT_AVAILABLE:
@@ -61,7 +66,6 @@ class RetinaNetMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
         )
 
     def get_predictions(self) -> Dict[int, Dict[str, np.ndarray]]:
-        """Get stored predictions formatted for accuracy calculation."""
         cpp_preds = self._cpp_sut.get_predictions()
         result = {}
         for idx, pred in cpp_preds.items():
@@ -80,7 +84,6 @@ class RetinaNetMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
         return result
 
     def compute_accuracy(self) -> Dict[str, float]:
-        """Compute mAP accuracy using pycocotools."""
         predictions = self.get_predictions()
 
         if not predictions:
@@ -123,7 +126,6 @@ class RetinaNetMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
             import traceback
             traceback.print_exc()
 
-        # Fallback to basic mAP calculation
         pred_list = []
         indices = []
 
@@ -135,5 +137,4 @@ class RetinaNetMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
 
 
 def is_retinanet_multi_die_cpp_available() -> bool:
-    """Check if C++ multi-die SUT is available."""
     return CPP_SUT_AVAILABLE and LOADGEN_AVAILABLE

@@ -30,7 +30,6 @@ DEFAULT_NIREQ = 8
 
 
 class BertMultiDieSUTWrapper:
-    """BERT SUT wrapper for multi-die NPU accelerators."""
 
     def __init__(
         self,
@@ -89,7 +88,6 @@ class BertMultiDieSUTWrapper:
         logger.info(f"Devices: {self._cpp_sut.get_active_devices()}")
 
     def warmup(self, iterations: int = 2) -> None:
-        """Run warmup inferences on all dies."""
         if not self._is_loaded:
             raise RuntimeError("Model not loaded, call load() first")
         self._cpp_sut.warmup(iterations)
@@ -128,7 +126,6 @@ class BertMultiDieSUTWrapper:
             self._cpp_sut.register_sample(idx, input_ids, attention_mask, token_type_ids, seq_len)
             count += 1
 
-            # Print progress dots
             if total > 0:
                 progress = int(count * 10 / total)
                 while dots_printed < progress:
@@ -155,7 +152,6 @@ class BertMultiDieSUTWrapper:
         num_samples = len(query_samples)
         print(f"[Offline] {num_samples} samples, {len(SEQ_BUCKETS)} buckets", file=sys.stderr)
 
-        # Group by bucket
         print(f"[Bucketing] ", end="", file=sys.stderr)
         buckets: Dict[int, List[Tuple[int, int]]] = {i: [] for i in range(len(SEQ_BUCKETS))}
 
@@ -166,7 +162,6 @@ class BertMultiDieSUTWrapper:
         bucket_counts = [len(buckets[i]) for i in range(len(SEQ_BUCKETS))]
         print(f"{bucket_counts}", file=sys.stderr)
 
-        # Submit batches
         print(f"[Submit] ", end="", file=sys.stderr)
         buckets_submitted = 0
 
@@ -181,7 +176,6 @@ class BertMultiDieSUTWrapper:
 
         print(f" {buckets_submitted} buckets", file=sys.stderr)
 
-        # Wait for completion
         print(f"[Inference] ", end="", file=sys.stderr)
         last_completed = 0
         wait_start = time.time()

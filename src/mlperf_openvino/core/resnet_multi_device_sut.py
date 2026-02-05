@@ -1,9 +1,3 @@
-"""
-Multi-device SUT (System Under Test) for accelerators with multiple dies.
-
-Optimized for maximum throughput on multi-die accelerators.
-"""
-
 import array
 import logging
 import sys
@@ -37,15 +31,6 @@ logger = logging.getLogger(__name__)
 
 
 class ResNetMultiDeviceSUT:
-    """
-    System Under Test for multi-die accelerator inference.
-
-    Optimized for maximum throughput:
-    - Proper batching support (batch_size > 1)
-    - AsyncInferQueue per die for pipelining
-    - Round-robin distribution across dies
-    - Minimal Python overhead in hot path
-    """
 
     def __init__(
         self,
@@ -82,7 +67,6 @@ class ResNetMultiDeviceSUT:
         self._sample_count = 0
         self._start_time = 0.0
 
-        # Per-die async queues
         self._async_queues: Dict[str, AsyncInferQueue] = {}
         self._input_dtype = None
         self._issued_count = 0
@@ -90,14 +74,12 @@ class ResNetMultiDeviceSUT:
         self._die_index = 0
         self._die_lock = threading.Lock()
 
-        # Offline mode: accumulated responses
-        self._offline_responses: List[Tuple] = []  # (query_ids, response_arrays)
+        self._offline_responses: List[Tuple] = []
         self._offline_lock = threading.Lock()
 
         self._progress_thread_stop = False
         self._progress_thread = None
 
-        # Setup async queues
         self._setup_async_queues()
 
         logger.info(
@@ -105,7 +87,6 @@ class ResNetMultiDeviceSUT:
         )
 
     def _setup_async_queues(self) -> None:
-        """Setup async inference queues for all dies."""
         first_die = self.backend.active_devices[0]
         ctx = self.backend._die_contexts[first_die]
         compiled_model = ctx.compiled_model
@@ -122,14 +103,13 @@ class ResNetMultiDeviceSUT:
         else:
             self._input_dtype = np.float32
 
-        # Determine if model expects NCHW (channels at dim 1) or NHWC (channels at dim 3)
         # Model input shape: [N, C, H, W] for NCHW or [N, H, W, C] for NHWC
         input_shape = compiled_model.input(0).shape
         if len(input_shape) == 4:
             # Check if channels (3 for RGB) are at position 1 (NCHW) or 3 (NHWC)
             self._model_expects_nchw = (input_shape[1] == 3)
         else:
-            self._model_expects_nchw = True  # Default to NCHW
+            self._model_expects_nchw = True
         logger.debug(f"Model expects NCHW: {self._model_expects_nchw}, input shape: {input_shape}")
 
         for die_name in self.backend.active_devices:
@@ -144,18 +124,15 @@ class ResNetMultiDeviceSUT:
             logger.info(f"AsyncInferQueue for {die_name}: {num_requests} requests")
 
     def _make_callback(self, die_name: str):
-        """Create callback for async inference completion."""
         def callback(infer_request, userdata):
             query_ids, sample_indices, actual_batch_size, is_offline = userdata
             try:
                 output = infer_request.get_output_tensor(0).data
 
-                # Split batch output to individual samples
                 for i in range(actual_batch_size):
                     sample_idx = sample_indices[i]
                     query_id = query_ids[i]
 
-                    # Extract single sample from batch
                     if self.batch_size > 1:
                         sample_output = output[i].copy()
                     else:
@@ -187,13 +164,11 @@ class ResNetMultiDeviceSUT:
         return callback
 
     def _get_next_die(self) -> str:
-        """Get next die for round-robin distribution (lock-free for speed)."""
         idx = self._die_index
         self._die_index = (idx + 1) % len(self.backend.active_devices)
         return self.backend.active_devices[idx]
 
     def _start_progress_thread(self):
-        """Start progress monitoring thread."""
         self._progress_thread_stop = False
         self._start_time = time.time()
 
@@ -215,7 +190,6 @@ class ResNetMultiDeviceSUT:
         self._progress_thread.start()
 
     def _stop_progress_thread(self):
-        """Stop progress thread and print final stats."""
         self._progress_thread_stop = True
         if self._progress_thread:
             self._progress_thread.join(timeout=1.0)
@@ -230,7 +204,6 @@ class ResNetMultiDeviceSUT:
             sys.stderr.flush()
 
     def _issue_query_offline(self, query_samples: List["lg.QuerySample"]) -> None:
-        """Process queries in Offline mode with batching."""
         self._start_time = time.time()
         self._offline_responses.clear()
         self._issued_count = 0
@@ -249,7 +222,7 @@ class ResNetMultiDeviceSUT:
 
         i = 0
         while i < num_samples:
-            # Determine actual batch size (may be smaller at end)
+            # Actual batch size may be smaller at end
             end_idx = min(i + batch_size, num_samples)
             actual_batch_size = end_idx - i
 
@@ -277,7 +250,6 @@ class ResNetMultiDeviceSUT:
 
                 batch_data.append(input_data)
 
-            # Stack into batch tensor
             if actual_batch_size == batch_size:
                 batched_input = np.stack(batch_data, axis=0)
             else:
@@ -285,19 +257,16 @@ class ResNetMultiDeviceSUT:
                 padded = batch_data + [batch_data[-1]] * (batch_size - actual_batch_size)
                 batched_input = np.stack(padded, axis=0)
 
-            # Convert NHWC to NCHW if model expects NCHW
-            # Data from preprocessing is NHWC: [N, H, W, C], model expects NCHW: [N, C, H, W]
+            # Data from preprocessing is NHWC [N,H,W,C], model may expect NCHW [N,C,H,W]
             if self._model_expects_nchw and batched_input.ndim == 4 and batched_input.shape[3] == 3:
                 batched_input = np.transpose(batched_input, (0, 3, 1, 2))
 
-            # Convert dtype
             if input_dtype is not None and batched_input.dtype != input_dtype:
                 batched_input = batched_input.astype(input_dtype, copy=False)
 
             if not batched_input.flags['C_CONTIGUOUS']:
                 batched_input = np.ascontiguousarray(batched_input)
 
-            # Select die and submit
             die_name = self._get_next_die()
             async_queue = self._async_queues[die_name]
 
@@ -307,7 +276,6 @@ class ResNetMultiDeviceSUT:
             self._issued_count += actual_batch_size
             i = end_idx
 
-        # Wait for all to complete
         for async_queue in self._async_queues.values():
             async_queue.wait_all()
 
@@ -323,14 +291,11 @@ class ResNetMultiDeviceSUT:
         self._sample_count = self._completed_count
 
     def _issue_query_server(self, query_samples: List["lg.QuerySample"]) -> None:
-        """Process queries in Server mode (low latency, batch=1 typically)."""
         qsl = self.qsl
         input_name = self.input_name
         input_dtype = self._input_dtype
         batch_size = self.batch_size
 
-        # For Server mode, process immediately
-        # If batch_size > 1, we still need to batch, but for latency we use batch=1
         for qs in query_samples:
             sample_idx = qs.index
             query_id = qs.id
@@ -352,18 +317,16 @@ class ResNetMultiDeviceSUT:
                     # Replicate to fill batch (only first result matters)
                     input_data = np.stack([input_data] * batch_size, axis=0)
 
-            # Convert NHWC to NCHW if model expects NCHW
+            # Data from preprocessing is NHWC, model may expect NCHW
             if self._model_expects_nchw and input_data.ndim == 4 and input_data.shape[3] == 3:
                 input_data = np.transpose(input_data, (0, 3, 1, 2))
 
-            # Convert dtype
             if input_dtype is not None and input_data.dtype != input_dtype:
                 input_data = input_data.astype(input_dtype, copy=False)
 
             if not input_data.flags['C_CONTIGUOUS']:
                 input_data = np.ascontiguousarray(input_data)
 
-            # Select die and submit
             die_name = self._get_next_die()
             async_queue = self._async_queues[die_name]
 
@@ -376,7 +339,6 @@ class ResNetMultiDeviceSUT:
         self._query_count += 1
 
     def issue_queries(self, query_samples: List["lg.QuerySample"]) -> None:
-        """Process incoming queries."""
         if self.scenario == Scenario.OFFLINE:
             self._issue_query_offline(query_samples)
         elif self.scenario == Scenario.SERVER:
@@ -385,18 +347,15 @@ class ResNetMultiDeviceSUT:
             raise ValueError(f"Unsupported scenario: {self.scenario}")
 
     def flush_queries(self) -> None:
-        """Flush any pending queries."""
         for async_queue in self._async_queues.values():
             async_queue.wait_all()
 
         self._stop_progress_thread()
 
     def get_sut(self) -> "lg.ConstructSUT":
-        """Get the LoadGen SUT object."""
         return lg.ConstructSUT(self.issue_queries, self.flush_queries)
 
     def get_qsl(self) -> "lg.ConstructQSL":
-        """Get the LoadGen QSL object."""
         return lg.ConstructQSL(
             self.qsl.total_sample_count,
             self.qsl.performance_sample_count,

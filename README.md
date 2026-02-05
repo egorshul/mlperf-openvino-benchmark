@@ -1,38 +1,56 @@
-# MLPerf v5.1 OpenVINO Benchmark
+# MLPerf OpenVINO Benchmark
 
-MLPerf Inference v5.1 benchmark implementation using OpenVINO backend.
+MLPerf Inference benchmark implementation using OpenVINO backend.
 
 ## Supported Models
 
-| Model | Task | Dataset | Metric | Target (99%) |
-|-------|------|---------|--------|--------------|
-| ResNet50 | Image Classification | ImageNet | Top-1 | ≥ 75.70% |
-| BERT-Large | Question Answering | SQuAD v1.1 | F1 | ≥ 89.97% |
-| RetinaNet | Object Detection | OpenImages | mAP | ≥ 37.19% |
-| Whisper Large v3 | Speech Recognition | LibriSpeech | Word Acc | ≥ 96.95% |
-| SDXL | Text-to-Image | COCO 2014 | CLIP/FID | 31.68-31.81 |
+| Model | Task | Dataset | Metric | Target (99%) | Scenario |
+|-------|------|---------|--------|--------------|----------|
+| ResNet50-v1.5 | Image Classification | ImageNet 2012 | Top-1 Accuracy | ≥ 75.70% | Offline, Server |
+| BERT-Large | Question Answering | SQuAD v1.1 | F1 Score | ≥ 89.97% | Offline, Server |
+| RetinaNet | Object Detection | OpenImages | mAP | ≥ 37.19% | Offline, Server |
+| Whisper Large v3 | Speech Recognition | LibriSpeech | Word Accuracy | ≥ 96.95% | Offline |
+| Stable Diffusion XL | Text-to-Image | COCO 2014 | CLIP / FID | 31.69–31.81 / 23.01–23.95 | Offline, Server |
 
 ## Installation
 
 ```bash
 pip install -e ".[all]"
+```
 
-# Optional: C++ SUT for better performance
+To build the optional C++ SUT for higher performance (bypasses Python GIL):
+
+```bash
 ./build_cpp.sh
 ```
 
 ## Quick Start
 
 ```bash
-# Setup (download model + dataset)
+# Download model and dataset
 mlperf-ov setup --model resnet50
 
-# Run benchmark
+# Run accuracy test
 mlperf-ov run --model resnet50 --mode accuracy
+
+# Run performance test
 mlperf-ov run --model resnet50 --mode performance --scenario Offline
 ```
 
-## Optimal Run Commands (NPU)
+## Device Selection
+
+```bash
+# CPU (default)
+mlperf-ov run --model resnet50 --device CPU
+
+# All accelerator dies (auto-discovery)
+mlperf-ov run --model resnet50 --device NPU
+
+# Specific die
+mlperf-ov run --model resnet50 --device NPU.0
+```
+
+## Run Examples
 
 ### ResNet50
 
@@ -48,37 +66,59 @@ mlperf-ov run --model bert --scenario Offline --device NPU
 mlperf-ov run --model bert --scenario Server --device NPU
 ```
 
-## Device Selection
+### RetinaNet
 
 ```bash
-# CPU (default)
-mlperf-ov run --model resnet50 --device CPU
+mlperf-ov run --model retinanet --scenario Offline --device NPU
+```
 
-# All accelerator dies
-mlperf-ov run --model resnet50 --device NPU
+### Whisper Large v3
 
-# Specific die
-mlperf-ov run --model resnet50 --device NPU.0
+```bash
+mlperf-ov run --model whisper --scenario Offline --device CPU
+```
+
+### Stable Diffusion XL
+
+```bash
+mlperf-ov run --model sdxl --scenario Offline --device CPU
 ```
 
 ## CLI Reference
 
 ```
-mlperf-ov run                  # Run benchmark
-mlperf-ov setup --model X      # Download model + dataset
-mlperf-ov download-model       # Download model only
-mlperf-ov download-dataset     # Download dataset only
-mlperf-ov list-models          # List supported models
-mlperf-ov info                 # System information
+mlperf-ov run                  Run benchmark
+mlperf-ov setup --model X      Download model + dataset
+mlperf-ov download-model       Download model only
+mlperf-ov download-dataset     Download dataset only
+mlperf-ov list-models          List supported models
+mlperf-ov info                 System information
 ```
 
-### Common Options
+### Options
 
 ```
 --model, -m      Model: resnet50, bert, retinanet, whisper, sdxl
 --mode           Mode: accuracy, performance
 --scenario, -s   Scenario: Offline, Server
 --device, -d     Device: CPU, NPU, NPU.0, etc.
---batch-size, -b Batch size
+--batch-size, -b Inference batch size
 --count          Number of samples (0 = all)
+-p, --properties Device properties (KEY=VALUE,KEY2=VALUE2)
 ```
+
+## Project Structure
+
+```
+src/mlperf_openvino/
+    backends/          Inference backends (OpenVINO, multi-device)
+    core/              SUT implementations, benchmark runner, config
+    datasets/          Dataset loaders and QSL implementations
+    utils/             Model and dataset download utilities
+    cpp/               C++ SUT implementations (pybind11)
+    cli.py             CLI entry point
+```
+
+## License
+
+See [LICENSE](LICENSE).

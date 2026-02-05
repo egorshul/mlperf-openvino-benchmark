@@ -122,7 +122,6 @@ class SDXLMultiDieSUT:
         return sorted(d for d in core.available_devices if pattern.match(d))
 
     def _setup_pipelines(self) -> None:
-        """Load one pipeline per accelerator die."""
         target_device = (
             self.config.openvino.device
             if hasattr(self.config, "openvino")
@@ -160,7 +159,6 @@ class SDXLMultiDieSUT:
         )
 
     def _load_pipeline_for_device(self, die: str) -> Any:
-        """Load, reshape to static shapes, and compile pipeline on *die*."""
         is_cpu = die.upper() == "CPU"
 
         if is_cpu and self.batch_size <= 1:
@@ -222,7 +220,6 @@ class SDXLMultiDieSUT:
         return pipeline
 
     def _process_sample(self, sample_idx: int, pipeline: Any) -> np.ndarray:
-        """Generate a single image with MLCommons-compliant parameters."""
         features = self.qsl.get_features(sample_idx)
         prompt = features["prompt"]
         guidance_scale = features.get("guidance_scale", self.guidance_scale)
@@ -272,7 +269,6 @@ class SDXLMultiDieSUT:
         return image
 
     def _process_batch(self, sample_indices: List[int], pipeline: Any) -> List[np.ndarray]:
-        """Generate a batch of images with MLCommons-compliant parameters."""
         import torch
 
         prompts = []
@@ -320,7 +316,7 @@ class SDXLMultiDieSUT:
 
     @property
     def _sample_count(self) -> int:
-        """Completed sample count (used by benchmark_runner)."""
+        # Exposes completed count under the name expected by benchmark_runner.
         return self._completed
 
     def issue_queries(self, query_samples: List[Any]) -> None:
@@ -331,7 +327,6 @@ class SDXLMultiDieSUT:
             self._issue_queries_server(query_samples)
 
     def _issue_queries_offline(self, query_samples: List[Any]) -> None:
-        """Offline: distribute samples across dies and run in parallel."""
         total = len(query_samples)
         num_dies = len(self._pipelines)
         self._start_time = time.time()
@@ -400,7 +395,6 @@ class SDXLMultiDieSUT:
     def _issue_queries_offline_sequential(
         self, query_samples: List[Any],
     ) -> None:
-        """Single-die Offline path."""
         total = len(query_samples)
         all_results: List[Tuple[Any, int, np.ndarray]] = []
 
@@ -431,7 +425,6 @@ class SDXLMultiDieSUT:
         self._send_loadgen_responses(all_results)
 
     def _issue_queries_server(self, query_samples: List[Any]) -> None:
-        """Server: round-robin across dies, respond per query."""
         for sample in query_samples:
             sample_idx = sample.index
             _name, pipeline, die_lock = self._pipelines[self._pipeline_index]
@@ -453,8 +446,8 @@ class SDXLMultiDieSUT:
     def _send_loadgen_responses(
         results: List[Tuple[Any, int, np.ndarray]],
     ) -> None:
-        """Send batched LoadGen responses sorted by sample index."""
         responses = []
+        # array.array objects must stay alive until QuerySamplesComplete returns.
         arrays = []
         for sample, _idx, image in sorted(results, key=lambda r: r[1]):
             response_data = np.array(image.shape, dtype=np.int64)

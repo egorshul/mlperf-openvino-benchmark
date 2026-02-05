@@ -166,15 +166,11 @@ models:
     # MLPerf LoadGen settings (from mlperf.conf v5.1)
     performance_sample_count: 1633  # QSL size for performance runs
 
+    # Whisper supports Offline scenario only (per MLCommons specification)
     offline:
       min_duration_ms: 600000  # 10 minutes (MLPerf v5.1 official requirement)
       min_query_count: 1633  # MLPerf v5.1 official requirement
       samples_per_query: 1633
-
-    server:
-      target_latency_ns: 1000000000  # 1 second for ASR
-      target_qps: 500.0  # High default for max throughput
-      min_duration_ms: 600000  # 10 minutes (MLPerf v5.1 official requirement)
 
   sdxl:
     name: "Stable-Diffusion-XL"

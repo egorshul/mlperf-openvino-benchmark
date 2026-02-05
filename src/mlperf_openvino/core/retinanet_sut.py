@@ -1,5 +1,3 @@
-"""RetinaNet SUT implementation for MLPerf Object Detection."""
-
 import array
 import logging
 import sys
@@ -36,7 +34,6 @@ MAX_DETECTIONS = 100
 
 
 def nms(boxes: np.ndarray, scores: np.ndarray, threshold: float = 0.5) -> np.ndarray:
-    """Non-Maximum Suppression."""
     if len(boxes) == 0:
         return np.array([], dtype=np.int64)
 
@@ -74,7 +71,6 @@ def nms(boxes: np.ndarray, scores: np.ndarray, threshold: float = 0.5) -> np.nda
 
 
 class RetinaNetSUT:
-    """System Under Test for RetinaNet Object Detection model."""
 
     def __init__(
         self,
@@ -86,7 +82,6 @@ class RetinaNetSUT:
         nms_threshold: float = NMS_THRESHOLD,
         max_detections: int = MAX_DETECTIONS,
     ):
-        """Initialize RetinaNet SUT."""
         if not LOADGEN_AVAILABLE:
             raise ImportError(
                 "MLPerf LoadGen is not installed. Please install with: "
@@ -113,13 +108,12 @@ class RetinaNetSUT:
         self._progress_bar: Optional[Any] = None
         self._start_time = 0.0
         self._last_progress_update = 0.0
-        self._progress_update_interval = 0.5  # seconds
+        self._progress_update_interval = 0.5
 
         self._sut = None
         self._qsl_handle = None
 
     def _start_progress(self, total: int, desc: str = "Processing") -> None:
-        """Start progress tracking."""
         self._start_time = time.time()
         if TQDM_AVAILABLE:
             self._progress_bar = tqdm(
@@ -134,7 +128,6 @@ class RetinaNetSUT:
             self._last_progress_update = time.time()
 
     def _update_progress(self, n: int = 1) -> None:
-        """Update progress by n samples."""
         if TQDM_AVAILABLE and self._progress_bar is not None:
             self._progress_bar.update(n)
         else:
@@ -146,7 +139,6 @@ class RetinaNetSUT:
                 self._last_progress_update = current_time
 
     def _close_progress(self) -> None:
-        """Close progress tracking."""
         if TQDM_AVAILABLE and self._progress_bar is not None:
             self._progress_bar.close()
             self._progress_bar = None
@@ -156,7 +148,6 @@ class RetinaNetSUT:
             logger.info(f"Completed: {self._sample_count} samples in {elapsed:.1f}s ({throughput:.1f} samples/sec)")
 
     def _map_io_names(self) -> None:
-        """Map expected input/output names to model's actual names."""
         model_inputs = self.backend.input_names
 
         self.input_name = None
@@ -184,7 +175,7 @@ class RetinaNetSUT:
             elif 'label' in name_lower or 'class' in name_lower:
                 self.labels_name = name
 
-        # Fallback for common output formats
+        # Fallback: assume positional output order [boxes, scores, labels]
         if not self.boxes_name and len(model_outputs) >= 1:
             self.boxes_name = model_outputs[0]
         if not self.scores_name and len(model_outputs) >= 2:
@@ -198,8 +189,7 @@ class RetinaNetSUT:
         scores: np.ndarray,
         labels: Optional[np.ndarray] = None
     ) -> Dict[str, np.ndarray]:
-        """Postprocess raw model outputs into filtered detections."""
-        # Handle different output shapes
+        # Handle batch dimension in model outputs
         if boxes.ndim == 3:
             boxes = boxes[0]
         if scores.ndim == 2:
@@ -207,12 +197,11 @@ class RetinaNetSUT:
         if labels is not None and labels.ndim == 2:
             labels = labels[0]
 
-        # If scores are per-class, take max
+        # If scores are per-class (shape [N, NUM_CLASSES]), reduce to max
         if scores.ndim == 2 and scores.shape[1] == NUM_CLASSES:
             labels = np.argmax(scores, axis=1)
             scores = np.max(scores, axis=1)
 
-        # Filter by score threshold
         mask = scores > self.score_threshold
         filtered_boxes = boxes[mask]
         filtered_scores = scores[mask]
@@ -222,7 +211,6 @@ class RetinaNetSUT:
         else:
             filtered_labels = np.zeros(len(filtered_boxes), dtype=np.int64)
 
-        # Apply NMS per class
         final_boxes = []
         final_scores = []
         final_labels = []
@@ -246,7 +234,6 @@ class RetinaNetSUT:
             final_scores = np.concatenate(final_scores)
             final_labels = np.concatenate(final_labels)
 
-            # Sort by score and limit detections
             order = np.argsort(final_scores)[::-1][:self.max_detections]
             final_boxes = final_boxes[order]
             final_scores = final_scores[order]
@@ -263,7 +250,6 @@ class RetinaNetSUT:
         }
 
     def _process_sample(self, sample_idx: int) -> Dict[str, np.ndarray]:
-        """Process a single sample and return detections."""
         features = self.qsl.get_features(sample_idx)
         inputs = {self.input_name: features['input']}
         outputs = self.backend.predict(inputs)
@@ -275,9 +261,8 @@ class RetinaNetSUT:
         return self._postprocess_detections(boxes, scores, labels)
 
     def _issue_query_offline(self, query_samples: List[Any]) -> None:
-        """Process queries in Offline mode."""
         responses = []
-        response_arrays = []  # Keep arrays alive until QuerySamplesComplete!
+        response_arrays = []  # Keep arrays alive until QuerySamplesComplete
 
         total_samples = len(query_samples)
         self._start_progress(total_samples, desc="RetinaNet Offline inference")
@@ -290,7 +275,7 @@ class RetinaNetSUT:
             num_detections = len(detections['boxes'])
             response_data = np.array([num_detections], dtype=np.int64)
             response_array = array.array('B', response_data.tobytes())
-            response_arrays.append(response_array)  # Keep alive!
+            response_arrays.append(response_array)
             bi = response_array.buffer_info()
 
             response = lg.QuerySampleResponse(
@@ -310,9 +295,8 @@ class RetinaNetSUT:
         self._query_count += 1
 
     def _issue_query_server(self, query_samples: List[Any]) -> None:
-        """Process queries in Server mode."""
         responses = []
-        response_arrays = []  # Keep arrays alive until QuerySamplesComplete!
+        response_arrays = []  # Keep arrays alive until QuerySamplesComplete
 
         if self._query_count == 0:
             self._start_progress(0, desc="RetinaNet Server inference")
@@ -325,7 +309,7 @@ class RetinaNetSUT:
             num_detections = len(detections['boxes'])
             response_data = np.array([num_detections], dtype=np.int64)
             response_array = array.array('B', response_data.tobytes())
-            response_arrays.append(response_array)  # Keep alive!
+            response_arrays.append(response_array)
             bi = response_array.buffer_info()
 
             response = lg.QuerySampleResponse(
@@ -343,7 +327,6 @@ class RetinaNetSUT:
         self._query_count += 1
 
     def issue_queries(self, query_samples: List[Any]) -> None:
-        """Process incoming queries from LoadGen."""
         if self.scenario == Scenario.OFFLINE:
             self._issue_query_offline(query_samples)
         elif self.scenario == Scenario.SERVER:
@@ -352,19 +335,15 @@ class RetinaNetSUT:
             raise ValueError(f"Unsupported scenario: {self.scenario}")
 
     def flush_queries(self) -> None:
-        """Flush any pending queries."""
-        # Close progress bar if still open (Server mode)
         if self._progress_bar is not None:
             self._close_progress()
 
     def get_sut(self) -> Any:
-        """Get LoadGen SUT handle."""
         if self._sut is None:
             self._sut = lg.ConstructSUT(self.issue_queries, self.flush_queries)
         return self._sut
 
     def get_qsl(self) -> Any:
-        """Get LoadGen QSL handle."""
         if self._qsl_handle is None:
             self._qsl_handle = lg.ConstructQSL(
                 self.qsl.total_sample_count,
@@ -376,26 +355,21 @@ class RetinaNetSUT:
 
     @property
     def name(self) -> str:
-        """Get SUT name."""
         return f"RetinaNet-{self.config.model.name}"
 
     def get_predictions(self) -> Dict[int, Dict[str, np.ndarray]]:
-        """Get all predictions."""
         return self._predictions.copy()
 
     def reset(self) -> None:
-        """Reset SUT state."""
         self._predictions.clear()
         self._query_count = 0
         self._sample_count = 0
 
     def compute_accuracy(self) -> Dict[str, float]:
-        """Compute mAP accuracy using pycocotools (official MLPerf method)."""
         if not self._predictions:
             logger.warning(f"No predictions (sample_count={self._sample_count}, query_count={self._query_count})")
             return {'mAP': 0.0, 'num_samples': 0}
 
-        # Try to use pycocotools for accurate mAP calculation (same as C++ wrapper)
         try:
             from ..datasets.coco_eval import evaluate_openimages_accuracy, PYCOCOTOOLS_AVAILABLE
             from pathlib import Path
@@ -416,8 +390,7 @@ class RetinaNetSUT:
                 if coco_file:
                     logger.info(f"Using pycocotools with {coco_file}")
 
-                    # Get sample_idx to filename mapping for correct COCO image_id lookup
-                    # This is CRITICAL - dataset order may differ from COCO annotation order!
+                    # Dataset order may differ from COCO annotation order
                     sample_to_filename = None
                     if hasattr(self.qsl, 'get_sample_to_filename_mapping'):
                         sample_to_filename = self.qsl.get_sample_to_filename_mapping()
@@ -427,8 +400,8 @@ class RetinaNetSUT:
                         predictions=self._predictions,
                         coco_annotations_file=coco_file,
                         input_size=800,
-                        model_labels_zero_indexed=True,  # Model outputs 0-indexed labels (0-263), add +1 for category_ids (1-264)
-                        boxes_in_pixels=True,  # Model outputs boxes in pixel coords [0,800]
+                        model_labels_zero_indexed=True,  # Model outputs 0-indexed (0-263), COCO expects 1-indexed (1-264)
+                        boxes_in_pixels=True,  # Model outputs pixel coords [0,800]
                         sample_to_filename=sample_to_filename,
                     )
                 else:
@@ -438,7 +411,6 @@ class RetinaNetSUT:
             import traceback
             traceback.print_exc()
 
-        # Fallback to basic mAP calculation
         predictions = []
         indices = []
 

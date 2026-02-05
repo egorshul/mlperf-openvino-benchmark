@@ -19,12 +19,10 @@ N_MELS = 80
 CHUNK_LENGTH = 30  # seconds
 N_SAMPLES = CHUNK_LENGTH * SAMPLE_RATE  # 480000 samples for 30 seconds
 
-# Global feature extractor (lazy loaded)
 _feature_extractor = None
 
 
 def get_whisper_feature_extractor():
-    """Get or create WhisperFeatureExtractor for audio preprocessing."""
     global _feature_extractor
     if _feature_extractor is None:
         try:
@@ -38,7 +36,7 @@ def get_whisper_feature_extractor():
                 "transformers not available, falling back to manual mel spectrogram. "
                 "Install with: pip install transformers"
             )
-            _feature_extractor = False  # Mark as unavailable
+            _feature_extractor = False
         except Exception as e:
             logger.warning(f"Failed to load WhisperFeatureExtractor: {e}")
             _feature_extractor = False
@@ -46,7 +44,6 @@ def get_whisper_feature_extractor():
 
 
 def load_audio(file_path: str, sr: int = SAMPLE_RATE) -> np.ndarray:
-    """Load audio file and resample to target sample rate."""
     try:
         import soundfile as sf
     except ImportError:
@@ -57,7 +54,6 @@ def load_audio(file_path: str, sr: int = SAMPLE_RATE) -> np.ndarray:
 
     audio, file_sr = sf.read(file_path, dtype='float32')
 
-    # Convert stereo to mono if needed
     if len(audio.shape) > 1:
         audio = audio.mean(axis=1)
 
@@ -66,7 +62,6 @@ def load_audio(file_path: str, sr: int = SAMPLE_RATE) -> np.ndarray:
             import librosa
             audio = librosa.resample(audio, orig_sr=file_sr, target_sr=sr)
         except ImportError:
-            # Simple resampling without librosa
             ratio = sr / file_sr
             new_length = int(len(audio) * ratio)
             indices = np.linspace(0, len(audio) - 1, new_length)
@@ -76,7 +71,6 @@ def load_audio(file_path: str, sr: int = SAMPLE_RATE) -> np.ndarray:
 
 
 def pad_or_trim(array: np.ndarray, length: int = N_SAMPLES) -> np.ndarray:
-    """Pad or trim audio to exact length."""
     if len(array) > length:
         array = array[:length]
     elif len(array) < length:
@@ -90,7 +84,6 @@ def log_mel_spectrogram(
     n_fft: int = N_FFT,
     hop_length: int = HOP_LENGTH,
 ) -> np.ndarray:
-    """Compute log-Mel spectrogram matching Whisper preprocessing."""
     try:
         import librosa
 
@@ -111,10 +104,8 @@ def log_mel_spectrogram(
         return log_mel.astype(np.float32)
 
     except ImportError:
-        # Fallback without librosa - simplified mel spectrogram
         logger.warning("librosa not available, using simplified mel spectrogram")
 
-        # Compute STFT
         window = np.hanning(n_fft)
         num_frames = 1 + (len(audio) - n_fft) // hop_length
 
@@ -124,10 +115,8 @@ def log_mel_spectrogram(
             frame = audio[start:start + n_fft] * window
             stft[:, i] = np.fft.rfft(frame)
 
-        # Power spectrum
         power = np.abs(stft) ** 2
 
-        # Simplified mel filterbank
         mel_freqs = np.linspace(0, 2595 * np.log10(1 + SAMPLE_RATE / 2 / 700), n_mels + 2)
         mel_freqs = 700 * (10 ** (mel_freqs / 2595) - 1)
 
@@ -155,23 +144,6 @@ def log_mel_spectrogram(
 
 
 class LibriSpeechDataset(BaseDataset):
-    """
-    LibriSpeech dataset for Whisper ASR benchmark.
-
-    LibriSpeech is a corpus of read English speech derived from audiobooks.
-    For MLPerf, typically the dev-clean or test-clean subset is used.
-
-    Expected directory structure:
-        data_path/
-        ├── audio/
-        │   ├── 1272-128104-0000.flac
-        │   ├── 1272-128104-0001.flac
-        │   └── ...
-        └── transcripts.txt (or dev-clean.txt)
-
-    Transcript format (one per line):
-        1272-128104-0000 HE HOPED THERE WOULD BE STEW FOR DINNER
-    """
 
     def __init__(
         self,
@@ -180,7 +152,6 @@ class LibriSpeechDataset(BaseDataset):
         count: Optional[int] = None,
         max_duration: float = 30.0,
     ):
-        """Initialize LibriSpeech dataset."""
         super().__init__(data_path=data_path, count=count)
 
         self.data_path = Path(data_path)
@@ -192,7 +163,6 @@ class LibriSpeechDataset(BaseDataset):
         self._is_loaded = False
 
     def load(self) -> None:
-        """Load dataset metadata."""
         if self._is_loaded:
             return
 
@@ -201,14 +171,13 @@ class LibriSpeechDataset(BaseDataset):
         # Try JSON manifest first (MLPerf/MLCommons format)
         manifest_file = None
         manifest_names = [
-            "dev-all-repack.json",  # MLCommons repackaged format
-            "dev-all.json",         # MLCommons merged format
-            "manifest.json",        # Generic manifest
-            "dev-clean.json",       # Dev-clean split
-            "dev-other.json",       # Dev-other split
+            "dev-all-repack.json",
+            "dev-all.json",
+            "manifest.json",
+            "dev-clean.json",
+            "dev-other.json",
         ]
 
-        # Search in current directory and parent directory
         search_paths = [self.data_path]
         if self.data_path.parent != self.data_path:
             search_paths.append(self.data_path.parent)
@@ -244,7 +213,6 @@ class LibriSpeechDataset(BaseDataset):
                         break
 
                 if not transcript_file:
-                    # Scan for audio files without transcripts
                     logger.warning("No transcript file found, scanning for audio files")
 
             if transcript_file and transcript_file.exists():
@@ -268,13 +236,6 @@ class LibriSpeechDataset(BaseDataset):
         self._is_loaded = True
 
     def _load_from_manifest(self, manifest_file: Path) -> None:
-        """Load samples from JSON manifest file (MLPerf/MLCommons format).
-
-        Supports multiple manifest formats:
-        1. MLCommons format: {"files": [{"fname": "audio.wav"}], "transcript": "text"}
-        2. NeMo format: {"audio_filepath": "audio.wav", "text": "text"}
-        3. Simple format: {"audio_filepath": "audio.wav", "transcript": "text"}
-        """
         import json
 
         logger.info(f"Loading from manifest: {manifest_file}")
@@ -284,7 +245,6 @@ class LibriSpeechDataset(BaseDataset):
 
         entries = []
         if content.startswith('['):
-            # Standard JSON array
             entries = json.loads(content)
         else:
             # JSONL format (one JSON object per line)
@@ -307,11 +267,9 @@ class LibriSpeechDataset(BaseDataset):
                 if fname:
                     audio_path = fname
 
-            # Standard format: audio_filepath
             if not audio_path:
                 audio_path = entry.get("audio_filepath", "")
 
-            # Alternative: audio_path directly
             if not audio_path:
                 audio_path = entry.get("audio_path", "")
 
@@ -319,20 +277,16 @@ class LibriSpeechDataset(BaseDataset):
                 logger.debug(f"No audio path found in entry: {entry}")
                 continue
 
-            # Handle relative paths - resolve against manifest directory
             if not Path(audio_path).is_absolute():
-                # First try relative to manifest file directory
                 manifest_dir = manifest_file.parent
                 candidate = manifest_dir / audio_path
                 if candidate.exists():
                     audio_path = str(candidate)
                 else:
-                    # Try relative to data_path
                     candidate = self.data_path / audio_path
                     if candidate.exists():
                         audio_path = str(candidate)
                     else:
-                        # Try in audio subdirectory
                         audio_name = Path(audio_path).name
                         for subdir in ["audio", "wav", "flac", ""]:
                             if subdir:
@@ -375,7 +329,6 @@ class LibriSpeechDataset(BaseDataset):
         logger.info(f"Loaded {len(self._samples)} valid samples from manifest")
 
     def _load_from_transcript(self, transcript_file: Path) -> None:
-        """Load samples from transcript file."""
         audio_dir = self.data_path / "audio"
         if not audio_dir.exists():
             audio_dir = self.data_path
@@ -408,7 +361,6 @@ class LibriSpeechDataset(BaseDataset):
                     })
 
     def _scan_audio_files(self) -> None:
-        """Scan directory for audio files."""
         audio_extensions = {'.flac', '.wav', '.mp3', '.ogg', '.m4a'}
 
         for root, _, files in os.walk(self.data_path):
@@ -420,7 +372,7 @@ class LibriSpeechDataset(BaseDataset):
                     self._samples.append({
                         "id": audio_id,
                         "audio_path": str(audio_path),
-                        "transcript": "",  # Unknown
+                        "transcript": "",
                     })
 
     def __len__(self) -> int:
@@ -435,7 +387,6 @@ class LibriSpeechDataset(BaseDataset):
         return len(self._samples)
 
     def get_sample(self, index: int) -> Tuple[np.ndarray, str]:
-        """Get preprocessed audio sample."""
         if index in self._cache:
             features = self._cache[index]
         else:
@@ -445,45 +396,39 @@ class LibriSpeechDataset(BaseDataset):
             feature_extractor = get_whisper_feature_extractor()
 
             if feature_extractor is not None:
-                # Use HuggingFace feature extractor (produces correct shape for OpenVINO model)
                 inputs = feature_extractor(
                     audio,
                     sampling_rate=SAMPLE_RATE,
                     return_tensors="np",
                 )
-                features = inputs["input_features"]  # Shape: (1, 128, 3000) or (1, 80, 3000)
+                features = inputs["input_features"]
             else:
-                # Fallback to manual mel spectrogram
-                audio = pad_or_trim(audio, N_SAMPLES)
-                mel = log_mel_spectrogram(audio)
-                features = mel[np.newaxis, ...]  # (1, n_mels, time_frames)
+                features = pad_or_trim(audio, N_SAMPLES)
+                features = log_mel_spectrogram(features)
+                features = features[np.newaxis, ...]
 
             self._cache[index] = features
 
-        # Ensure we have batch dimension
         if features.ndim == 2:
             features = features[np.newaxis, ...]
 
         return features, self._samples[index]["transcript"]
 
     def get_samples(self, indices: List[int]) -> Tuple[np.ndarray, List[str]]:
-        """Get batch of preprocessed audio samples."""
         mels = []
         transcripts = []
 
         for idx in indices:
             mel, transcript = self.get_sample(idx)
-            mels.append(mel[0])  # Remove batch dim for stacking
+            mels.append(mel[0])
             transcripts.append(transcript)
 
         return np.stack(mels), transcripts
 
     def get_transcript(self, index: int) -> str:
-        """Get transcript for sample."""
         return self._samples[index]["transcript"]
 
     def get_audio_path(self, index: int) -> str:
-        """Get audio file path for sample."""
         return self._samples[index]["audio_path"]
 
     def postprocess(
@@ -491,9 +436,7 @@ class LibriSpeechDataset(BaseDataset):
         results: Union[np.ndarray, List[str]],
         indices: List[int]
     ) -> List[str]:
-        """Postprocess Whisper model outputs to transcribed text."""
         if isinstance(results, np.ndarray):
-            # Assume token IDs - would need tokenizer for decoding
             return ["" for _ in indices]
         return results
 
@@ -502,10 +445,7 @@ class LibriSpeechDataset(BaseDataset):
         predictions: List[str],
         ground_truth: List[str]
     ) -> Dict[str, float]:
-        """Compute Word Accuracy (MLPerf v5.1 official metric for Whisper).
-
-        Word Accuracy = 1 - WER (Word Error Rate)
-        """
+        """Compute Word Accuracy = 1 - WER (MLPerf v5.1 official metric for Whisper)."""
         try:
             from jiwer import wer, cer
         except ImportError:
@@ -524,15 +464,12 @@ class LibriSpeechDataset(BaseDataset):
         # Try to use Whisper's EnglishTextNormalizer (MLCommons standard)
         normalizer = None
         try:
-            # Method 1: Use WhisperTokenizer's normalize method (recommended)
             from transformers import WhisperTokenizer
             tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-large-v3")
-            # The tokenizer has a normalize() method that uses EnglishTextNormalizer internally
             normalizer = tokenizer.normalize
             logger.info("Using WhisperTokenizer.normalize for WER calculation (MLCommons standard)")
         except Exception as e1:
             try:
-                # Method 2: Try BasicTextNormalizer (doesn't need spelling mapping)
                 from transformers.models.whisper.english_normalizer import BasicTextNormalizer
                 normalizer = BasicTextNormalizer()
                 logger.info("Using BasicTextNormalizer for WER calculation")
@@ -544,11 +481,10 @@ class LibriSpeechDataset(BaseDataset):
                 )
 
         if normalizer is not None:
-            # Use Whisper's English normalizer (handles numbers, contractions, etc.)
             predictions_norm = [normalizer(p) for p in predictions]
             ground_truth_norm = [normalizer(g) for g in ground_truth]
         else:
-            # Fallback: basic normalization (lowercase, strip whitespace)
+            # Fallback: basic normalization (lowercase, strip)
             predictions_norm = [p.lower().strip() for p in predictions]
             ground_truth_norm = [g.lower().strip() for g in ground_truth]
 
@@ -573,7 +509,7 @@ class LibriSpeechDataset(BaseDataset):
         word_accuracy = 1.0 - word_error_rate
 
         return {
-            "word_accuracy": word_accuracy,  # Primary MLPerf metric
+            "word_accuracy": word_accuracy,
             "wer": word_error_rate,
             "cer": char_error_rate,
             "num_samples": len(valid_pairs),
@@ -581,11 +517,6 @@ class LibriSpeechDataset(BaseDataset):
 
 
 class LibriSpeechQSL(QuerySampleLibrary):
-    """
-    Query Sample Library for LibriSpeech dataset.
-
-    Implements the MLPerf LoadGen QSL interface for Whisper benchmark.
-    """
 
     def __init__(
         self,
@@ -594,7 +525,6 @@ class LibriSpeechQSL(QuerySampleLibrary):
         count: Optional[int] = None,
         performance_sample_count: int = 1633,  # MLPerf official for Whisper
     ):
-        """Initialize LibriSpeech QSL."""
         super().__init__()
 
         self.dataset = LibriSpeechDataset(
@@ -607,7 +537,6 @@ class LibriSpeechQSL(QuerySampleLibrary):
         self._loaded_samples: Dict[int, np.ndarray] = {}
 
     def load(self) -> None:
-        """Load the dataset."""
         self.dataset.load()
 
     @property
@@ -621,19 +550,16 @@ class LibriSpeechQSL(QuerySampleLibrary):
         return min(self._performance_sample_count, self.total_sample_count)
 
     def load_query_samples(self, sample_indices: List[int]) -> None:
-        """Load samples into memory."""
         for idx in sample_indices:
             if idx not in self._loaded_samples:
                 mel, _ = self.dataset.get_sample(idx)
                 self._loaded_samples[idx] = mel
 
     def unload_query_samples(self, sample_indices: List[int]) -> None:
-        """Unload samples from memory."""
         for idx in sample_indices:
             self._loaded_samples.pop(idx, None)
 
     def get_features(self, sample_index: int) -> Dict[str, np.ndarray]:
-        """Get input features for a sample."""
         if sample_index in self._loaded_samples:
             mel = self._loaded_samples[sample_index]
         else:
@@ -642,5 +568,4 @@ class LibriSpeechQSL(QuerySampleLibrary):
         return {"input_features": mel}
 
     def get_label(self, sample_index: int) -> str:
-        """Get ground truth transcript for a sample."""
         return self.dataset.get_transcript(sample_index)

@@ -1,5 +1,4 @@
-"""
-Device discovery utilities for accelerator devices.
+"""Device discovery for accelerator devices.
 
 Topology: 1 card = 2 dies. Devices appear as: NPU.0, NPU.1, NPU.2, etc.
 """
@@ -10,17 +9,14 @@ from typing import List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# Simulator suffixes (excluded from physical dies)
 SIMULATOR_SUFFIXES = ("FuncSimulator", "Simulator")
 
 
 def _get_die_pattern(device_prefix: str) -> re.Pattern:
-    """Get regex pattern for device dies."""
     return re.compile(rf"^{re.escape(device_prefix)}\.(\d+)$")
 
 
 def discover_accelerator_devices(core: "Core", device_prefix: str) -> List[str]:
-    """Discover all available accelerator dies for a device prefix."""
     try:
         all_devices = core.available_devices
     except Exception as e:
@@ -35,16 +31,13 @@ def discover_accelerator_devices(core: "Core", device_prefix: str) -> List[str]:
         if not device.startswith(device_prefix):
             continue
 
-        # Check if it's a simulator
         if is_simulator(device, device_prefix):
             simulators_found.append(device)
             continue
 
-        # Check if it's a valid die (DEVICE.<number>)
         if pattern.match(device):
             dies.append(device)
 
-    # Sort by die number for consistent ordering
     dies = sort_devices(dies, device_prefix)
 
     if simulators_found:
@@ -55,7 +48,6 @@ def discover_accelerator_devices(core: "Core", device_prefix: str) -> List[str]:
 
 
 def is_simulator(device_name: str, device_prefix: str) -> bool:
-    """Check if the device is a simulator."""
     if not device_name.startswith(device_prefix + "."):
         return False
 
@@ -64,13 +56,11 @@ def is_simulator(device_name: str, device_prefix: str) -> bool:
 
 
 def is_accelerator_die(device_name: str, device_prefix: str) -> bool:
-    """Check if the device is a valid accelerator die (DEVICE.N format)."""
     pattern = _get_die_pattern(device_prefix)
     return pattern.match(device_name) is not None
 
 
 def get_die_number_for_device(device_name: str, device_prefix: str) -> Optional[int]:
-    """Extract die number from device name."""
     pattern = _get_die_pattern(device_prefix)
     match = pattern.match(device_name)
     if match:
@@ -79,7 +69,6 @@ def get_die_number_for_device(device_name: str, device_prefix: str) -> Optional[
 
 
 def get_die_number(device_name: str) -> Optional[int]:
-    """Extract die number (auto-detects prefix)."""
     if "." not in device_name:
         return None
     prefix = device_name.split(".")[0]
@@ -87,32 +76,11 @@ def get_die_number(device_name: str) -> Optional[int]:
 
 
 def sort_devices(devices: List[str], device_prefix: str) -> List[str]:
-    """Sort device names by die number."""
     def sort_key(device: str) -> int:
         num = get_die_number_for_device(device, device_prefix)
         return num if num is not None else float('inf')
 
     return sorted(devices, key=sort_key)
-
-
-def get_device_info(core: "Core", device_name: str) -> dict:
-    """Get information about a device."""
-    prefix = device_name.split(".")[0] if "." in device_name else device_name
-
-    info = {
-        "name": device_name,
-        "prefix": prefix,
-        "is_die": is_accelerator_die(device_name, prefix) if "." in device_name else False,
-        "is_simulator": is_simulator(device_name, prefix) if "." in device_name else False,
-        "die_number": get_die_number(device_name),
-    }
-
-    try:
-        info["full_name"] = core.get_property(device_name, "FULL_DEVICE_NAME")
-    except Exception:
-        info["full_name"] = device_name
-
-    return info
 
 
 def get_card_and_die(device_name: str) -> Optional[Tuple[int, int]]:
@@ -130,22 +98,18 @@ def validate_accelerator_device(core: "Core", device_name: str) -> Tuple[bool, s
     """Validate that an accelerator device is available. Returns (is_valid, error_message)."""
     all_devices = core.available_devices
 
-    # Determine prefix
     if "." in device_name:
         prefix = device_name.split(".")[0]
     else:
         prefix = device_name
 
-    # Check if it's just the prefix (user wants all dies)
     if device_name == prefix:
-        # User wants all devices of this type - check if any exist
         devices = discover_accelerator_devices(core, prefix)
         if not devices:
             available = ", ".join(all_devices)
             return False, f"No {prefix} devices found. Available devices: {available}"
         return True, ""
 
-    # Check for specific die (PREFIX.<N>)
     if device_name.startswith(prefix + "."):
         if is_simulator(device_name, prefix):
             return False, f"'{device_name}' is a simulator, not a physical die"
@@ -153,7 +117,6 @@ def validate_accelerator_device(core: "Core", device_name: str) -> Tuple[bool, s
         if not is_accelerator_die(device_name, prefix):
             return False, f"Invalid {prefix} device format: '{device_name}'. Expected {prefix}.<number>"
 
-        # Check if device exists
         if device_name not in all_devices:
             available_dies = [d for d in all_devices
                             if d.startswith(prefix + ".") and is_accelerator_die(d, prefix)]
@@ -197,7 +160,6 @@ def parse_device_properties(properties_str: str) -> dict:
 
 
 def validate_device_properties(properties: dict, device_type: str) -> Tuple[bool, List[str]]:
-    """Validate device properties. Returns (is_valid, warnings)."""
     warnings = []
 
     common_props = {"NUM_STREAMS", "PERFORMANCE_HINT", "INFERENCE_NUM_THREADS",
