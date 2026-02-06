@@ -51,9 +51,11 @@ def _print_progress(completed: int, total: int, start_time: float) -> None:
 
 
 class WhisperMultiDieSUT:
-    """Loads one OVModelForSpeechSeq2Seq per die with the encoder compiled
-    on the accelerator and the decoder on CPU. Offline mode distributes
-    samples across dies in parallel; Server mode uses round-robin dispatch.
+    """Whisper multi-die SUT using Optimum-Intel (OVModelForSpeechSeq2Seq).
+
+    Per die: encoder is compiled on the accelerator, decoder is also attempted
+    on the accelerator and falls back to CPU if compilation fails.
+    Offline mode distributes samples across dies in parallel via round-robin.
     """
 
     def __init__(
@@ -67,6 +69,11 @@ class WhisperMultiDieSUT:
     ):
         if not LOADGEN_AVAILABLE:
             raise ImportError("MLPerf LoadGen is not installed")
+        if not OPTIMUM_AVAILABLE:
+            raise ImportError(
+                "optimum-intel is required for WhisperMultiDieSUT. "
+                "Install with: pip install optimum[openvino]"
+            )
 
         self.config = config
         self.encoder_path = Path(encoder_path)
@@ -90,6 +97,10 @@ class WhisperMultiDieSUT:
 
         self._setup_models()
 
+    # ------------------------------------------------------------------
+    # Model setup
+    # ------------------------------------------------------------------
+
     def _discover_device_dies(self, device: str) -> List[str]:
         import openvino as ov
 
@@ -100,17 +111,13 @@ class WhisperMultiDieSUT:
     def _setup_models(self) -> None:
         from transformers import AutoProcessor
 
-        if not OPTIMUM_AVAILABLE:
-            raise ImportError(
-                "optimum-intel is required for WhisperMultiDieSUT. "
-                "Install with: pip install optimum[openvino]"
-            )
-
         target_device = (
             self.config.openvino.device
             if hasattr(self.config, "openvino")
-            else "CPU"
+            else None
         )
+        if not target_device:
+            raise RuntimeError("WhisperMultiDieSUT requires an accelerator device in config")
 
         try:
             self.processor = AutoProcessor.from_pretrained(self.model_path)
@@ -118,38 +125,29 @@ class WhisperMultiDieSUT:
             logger.debug("Loading processor from openai/whisper-large-v3")
             self.processor = AutoProcessor.from_pretrained("openai/whisper-large-v3")
 
-        if target_device == "CPU":
-            device_dies = ["CPU"]
-        elif "," in target_device:
-            # Comma-separated die selection (e.g., "NPU.0,NPU.2")
+        # Determine die list
+        if "," in target_device:
             device_dies = [p.strip() for p in target_device.split(",")]
         elif re.match(r"^.+\.\d+$", target_device):
             device_dies = [target_device]
         else:
             device_dies = self._discover_device_dies(target_device)
-            if not device_dies:
-                logger.warning("No %s dies found, falling back to CPU", target_device)
-                device_dies = ["CPU"]
+
+        if not device_dies:
+            raise RuntimeError(
+                f"No dies discovered for device '{target_device}'. "
+                f"Check that the device is available."
+            )
 
         for die in device_dies:
-            try:
-                print(f"[Whisper] Compiling on {die} ...", file=sys.stderr, flush=True)
-                model = self._load_optimum_model()
-                if die != "CPU":
-                    self._patch_encoder_device(model, die)
-                self._models.append((die, model))
-            except Exception as exc:
-                logger.debug("Failed to load model for %s: %s", die, exc)
-
-        if not self._models:
-            logger.warning("No accelerator models loaded, falling back to CPU")
+            logger.info("[Whisper] Loading model for %s ...", die)
             model = self._load_optimum_model()
-            self._models.append(("CPU", model))
+            self._compile_on_device(model, die)
+            self._models.append((die, model))
 
         die_names = [name for name, _ in self._models]
-        print(
-            f"[Whisper] {len(self._models)} die(s): {', '.join(die_names)}",
-            file=sys.stderr,
+        logger.info(
+            "[Whisper] %d die(s) ready: %s", len(self._models), ", ".join(die_names),
         )
 
     def _load_optimum_model(self) -> Any:
@@ -169,23 +167,44 @@ class WhisperMultiDieSUT:
             decoder_file_name=self.decoder_path.name,
         )
 
-    def _patch_encoder_device(self, model: Any, die: str) -> None:
+    def _compile_on_device(self, model: Any, die: str) -> None:
+        """Compile encoder and decoder on the given die.
+
+        Encoder is always compiled on the accelerator (static shape for NPU).
+        Decoder is attempted on the accelerator; falls back to CPU on failure.
+        """
         import openvino as ov
 
         core = ov.Core()
-        encoder_model = core.read_model(str(self.encoder_path))
-
-        for inp in encoder_model.inputs:
-            if inp.get_partial_shape().is_dynamic:
-                encoder_model.reshape({inp.get_any_name(): [1, 128, 3000]})
-                break
 
         ov_config: Dict[str, Any] = {"CACHE_DIR": ""}
         if hasattr(self.config, "openvino") and hasattr(self.config.openvino, "device_properties"):
             for key, value in self.config.openvino.device_properties.items():
                 ov_config[key] = value
 
-        model.encoder.request = core.compile_model(encoder_model, die, ov_config)
+        # --- Encoder → device (reshape to static for NPU) ---
+        encoder_ir = core.read_model(str(self.encoder_path))
+        for inp in encoder_ir.inputs:
+            if inp.get_partial_shape().is_dynamic:
+                encoder_ir.reshape({inp.get_any_name(): [1, 128, 3000]})
+                break
+        model.encoder.request = core.compile_model(encoder_ir, die, ov_config)
+        logger.info("[Whisper %s] Encoder -> %s", die, die)
+
+        # --- Decoder → try device, fallback to CPU ---
+        try:
+            decoder_ir = core.read_model(str(self.decoder_path))
+            compiled_decoder = core.compile_model(decoder_ir, die, ov_config)
+            model.decoder.request = compiled_decoder
+            logger.info("[Whisper %s] Decoder -> %s", die, die)
+        except Exception as exc:
+            logger.info(
+                "[Whisper %s] Decoder -> CPU (device compilation failed: %s)", die, exc,
+            )
+
+    # ------------------------------------------------------------------
+    # Inference
+    # ------------------------------------------------------------------
 
     def _process_sample(self, sample_idx: int, model: Any) -> str:
         import torch
@@ -206,6 +225,10 @@ class WhisperMultiDieSUT:
         )
         return self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
 
+    # ------------------------------------------------------------------
+    # Query dispatch
+    # ------------------------------------------------------------------
+
     def issue_queries(self, query_samples: List[Any]) -> None:
         self._query_count += len(query_samples)
         if self.scenario == Scenario.OFFLINE:
@@ -219,7 +242,7 @@ class WhisperMultiDieSUT:
         self._start_time = time.time()
         self._sample_count = 0
 
-        print(f"[Offline] {total} samples, {num_dies} die(s)", file=sys.stderr)
+        logger.info("[Offline] %d samples, %d die(s)", total, num_dies)
 
         if num_dies <= 1:
             self._issue_queries_offline_sequential(query_samples)
@@ -306,6 +329,10 @@ class WhisperMultiDieSUT:
             arr = array.array("B", text_bytes)
             bi = arr.buffer_info()
             lg.QuerySamplesComplete([lg.QuerySampleResponse(sample.id, bi[0], bi[1])])
+
+    # ------------------------------------------------------------------
+    # LoadGen interface
+    # ------------------------------------------------------------------
 
     def flush_queries(self) -> None:
         pass
