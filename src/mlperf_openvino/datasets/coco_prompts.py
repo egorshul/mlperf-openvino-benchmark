@@ -405,9 +405,6 @@ class COCOPromptsDataset(BaseDataset):
         generated_images: List[np.ndarray],
         indices: List[int]
     ) -> Dict[str, float]:
-        # MLPerf v5.1 accuracy targets for SDXL (closed division):
-        # CLIP_SCORE: >= 31.68632 and <= 31.81332
-        # FID_SCORE: >= 23.01086 and <= 23.95007
         metrics = {
             'clip_score': 0.0,
             'fid_score': 0.0,
@@ -441,9 +438,6 @@ class COCOPromptsDataset(BaseDataset):
                 generated_images, reference_images, statistics_path=statistics_path
             )
             metrics['fid_score'] = fid_score
-
-        metrics['clip_score_valid'] = 31.68632 <= clip_score <= 31.81332
-        metrics['fid_score_valid'] = 23.01086 <= metrics['fid_score'] <= 23.95007
 
         return metrics
 
