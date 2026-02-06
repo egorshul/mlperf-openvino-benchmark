@@ -158,6 +158,7 @@ class SDXLOptimumSUT:
                 timestep_spacing="leading",
                 steps_offset=1,
                 prediction_type="epsilon",
+                use_karras_sigmas=False,
             )
         except Exception as e:
             logger.warning("Failed to set EulerDiscreteScheduler: %s", e)

@@ -675,10 +675,10 @@ class BenchmarkRunner:
 
         # Read SDXL accuracy thresholds from config (accuracy_metrics section)
         metrics_cfg = self.config.model.accuracy_metrics
-        clip_min = metrics_cfg.get('clip_score_min', 31.0)
-        clip_max = metrics_cfg.get('clip_score_max', 32.5)
-        fid_min = metrics_cfg.get('fid_score_min', 22.0)
-        fid_max = metrics_cfg.get('fid_score_max', 25.5)
+        clip_min = metrics_cfg.get('clip_score_min', 31.68632)
+        clip_max = metrics_cfg.get('clip_score_max', 31.81332)
+        fid_min = metrics_cfg.get('fid_score_min', 23.01086)
+        fid_max = metrics_cfg.get('fid_score_max', 23.95007)
 
         clip_valid = clip_min <= clip_score <= clip_max
         fid_valid = fid_min <= fid_score <= fid_max
@@ -750,10 +750,10 @@ class BenchmarkRunner:
             clip = acc.get('clip_score', 0)
             fid = acc.get('fid_score', 0)
             metrics_cfg = self.config.model.accuracy_metrics
-            clip_min = metrics_cfg.get('clip_score_min', 31.0)
-            clip_max = metrics_cfg.get('clip_score_max', 32.5)
-            fid_min = metrics_cfg.get('fid_score_min', 22.0)
-            fid_max = metrics_cfg.get('fid_score_max', 25.5)
+            clip_min = metrics_cfg.get('clip_score_min', 31.68632)
+            clip_max = metrics_cfg.get('clip_score_max', 31.81332)
+            fid_min = metrics_cfg.get('fid_score_min', 23.01086)
+            fid_max = metrics_cfg.get('fid_score_max', 23.95007)
             clip_status = "PASS" if clip_min <= clip <= clip_max else "FAIL"
             fid_status = "PASS" if fid_min <= fid <= fid_max else "FAIL"
             print(f"CLIP: {clip:.4f} [{clip_status}]")

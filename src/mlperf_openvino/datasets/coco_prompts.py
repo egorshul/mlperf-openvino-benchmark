@@ -558,9 +558,11 @@ class COCOPromptsDataset(BaseDataset):
 
             model.eval()
 
-            # Resize + ToTensor scales to [0,1]; pytorch-fid InceptionV3 normalizes to [-1,1] internally
+            # ToTensor scales to [0,1]; pytorch-fid InceptionV3 resizes to 299x299
+            # and normalizes to [-1,1] internally (resize_input=True, normalize_input=True).
+            # Do NOT resize externally — pytorch-fid uses F.interpolate internally,
+            # and PIL Resize produces different pixel values for the same downscale.
             transform = transforms.Compose([
-                transforms.Resize((299, 299)),
                 transforms.ToTensor(),
             ])
 

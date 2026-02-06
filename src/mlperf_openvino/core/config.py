@@ -489,16 +489,16 @@ class BenchmarkConfig:
                 output_name="sample",
                 data_format="NC",
                 dtype="FP32",
-                # SDXL accuracy targets for OpenVINO (wider than MLPerf closed FP32 ref)
-                # MLPerf FP32 ref: CLIP [31.686, 31.813], FID [23.011, 23.950]
-                # OpenVINO range accounts for graph optimizations and precision effects
-                accuracy_target=31.0,  # Minimum CLIP score
-                accuracy_threshold=0.99,
+                # MLPerf v5.1 accuracy targets for SDXL (closed division)
+                # CLIP_SCORE: >= 31.68632 and <= 31.81332
+                # FID_SCORE: >= 23.01086 and <= 23.95007
+                accuracy_target=31.68632,  # Minimum CLIP score
+                accuracy_threshold=1.0,
                 accuracy_metrics={
-                    'clip_score_min': 31.0,
-                    'clip_score_max': 32.5,
-                    'fid_score_min': 22.0,
-                    'fid_score_max': 25.5,
+                    'clip_score_min': 31.68632,
+                    'clip_score_max': 31.81332,
+                    'fid_score_min': 23.01086,
+                    'fid_score_max': 23.95007,
                 },
                 preprocessing=PreprocessingConfig(),  # Not used for text input
                 offline=ScenarioConfig(
