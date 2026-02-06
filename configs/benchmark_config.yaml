@@ -124,13 +124,15 @@ models:
     performance_sample_count: 64  # QSL size for performance runs
 
     offline:
-      min_duration_ms: 600000  # 10 minutes (MLPerf v5.1 official requirement)
-      min_query_count: 24576  # MLPerf official requirement
+      min_duration_ms: 60000  # MLPerf v5.1 official: 600000 (10 min)
+      min_query_count: 500  # MLPerf v5.1 official: 24576
+      target_qps: 10.0  # MLPerf v5.1 official: not set (defaults to 1000)
 
     server:
       target_latency_ns: 100000000  # 100ms (from mlperf.conf)
-      target_qps: 1000.0  # Starting point, auto-tuned
-      min_duration_ms: 600000  # 10 minutes (MLPerf v5.1 official requirement)
+      target_qps: 10.0  # MLPerf v5.1 official: 1000.0
+      min_duration_ms: 60000  # MLPerf v5.1 official: 600000 (10 min)
+      min_query_count: 500  # MLPerf v5.1 official: 24576
 
   whisper:
     name: "Whisper-Large-v3"

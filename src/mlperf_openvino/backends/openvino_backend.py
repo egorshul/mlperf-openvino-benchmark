@@ -66,11 +66,11 @@ class OpenVINOBackend(BaseBackend):
 
         logger.info(f"Loading model from {self.model_path}")
 
-        # Bare accelerator prefix without die number requires MultiDeviceBackend
-        if self.config.is_multi_device():
+        # Validate device - multi-die configurations require MultiDeviceBackend
+        if self.config.is_multi_device() or self.config.is_selected_dies():
             device_prefix = self.config.get_device_prefix()
             raise ValueError(
-                f"Device '{device_prefix}' (all dies) requires MultiDeviceBackend. "
+                f"Device '{self.config.device}' (multiple dies) requires MultiDeviceBackend. "
                 f"Use a specific die (e.g., '{device_prefix}.0') for OpenVINOBackend, "
                 f"or use '--device {device_prefix}' which automatically uses MultiDeviceBackend."
             )
