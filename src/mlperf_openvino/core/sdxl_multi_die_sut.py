@@ -164,8 +164,8 @@ class SDXLMultiDieSUT:
     def _load_pipeline_for_device(self, die: str) -> Any:
         is_cpu = die.upper() == "CPU"
 
-        # Force FP32 precision to match MLPerf reference (OpenVINO may
-        # auto-downcast to BF16 on CPUs with AMX/AVX-512 support).
+        # Force FP32 precision for CPU components to match MLPerf reference
+        # (OpenVINO may auto-downcast to BF16 on CPUs with AMX/AVX-512).
         ov_config = {"INFERENCE_PRECISION_HINT": "f32"}
 
         if is_cpu and self.batch_size <= 1:
@@ -185,9 +185,10 @@ class SDXLMultiDieSUT:
                     width=self.image_size,
                     num_images_per_prompt=1,
                 )
-                if not is_cpu:
-                    pipeline.to(die)
-                pipeline.compile()
+                if is_cpu:
+                    pipeline.compile()
+                else:
+                    self._compile_heterogeneous(pipeline, die)
             except Exception as exc:
                 if self.batch_size > 1:
                     logger.warning(
@@ -204,9 +205,10 @@ class SDXLMultiDieSUT:
                         width=self.image_size,
                         num_images_per_prompt=1,
                     )
-                    if not is_cpu:
-                        pipeline.to(die)
-                    pipeline.compile()
+                    if is_cpu:
+                        pipeline.compile()
+                    else:
+                        self._compile_heterogeneous(pipeline, die)
                     self.batch_size = 1
                 else:
                     raise
@@ -229,6 +231,36 @@ class SDXLMultiDieSUT:
             pipeline.watermark = None
 
         return pipeline
+
+    def _compile_heterogeneous(self, pipeline: Any, die: str) -> None:
+        """Compile text encoders + VAE on CPU (FP32), UNet on accelerator die.
+
+        Keeping text encoders and VAE decoder on CPU preserves FP32 precision
+        for prompt embedding and image decoding, while only the UNet diffusion
+        steps run on the accelerator (which may use lower precision, e.g. FP24).
+        """
+        import openvino as ov
+
+        core = ov.Core()
+
+        # Compile text encoders and VAE on CPU (FP32)
+        pipeline.to("CPU")
+        for attr_name in ("text_encoder", "text_encoder_2", "vae_decoder", "vae_encoder"):
+            component = getattr(pipeline, attr_name, None)
+            if component is not None and hasattr(component, "compile"):
+                component.compile()
+
+        # Collect device-specific properties for the accelerator
+        npu_config: Dict[str, Any] = {}
+        if hasattr(self.config, "openvino") and hasattr(self.config.openvino, "device_properties"):
+            for key, value in self.config.openvino.device_properties.items():
+                npu_config[key] = value
+
+        # Compile UNet on the accelerator die
+        unet_compiled = core.compile_model(pipeline.unet.model, die, npu_config)
+        pipeline.unet.request = unet_compiled
+
+        logger.info("[SDXL %s] UNet -> %s, text encoders + VAE -> CPU", die, die)
 
     def _process_sample(self, sample_idx: int, pipeline: Any) -> np.ndarray:
         features = self.qsl.get_features(sample_idx)
