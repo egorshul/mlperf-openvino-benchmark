@@ -342,10 +342,12 @@ def download_model_cmd(model: str, output_dir: str, format: str, batch_sizes: st
                 click.echo(f"  Decoder with KV-cache: {paths['decoder_with_past_path']}")
         elif model == 'sdxl':
             from .utils.model_downloader import download_sdxl_model
-            export_to_openvino = (format == 'openvino')
+            # SDXL always needs OpenVINO IR format for inference
+            if format != 'openvino':
+                click.echo("  Note: SDXL requires OpenVINO format, using --format openvino")
             paths = download_sdxl_model(
                 str(output_path),
-                export_to_openvino=export_to_openvino
+                export_to_openvino=True,
             )
             click.echo(f"Model downloaded to: {paths['model_path']}")
         elif model == 'retinanet':
@@ -521,10 +523,12 @@ def setup_cmd(model: str, output_dir: str, format: str):
             )
             model_path = model_paths['model_path']
         elif model == 'sdxl':
-            export_to_openvino = (format == 'openvino')
+            # SDXL always needs OpenVINO IR format for inference
+            if format != 'openvino':
+                click.echo("  Note: SDXL requires OpenVINO format, using --format openvino")
             model_paths = download_sdxl_model(
                 str(models_dir),
-                export_to_openvino=export_to_openvino
+                export_to_openvino=True,
             )
             model_path = model_paths['model_path']
         elif model == 'retinanet':
