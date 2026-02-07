@@ -164,13 +164,19 @@ class SDXLMultiDieSUT:
     def _load_pipeline_for_device(self, die: str) -> Any:
         is_cpu = die.upper() == "CPU"
 
+        # Force FP32 precision to match MLPerf reference (OpenVINO may
+        # auto-downcast to BF16 on CPUs with AMX/AVX-512 support).
+        ov_config = {"INFERENCE_PRECISION_HINT": "f32"}
+
         if is_cpu and self.batch_size <= 1:
             pipeline = OVStableDiffusionXLPipeline.from_pretrained(
                 str(self.model_path), compile=True, load_in_8bit=False,
+                ov_config=ov_config,
             )
         else:
             pipeline = OVStableDiffusionXLPipeline.from_pretrained(
                 str(self.model_path), compile=False, load_in_8bit=False,
+                ov_config=ov_config,
             )
             try:
                 pipeline.reshape(
@@ -190,6 +196,7 @@ class SDXLMultiDieSUT:
                     )
                     pipeline = OVStableDiffusionXLPipeline.from_pretrained(
                         str(self.model_path), compile=False, load_in_8bit=False,
+                        ov_config=ov_config,
                     )
                     pipeline.reshape(
                         batch_size=1,

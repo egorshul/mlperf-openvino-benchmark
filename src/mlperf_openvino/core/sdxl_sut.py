@@ -113,10 +113,15 @@ class SDXLOptimumSUT:
         device = self.config.openvino.device if hasattr(self.config, "openvino") else "CPU"
         print(f"[SDXL] Compiling on {device} ...", file=sys.stderr, flush=True)
 
+        # Force FP32 precision to match MLPerf reference (OpenVINO may
+        # auto-downcast to BF16 on CPUs with AMX/AVX-512 support).
+        ov_config = {"INFERENCE_PRECISION_HINT": "f32"}
+
         try:
             if self.batch_size > 1:
                 self.pipeline = OVStableDiffusionXLPipeline.from_pretrained(
                     str(self.model_path), compile=False, load_in_8bit=False,
+                    ov_config=ov_config,
                 )
                 try:
                     self.pipeline.reshape(
@@ -133,11 +138,13 @@ class SDXLOptimumSUT:
                     )
                     self.pipeline = OVStableDiffusionXLPipeline.from_pretrained(
                         str(self.model_path), compile=True, load_in_8bit=False,
+                        ov_config=ov_config,
                     )
                     self.batch_size = 1
             else:
                 self.pipeline = OVStableDiffusionXLPipeline.from_pretrained(
                     str(self.model_path), compile=True, load_in_8bit=False,
+                    ov_config=ov_config,
                 )
         except Exception as e:
             logger.warning("Failed to load OpenVINO pipeline: %s", e)
@@ -409,33 +416,37 @@ class SDXLManualSUT:
         core = ov.Core()
         logger.debug(f"Loading SDXL components from {self.model_path}")
 
+        # Force FP32 precision to match MLPerf reference (OpenVINO may
+        # auto-downcast to BF16 on CPUs with AMX/AVX-512 support).
+        ov_config = {"INFERENCE_PRECISION_HINT": "f32"}
+
         unet_path = self.model_path / "unet" / "openvino_model.xml"
         if not unet_path.exists():
             unet_path = self.model_path / "unet.xml"
         if unet_path.exists():
             logger.debug(f"Loading UNet from {unet_path}")
-            self.unet = core.compile_model(str(unet_path), "CPU")
+            self.unet = core.compile_model(str(unet_path), "CPU", ov_config)
 
         vae_path = self.model_path / "vae_decoder" / "openvino_model.xml"
         if not vae_path.exists():
             vae_path = self.model_path / "vae_decoder.xml"
         if vae_path.exists():
             logger.debug(f"Loading VAE decoder from {vae_path}")
-            self.vae_decoder = core.compile_model(str(vae_path), "CPU")
+            self.vae_decoder = core.compile_model(str(vae_path), "CPU", ov_config)
 
         text_enc_path = self.model_path / "text_encoder" / "openvino_model.xml"
         if not text_enc_path.exists():
             text_enc_path = self.model_path / "text_encoder.xml"
         if text_enc_path.exists():
             logger.debug(f"Loading text encoder from {text_enc_path}")
-            self.text_encoder = core.compile_model(str(text_enc_path), "CPU")
+            self.text_encoder = core.compile_model(str(text_enc_path), "CPU", ov_config)
 
         text_enc2_path = self.model_path / "text_encoder_2" / "openvino_model.xml"
         if not text_enc2_path.exists():
             text_enc2_path = self.model_path / "text_encoder_2.xml"
         if text_enc2_path.exists():
             logger.debug(f"Loading text encoder 2 from {text_enc2_path}")
-            self.text_encoder_2 = core.compile_model(str(text_enc2_path), "CPU")
+            self.text_encoder_2 = core.compile_model(str(text_enc2_path), "CPU", ov_config)
 
         try:
             from transformers import CLIPTokenizer
