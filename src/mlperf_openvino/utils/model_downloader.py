@@ -490,13 +490,22 @@ def _export_sdxl_to_openvino(output_dir: str, model_id: str) -> Dict[str, str]:
     logger.info("Large files (6+ GB) - download will resume if interrupted.")
 
     def do_export():
+        import torch
+
         # load_in_8bit=False avoids NNCF int8 compression which degrades
-        # accuracy for MLCommons closed division
+        # accuracy for MLCommons closed division.
+        # torch_dtype=float32 is critical: SDXL weights on HuggingFace are
+        # stored in FP16.  Without this, Optimum-Intel auto-detects the on-disk
+        # FP16 format and exports FP16 weight constants into the OpenVINO IR.
+        # The MLPerf reference loads with torch_dtype=float32 to get full FP32
+        # weights, and the closed-division accuracy thresholds (CLIP/FID) are
+        # computed against that FP32 baseline.
         return OVStableDiffusionXLPipeline.from_pretrained(
             model_id,
             export=True,
             compile=False,
             load_in_8bit=False,
+            torch_dtype=torch.float32,
         )
 
     pipeline = _download_with_retry(do_export, max_retries=3)
