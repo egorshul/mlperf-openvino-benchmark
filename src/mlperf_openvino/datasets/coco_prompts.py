@@ -458,12 +458,16 @@ class COCOPromptsDataset(BaseDataset):
             return 0.0
 
         try:
-            # MLCommons reference: ViT-B/32 with openai weights
+            # MLCommons reference: ViT-B/32 with openai weights.
+            # Must use the QuickGELU variant: OpenAI CLIP was trained with
+            # QuickGELU (x*sigmoid(1.702*x)), but newer open_clip defaults to
+            # standard nn.GELU.  Using the wrong activation produces wrong
+            # embeddings and systematically lower CLIP scores.
             model, _, preprocess = open_clip.create_model_and_transforms(
-                'ViT-B-32',
+                'ViT-B-32-quickgelu',
                 pretrained='openai'
             )
-            tokenizer = open_clip.get_tokenizer('ViT-B-32')
+            tokenizer = open_clip.get_tokenizer('ViT-B-32-quickgelu')
             model.eval()
 
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
