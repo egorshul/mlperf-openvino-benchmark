@@ -274,8 +274,8 @@ class SSDResNet34SUT:
         if labels is not None and labels.ndim == 2:
             labels = labels[0]
 
-        # Filter padding (model NMS already filtered at score > 0.05)
-        mask = scores > 0.0
+        # Reference PostProcessCocoOnnx filters at score < 0.5
+        mask = scores >= 0.5
         boxes = boxes[mask]
         scores = scores[mask]
         if labels is not None:
@@ -323,7 +323,7 @@ class SSDResNet34SUT:
         response_vals = []
         for i in range(len(scores)):
             score = float(scores[i])
-            if score <= 0.0:
+            if score < 0.5:
                 continue
             box = boxes[i]
             label = float(labels[i]) if i < len(labels) else 0.0

@@ -686,7 +686,7 @@ void SSDResNet34MultiDieCppSUT::on_inference_complete(SSDResNet34MultiDieInferCo
 
             for (size_t det = 0; det < num_dets; ++det) {
                 float score = sample_scores[det];
-                if (score <= 0.0f) continue;  // skip padding (model NMS already filtered at 0.05)
+                if (score < 0.5f) continue;  // Reference PostProcessCocoOnnx filters at score < 0.5
 
                 // Model output: box = [x1, y1, x2, y2]
                 float x1 = sample_boxes[det * 4 + 0];

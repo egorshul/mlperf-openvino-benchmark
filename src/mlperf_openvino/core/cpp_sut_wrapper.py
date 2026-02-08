@@ -735,7 +735,7 @@ class SSDResNet34CppSUTWrapper:
                 response_data = []
                 for det_idx in range(len(scores_arr)):
                     score = float(scores_arr[det_idx])
-                    if score <= 0.0:
+                    if score < 0.5:
                         continue
                     box = boxes_arr[det_idx]
                     label = float(labels_arr[det_idx]) if labels_arr is not None and det_idx < len(labels_arr) else 0.0
