@@ -227,6 +227,13 @@ class BenchmarkConfig:
     results_dir: str = "./results"
     logs_dir: str = "./logs"
 
+    # MLPerf LoadGen config files for Closed Division compliance.
+    # When set, LoadGen uses official settings (min_duration, min_query_count,
+    # performance_sample_count, seeds, etc.) from these files, overriding
+    # any programmatic settings.
+    mlperf_conf: Optional[str] = None   # path to mlperf.conf
+    user_conf: Optional[str] = None     # path to user.conf
+
     @classmethod
     def from_yaml(cls, yaml_path: str, model_name: str = "resnet50") -> "BenchmarkConfig":
         """Load configuration from YAML file."""

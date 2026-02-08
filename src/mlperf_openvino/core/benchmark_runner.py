@@ -461,12 +461,35 @@ class BenchmarkRunner:
         else:
             settings.mode = lg.TestMode.PerformanceOnly
 
+        # For Closed Division: load official MLPerf settings from config files.
+        # These override any programmatic settings below (min_duration, seeds, etc.).
+        scenario_str = self.config.scenario.value  # "offline" or "server"
+        model_name = self.config.model.model_type.value if self.config.model.model_type else ""
+
+        if self.config.mlperf_conf:
+            conf_path = Path(self.config.mlperf_conf)
+            if conf_path.exists():
+                logger.info(f"Loading mlperf.conf from {conf_path}")
+                settings.FromConfig(str(conf_path), model_name, scenario_str)
+            else:
+                logger.warning(f"mlperf.conf not found: {conf_path}")
+
+        if self.config.user_conf:
+            conf_path = Path(self.config.user_conf)
+            if conf_path.exists():
+                logger.info(f"Loading user.conf from {conf_path}")
+                settings.FromConfig(str(conf_path), model_name, scenario_str)
+            else:
+                logger.warning(f"user.conf not found: {conf_path}")
+
+        # Programmatic defaults (used when config files are not provided)
         scenario_config = self.config.get_scenario_config()
-        settings.min_duration_ms = scenario_config.min_duration_ms
-        settings.min_query_count = scenario_config.min_query_count
-        settings.qsl_rng_seed = scenario_config.qsl_rng_seed
-        settings.sample_index_rng_seed = scenario_config.sample_index_rng_seed
-        settings.schedule_rng_seed = scenario_config.schedule_rng_seed
+        if not self.config.mlperf_conf:
+            settings.min_duration_ms = scenario_config.min_duration_ms
+            settings.min_query_count = scenario_config.min_query_count
+            settings.qsl_rng_seed = scenario_config.qsl_rng_seed
+            settings.sample_index_rng_seed = scenario_config.sample_index_rng_seed
+            settings.schedule_rng_seed = scenario_config.schedule_rng_seed
 
         logger.info(f"LoadGen settings: min_duration={scenario_config.min_duration_ms/1000:.0f}s, min_query_count={scenario_config.min_query_count}")
 

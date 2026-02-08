@@ -291,9 +291,15 @@ class COCODataset(BaseDataset):
         return img_array, preprocess_info
 
     def _preprocess_image_pil(self, image_path: str) -> Tuple[np.ndarray, Dict]:
+        # Note: PIL fallback may produce slightly different results from cv2.
+        # For MLPerf Closed Division, OpenCV (cv2) is required to match
+        # the reference preprocessing exactly.
+        logger.warning("Using PIL fallback for preprocessing; install OpenCV (cv2) "
+                       "for MLPerf Closed Division compliance")
         img = Image.open(image_path).convert('RGB')
         orig_width, orig_height = img.size
 
+        # PIL BILINEAR is the closest equivalent to cv2.INTER_LINEAR
         img = img.resize((self.input_size, self.input_size), Image.Resampling.BILINEAR)
 
         img_array = np.array(img, dtype=np.float32) / 255.0

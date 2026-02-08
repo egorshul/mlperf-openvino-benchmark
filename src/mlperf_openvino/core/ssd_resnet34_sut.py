@@ -81,6 +81,7 @@ class SSDResNet34SUT:
         score_threshold: float = SCORE_THRESHOLD,
         nms_threshold: float = NMS_THRESHOLD,
         max_detections: int = MAX_DETECTIONS,
+        model_has_nms: bool = True,
     ):
         if not LOADGEN_AVAILABLE:
             raise ImportError(
@@ -95,6 +96,10 @@ class SSDResNet34SUT:
         self.score_threshold = score_threshold
         self.nms_threshold = nms_threshold
         self.max_detections = max_detections
+        # The MLPerf ONNX model (ssd_resnet34_mAP_20.2.onnx) has NMS baked in.
+        # When True, skip redundant per-class NMS and just pass through model
+        # output (matching the reference PostProcessCocoOnnx behavior).
+        self.model_has_nms = model_has_nms
 
         if not self.backend.is_loaded:
             self.backend.load()
@@ -250,6 +255,40 @@ class SSDResNet34SUT:
             'labels': final_labels,
         }
 
+    def _passthrough_detections(
+        self,
+        boxes: np.ndarray,
+        scores: np.ndarray,
+        labels: Optional[np.ndarray] = None
+    ) -> Dict[str, np.ndarray]:
+        """Pass through model output for NMS-baked ONNX model.
+
+        Matches the MLCommons reference PostProcessCocoOnnx which only strips
+        the batch dimension and filters by score — no additional NMS.
+        """
+        # Remove batch dimension
+        if boxes.ndim == 3:
+            boxes = boxes[0]
+        if scores.ndim == 2:
+            scores = scores[0]
+        if labels is not None and labels.ndim == 2:
+            labels = labels[0]
+
+        # Filter padding (model NMS already filtered at score > 0.05)
+        mask = scores > 0.0
+        boxes = boxes[mask]
+        scores = scores[mask]
+        if labels is not None:
+            labels = labels[mask]
+        else:
+            labels = np.zeros(len(boxes), dtype=np.int64)
+
+        return {
+            'boxes': boxes,
+            'scores': scores,
+            'labels': labels,
+        }
+
     def _process_sample(self, sample_idx: int) -> Dict[str, np.ndarray]:
         features = self.qsl.get_features(sample_idx)
         inputs = {self.input_name: features['input']}
@@ -259,6 +298,8 @@ class SSDResNet34SUT:
         scores = outputs.get(self.scores_name, np.array([]))
         labels = outputs.get(self.labels_name) if self.labels_name else None
 
+        if self.model_has_nms:
+            return self._passthrough_detections(boxes, scores, labels)
         return self._postprocess_detections(boxes, scores, labels)
 
     def _format_response_data(self, sample_idx: int, detections: Dict[str, np.ndarray]) -> np.ndarray:
