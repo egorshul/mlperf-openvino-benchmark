@@ -711,17 +711,54 @@ class SSDResNet34CppSUTWrapper:
         self.labels_name = self._cpp_sut.get_labels_name()
 
         self._cpp_sut.set_store_predictions(True)
+        self._query_to_sample: Dict[int, int] = {}  # query_id -> sample_idx
         self._setup_response_callback()
         self._progress_monitor: Optional[ProgressMonitor] = None
 
     def _setup_response_callback(self):
         import array
 
-        dummy_data = array.array('B', [0] * 8)
-        dummy_bi = dummy_data.buffer_info()
-
         def response_callback(query_id: int, boxes, scores, labels):
-            response = lg.QuerySampleResponse(query_id, dummy_bi[0], dummy_bi[1])
+            sample_idx = self._query_to_sample.pop(query_id, 0)
+
+            if boxes is not None and scores is not None:
+                boxes_arr = np.asarray(boxes, dtype=np.float32)
+                scores_arr = np.asarray(scores, dtype=np.float32)
+                labels_arr = np.asarray(labels, dtype=np.float32) if labels is not None else None
+
+                if len(boxes_arr) > 0 and len(boxes_arr) % 4 == 0:
+                    boxes_arr = boxes_arr.reshape(-1, 4)
+
+                # Build MLCommons accuracy-coco.py response format:
+                # Each detection = 7 float32: [qsl_idx, ymin, xmin, ymax, xmax, score, label]
+                # Model boxes are [x1, y1, x2, y2], reorder to [y1, x1, y2, x2]
+                response_data = []
+                for det_idx in range(len(scores_arr)):
+                    score = float(scores_arr[det_idx])
+                    if score <= 0.0:
+                        continue
+                    box = boxes_arr[det_idx]
+                    label = float(labels_arr[det_idx]) if labels_arr is not None and det_idx < len(labels_arr) else 0.0
+                    response_data.extend([
+                        float(sample_idx),
+                        float(box[1]),  # ymin
+                        float(box[0]),  # xmin
+                        float(box[3]),  # ymax
+                        float(box[2]),  # xmax
+                        score,
+                        label,
+                    ])
+
+                if response_data:
+                    data_np = np.array(response_data, dtype=np.float32)
+                    response_array = array.array('B', data_np.tobytes())
+                    bi = response_array.buffer_info()
+                    response = lg.QuerySampleResponse(query_id, bi[0], bi[1])
+                else:
+                    response = lg.QuerySampleResponse(query_id, 0, 0)
+            else:
+                response = lg.QuerySampleResponse(query_id, 0, 0)
+
             lg.QuerySamplesComplete([response])
 
         self._cpp_sut.set_response_callback(response_callback)
@@ -738,6 +775,9 @@ class SSDResNet34CppSUTWrapper:
         for qs in query_samples:
             sample_idx = qs.index
             query_id = qs.id
+
+            # Store mapping for MLCommons accuracy log response formatting
+            self._query_to_sample[query_id] = sample_idx
 
             features = self.qsl.get_features(sample_idx)
             input_data = features.get('input', features.get(self.input_name))

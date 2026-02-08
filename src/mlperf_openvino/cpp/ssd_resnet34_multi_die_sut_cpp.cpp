@@ -591,7 +591,14 @@ void SSDResNet34MultiDieCppSUT::on_inference_complete(SSDResNet34MultiDieInferCo
     int num_dummies = ctx->num_dummies;
     int real_samples = actual_batch_size - num_dummies;
 
-    // Store predictions if needed (only for real samples)
+    // Response data buffers for MLCommons accuracy log format.
+    // Each detection: [qsl_idx, ymin, xmin, ymax, xmax, score, label] (7 float32).
+    // Must stay alive until QuerySamplesComplete copies the data.
+    std::vector<std::vector<float>> response_buffers;
+    mlperf::QuerySampleResponse responses[SSDResNet34MultiDieInferContext::MAX_BATCH];
+
+    // In accuracy mode, read model outputs for both prediction storage and
+    // response data formatting; in performance mode, skip entirely.
     if (store_predictions_ && real_samples > 0) {
         // Get output tensors
         ov::Tensor boxes_tensor = ctx->request.get_output_tensor(boxes_idx_);
@@ -600,7 +607,6 @@ void SSDResNet34MultiDieCppSUT::on_inference_complete(SSDResNet34MultiDieInferCo
         auto boxes_shape = boxes_tensor.get_shape();
         auto scores_shape = scores_tensor.get_shape();
 
-        size_t num_detections = scores_shape.size() > 1 ? scores_shape[1] : scores_shape[0];
         size_t boxes_per_sample = boxes_tensor.get_size() / actual_batch_size;
         size_t scores_per_sample = scores_tensor.get_size() / actual_batch_size;
 
@@ -640,34 +646,77 @@ void SSDResNet34MultiDieCppSUT::on_inference_complete(SSDResNet34MultiDieInferCo
             }
         }
 
-        std::lock_guard<std::mutex> lock(predictions_mutex_);
+        // Store predictions
+        {
+            std::lock_guard<std::mutex> lock(predictions_mutex_);
+            for (int i = 0; i < real_samples; ++i) {
+                int sample_idx = ctx->sample_indices[i];
+                SSDResNet34MultiDiePrediction pred;
+
+                const float* sample_boxes = boxes_data + (i * boxes_per_sample);
+                pred.boxes.assign(sample_boxes, sample_boxes + boxes_per_sample);
+
+                const float* sample_scores = scores_data + (i * scores_per_sample);
+                pred.scores.assign(sample_scores, sample_scores + scores_per_sample);
+
+                if (labels_data && labels_per_sample > 0) {
+                    const float* sample_labels = labels_data + (i * labels_per_sample);
+                    pred.labels.assign(sample_labels, sample_labels + labels_per_sample);
+                }
+
+                pred.num_detections = static_cast<int>(scores_per_sample);
+                predictions_[sample_idx] = std::move(pred);
+            }
+        }
+
+        // Format response data in MLCommons accuracy-coco.py format:
+        // Each detection = 7 float32: [qsl_idx, ymin, xmin, ymax, xmax, score, label]
+        // Model boxes are [x1, y1, x2, y2] normalized, we reorder to [y1, x1, y2, x2].
+        // Labels are raw model output (1-indexed, 1-80); accuracy-coco.py with
+        // --use-inv-map converts to COCO category IDs.
+        response_buffers.resize(real_samples);
         for (int i = 0; i < real_samples; ++i) {
             int sample_idx = ctx->sample_indices[i];
-            SSDResNet34MultiDiePrediction pred;
+            auto& buf = response_buffers[i];
+            buf.reserve(200 * 7);  // NMS baked in model caps at 200 detections
 
-            // Copy boxes
             const float* sample_boxes = boxes_data + (i * boxes_per_sample);
-            pred.boxes.assign(sample_boxes, sample_boxes + boxes_per_sample);
-
-            // Copy scores
             const float* sample_scores = scores_data + (i * scores_per_sample);
-            pred.scores.assign(sample_scores, sample_scores + scores_per_sample);
+            size_t num_dets = scores_per_sample;
 
-            // Copy labels
-            if (labels_data && labels_per_sample > 0) {
-                const float* sample_labels = labels_data + (i * labels_per_sample);
-                pred.labels.assign(sample_labels, sample_labels + labels_per_sample);
+            for (size_t det = 0; det < num_dets; ++det) {
+                float score = sample_scores[det];
+                if (score <= 0.0f) continue;  // skip padding (model NMS already filtered at 0.05)
+
+                // Model output: box = [x1, y1, x2, y2]
+                float x1 = sample_boxes[det * 4 + 0];
+                float y1 = sample_boxes[det * 4 + 1];
+                float x2 = sample_boxes[det * 4 + 2];
+                float y2 = sample_boxes[det * 4 + 3];
+                float label = 0.0f;
+                if (labels_data && labels_per_sample > 0) {
+                    label = (labels_data + i * labels_per_sample)[det];
+                }
+
+                // accuracy-coco.py format: [qsl_idx, ymin, xmin, ymax, xmax, score, label]
+                buf.push_back(static_cast<float>(sample_idx));
+                buf.push_back(y1);    // ymin
+                buf.push_back(x1);    // xmin
+                buf.push_back(y2);    // ymax
+                buf.push_back(x2);    // xmax
+                buf.push_back(score);
+                buf.push_back(label);
             }
 
-            pred.num_detections = static_cast<int>(scores_per_sample);
-            predictions_[sample_idx] = std::move(pred);
+            responses[i].id = ctx->query_ids[i];
+            responses[i].data = reinterpret_cast<uintptr_t>(buf.data());
+            responses[i].size = buf.size() * sizeof(float);
         }
-    }
-
-    // Prepare responses only for real samples (not dummies)
-    mlperf::QuerySampleResponse responses[SSDResNet34MultiDieInferContext::MAX_BATCH];
-    for (int i = 0; i < real_samples; ++i) {
-        responses[i] = {ctx->query_ids[i], 0, 0};
+    } else {
+        // Performance mode: empty response (LoadGen doesn't write accuracy log)
+        for (int i = 0; i < real_samples; ++i) {
+            responses[i] = {ctx->query_ids[i], 0, 0};
+        }
     }
 
     size_t pool_id = ctx->pool_id;

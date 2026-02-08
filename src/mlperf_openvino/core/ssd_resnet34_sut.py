@@ -261,6 +261,43 @@ class SSDResNet34SUT:
 
         return self._postprocess_detections(boxes, scores, labels)
 
+    def _format_response_data(self, sample_idx: int, detections: Dict[str, np.ndarray]) -> np.ndarray:
+        """Format detections as MLCommons accuracy-coco.py response data.
+
+        Each detection = 7 float32: [qsl_idx, ymin, xmin, ymax, xmax, score, label].
+        Model boxes are [x1, y1, x2, y2] normalized, reordered to [y1, x1, y2, x2].
+        Labels are raw model output (1-indexed, 1-80); accuracy-coco.py with
+        --use-inv-map converts to COCO category IDs.
+        """
+        boxes = detections.get('boxes', np.array([]))
+        scores = detections.get('scores', np.array([]))
+        labels = detections.get('labels', np.array([]))
+
+        if len(boxes) == 0 or len(scores) == 0:
+            return np.array([], dtype=np.float32)
+
+        if boxes.ndim == 1 and len(boxes) % 4 == 0:
+            boxes = boxes.reshape(-1, 4)
+
+        response_vals = []
+        for i in range(len(scores)):
+            score = float(scores[i])
+            if score <= 0.0:
+                continue
+            box = boxes[i]
+            label = float(labels[i]) if i < len(labels) else 0.0
+            response_vals.extend([
+                float(sample_idx),
+                float(box[1]),  # ymin
+                float(box[0]),  # xmin
+                float(box[3]),  # ymax
+                float(box[2]),  # xmax
+                score,
+                label,
+            ])
+
+        return np.array(response_vals, dtype=np.float32) if response_vals else np.array([], dtype=np.float32)
+
     def _issue_query_offline(self, query_samples: List[Any]) -> None:
         responses = []
         response_arrays = []  # Keep arrays alive until QuerySamplesComplete
@@ -273,17 +310,16 @@ class SSDResNet34SUT:
             detections = self._process_sample(sample_idx)
             self._predictions[sample_idx] = detections
 
-            num_detections = len(detections['boxes'])
-            response_data = np.array([num_detections], dtype=np.int64)
-            response_array = array.array('B', response_data.tobytes())
-            response_arrays.append(response_array)
-            bi = response_array.buffer_info()
+            # Format MLCommons accuracy-coco.py response data
+            response_data = self._format_response_data(sample_idx, detections)
+            if len(response_data) > 0:
+                response_array = array.array('B', response_data.tobytes())
+                response_arrays.append(response_array)
+                bi = response_array.buffer_info()
+                response = lg.QuerySampleResponse(qs.id, bi[0], bi[1])
+            else:
+                response = lg.QuerySampleResponse(qs.id, 0, 0)
 
-            response = lg.QuerySampleResponse(
-                qs.id,
-                bi[0],
-                bi[1]
-            )
             responses.append(response)
 
             self._sample_count += 1
@@ -307,17 +343,16 @@ class SSDResNet34SUT:
             detections = self._process_sample(sample_idx)
             self._predictions[sample_idx] = detections
 
-            num_detections = len(detections['boxes'])
-            response_data = np.array([num_detections], dtype=np.int64)
-            response_array = array.array('B', response_data.tobytes())
-            response_arrays.append(response_array)
-            bi = response_array.buffer_info()
+            # Format MLCommons accuracy-coco.py response data
+            response_data = self._format_response_data(sample_idx, detections)
+            if len(response_data) > 0:
+                response_array = array.array('B', response_data.tobytes())
+                response_arrays.append(response_array)
+                bi = response_array.buffer_info()
+                response = lg.QuerySampleResponse(qs.id, bi[0], bi[1])
+            else:
+                response = lg.QuerySampleResponse(qs.id, 0, 0)
 
-            response = lg.QuerySampleResponse(
-                qs.id,
-                bi[0],
-                bi[1]
-            )
             responses.append(response)
 
             self._sample_count += 1
