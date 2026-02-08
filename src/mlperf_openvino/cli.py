@@ -342,7 +342,6 @@ def download_model_cmd(model: str, output_dir: str, format: str, batch_sizes: st
                 click.echo(f"  Decoder with KV-cache: {paths['decoder_with_past_path']}")
         elif model == 'sdxl':
             from .utils.model_downloader import download_sdxl_model
-            # SDXL always needs OpenVINO IR format for inference
             if format != 'openvino':
                 click.echo("  Note: SDXL requires OpenVINO format, using --format openvino")
             paths = download_sdxl_model(
@@ -523,7 +522,6 @@ def setup_cmd(model: str, output_dir: str, format: str):
             )
             model_path = model_paths['model_path']
         elif model == 'sdxl':
-            # SDXL always needs OpenVINO IR format for inference
             if format != 'openvino':
                 click.echo("  Note: SDXL requires OpenVINO format, using --format openvino")
             model_paths = download_sdxl_model(

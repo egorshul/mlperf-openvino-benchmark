@@ -97,10 +97,6 @@ class WhisperMultiDieSUT:
 
         self._setup_models()
 
-    # ------------------------------------------------------------------
-    # Model setup
-    # ------------------------------------------------------------------
-
     def _discover_device_dies(self, device: str) -> List[str]:
         import openvino as ov
 
@@ -168,11 +164,7 @@ class WhisperMultiDieSUT:
         )
 
     def _compile_on_device(self, model: Any, die: str) -> None:
-        """Compile encoder and decoder on the given die.
-
-        Encoder is always compiled on the accelerator (static shape for NPU).
-        Decoder is attempted on the accelerator; falls back to CPU on failure.
-        """
+        """Compile encoder and decoder on the given die."""
         import openvino as ov
 
         core = ov.Core()
@@ -182,7 +174,6 @@ class WhisperMultiDieSUT:
             for key, value in self.config.openvino.device_properties.items():
                 ov_config[key] = value
 
-        # --- Encoder → device (reshape to static for NPU) ---
         encoder_ir = core.read_model(str(self.encoder_path))
         for inp in encoder_ir.inputs:
             if inp.get_partial_shape().is_dynamic:
@@ -191,20 +182,14 @@ class WhisperMultiDieSUT:
         model.encoder.request = core.compile_model(encoder_ir, die, ov_config)
         logger.info("[Whisper %s] Encoder -> %s", die, die)
 
-        # --- Decoder → try device, fallback to CPU ---
         try:
             decoder_ir = core.read_model(str(self.decoder_path))
-            compiled_decoder = core.compile_model(decoder_ir, die, ov_config)
-            model.decoder.request = compiled_decoder
+            model.decoder.request = core.compile_model(decoder_ir, die, ov_config)
             logger.info("[Whisper %s] Decoder -> %s", die, die)
         except Exception as exc:
             logger.info(
-                "[Whisper %s] Decoder -> CPU (device compilation failed: %s)", die, exc,
+                "[Whisper %s] Decoder -> CPU (device failed: %s)", die, exc,
             )
-
-    # ------------------------------------------------------------------
-    # Inference
-    # ------------------------------------------------------------------
 
     def _process_sample(self, sample_idx: int, model: Any) -> str:
         import torch
@@ -224,10 +209,6 @@ class WhisperMultiDieSUT:
             task="transcribe",
         )
         return self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-
-    # ------------------------------------------------------------------
-    # Query dispatch
-    # ------------------------------------------------------------------
 
     def issue_queries(self, query_samples: List[Any]) -> None:
         self._query_count += len(query_samples)
@@ -329,10 +310,6 @@ class WhisperMultiDieSUT:
             arr = array.array("B", text_bytes)
             bi = arr.buffer_info()
             lg.QuerySamplesComplete([lg.QuerySampleResponse(sample.id, bi[0], bi[1])])
-
-    # ------------------------------------------------------------------
-    # LoadGen interface
-    # ------------------------------------------------------------------
 
     def flush_queries(self) -> None:
         pass

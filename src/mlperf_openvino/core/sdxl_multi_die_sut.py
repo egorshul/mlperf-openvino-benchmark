@@ -164,10 +164,6 @@ class SDXLMultiDieSUT:
     def _load_pipeline_for_device(self, die: str) -> Any:
         is_cpu = die.upper() == "CPU"
 
-        # EXECUTION_MODE_HINT=ACCURACY prevents BF16/F16 auto-downcast AND
-        # disables dynamic quantization (int8 MatMul) that OpenVINO enables
-        # by default in PERFORMANCE mode.  This is critical for matching
-        # MLPerf FP32 reference accuracy (CLIP/FID thresholds).
         ov_config = {"EXECUTION_MODE_HINT": "ACCURACY"}
 
         if is_cpu and self.batch_size <= 1:

@@ -176,7 +176,6 @@ class ModelConfig:
     accuracy_target: float = 0.0
     accuracy_threshold: float = 0.99
 
-    # SDXL-specific: range-based accuracy metrics (clip_score_min/max, fid_score_min/max)
     accuracy_metrics: Dict[str, float] = field(default_factory=dict)
 
     preprocessing: PreprocessingConfig = field(default_factory=PreprocessingConfig)
@@ -489,10 +488,7 @@ class BenchmarkConfig:
                 output_name="sample",
                 data_format="NC",
                 dtype="FP32",
-                # MLPerf v5.1 accuracy targets for SDXL (closed division)
-                # CLIP_SCORE: >= 31.68632 and <= 31.81332
-                # FID_SCORE: >= 23.01086 and <= 23.95007
-                accuracy_target=31.68632,  # Minimum CLIP score
+                accuracy_target=31.68632,
                 accuracy_threshold=1.0,
                 accuracy_metrics={
                     'clip_score_min': 31.68632,

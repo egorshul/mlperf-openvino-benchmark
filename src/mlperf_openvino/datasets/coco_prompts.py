@@ -458,11 +458,6 @@ class COCOPromptsDataset(BaseDataset):
             return 0.0
 
         try:
-            # MLCommons reference: ViT-B/32 with openai weights.
-            # Must use the QuickGELU variant: OpenAI CLIP was trained with
-            # QuickGELU (x*sigmoid(1.702*x)), but newer open_clip defaults to
-            # standard nn.GELU.  Using the wrong activation produces wrong
-            # embeddings and systematically lower CLIP scores.
             model, _, preprocess = open_clip.create_model_and_transforms(
                 'ViT-B-32-quickgelu',
                 pretrained='openai'
@@ -562,10 +557,6 @@ class COCOPromptsDataset(BaseDataset):
 
             model.eval()
 
-            # ToTensor scales to [0,1]; pytorch-fid InceptionV3 resizes to 299x299
-            # and normalizes to [-1,1] internally (resize_input=True, normalize_input=True).
-            # Do NOT resize externally — pytorch-fid uses F.interpolate internally,
-            # and PIL Resize produces different pixel values for the same downscale.
             transform = transforms.Compose([
                 transforms.ToTensor(),
             ])

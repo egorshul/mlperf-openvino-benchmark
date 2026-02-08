@@ -673,7 +673,6 @@ class BenchmarkRunner:
         logger.info(f"CLIP Score: {clip_score:.4f}")
         logger.info(f"FID Score: {fid_score:.4f}")
 
-        # Read SDXL accuracy thresholds from config (accuracy_metrics section)
         metrics_cfg = self.config.model.accuracy_metrics
         clip_min = metrics_cfg.get('clip_score_min', 31.68632)
         clip_max = metrics_cfg.get('clip_score_max', 31.81332)

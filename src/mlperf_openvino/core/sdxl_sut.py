@@ -113,10 +113,6 @@ class SDXLOptimumSUT:
         device = self.config.openvino.device if hasattr(self.config, "openvino") else "CPU"
         print(f"[SDXL] Compiling on {device} ...", file=sys.stderr, flush=True)
 
-        # EXECUTION_MODE_HINT=ACCURACY prevents BF16/F16 auto-downcast AND
-        # disables dynamic quantization (int8 MatMul) that OpenVINO enables
-        # by default in PERFORMANCE mode.  This is critical for matching
-        # MLPerf FP32 reference accuracy (CLIP/FID thresholds).
         ov_config = {"EXECUTION_MODE_HINT": "ACCURACY"}
 
         try:
@@ -418,10 +414,6 @@ class SDXLManualSUT:
         core = ov.Core()
         logger.debug(f"Loading SDXL components from {self.model_path}")
 
-        # EXECUTION_MODE_HINT=ACCURACY prevents BF16/F16 auto-downcast AND
-        # disables dynamic quantization (int8 MatMul) that OpenVINO enables
-        # by default in PERFORMANCE mode.  This is critical for matching
-        # MLPerf FP32 reference accuracy (CLIP/FID thresholds).
         ov_config = {"EXECUTION_MODE_HINT": "ACCURACY"}
 
         unet_path = self.model_path / "unet" / "openvino_model.xml"
