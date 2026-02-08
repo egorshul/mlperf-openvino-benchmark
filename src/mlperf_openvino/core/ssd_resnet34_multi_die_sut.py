@@ -20,20 +20,9 @@ except ImportError:
 
 from .image_multi_die_sut_base import ImageMultiDieSUTBase
 from .config import Scenario
+from ..datasets.coco import LABEL_TO_COCO_ID
 
 logger = logging.getLogger(__name__)
-
-# SSD-ResNet34 outputs 0-indexed labels (0-79) that must be mapped to
-# non-contiguous COCO 2017 category IDs for evaluation with pycocotools.
-LABEL_TO_COCO_ID = [
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19, 20, 21,
-    22, 23, 24, 25, 27, 28, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
-    43, 44, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
-    62, 63, 64, 65, 67, 70, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 84,
-    85, 86, 87, 88, 89, 90,
-]
-
-INPUT_SIZE = 1200
 
 
 class SSDResNet34MultiDieCppSUTWrapper(ImageMultiDieSUTBase):
@@ -96,6 +85,7 @@ class SSDResNet34MultiDieCppSUTWrapper(ImageMultiDieSUTBase):
         return result
 
     def compute_accuracy(self) -> Dict[str, float]:
+        """Compute mAP using pycocotools, aligned with MLCommons accuracy-coco.py."""
         predictions = self.get_predictions()
 
         if not predictions:
@@ -106,32 +96,30 @@ class SSDResNet34MultiDieCppSUTWrapper(ImageMultiDieSUTBase):
             from pycocotools.coco import COCO
             from pycocotools.cocoeval import COCOeval
         except ImportError:
-            logger.error("pycocotools not available, cannot compute accurate mAP")
-            return {'mAP': 0.0, 'error': 'pycocotools not installed'}
+            logger.error("pycocotools not available, cannot compute mAP")
+            # Fallback to dataset-level accuracy
+            pred_list = []
+            indices = []
+            for sample_idx in sorted(predictions.keys()):
+                pred_list.append(predictions[sample_idx])
+                indices.append(sample_idx)
+            return self.qsl.dataset.compute_accuracy(pred_list, indices)
 
-        coco_file = None
-        if hasattr(self.qsl, 'dataset') and hasattr(self.qsl.dataset, '_coco_annotations_file'):
-            coco_file = self.qsl.dataset._coco_annotations_file
-
+        # Find COCO annotations file
+        coco_file = getattr(self.qsl.dataset, '_coco_annotations_file', None)
         if not coco_file:
-            # Fallback: search common annotation file locations
-            if hasattr(self.qsl, 'dataset') and hasattr(self.qsl.dataset, 'data_path'):
-                data_path = Path(self.qsl.dataset.data_path)
-                for name in [
-                    "annotations/instances_val2017.json",
-                    "instances_val2017.json",
-                    "annotations/coco-1200.json",
-                    "coco-1200.json",
-                ]:
-                    path = data_path / name
-                    if path.exists():
-                        coco_file = str(path)
-                        break
+            data_path = Path(self.qsl.dataset.data_path)
+            for name in [
+                "annotations/instances_val2017.json",
+                "instances_val2017.json",
+            ]:
+                path = data_path / name
+                if path.exists():
+                    coco_file = str(path)
+                    break
 
         if not coco_file:
             logger.error("COCO annotations file not found, cannot compute mAP")
-
-            # Fall back to dataset compute_accuracy if available
             pred_list = []
             indices = []
             for sample_idx in sorted(predictions.keys()):
@@ -144,38 +132,22 @@ class SSDResNet34MultiDieCppSUTWrapper(ImageMultiDieSUTBase):
         try:
             coco_gt = COCO(coco_file)
 
-            # Build sample index to COCO image_id mapping
-            sample_to_image_id = {}
+            # Get sample → image_id mapping directly from QSL
+            sample_to_image_id = self.qsl.get_sample_to_image_id_mapping()
 
-            if hasattr(self.qsl, 'get_sample_to_filename_mapping'):
-                sample_to_filename = self.qsl.get_sample_to_filename_mapping()
-                logger.info(f"Got filename mapping for {len(sample_to_filename)} samples")
-
-                filename_to_image_id = {}
-                for img_id, img_info in coco_gt.imgs.items():
-                    filename = img_info.get('file_name', '')
-                    base_name = filename.replace('.jpg', '').replace('.jpeg', '').replace('.png', '')
-                    filename_to_image_id[base_name] = img_id
-                    filename_to_image_id[filename] = img_id
-
-                for sample_idx, filename in sample_to_filename.items():
-                    base_name = filename.replace('.jpg', '').replace('.jpeg', '').replace('.png', '')
-                    if base_name in filename_to_image_id:
-                        sample_to_image_id[sample_idx] = filename_to_image_id[base_name]
-                    elif filename in filename_to_image_id:
-                        sample_to_image_id[sample_idx] = filename_to_image_id[filename]
-            else:
-                # Fallback: assume sample order matches sorted COCO image_id order
-                logger.warning("No filename mapping - assuming sample order matches COCO order")
-                sorted_img_ids = sorted(coco_gt.imgs.keys())
-                for sample_idx, img_id in enumerate(sorted_img_ids):
-                    sample_to_image_id[sample_idx] = img_id
-
-            # Convert predictions to COCO evaluation format
+            # Build COCO-format detections per MLCommons accuracy-coco.py:
+            # - Boxes are normalized [0, 1], scale to original image dimensions
+            # - Labels are 1-indexed (1-80), map via inv_map = [0] + getCatIds()
             coco_results = []
-            skipped = 0
+            evaluated_image_ids = []
 
             for sample_idx, pred in predictions.items():
+                image_id = sample_to_image_id.get(sample_idx)
+                if image_id is None:
+                    continue
+
+                evaluated_image_ids.append(image_id)
+
                 boxes = pred.get('boxes', np.array([]))
                 scores = pred.get('scores', np.array([]))
                 labels = pred.get('labels', np.array([]))
@@ -183,60 +155,42 @@ class SSDResNet34MultiDieCppSUTWrapper(ImageMultiDieSUTBase):
                 if len(boxes) == 0:
                     continue
 
-                if sample_idx not in sample_to_image_id:
-                    skipped += 1
-                    continue
-                image_id = sample_to_image_id[sample_idx]
-
-                # Get original image dimensions for coordinate scaling
-                if image_id in coco_gt.imgs:
-                    img_info = coco_gt.imgs[image_id]
-                    img_width = img_info.get('width', INPUT_SIZE)
-                    img_height = img_info.get('height', INPUT_SIZE)
-                else:
-                    img_width = img_height = INPUT_SIZE
+                # Get original image dimensions for coordinate denormalization
+                img_info = coco_gt.imgs.get(image_id, {})
+                img_width = img_info.get('width', 1)
+                img_height = img_info.get('height', 1)
 
                 for box, score, label in zip(boxes, scores, labels):
-                    # Boxes are in model input pixel coordinates [0, INPUT_SIZE]
-                    # Scale to original image dimensions
-                    x1, y1, x2, y2 = box
-                    scale_x = img_width / INPUT_SIZE
-                    scale_y = img_height / INPUT_SIZE
-                    x1_px = x1 * scale_x
-                    y1_px = y1 * scale_y
-                    x2_px = x2 * scale_x
-                    y2_px = y2 * scale_y
+                    # Boxes are normalized [0, 1] per MLCommons SSD-ResNet34 reference
+                    x1_px = float(box[0]) * img_width
+                    y1_px = float(box[1]) * img_height
+                    x2_px = float(box[2]) * img_width
+                    y2_px = float(box[3]) * img_height
 
-                    # Convert to COCO format [x, y, w, h]
-                    bbox_width = x2_px - x1_px
-                    bbox_height = y2_px - y1_px
-
-                    # Map model label (0-indexed) to COCO category_id
-                    label_idx = int(label)
-                    if 0 <= label_idx < len(LABEL_TO_COCO_ID):
-                        category_id = LABEL_TO_COCO_ID[label_idx]
-                    else:
-                        # Label out of range, skip
+                    # Map 1-indexed label (1-80) to COCO category ID
+                    # Matches MLCommons: inv_map = [0] + cocoGt.getCatIds()
+                    label_int = int(label)
+                    if label_int < 1 or label_int > 80:
                         continue
+                    category_id = LABEL_TO_COCO_ID[label_int]
 
                     coco_results.append({
                         'image_id': int(image_id),
                         'category_id': category_id,
-                        'bbox': [float(x1_px), float(y1_px), float(bbox_width), float(bbox_height)],
+                        'bbox': [x1_px, y1_px, x2_px - x1_px, y2_px - y1_px],
                         'score': float(score),
                     })
-
-            if skipped > 0:
-                logger.warning(f"Skipped {skipped} samples without image_id mapping")
 
             if not coco_results:
                 logger.error("No valid predictions to evaluate after label mapping")
                 return {'mAP': 0.0, 'num_predictions': 0}
 
-            logger.info(f"Evaluating {len(coco_results)} predictions")
+            logger.info(f"Evaluating {len(coco_results)} predictions on {len(evaluated_image_ids)} images")
 
             coco_dt = coco_gt.loadRes(coco_results)
             coco_eval = COCOeval(coco_gt, coco_dt, iouType='bbox')
+            # Only evaluate on images that were actually processed
+            coco_eval.params.imgIds = evaluated_image_ids
             coco_eval.evaluate()
             coco_eval.accumulate()
             coco_eval.summarize()
@@ -249,6 +203,7 @@ class SSDResNet34MultiDieCppSUTWrapper(ImageMultiDieSUTBase):
                 'mAP_medium': float(coco_eval.stats[4]),
                 'mAP_large': float(coco_eval.stats[5]),
                 'num_predictions': len(coco_results),
+                'num_images': len(evaluated_image_ids),
             }
 
             logger.info(f"mAP@0.5:0.95 = {results['mAP']:.4f}")

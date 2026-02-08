@@ -42,9 +42,14 @@ COCO_CATEGORY_IDS = [
     85, 86, 87, 88, 89, 90,
 ]
 
-# Map contiguous label index (0-79) to COCO category ID
-LABEL_TO_COCO_ID = {i: cid for i, cid in enumerate(COCO_CATEGORY_IDS)}
-COCO_ID_TO_LABEL = {cid: i for i, cid in enumerate(COCO_CATEGORY_IDS)}
+# MLCommons-compatible inverse label map: inv_map = [0] + cocoGt.getCatIds()
+# Index 0 = background (unused by NMS-baked model)
+# Indices 1-80 = COCO category IDs for the 80 classes
+# Model outputs 1-indexed labels (1-80), so: category_id = LABEL_TO_COCO_ID[label]
+LABEL_TO_COCO_ID = [0] + list(COCO_CATEGORY_IDS)  # 81 elements, indices 0-80
+
+# Reverse mapping: COCO category ID -> contiguous 1-indexed label
+COCO_ID_TO_LABEL = {cid: i + 1 for i, cid in enumerate(COCO_CATEGORY_IDS)}
 
 
 class COCODataset(BaseDataset):
@@ -498,23 +503,26 @@ class COCODataset(BaseDataset):
                 label = int(labels[i]) if i < len(labels) else 0
 
                 # Convert to COCO format: [x, y, width, height]
-                # SSD model outputs in ltrb (left, top, right, bottom) pixel coords
+                # Model outputs normalized [0, 1] coordinates (ltrb)
+                # Scale directly to original image dimensions per MLCommons reference
                 orig_w = sample.get('width', self.input_size)
                 orig_h = sample.get('height', self.input_size)
 
-                x1 = float(box[0]) * orig_w / self.input_size
-                y1 = float(box[1]) * orig_h / self.input_size
-                x2 = float(box[2]) * orig_w / self.input_size
-                y2 = float(box[3]) * orig_h / self.input_size
+                x1 = float(box[0]) * orig_w
+                y1 = float(box[1]) * orig_h
+                x2 = float(box[2]) * orig_w
+                y2 = float(box[3]) * orig_h
 
                 w = x2 - x1
                 h = y2 - y1
 
-                # Map contiguous label to COCO category ID
-                if label in LABEL_TO_COCO_ID:
-                    category_id = LABEL_TO_COCO_ID[label]
+                # Map 1-indexed label (1-80) to COCO category ID
+                # Matches MLCommons inv_map = [0] + cocoGt.getCatIds()
+                label_int = int(label)
+                if 1 <= label_int <= 80:
+                    category_id = LABEL_TO_COCO_ID[label_int]
                 else:
-                    category_id = label
+                    continue
 
                 coco_results.append({
                     'image_id': image_id,
@@ -763,3 +771,9 @@ class COCOQSL(QuerySampleLibrary):
         if not self.dataset._is_loaded:
             self.dataset.load()
         return {idx: sample['image_id'] for idx, sample in enumerate(self.dataset._samples)}
+
+    def get_sample_to_filename_mapping(self) -> Dict[int, str]:
+        """Get mapping from sample index to image filename."""
+        if not self.dataset._is_loaded:
+            self.dataset.load()
+        return {idx: sample.get('file_name', '') for idx, sample in enumerate(self.dataset._samples)}

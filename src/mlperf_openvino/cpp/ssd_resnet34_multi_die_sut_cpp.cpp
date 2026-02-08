@@ -803,13 +803,13 @@ void SSDResNet34MultiDieCppSUT::map_output_names() {
         boxes_name_ = outputs[0].get_any_name();
         boxes_idx_ = 0;
     }
-    if (scores_name_.empty() && outputs.size() >= 2) {
-        scores_name_ = outputs[1].get_any_name();
-        scores_idx_ = 1;
+    if (labels_name_.empty() && outputs.size() >= 2) {
+        labels_name_ = outputs[1].get_any_name();
+        labels_idx_ = 1;
     }
-    if (labels_name_.empty() && outputs.size() >= 3) {
-        labels_name_ = outputs[2].get_any_name();
-        labels_idx_ = 2;
+    if (scores_name_.empty() && outputs.size() >= 3) {
+        scores_name_ = outputs[2].get_any_name();
+        scores_idx_ = 2;
     }
 }
 

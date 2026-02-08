@@ -207,14 +207,14 @@ private:
     void batcher_thread_func();
     void issue_thread_batched_func(size_t die_idx);
 
-    // Model info
+    // Model info — MLPerf SSD-ResNet34 ONNX: [0]=bboxes, [1]=labels, [2]=scores
     std::string input_name_;
     std::string boxes_name_;
     std::string scores_name_;
     std::string labels_name_;
     int boxes_idx_ = 0;
-    int scores_idx_ = 1;
-    int labels_idx_ = 2;
+    int labels_idx_ = 1;
+    int scores_idx_ = 2;
     ov::Shape input_shape_;
     ov::element::Type input_type_;
     size_t input_byte_size_ = 0;

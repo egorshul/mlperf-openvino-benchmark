@@ -137,13 +137,13 @@ private:
     std::string input_name_;
     ov::Shape input_shape_;
 
-    // Output info
+    // Output info — MLPerf SSD-ResNet34 ONNX: [0]=bboxes, [1]=labels, [2]=scores
     std::string boxes_name_;
     std::string scores_name_;
     std::string labels_name_;
     int boxes_idx_ = 0;
-    int scores_idx_ = 1;
-    int labels_idx_ = 2;
+    int labels_idx_ = 1;
+    int scores_idx_ = 2;
 
     int optimal_nireq_ = 1;
 
