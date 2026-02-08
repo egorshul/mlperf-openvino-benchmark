@@ -673,20 +673,23 @@ class BenchmarkRunner:
         logger.info(f"CLIP Score: {clip_score:.4f}")
         logger.info(f"FID Score: {fid_score:.4f}")
 
-        # MLPerf v5.1 thresholds for SDXL
-        # CLIP_SCORE: >= 31.68632 and <= 31.81332
-        # FID_SCORE: >= 23.01086 and <= 23.95007
-        clip_valid = 31.68632 <= clip_score <= 31.81332
-        fid_valid = 23.01086 <= fid_score <= 23.95007
+        metrics_cfg = self.config.model.accuracy_metrics
+        clip_min = metrics_cfg.get('clip_score_min', 31.68632)
+        clip_max = metrics_cfg.get('clip_score_max', 31.81332)
+        fid_min = metrics_cfg.get('fid_score_min', 23.01086)
+        fid_max = metrics_cfg.get('fid_score_max', 23.95007)
+
+        clip_valid = clip_min <= clip_score <= clip_max
+        fid_valid = fid_min <= fid_score <= fid_max
 
         if clip_valid and fid_valid:
-            logger.info("SDXL accuracy: PASSED (within MLPerf thresholds)")
+            logger.info("SDXL accuracy: PASSED (within thresholds)")
         else:
-            logger.warning("SDXL accuracy: Outside MLPerf thresholds")
+            logger.warning("SDXL accuracy: Outside thresholds")
             if not clip_valid:
-                logger.warning(f"  CLIP Score {clip_score:.4f} not in [31.68632, 31.81332]")
+                logger.warning(f"  CLIP Score {clip_score:.4f} not in [{clip_min}, {clip_max}]")
             if not fid_valid:
-                logger.warning(f"  FID Score {fid_score:.4f} not in [23.01086, 23.95007]")
+                logger.warning(f"  FID Score {fid_score:.4f} not in [{fid_min}, {fid_max}]")
 
     def save_results(self, output_path: Optional[str] = None) -> str:
         """Save benchmark results to file."""
@@ -745,9 +748,13 @@ class BenchmarkRunner:
         elif model_type == 'sdxl':
             clip = acc.get('clip_score', 0)
             fid = acc.get('fid_score', 0)
-            # MLPerf SDXL: CLIP in [31.68632, 31.81332], FID in [23.01086, 23.95007]
-            clip_status = "PASS" if 31.68632 <= clip <= 31.81332 else "FAIL"
-            fid_status = "PASS" if 23.01086 <= fid <= 23.95007 else "FAIL"
+            metrics_cfg = self.config.model.accuracy_metrics
+            clip_min = metrics_cfg.get('clip_score_min', 31.68632)
+            clip_max = metrics_cfg.get('clip_score_max', 31.81332)
+            fid_min = metrics_cfg.get('fid_score_min', 23.01086)
+            fid_max = metrics_cfg.get('fid_score_max', 23.95007)
+            clip_status = "PASS" if clip_min <= clip <= clip_max else "FAIL"
+            fid_status = "PASS" if fid_min <= fid <= fid_max else "FAIL"
             print(f"CLIP: {clip:.4f} [{clip_status}]")
             print(f"FID: {fid:.4f} [{fid_status}]")
 

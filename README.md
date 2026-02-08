@@ -1,27 +1,61 @@
-# MLPerf OpenVINO Benchmark
+# MLPerf OpenVINO Benchmark v1.0.0
 
-MLPerf Inference benchmark implementation using OpenVINO backend.
+MLPerf Inference v5.1 benchmark implementation using Intel OpenVINO as the inference backend. Supports multi-die accelerators (NPU/VPU) with automatic device discovery and both Python and C++ SUT implementations.
 
 ## Supported Models
 
-| Model | Task | Dataset | Metric | Target (99%) | Scenario |
-|-------|------|---------|--------|--------------|----------|
-| ResNet50-v1.5 | Image Classification | ImageNet 2012 | Top-1 Accuracy | ≥ 75.70% | Offline, Server |
-| BERT-Large | Question Answering | SQuAD v1.1 | F1 Score | ≥ 89.97% | Offline, Server |
-| RetinaNet | Object Detection | OpenImages | mAP | ≥ 37.19% | Offline, Server |
-| Whisper Large v3 | Speech Recognition | LibriSpeech | Word Accuracy | ≥ 96.95% | Offline |
-| Stable Diffusion XL | Text-to-Image | COCO 2014 | CLIP / FID | 31.69–31.81 / 23.01–23.95 | Offline, Server |
+| Model | Task | Dataset | Metric | Target (closed, 99%) | Scenarios |
+|-------|------|---------|--------|-----------------------|-----------|
+| ResNet50-v1.5 | Image Classification | ImageNet 2012 | Top-1 Accuracy | >= 75.70% | Offline, Server |
+| BERT-Large | Question Answering | SQuAD v1.1 | F1 Score | >= 89.97% | Offline, Server |
+| RetinaNet | Object Detection | OpenImages | mAP | >= 37.19% | Offline, Server |
+| Whisper Large v3 | Speech Recognition | LibriSpeech | Word Accuracy | >= 96.95% | Offline |
+| Stable Diffusion XL | Text-to-Image | COCO 2014 | CLIP / FID | 31.69-31.81 / 23.01-23.95 | Offline, Server |
+
+## Requirements
+
+- Python >= 3.9
+- OpenVINO >= 2024.0.0
+- MLCommons LoadGen >= 4.0
 
 ## Installation
+
+Install the package with dependencies for all models:
 
 ```bash
 pip install -e ".[all]"
 ```
 
-To build the optional C++ SUT for higher performance (bypasses Python GIL):
+Or install only the dependencies you need:
+
+```bash
+# Core only (ResNet50)
+pip install -e .
+
+# Specific model
+pip install -e ".[bert]"
+pip install -e ".[whisper]"
+pip install -e ".[sdxl]"
+pip install -e ".[retinanet]"
+
+# Development
+pip install -e ".[dev]"
+```
+
+### Optional: C++ SUT
+
+For maximum Server mode throughput, build the C++ SUT extension. This bypasses the Python GIL and calls `mlperf::QuerySamplesComplete` directly from C++.
 
 ```bash
 ./build_cpp.sh
+```
+
+Requires CMake 3.14+, a C++17 compiler, and pybind11.
+
+Verify:
+
+```bash
+python -c "from mlperf_openvino.cpp import ResNetCppSUT, CPP_AVAILABLE; print(f'C++ SUT available: {CPP_AVAILABLE}')"
 ```
 
 ## Quick Start
@@ -35,6 +69,9 @@ mlperf-ov run --model resnet50 --mode accuracy
 
 # Run performance test
 mlperf-ov run --model resnet50 --mode performance --scenario Offline
+
+# Run both
+mlperf-ov run --model resnet50 --mode both --scenario Offline
 ```
 
 ## Device Selection
@@ -48,13 +85,19 @@ mlperf-ov run --model resnet50 --device NPU
 
 # Specific die
 mlperf-ov run --model resnet50 --device NPU.0
+
+# Multiple specific dies
+mlperf-ov run --model resnet50 --device NPU.0,NPU.2
 ```
 
-## Run Examples
+When targeting an accelerator (e.g. `NPU`), the framework automatically discovers all available dies and distributes inference across them using a thread pool with round-robin dispatch.
+
+## Model Examples
 
 ### ResNet50
 
 ```bash
+mlperf-ov setup --model resnet50
 mlperf-ov run --model resnet50 --scenario Offline --device NPU
 mlperf-ov run --model resnet50 --scenario Server --device NPU --explicit-batching
 ```
@@ -62,6 +105,7 @@ mlperf-ov run --model resnet50 --scenario Server --device NPU --explicit-batchin
 ### BERT-Large
 
 ```bash
+mlperf-ov setup --model bert
 mlperf-ov run --model bert --scenario Offline --device NPU
 mlperf-ov run --model bert --scenario Server --device NPU
 ```
@@ -69,56 +113,174 @@ mlperf-ov run --model bert --scenario Server --device NPU
 ### RetinaNet
 
 ```bash
+mlperf-ov setup --model retinanet
 mlperf-ov run --model retinanet --scenario Offline --device NPU
+mlperf-ov run --model retinanet --scenario Server --device NPU
 ```
 
 ### Whisper Large v3
 
 ```bash
+mlperf-ov setup --model whisper
 mlperf-ov run --model whisper --scenario Offline --device CPU
+mlperf-ov run --model whisper --scenario Offline --device NPU
 ```
 
 ### Stable Diffusion XL
 
+SDXL is automatically downloaded in OpenVINO IR format with FP32 weights.
+
 ```bash
+mlperf-ov setup --model sdxl
 mlperf-ov run --model sdxl --scenario Offline --device CPU
+mlperf-ov run --model sdxl --scenario Offline --device NPU
 ```
 
 ## CLI Reference
 
-```
-mlperf-ov run                  Run benchmark
-mlperf-ov setup --model X      Download model + dataset
-mlperf-ov download-model       Download model only
-mlperf-ov download-dataset     Download dataset only
-mlperf-ov list-models          List supported models
-mlperf-ov info                 System information
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `mlperf-ov run` | Run benchmark |
+| `mlperf-ov setup --model X` | Download model and dataset |
+| `mlperf-ov download-model` | Download model only |
+| `mlperf-ov download-dataset` | Download dataset only |
+| `mlperf-ov list-models` | List supported models |
+| `mlperf-ov info` | Show system and library information |
+
+### Run Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--model, -m` | Model: resnet50, bert, retinanet, whisper, sdxl | (required) |
+| `--mode` | Mode: accuracy, performance, both | accuracy |
+| `--scenario, -s` | Scenario: Offline, Server | Offline |
+| `--device, -d` | Device: CPU, NPU, NPU.0, NPU.0,NPU.2 | CPU |
+| `--model-path` | Path to model (ONNX or OpenVINO IR) | auto |
+| `--data-path` | Path to dataset | auto |
+| `--config, -c` | Config YAML path | configs/benchmark_config.yaml |
+| `--output-dir, -o` | Output directory | ./results |
+| `--batch-size, -b` | Inference batch size | 1 |
+| `--count` | Number of samples (0 = all) | 0 |
+| `--warmup` | Warmup iterations | 10 |
+| `--duration` | Test duration (ms) | from config |
+| `--target-qps` | Target QPS | from config |
+| `--target-latency-ns` | Target latency in ns (Server) | from config |
+| `-p, --properties` | Device properties (KEY=VALUE,KEY2=VALUE2) | - |
+| `--num-threads` | Number of threads (0 = auto) | 0 |
+| `--num-streams` | Number of inference streams | AUTO |
+| `--performance-hint` | THROUGHPUT, LATENCY, AUTO | AUTO |
+| `--nchw` | Use NCHW layout (ResNet50) | NHWC |
+| `--explicit-batching` | Enable explicit batching (Server) | false |
+| `--verbose, -v` | Enable verbose output | false |
+
+### Download Options
+
+```bash
+# Download model in specific format
+mlperf-ov download-model --model resnet50 --format onnx
+mlperf-ov download-model --model resnet50 --format openvino
+
+# Download specific dataset
+mlperf-ov download-dataset --dataset imagenet
+mlperf-ov download-dataset --dataset librispeech --subset dev-clean
+mlperf-ov download-dataset --dataset coco2014 --with-images
+
+# Download RetinaNet with batch sizes
+mlperf-ov download-model --model retinanet --batch-sizes 1,2,4,8
 ```
 
-### Options
+## Configuration
 
-```
---model, -m      Model: resnet50, bert, retinanet, whisper, sdxl
---mode           Mode: accuracy, performance
---scenario, -s   Scenario: Offline, Server
---device, -d     Device: CPU, NPU, NPU.0, etc.
---batch-size, -b Inference batch size
---count          Number of samples (0 = all)
--p, --properties Device properties (KEY=VALUE,KEY2=VALUE2)
-```
+The main configuration is in `configs/benchmark_config.yaml`. It includes:
 
-## Project Structure
+- MLPerf version, division (closed/open), and category (datacenter/edge)
+- Per-model settings: input shapes, accuracy targets, preprocessing, scenario parameters
+- OpenVINO settings: device, streams, threads, precision, performance hints
+- Dataset paths
+- LoadGen settings
 
-```
-src/mlperf_openvino/
-    backends/          Inference backends (OpenVINO, multi-device)
-    core/              SUT implementations, benchmark runner, config
-    datasets/          Dataset loaders and QSL implementations
-    utils/             Model and dataset download utilities
-    cpp/               C++ SUT implementations (pybind11)
-    cli.py             CLI entry point
+Key OpenVINO parameters:
+
+```yaml
+openvino:
+  device: "CPU"
+  num_streams: "AUTO"
+  num_threads: 0
+  batch_size: 1
+  performance_hint: "THROUGHPUT"
+  inference_precision: "FP32"
 ```
 
-## License
+## Architecture
 
-See [LICENSE](LICENSE).
+### Multi-Die Inference
+
+The framework auto-discovers accelerator dies and distributes inference across all of them:
+
+```
+LoadGen
+  |
+  v
+SUT (Python / C++)
+  |
+  +--> Die 0  (NPU.0)  ─── inference ───> results
+  +--> Die 1  (NPU.1)  ─── inference ───> results
+  +--> Die 2  (NPU.2)  ─── inference ───> results
+  +--> Die 3  (NPU.3)  ─── inference ───> results
+  |
+  v
+QuerySamplesComplete
+```
+
+1 card = 2 dies in NPU topology. The number of dies is not limited.
+
+### C++ SUT (Server Mode)
+
+For Server mode, the C++ SUT calls `mlperf::QuerySamplesComplete` directly from C++ without acquiring the Python GIL:
+
+| Mode | Expected QPS (ResNet50) |
+|------|-------------------------|
+| Python | ~17,000 |
+| C++ | ~55,000 |
+
+### Project Structure
+
+```
+mlperf-openvino-benchmark/
+├── configs/
+│   └── benchmark_config.yaml     # Main configuration
+├── src/mlperf_openvino/
+│   ├── cli.py                    # CLI entry point (mlperf-ov)
+│   ├── backends/                 # Inference backends
+│   │   ├── openvino_backend.py   # Single-device OpenVINO backend
+│   │   ├── multi_device_backend.py # Multi-die backend
+│   │   └── device_discovery.py   # Accelerator die detection
+│   ├── core/                     # SUT implementations and runner
+│   │   ├── config.py             # Configuration dataclasses
+│   │   ├── benchmark_runner.py   # Main benchmark orchestrator
+│   │   ├── sut_factory.py        # Factory for model-specific SUTs
+│   │   ├── sut.py                # Generic OpenVINO SUT
+│   │   ├── resnet_multi_die_sut.py
+│   │   ├── bert_multi_die_sut.py
+│   │   ├── retinanet_multi_die_sut.py
+│   │   ├── whisper_multi_die_sut.py
+│   │   ├── sdxl_multi_die_sut.py
+│   │   ├── whisper_sut.py
+│   │   └── sdxl_sut.py
+│   ├── datasets/                 # Dataset loaders and QSL
+│   │   ├── imagenet.py           # ImageNet 2012 (ResNet50)
+│   │   ├── squad.py              # SQuAD v1.1 (BERT)
+│   │   ├── openimages.py         # OpenImages (RetinaNet)
+│   │   ├── librispeech.py        # LibriSpeech (Whisper)
+│   │   └── coco_prompts.py       # COCO 2014 (SDXL)
+│   ├── utils/
+│   │   ├── model_downloader.py   # Model download from Zenodo/HuggingFace
+│   │   └── dataset_downloader.py # Dataset download
+│   └── cpp/                      # C++ SUT (pybind11)
+│       ├── CMakeLists.txt
+│       └── resnet_multi_die_sut_cpp.hpp/cpp
+├── build_cpp.sh                  # Build script for C++ SUT
+└── pyproject.toml
+```

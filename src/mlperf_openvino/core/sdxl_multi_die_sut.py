@@ -164,13 +164,17 @@ class SDXLMultiDieSUT:
     def _load_pipeline_for_device(self, die: str) -> Any:
         is_cpu = die.upper() == "CPU"
 
+        ov_config = {"EXECUTION_MODE_HINT": "ACCURACY"}
+
         if is_cpu and self.batch_size <= 1:
             pipeline = OVStableDiffusionXLPipeline.from_pretrained(
                 str(self.model_path), compile=True, load_in_8bit=False,
+                ov_config=ov_config,
             )
         else:
             pipeline = OVStableDiffusionXLPipeline.from_pretrained(
                 str(self.model_path), compile=False, load_in_8bit=False,
+                ov_config=ov_config,
             )
             try:
                 pipeline.reshape(
@@ -190,6 +194,7 @@ class SDXLMultiDieSUT:
                     )
                     pipeline = OVStableDiffusionXLPipeline.from_pretrained(
                         str(self.model_path), compile=False, load_in_8bit=False,
+                        ov_config=ov_config,
                     )
                     pipeline.reshape(
                         batch_size=1,
@@ -213,6 +218,7 @@ class SDXLMultiDieSUT:
                 timestep_spacing="leading",
                 steps_offset=1,
                 prediction_type="epsilon",
+                use_karras_sigmas=False,
             )
         except Exception:
             logger.warning("Failed to set EulerDiscreteScheduler on %s", die)

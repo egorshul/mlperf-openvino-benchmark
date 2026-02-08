@@ -176,6 +176,8 @@ class ModelConfig:
     accuracy_target: float = 0.0
     accuracy_threshold: float = 0.99
 
+    accuracy_metrics: Dict[str, float] = field(default_factory=dict)
+
     preprocessing: PreprocessingConfig = field(default_factory=PreprocessingConfig)
 
     offline: ScenarioConfig = field(default_factory=ScenarioConfig)
@@ -282,6 +284,7 @@ class BenchmarkConfig:
             offline=offline,
             server=server,
             onnx_url=sources.get("onnx_url"),
+            accuracy_metrics=model_data.get("accuracy_metrics", {}),
         )
 
         ov_data = data.get("openvino", {})
@@ -485,11 +488,14 @@ class BenchmarkConfig:
                 output_name="sample",
                 data_format="NC",
                 dtype="FP32",
-                # MLPerf v5.1 accuracy targets for SDXL (closed division)
-                # CLIP_SCORE: >= 31.68632 and <= 31.81332
-                # FID_SCORE: >= 23.01086 and <= 23.95007
-                accuracy_target=31.68632,  # Minimum CLIP score
-                accuracy_threshold=0.99,
+                accuracy_target=31.68632,
+                accuracy_threshold=1.0,
+                accuracy_metrics={
+                    'clip_score_min': 31.68632,
+                    'clip_score_max': 31.81332,
+                    'fid_score_min': 23.01086,
+                    'fid_score_max': 23.95007,
+                },
                 preprocessing=PreprocessingConfig(),  # Not used for text input
                 offline=ScenarioConfig(
                     min_duration_ms=600000,  # MLPerf official: 10 minutes

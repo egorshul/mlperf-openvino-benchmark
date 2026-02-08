@@ -405,9 +405,6 @@ class COCOPromptsDataset(BaseDataset):
         generated_images: List[np.ndarray],
         indices: List[int]
     ) -> Dict[str, float]:
-        # MLPerf v5.1 accuracy targets for SDXL (closed division):
-        # CLIP_SCORE: >= 31.68632 and <= 31.81332
-        # FID_SCORE: >= 23.01086 and <= 23.95007
         metrics = {
             'clip_score': 0.0,
             'fid_score': 0.0,
@@ -442,9 +439,6 @@ class COCOPromptsDataset(BaseDataset):
             )
             metrics['fid_score'] = fid_score
 
-        metrics['clip_score_valid'] = 31.68632 <= clip_score <= 31.81332
-        metrics['fid_score_valid'] = 23.01086 <= metrics['fid_score'] <= 23.95007
-
         return metrics
 
     def _compute_clip_score(
@@ -464,12 +458,11 @@ class COCOPromptsDataset(BaseDataset):
             return 0.0
 
         try:
-            # MLCommons reference: ViT-B/32 with openai weights
             model, _, preprocess = open_clip.create_model_and_transforms(
-                'ViT-B-32',
+                'ViT-B-32-quickgelu',
                 pretrained='openai'
             )
-            tokenizer = open_clip.get_tokenizer('ViT-B-32')
+            tokenizer = open_clip.get_tokenizer('ViT-B-32-quickgelu')
             model.eval()
 
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -564,9 +557,7 @@ class COCOPromptsDataset(BaseDataset):
 
             model.eval()
 
-            # Resize + ToTensor scales to [0,1]; pytorch-fid InceptionV3 normalizes to [-1,1] internally
             transform = transforms.Compose([
-                transforms.Resize((299, 299)),
                 transforms.ToTensor(),
             ])
 
