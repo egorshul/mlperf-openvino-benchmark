@@ -42,6 +42,14 @@ MODEL_REGISTRY: Dict[str, Dict] = {
         },
         "description": "Whisper Large v3 for speech recognition",
     },
+    "ssd-resnet34": {
+        "onnx": {
+            "url": "https://zenodo.org/record/3236545/files/ssd_resnet34_mAP_20.2.onnx",
+            "filename": "ssd_resnet34_mAP_20.2.onnx",
+            "md5": None,
+        },
+        "description": "SSD-ResNet34 for object detection (COCO 2017)",
+    },
     "sdxl": {
         "huggingface": {
             "model_id": "stabilityai/stable-diffusion-xl-base-1.0",

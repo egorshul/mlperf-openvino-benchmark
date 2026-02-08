@@ -21,6 +21,8 @@
 #include "resnet_multi_die_sut_cpp.hpp"
 #include "bert_multi_die_sut.hpp"
 #include "retinanet_multi_die_sut_cpp.hpp"
+#include "ssd_resnet34_sut_cpp.hpp"
+#include "ssd_resnet34_multi_die_sut_cpp.hpp"
 
 namespace py = pybind11;
 
@@ -952,6 +954,274 @@ PYBIND11_MODULE(_cpp_sut, m) {
                      min_duration_ms,
                      min_query_count,
                      is_accuracy_mode);
+             },
+             py::arg("total_sample_count"),
+             py::arg("performance_sample_count"),
+             py::arg("mlperf_conf_path") = "",
+             py::arg("user_conf_path") = "",
+             py::arg("log_output_dir") = ".",
+             py::arg("target_qps") = 0.0,
+             py::arg("target_latency_ns") = 0,
+             py::arg("min_duration_ms") = 0,
+             py::arg("min_query_count") = 0,
+             py::arg("is_accuracy_mode") = false,
+             "Run Server benchmark with pure C++ SUT");
+
+    // =========================================================================
+    // SSD-ResNet34 Single-Device SUT
+    // =========================================================================
+    py::class_<mlperf_ov::SSDResNet34CppSUT>(m, "SSDResNet34CppSUT")
+        .def(py::init<const std::string&, const std::string&, int, const std::string&, bool>(),
+             py::arg("model_path"),
+             py::arg("device") = "CPU",
+             py::arg("num_streams") = 0,
+             py::arg("performance_hint") = "THROUGHPUT",
+             py::arg("use_nhwc_input") = true,
+             "Create SSD-ResNet34 C++ SUT instance")
+
+        .def("load", &mlperf_ov::SSDResNet34CppSUT::load,
+             py::call_guard<py::gil_scoped_release>(),
+             "Load and compile the model")
+
+        .def("is_loaded", &mlperf_ov::SSDResNet34CppSUT::is_loaded)
+        .def("get_optimal_nireq", &mlperf_ov::SSDResNet34CppSUT::get_optimal_nireq)
+        .def("get_input_name", &mlperf_ov::SSDResNet34CppSUT::get_input_name)
+        .def("get_boxes_name", &mlperf_ov::SSDResNet34CppSUT::get_boxes_name)
+        .def("get_scores_name", &mlperf_ov::SSDResNet34CppSUT::get_scores_name)
+        .def("get_labels_name", &mlperf_ov::SSDResNet34CppSUT::get_labels_name)
+        .def("get_input_shape", &mlperf_ov::SSDResNet34CppSUT::get_input_shape)
+
+        .def("start_async",
+             [](mlperf_ov::SSDResNet34CppSUT& self,
+                py::array_t<float, py::array::c_style | py::array::forcecast> input,
+                uint64_t query_id,
+                int sample_idx) {
+                 py::buffer_info buf = input.request();
+                 const float* data = static_cast<const float*>(buf.ptr);
+                 size_t size = buf.size;
+                 py::gil_scoped_release release;
+                 self.start_async(data, size, query_id, sample_idx);
+             },
+             py::arg("input"), py::arg("query_id"), py::arg("sample_idx"),
+             "Start async SSD-ResNet34 inference (GIL released)")
+
+        .def("wait_all", &mlperf_ov::SSDResNet34CppSUT::wait_all,
+             py::call_guard<py::gil_scoped_release>())
+        .def("get_completed_count", &mlperf_ov::SSDResNet34CppSUT::get_completed_count)
+        .def("get_issued_count", &mlperf_ov::SSDResNet34CppSUT::get_issued_count)
+        .def("reset_counters", &mlperf_ov::SSDResNet34CppSUT::reset_counters)
+        .def("set_store_predictions", &mlperf_ov::SSDResNet34CppSUT::set_store_predictions,
+             py::arg("store"))
+
+        .def("get_predictions",
+             [](mlperf_ov::SSDResNet34CppSUT& self) {
+                 auto cpp_preds = self.get_predictions();
+                 py::dict py_preds;
+                 for (const auto& [idx, pred] : cpp_preds) {
+                     py::dict entry;
+                     py::array_t<float> boxes_arr(pred.boxes.size());
+                     py::array_t<float> scores_arr(pred.scores.size());
+                     py::array_t<float> labels_arr(pred.labels.size());
+                     std::memcpy(boxes_arr.mutable_data(), pred.boxes.data(),
+                                pred.boxes.size() * sizeof(float));
+                     std::memcpy(scores_arr.mutable_data(), pred.scores.data(),
+                                pred.scores.size() * sizeof(float));
+                     if (!pred.labels.empty()) {
+                         std::memcpy(labels_arr.mutable_data(), pred.labels.data(),
+                                    pred.labels.size() * sizeof(float));
+                     }
+                     entry["boxes"] = boxes_arr;
+                     entry["scores"] = scores_arr;
+                     entry["labels"] = labels_arr;
+                     entry["num_detections"] = pred.num_detections;
+                     py_preds[py::int_(idx)] = entry;
+                 }
+                 return py_preds;
+             },
+             "Get stored predictions")
+
+        .def("set_response_callback",
+             [](mlperf_ov::SSDResNet34CppSUT& self, py::function callback) {
+                 self.set_response_callback(
+                     [callback](uint64_t query_id,
+                               const float* boxes_data, size_t boxes_size,
+                               const float* scores_data, size_t scores_size,
+                               const float* labels_data, size_t labels_size) {
+                         py::gil_scoped_acquire acquire;
+                         if (boxes_data && scores_data && boxes_size > 0) {
+                             py::array_t<float> boxes_arr(boxes_size);
+                             py::array_t<float> scores_arr(scores_size);
+                             std::memcpy(boxes_arr.mutable_data(), boxes_data, boxes_size * sizeof(float));
+                             std::memcpy(scores_arr.mutable_data(), scores_data, scores_size * sizeof(float));
+                             if (labels_data && labels_size > 0) {
+                                 py::array_t<float> labels_arr(labels_size);
+                                 std::memcpy(labels_arr.mutable_data(), labels_data, labels_size * sizeof(float));
+                                 callback(query_id, boxes_arr, scores_arr, labels_arr);
+                             } else {
+                                 callback(query_id, boxes_arr, scores_arr, py::none());
+                             }
+                         } else {
+                             callback(query_id, py::none(), py::none(), py::none());
+                         }
+                     });
+             },
+             py::arg("callback"),
+             "Set response callback (receives query_id, boxes, scores, labels)");
+
+    // =========================================================================
+    // SSD-ResNet34 Multi-Die SUT
+    // =========================================================================
+    py::class_<mlperf_ov::SSDResNet34MultiDieCppSUT>(m, "SSDResNet34MultiDieCppSUT")
+        .def(py::init<const std::string&, const std::string&, int,
+                      const std::unordered_map<std::string, std::string>&, bool, int>(),
+             py::arg("model_path"),
+             py::arg("device_prefix"),
+             py::arg("batch_size") = 1,
+             py::arg("compile_properties") = std::unordered_map<std::string, std::string>{},
+             py::arg("use_nhwc_input") = true,
+             py::arg("nireq_multiplier") = 2,
+             "Create multi-die SSD-ResNet34 SUT")
+
+        .def("load", &mlperf_ov::SSDResNet34MultiDieCppSUT::load,
+             py::call_guard<py::gil_scoped_release>())
+        .def("warmup", &mlperf_ov::SSDResNet34MultiDieCppSUT::warmup,
+             py::call_guard<py::gil_scoped_release>(),
+             py::arg("iterations") = 2)
+        .def("set_target_devices", &mlperf_ov::SSDResNet34MultiDieCppSUT::set_target_devices,
+             py::arg("devices"))
+        .def("is_loaded", &mlperf_ov::SSDResNet34MultiDieCppSUT::is_loaded)
+        .def("get_num_dies", &mlperf_ov::SSDResNet34MultiDieCppSUT::get_num_dies)
+        .def("get_active_devices", &mlperf_ov::SSDResNet34MultiDieCppSUT::get_active_devices)
+        .def("get_batch_size", &mlperf_ov::SSDResNet34MultiDieCppSUT::get_batch_size)
+        .def("get_total_requests", &mlperf_ov::SSDResNet34MultiDieCppSUT::get_total_requests)
+        .def("get_input_name", &mlperf_ov::SSDResNet34MultiDieCppSUT::get_input_name)
+        .def("get_boxes_name", &mlperf_ov::SSDResNet34MultiDieCppSUT::get_boxes_name)
+        .def("get_scores_name", &mlperf_ov::SSDResNet34MultiDieCppSUT::get_scores_name)
+        .def("get_labels_name", &mlperf_ov::SSDResNet34MultiDieCppSUT::get_labels_name)
+
+        .def("start_async_batch",
+             [](mlperf_ov::SSDResNet34MultiDieCppSUT& self,
+                py::array_t<float, py::array::c_style | py::array::forcecast> input,
+                const std::vector<uint64_t>& query_ids,
+                const std::vector<int>& sample_indices,
+                int actual_batch_size) {
+                 py::buffer_info buf = input.request();
+                 const float* data = static_cast<const float*>(buf.ptr);
+                 size_t size = buf.size * sizeof(float);
+                 py::gil_scoped_release release;
+                 self.start_async_batch(data, size, query_ids, sample_indices, actual_batch_size);
+             },
+             py::arg("input"), py::arg("query_ids"),
+             py::arg("sample_indices"), py::arg("actual_batch_size"),
+             "Start async batch inference (GIL released)")
+
+        .def("wait_all", &mlperf_ov::SSDResNet34MultiDieCppSUT::wait_all,
+             py::call_guard<py::gil_scoped_release>())
+        .def("get_completed_count", &mlperf_ov::SSDResNet34MultiDieCppSUT::get_completed_count)
+        .def("get_issued_count", &mlperf_ov::SSDResNet34MultiDieCppSUT::get_issued_count)
+        .def("reset_counters", &mlperf_ov::SSDResNet34MultiDieCppSUT::reset_counters)
+        .def("set_store_predictions", &mlperf_ov::SSDResNet34MultiDieCppSUT::set_store_predictions,
+             py::arg("store"))
+
+        .def("get_predictions",
+             [](mlperf_ov::SSDResNet34MultiDieCppSUT& self) {
+                 auto cpp_preds = self.get_predictions();
+                 py::dict py_preds;
+                 for (const auto& [idx, pred] : cpp_preds) {
+                     py::dict entry;
+                     py::array_t<float> boxes_arr(pred.boxes.size());
+                     py::array_t<float> scores_arr(pred.scores.size());
+                     py::array_t<float> labels_arr(pred.labels.size());
+                     std::memcpy(boxes_arr.mutable_data(), pred.boxes.data(),
+                                pred.boxes.size() * sizeof(float));
+                     std::memcpy(scores_arr.mutable_data(), pred.scores.data(),
+                                pred.scores.size() * sizeof(float));
+                     if (!pred.labels.empty()) {
+                         std::memcpy(labels_arr.mutable_data(), pred.labels.data(),
+                                    pred.labels.size() * sizeof(float));
+                     }
+                     entry["boxes"] = boxes_arr;
+                     entry["scores"] = scores_arr;
+                     entry["labels"] = labels_arr;
+                     entry["num_detections"] = pred.num_detections;
+                     py_preds[py::int_(idx)] = entry;
+                 }
+                 return py_preds;
+             },
+             "Get stored predictions")
+
+        .def("clear_predictions", &mlperf_ov::SSDResNet34MultiDieCppSUT::clear_predictions)
+
+        .def("set_batch_response_callback",
+             [](mlperf_ov::SSDResNet34MultiDieCppSUT& self, py::function callback) {
+                 self.set_batch_response_callback(
+                     [callback](const std::vector<uint64_t>& query_ids) {
+                         py::gil_scoped_acquire acquire;
+                         callback(query_ids);
+                     });
+             },
+             py::arg("callback"))
+
+        .def("register_sample_data",
+             [](mlperf_ov::SSDResNet34MultiDieCppSUT& self,
+                int sample_idx,
+                py::array_t<float, py::array::c_style | py::array::forcecast> data) {
+                 py::buffer_info buf = data.request();
+                 self.register_sample_data(
+                     sample_idx,
+                     static_cast<const float*>(buf.ptr),
+                     buf.size * sizeof(float));
+             },
+             py::arg("sample_idx"), py::arg("data"))
+
+        .def("clear_sample_data", &mlperf_ov::SSDResNet34MultiDieCppSUT::clear_sample_data)
+
+        .def("issue_queries_server_fast",
+             [](mlperf_ov::SSDResNet34MultiDieCppSUT& self,
+                py::list query_ids,
+                py::list sample_indices) {
+                 size_t n = py::len(query_ids);
+                 std::vector<uint64_t> qids(n);
+                 std::vector<int> sidxs(n);
+                 for (size_t i = 0; i < n; ++i) {
+                     qids[i] = query_ids[i].cast<uint64_t>();
+                     sidxs[i] = sample_indices[i].cast<int>();
+                 }
+                 py::gil_scoped_release release;
+                 self.issue_queries_server_fast(qids, sidxs);
+             },
+             py::arg("query_ids"), py::arg("sample_indices"),
+             "Fast Server mode dispatch (NO GIL)")
+
+        .def("enable_direct_loadgen", &mlperf_ov::SSDResNet34MultiDieCppSUT::enable_direct_loadgen,
+             py::arg("enable"))
+
+        .def("enable_explicit_batching", &mlperf_ov::SSDResNet34MultiDieCppSUT::enable_explicit_batching,
+             py::arg("enable"),
+             py::arg("batch_size") = 1,
+             py::arg("timeout_us") = 1500,
+             "Enable explicit batching for Server mode")
+
+        .def("is_explicit_batching_enabled", &mlperf_ov::SSDResNet34MultiDieCppSUT::is_explicit_batching_enabled)
+
+        .def("run_server_benchmark",
+             [](mlperf_ov::SSDResNet34MultiDieCppSUT& self,
+                size_t total_sample_count,
+                size_t performance_sample_count,
+                const std::string& mlperf_conf_path,
+                const std::string& user_conf_path,
+                const std::string& log_output_dir,
+                double target_qps,
+                int64_t target_latency_ns,
+                int64_t min_duration_ms,
+                int64_t min_query_count,
+                bool is_accuracy_mode) {
+                 py::gil_scoped_release release;
+                 self.run_server_benchmark(
+                     total_sample_count, performance_sample_count,
+                     mlperf_conf_path, user_conf_path, log_output_dir,
+                     target_qps, target_latency_ns, min_duration_ms,
+                     min_query_count, is_accuracy_mode);
              },
              py::arg("total_sample_count"),
              py::arg("performance_sample_count"),

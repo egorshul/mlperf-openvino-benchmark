@@ -31,6 +31,7 @@ class ModelType(Enum):
     RETINANET = "retinanet"
     WHISPER = "whisper"
     SDXL = "sdxl"
+    SSD_RESNET34 = "ssd-resnet34"
 
 
 SUPPORTED_SCENARIOS: Dict[ModelType, List["Scenario"]] = {
@@ -39,6 +40,7 @@ SUPPORTED_SCENARIOS: Dict[ModelType, List["Scenario"]] = {
     ModelType.RETINANET: [Scenario.OFFLINE, Scenario.SERVER],
     ModelType.WHISPER: [Scenario.OFFLINE],
     ModelType.SDXL: [Scenario.OFFLINE, Scenario.SERVER],
+    ModelType.SSD_RESNET34: [Scenario.OFFLINE, Scenario.SERVER],
 }
 
 
@@ -472,6 +474,49 @@ class BenchmarkConfig:
             dataset=DatasetConfig(
                 name="openimages",
                 path="./data/openimages",
+            ),
+        )
+
+    @classmethod
+    def default_ssd_resnet34(cls) -> "BenchmarkConfig":
+        """Create default SSD-ResNet34 configuration for COCO 2017."""
+        return cls(
+            model=ModelConfig(
+                name="SSD-ResNet34",
+                task="object_detection",
+                model_type=ModelType.SSD_RESNET34,
+                input_shape=[1, 3, 1200, 1200],  # (batch, channels, height, width)
+                input_name="image",
+                output_name="bboxes,labels,scores",
+                data_format="NCHW",
+                dtype="FP32",
+                accuracy_target=0.20,  # mAP (official MLPerf: 20.0%, target = 99% = 19.8%)
+                accuracy_threshold=0.99,
+                preprocessing=PreprocessingConfig(
+                    resize=(1200, 1200),
+                    center_crop=(1200, 1200),
+                    # SSD-ResNet34 MLPerf: normalize with ImageNet mean/std
+                    mean=(0.485, 0.456, 0.406),
+                    std=(0.229, 0.224, 0.225),
+                    channel_order="RGB",
+                    # output_layout="NHWC" (default) - model uses PrePostProcessor for NHWC->NCHW
+                ),
+                offline=ScenarioConfig(
+                    min_duration_ms=600000,  # MLPerf official: 10 minutes
+                    min_query_count=24576,  # MLPerf official
+                    samples_per_query=1,
+                ),
+                server=ScenarioConfig(
+                    min_duration_ms=600000,  # MLPerf official: 10 minutes
+                    min_query_count=24576,
+                    target_latency_ns=100000000,  # 100ms (MLPerf official)
+                    target_qps=100.0,
+                ),
+                onnx_url="https://zenodo.org/record/3236545/files/ssd_resnet34_mAP_20.2.onnx",
+            ),
+            dataset=DatasetConfig(
+                name="coco2017",
+                path="./data/coco2017",
             ),
         )
 

@@ -136,6 +136,21 @@ DATASET_REGISTRY: Dict[str, Dict] = {
         "num_samples": 5000,  # MLPerf uses 5000 samples
         "note": "For MLPerf SDXL benchmark (closed division)",
     },
+    "coco2017": {
+        "description": "COCO 2017 validation set for SSD-ResNet34 Object Detection",
+        "images": {
+            "url": "http://images.cocodataset.org/zips/val2017.zip",
+            "filename": "val2017.zip",
+            "size_gb": 1.0,
+        },
+        "annotations": {
+            "url": "http://images.cocodataset.org/annotations/annotations_trainval2017.zip",
+            "filename": "annotations_trainval2017.zip",
+            "size_mb": 252,
+        },
+        "num_samples": 5000,  # COCO 2017 val set
+        "note": "For MLPerf SSD-ResNet34 benchmark",
+    },
 }
 
 
@@ -1374,6 +1389,64 @@ def download_dataset(
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
 
+def download_coco2017(
+    output_dir: str,
+    force: bool = False,
+) -> Dict[str, str]:
+    """Download COCO 2017 validation dataset for SSD-ResNet34."""
+    import zipfile
+
+    registry = DATASET_REGISTRY["coco2017"]
+
+    output_path = Path(output_dir) / "coco2017"
+    output_path.mkdir(parents=True, exist_ok=True)
+    images_dir = output_path / "val2017"
+    annotations_dir = output_path / "annotations"
+
+    # Download and extract images
+    if not images_dir.exists() or force:
+        img_info = registry["images"]
+        zip_path = output_path / img_info["filename"]
+
+        if not zip_path.exists() or force:
+            logger.info("Downloading COCO 2017 validation images (~1GB)...")
+            _download_file(img_info["url"], str(zip_path), expected_size_mb=1024)
+
+        logger.info("Extracting images...")
+        with zipfile.ZipFile(str(zip_path), 'r') as zf:
+            zf.extractall(str(output_path))
+        logger.info(f"Images extracted to {images_dir}")
+    else:
+        num_images = len(list(images_dir.glob("*.jpg")))
+        logger.info(f"COCO 2017 images already exist: {num_images} images")
+
+    # Download and extract annotations
+    if not annotations_dir.exists() or not (annotations_dir / "instances_val2017.json").exists() or force:
+        ann_info = registry["annotations"]
+        zip_path = output_path / ann_info["filename"]
+
+        if not zip_path.exists() or force:
+            logger.info("Downloading COCO 2017 annotations...")
+            _download_file(ann_info["url"], str(zip_path), expected_size_mb=252)
+
+        logger.info("Extracting annotations...")
+        with zipfile.ZipFile(str(zip_path), 'r') as zf:
+            zf.extractall(str(output_path))
+        logger.info(f"Annotations extracted to {annotations_dir}")
+    else:
+        logger.info("COCO 2017 annotations already exist")
+
+    num_images = len(list(images_dir.glob("*.jpg"))) if images_dir.exists() else 0
+    logger.info(f"COCO 2017 dataset ready: {num_images} images")
+
+    return {
+        "data_path": str(output_path),
+        "images_dir": str(images_dir),
+        "annotations_file": str(annotations_dir / "instances_val2017.json"),
+        "num_samples": num_images,
+    }
+
+
 def list_available_datasets() -> Dict[str, str]:
     return {
         "imagenet": DATASET_REGISTRY["imagenet"]["description"],
@@ -1381,6 +1454,7 @@ def list_available_datasets() -> Dict[str, str]:
         "openimages": DATASET_REGISTRY["openimages"]["description"],
         "librispeech": DATASET_REGISTRY["librispeech"]["description"],
         "coco2014": DATASET_REGISTRY["coco2014"]["description"],
+        "coco2017": DATASET_REGISTRY["coco2017"]["description"],
     }
 
 

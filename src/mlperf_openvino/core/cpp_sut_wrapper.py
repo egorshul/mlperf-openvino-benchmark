@@ -19,7 +19,7 @@ from ..core.config import BenchmarkConfig, Scenario
 
 try:
     from ..cpp import (
-        ResNetCppSUT, BertCppSUT, RetinaNetCppSUT,
+        ResNetCppSUT, BertCppSUT, RetinaNetCppSUT, SSDResNet34CppSUT,
         CPP_AVAILABLE,
     )
 except ImportError:
@@ -27,6 +27,7 @@ except ImportError:
     ResNetCppSUT = None
     BertCppSUT = None
     RetinaNetCppSUT = None
+    SSDResNet34CppSUT = None
 
 logger = logging.getLogger(__name__)
 
@@ -658,3 +659,183 @@ def create_retinanet_sut(
 
     backend = OpenVINOBackend(model_path, config.openvino, use_nhwc_input=use_nhwc)
     return RetinaNetSUT(config, backend, qsl, scenario)
+
+
+# =============================================================================
+# SSD-ResNet34 SUT Wrapper
+# =============================================================================
+
+
+class SSDResNet34CppSUTWrapper:
+
+    def __init__(
+        self,
+        config: BenchmarkConfig,
+        model_path: str,
+        qsl: "QuerySampleLibrary",
+        scenario: Scenario = Scenario.OFFLINE,
+    ):
+        if not LOADGEN_AVAILABLE:
+            raise ImportError("MLPerf LoadGen is not installed")
+
+        if not CPP_AVAILABLE or SSDResNet34CppSUT is None:
+            raise ImportError(
+                "SSD-ResNet34 C++ SUT extension not available. "
+                "Build it with: ./build_cpp.sh"
+            )
+
+        self.config = config
+        self.qsl = qsl
+        self.scenario = scenario
+
+        device = config.openvino.device
+        num_streams = 0
+        if config.openvino.num_streams != "AUTO":
+            try:
+                num_streams = int(config.openvino.num_streams)
+            except ValueError:
+                pass
+
+        performance_hint = config.openvino.performance_hint
+
+        use_nhwc = True
+        if hasattr(config.model, 'preprocessing') and config.model.preprocessing:
+            use_nhwc = getattr(config.model.preprocessing, 'output_layout', 'NHWC') == 'NHWC'
+
+        self._cpp_sut = SSDResNet34CppSUT(model_path, device, num_streams, performance_hint, use_nhwc)
+        self._cpp_sut.load()
+
+        self.input_name = self._cpp_sut.get_input_name()
+        self.boxes_name = self._cpp_sut.get_boxes_name()
+        self.scores_name = self._cpp_sut.get_scores_name()
+        self.labels_name = self._cpp_sut.get_labels_name()
+
+        self._cpp_sut.set_store_predictions(True)
+        self._setup_response_callback()
+        self._progress_monitor: Optional[ProgressMonitor] = None
+
+    def _setup_response_callback(self):
+        import array
+
+        dummy_data = array.array('B', [0] * 8)
+        dummy_bi = dummy_data.buffer_info()
+
+        def response_callback(query_id: int, boxes, scores, labels):
+            response = lg.QuerySampleResponse(query_id, dummy_bi[0], dummy_bi[1])
+            lg.QuerySamplesComplete([response])
+
+        self._cpp_sut.set_response_callback(response_callback)
+
+    def issue_queries(self, query_samples: List[Any]) -> None:
+        if self._progress_monitor is None:
+            self._progress_monitor = ProgressMonitor(
+                total_samples=self.qsl.total_sample_count,
+                get_completed=self._cpp_sut.get_completed_count,
+                name="SSD-ResNet34",
+            )
+            self._progress_monitor.start()
+
+        for qs in query_samples:
+            sample_idx = qs.index
+            query_id = qs.id
+
+            features = self.qsl.get_features(sample_idx)
+            input_data = features.get('input', features.get(self.input_name))
+            input_data = np.ascontiguousarray(input_data.flatten(), dtype=np.float32)
+            self._cpp_sut.start_async(input_data, query_id, sample_idx)
+
+    def flush_queries(self) -> None:
+        self._cpp_sut.wait_all()
+        if self._progress_monitor:
+            self._progress_monitor.stop()
+            self._progress_monitor = None
+
+    def get_sut(self) -> "lg.ConstructSUT":
+        return lg.ConstructSUT(self.issue_queries, self.flush_queries)
+
+    def get_qsl(self) -> "lg.ConstructQSL":
+        return lg.ConstructQSL(
+            self.qsl.total_sample_count,
+            self.qsl.performance_sample_count,
+            self.qsl.load_query_samples,
+            self.qsl.unload_query_samples,
+        )
+
+    @property
+    def name(self) -> str:
+        return f"OpenVINO-SSDResNet34Cpp-{self.config.model.name}"
+
+    @property
+    def _sample_count(self) -> int:
+        return self._cpp_sut.get_completed_count()
+
+    @property
+    def _query_count(self) -> int:
+        return self._cpp_sut.get_issued_count()
+
+    def get_predictions(self) -> Dict[int, Dict[str, np.ndarray]]:
+        raw_preds = self._cpp_sut.get_predictions()
+        result = {}
+
+        for idx, pred in raw_preds.items():
+            boxes = np.array(pred['boxes'], dtype=np.float32)
+            scores = np.array(pred['scores'], dtype=np.float32)
+            labels = np.array(pred['labels'], dtype=np.float32) if pred['labels'].size > 0 else np.array([])
+
+            if len(boxes) > 0 and len(boxes) % 4 == 0:
+                boxes = boxes.reshape(-1, 4)
+
+            result[idx] = {
+                'boxes': boxes,
+                'scores': scores,
+                'labels': labels.astype(np.int64) if len(labels) > 0 else np.array([], dtype=np.int64),
+            }
+        return result
+
+    def reset(self) -> None:
+        self._cpp_sut.reset_counters()
+
+    def compute_accuracy(self) -> Dict[str, float]:
+        predictions = self.get_predictions()
+
+        if not predictions:
+            logger.warning(f"No predictions collected (issued={self._cpp_sut.get_issued_count()}, "
+                          f"completed={self._cpp_sut.get_completed_count()})")
+            return {'mAP': 0.0, 'num_samples': 0}
+
+        pred_list = []
+        indices = sorted(predictions.keys())
+        for idx in indices:
+            pred_list.append(predictions[idx])
+
+        return self.qsl.dataset.compute_accuracy(pred_list, indices)
+
+
+def create_ssd_resnet34_sut(
+    config: BenchmarkConfig,
+    model_path: str,
+    qsl: "QuerySampleLibrary",
+    scenario: Scenario = Scenario.OFFLINE,
+    force_python: bool = False,
+):
+    if config.openvino.is_accelerator_device():
+        device = config.openvino.device
+        raise ValueError(
+            f"C++ SUT does not support accelerator devices (got: {device}). "
+            "Use MultiDeviceSUT via BenchmarkRunner._create_sut_for_backend() instead."
+        )
+
+    if CPP_AVAILABLE and SSDResNet34CppSUT is not None and not force_python:
+        logger.info(f"Using SSD-ResNet34 C++ SUT on {config.openvino.device}")
+        return SSDResNet34CppSUTWrapper(config, model_path, qsl, scenario)
+
+    logger.info(f"Using SSD-ResNet34 Python SUT on {config.openvino.device}")
+    from .ssd_resnet34_sut import SSDResNet34SUT
+    from ..backends.openvino_backend import OpenVINOBackend
+
+    use_nhwc = True
+    if hasattr(config.model, 'preprocessing') and config.model.preprocessing:
+        use_nhwc = getattr(config.model.preprocessing, 'output_layout', 'NHWC') == 'NHWC'
+
+    backend = OpenVINOBackend(model_path, config.openvino, use_nhwc_input=use_nhwc)
+    return SSDResNet34SUT(config, backend, qsl, scenario)
