@@ -157,7 +157,7 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
             actual_hint = None
         elif scenario == 'Offline':
             actual_hint = 'THROUGHPUT'
-            if batch_size is None and model != 'sdxl':
+            if batch_size is None and model not in ('sdxl', 'ssd-resnet34'):
                 batch_size = 32
         else:
             actual_hint = 'THROUGHPUT'

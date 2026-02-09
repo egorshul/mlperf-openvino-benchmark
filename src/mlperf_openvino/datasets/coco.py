@@ -511,47 +511,78 @@ class COCODataset(BaseDataset):
             if boxes.ndim == 1 and len(boxes) > 0:
                 boxes = boxes.reshape(-1, 4)
 
-            # Diagnostic: print first image's raw model output statistics
+            # Diagnostic: compare top prediction with ground truth
             if not diag_printed:
                 logger.info(f"[DIAG] First image (id={image_id}, idx={idx}):")
-                logger.info(f"  boxes: shape={boxes.shape}, dtype={boxes.dtype}")
-                logger.info(f"  scores: shape={scores.shape}, dtype={scores.dtype}")
-                logger.info(f"  labels: shape={labels.shape}, dtype={labels.dtype}")
-                if len(boxes) > 0:
-                    logger.info(f"  box[0]={boxes[0]} (expect normalized [0,1])")
-                    logger.info(f"  box coord ranges: col0=[{boxes[:,0].min():.4f},{boxes[:,0].max():.4f}] "
-                                f"col1=[{boxes[:,1].min():.4f},{boxes[:,1].max():.4f}] "
-                                f"col2=[{boxes[:,2].min():.4f},{boxes[:,2].max():.4f}] "
-                                f"col3=[{boxes[:,3].min():.4f},{boxes[:,3].max():.4f}]")
-                if len(scores) > 0:
-                    logger.info(f"  scores: min={scores.min():.4f}, max={scores.max():.4f}, "
-                                f">=0.5: {(scores >= 0.5).sum()}, >=0.05: {(scores >= 0.05).sum()}")
-                if len(labels) > 0:
-                    unique_labels = np.unique(labels)
-                    logger.info(f"  labels: min={labels.min()}, max={labels.max()}, "
-                                f"unique={unique_labels[:20]}{'...' if len(unique_labels) > 20 else ''}")
-                    logger.info(f"  labels in [1,80]: {((labels >= 1) & (labels <= 80)).sum()}, "
-                                f"label=0: {(labels == 0).sum()}")
                 orig_w_diag = sample.get('width', self.input_size)
                 orig_h_diag = sample.get('height', self.input_size)
                 logger.info(f"  orig image size: {orig_w_diag}x{orig_h_diag}")
+                logger.info(f"  boxes: shape={boxes.shape}, scores: >=0.5: {(scores >= 0.5).sum()}/{len(scores)}")
+                if len(boxes) > 0:
+                    logger.info(f"  box[0]={boxes[0]}")
+                # Compare top detection with GT under both coordinate interpretations
+                gt_anns = coco_gt.imgToAnns.get(image_id, [])
+                if gt_anns and len(boxes) > 0:
+                    top_idx = int(np.argmax(scores))
+                    top_box = boxes[top_idx]
+                    top_score = float(scores[top_idx])
+                    top_label = int(labels[top_idx]) if top_idx < len(labels) else 0
+                    logger.info(f"  Top detection: score={top_score:.3f}, label={top_label}, box={top_box}")
+                    # Interpretation A: box=[x1,y1,x2,y2] (current code)
+                    ax1 = float(top_box[0]) * orig_w_diag
+                    ay1 = float(top_box[1]) * orig_h_diag
+                    ax2 = float(top_box[2]) * orig_w_diag
+                    ay2 = float(top_box[3]) * orig_h_diag
+                    # Interpretation B: box=[y1,x1,y2,x2] (swapped)
+                    bx1 = float(top_box[1]) * orig_w_diag
+                    by1 = float(top_box[0]) * orig_h_diag
+                    bx2 = float(top_box[3]) * orig_w_diag
+                    by2 = float(top_box[2]) * orig_h_diag
+                    logger.info(f"  InterpA [x1,y1,x2,y2]: [{ax1:.1f},{ay1:.1f},{ax2:.1f},{ay2:.1f}]")
+                    logger.info(f"  InterpB [y1,x1,y2,x2]: [{bx1:.1f},{by1:.1f},{bx2:.1f},{by2:.1f}]")
+                    # Check IoU against each GT box
+                    best_iou_a, best_iou_b = 0.0, 0.0
+                    for gt_ann in gt_anns:
+                        gx, gy, gw, gh = gt_ann['bbox']  # COCO [x,y,w,h]
+                        gx2, gy2 = gx + gw, gy + gh
+                        # IoU for interpretation A
+                        ix1 = max(ax1, gx); iy1 = max(ay1, gy); ix2 = min(ax2, gx2); iy2 = min(ay2, gy2)
+                        inter = max(0, ix2-ix1) * max(0, iy2-iy1)
+                        area_a = max(0, ax2-ax1) * max(0, ay2-ay1)
+                        area_g = gw * gh
+                        iou_a = inter / (area_a + area_g - inter) if (area_a + area_g - inter) > 0 else 0
+                        best_iou_a = max(best_iou_a, iou_a)
+                        # IoU for interpretation B
+                        ix1 = max(bx1, gx); iy1 = max(by1, gy); ix2 = min(bx2, gx2); iy2 = min(by2, gy2)
+                        inter = max(0, ix2-ix1) * max(0, iy2-iy1)
+                        area_b = max(0, bx2-bx1) * max(0, by2-by1)
+                        iou_b = inter / (area_b + area_g - inter) if (area_b + area_g - inter) > 0 else 0
+                        best_iou_b = max(best_iou_b, iou_b)
+                    logger.info(f"  Best IoU vs GT: interpA={best_iou_a:.4f}, interpB={best_iou_b:.4f}")
+                    if best_iou_b > best_iou_a + 0.1:
+                        logger.warning(f"  >>> Coordinate swap [y1,x1,y2,x2] gives MUCH better IoU!")
+                    logger.info(f"  GT boxes ({len(gt_anns)}): {[a['bbox'] for a in gt_anns[:3]]}...")
                 diag_printed = True
+
+            orig_w = sample.get('width', self.input_size)
+            orig_h = sample.get('height', self.input_size)
 
             for i in range(len(scores)):
                 if i >= len(boxes):
                     break
 
+                score = float(scores[i])
+                # Filter low-confidence detections (model NMS uses score > 0.05)
+                if score < 0.05:
+                    continue
+
                 total_dets += 1
                 box = boxes[i]
-                score = float(scores[i])
                 label = int(labels[i]) if i < len(labels) else 0
 
                 # Convert to COCO format: [x, y, width, height]
-                # Model outputs normalized [0, 1] coordinates (ltrb)
-                # Scale directly to original image dimensions per MLCommons reference
-                orig_w = sample.get('width', self.input_size)
-                orig_h = sample.get('height', self.input_size)
-
+                # Model outputs normalized [0, 1] as [x1, y1, x2, y2]
+                # Scale to original image dimensions per MLCommons reference
                 x1 = float(box[0]) * orig_w
                 y1 = float(box[1]) * orig_h
                 x2 = float(box[2]) * orig_w
