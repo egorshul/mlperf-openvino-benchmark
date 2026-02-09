@@ -581,12 +581,13 @@ class COCODataset(BaseDataset):
                 label = int(labels[i]) if i < len(labels) else 0
 
                 # Convert to COCO format: [x, y, width, height]
-                # Model outputs normalized [0, 1] as [x1, y1, x2, y2]
-                # Scale to original image dimensions per MLCommons reference
-                x1 = float(box[0]) * orig_w
-                y1 = float(box[1]) * orig_h
-                x2 = float(box[2]) * orig_w
-                y2 = float(box[3]) * orig_h
+                # Model outputs normalized [0, 1] as [y1, x1, y2, x2]
+                # (confirmed by IoU diagnostic: swapped coords match GT)
+                # Reference PostProcessCocoOnnx also swaps: stores [box[1], box[0], box[3], box[2]]
+                y1 = float(box[0]) * orig_h
+                x1 = float(box[1]) * orig_w
+                y2 = float(box[2]) * orig_h
+                x2 = float(box[3]) * orig_w
 
                 w = x2 - x1
                 h = y2 - y1

@@ -671,7 +671,7 @@ void SSDResNet34MultiDieCppSUT::on_inference_complete(SSDResNet34MultiDieInferCo
 
         // Format response data in MLCommons accuracy-coco.py format:
         // Each detection = 7 float32: [qsl_idx, ymin, xmin, ymax, xmax, score, label]
-        // Model boxes are [x1, y1, x2, y2] normalized, we reorder to [y1, x1, y2, x2].
+        // Model boxes are [y1, x1, y2, x2] normalized — already in the right order.
         // Labels are raw model output (1-indexed, 1-80); accuracy-coco.py with
         // --use-inv-map converts to COCO category IDs.
         response_buffers.resize(real_samples);
@@ -688,11 +688,11 @@ void SSDResNet34MultiDieCppSUT::on_inference_complete(SSDResNet34MultiDieInferCo
                 float score = sample_scores[det];
                 if (score < 0.5f) continue;  // Reference PostProcessCocoOnnx filters at score < 0.5
 
-                // Model output: box = [x1, y1, x2, y2]
-                float x1 = sample_boxes[det * 4 + 0];
-                float y1 = sample_boxes[det * 4 + 1];
-                float x2 = sample_boxes[det * 4 + 2];
-                float y2 = sample_boxes[det * 4 + 3];
+                // Model output: box = [y1, x1, y2, x2] (confirmed by IoU diagnostic)
+                float y1 = sample_boxes[det * 4 + 0];
+                float x1 = sample_boxes[det * 4 + 1];
+                float y2 = sample_boxes[det * 4 + 2];
+                float x2 = sample_boxes[det * 4 + 3];
                 float label = 0.0f;
                 if (labels_data && labels_per_sample > 0) {
                     label = (labels_data + i * labels_per_sample)[det];
