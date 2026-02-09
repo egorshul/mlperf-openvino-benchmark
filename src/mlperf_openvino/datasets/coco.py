@@ -30,6 +30,10 @@ INPUT_SIZE = 1200
 NORMALIZE_MEAN = [0.485, 0.456, 0.406]
 NORMALIZE_STD = [0.229, 0.224, 0.225]
 
+# Cache version: bump when preprocessing changes to invalidate stale caches.
+# v2: float32 resize (matches MLCommons reference; v1 was uint8 resize)
+_CACHE_VERSION = "v2"
+
 # COCO 2017 has 80 categories
 NUM_CLASSES = 80
 
@@ -131,7 +135,7 @@ class COCODataset(BaseDataset):
         logger.info(f"Loaded {len(self._samples)} images")
 
         if self.use_disk_cache:
-            self._preprocessed_dir = self.data_path / "preprocessed_ssd_cache"
+            self._preprocessed_dir = self.data_path / f"preprocessed_ssd_cache_{_CACHE_VERSION}"
             self._preprocessed_dir.mkdir(exist_ok=True)
             self._check_or_create_disk_cache()
 
@@ -269,11 +273,14 @@ class COCODataset(BaseDataset):
         # BGR to RGB
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
+        # MLCommons reference: convert to float32 BEFORE resize for correct interpolation
+        img = np.array(img, dtype=np.float32)
+
         # Resize to input size (no aspect ratio preservation per MLPerf reference)
         img = cv2.resize(img, (self.input_size, self.input_size), interpolation=cv2.INTER_LINEAR)
 
         # Normalize: /255 then ImageNet mean/std
-        img_array = img.astype(np.float32) / 255.0
+        img_array = img / 255.0
         img_array = (img_array - np.array(NORMALIZE_MEAN, dtype=np.float32)) / np.array(NORMALIZE_STD, dtype=np.float32)
 
         if self.output_layout == "NCHW":
@@ -486,6 +493,10 @@ class COCODataset(BaseDataset):
         coco_gt = COCO(self._coco_annotations_file)
 
         coco_results = []
+        skipped_labels = 0
+        total_dets = 0
+        diag_printed = False
+
         for pred, idx in zip(predictions, indices):
             sample = self._samples[idx]
             image_id = sample['image_id']
@@ -500,10 +511,37 @@ class COCODataset(BaseDataset):
             if boxes.ndim == 1 and len(boxes) > 0:
                 boxes = boxes.reshape(-1, 4)
 
+            # Diagnostic: print first image's raw model output statistics
+            if not diag_printed:
+                logger.info(f"[DIAG] First image (id={image_id}, idx={idx}):")
+                logger.info(f"  boxes: shape={boxes.shape}, dtype={boxes.dtype}")
+                logger.info(f"  scores: shape={scores.shape}, dtype={scores.dtype}")
+                logger.info(f"  labels: shape={labels.shape}, dtype={labels.dtype}")
+                if len(boxes) > 0:
+                    logger.info(f"  box[0]={boxes[0]} (expect normalized [0,1])")
+                    logger.info(f"  box coord ranges: col0=[{boxes[:,0].min():.4f},{boxes[:,0].max():.4f}] "
+                                f"col1=[{boxes[:,1].min():.4f},{boxes[:,1].max():.4f}] "
+                                f"col2=[{boxes[:,2].min():.4f},{boxes[:,2].max():.4f}] "
+                                f"col3=[{boxes[:,3].min():.4f},{boxes[:,3].max():.4f}]")
+                if len(scores) > 0:
+                    logger.info(f"  scores: min={scores.min():.4f}, max={scores.max():.4f}, "
+                                f">=0.5: {(scores >= 0.5).sum()}, >=0.05: {(scores >= 0.05).sum()}")
+                if len(labels) > 0:
+                    unique_labels = np.unique(labels)
+                    logger.info(f"  labels: min={labels.min()}, max={labels.max()}, "
+                                f"unique={unique_labels[:20]}{'...' if len(unique_labels) > 20 else ''}")
+                    logger.info(f"  labels in [1,80]: {((labels >= 1) & (labels <= 80)).sum()}, "
+                                f"label=0: {(labels == 0).sum()}")
+                orig_w_diag = sample.get('width', self.input_size)
+                orig_h_diag = sample.get('height', self.input_size)
+                logger.info(f"  orig image size: {orig_w_diag}x{orig_h_diag}")
+                diag_printed = True
+
             for i in range(len(scores)):
                 if i >= len(boxes):
                     break
 
+                total_dets += 1
                 box = boxes[i]
                 score = float(scores[i])
                 label = int(labels[i]) if i < len(labels) else 0
@@ -528,6 +566,7 @@ class COCODataset(BaseDataset):
                 if 1 <= label_int <= 80:
                     category_id = LABEL_TO_COCO_ID[label_int]
                 else:
+                    skipped_labels += 1
                     continue
 
                 coco_results.append({
@@ -536,6 +575,9 @@ class COCODataset(BaseDataset):
                     'bbox': [x1, y1, w, h],
                     'score': score,
                 })
+
+        logger.info(f"[DIAG] Total detections={total_dets}, valid={len(coco_results)}, "
+                    f"skipped(label out of range)={skipped_labels}")
 
         if not coco_results:
             logger.warning("No valid predictions for COCO evaluation")
