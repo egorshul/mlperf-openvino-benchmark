@@ -519,7 +519,7 @@ class BenchmarkConfig:
                     target_latency_ns=100000000,  # 100ms (MLPerf official)
                     target_qps=100.0,
                 ),
-                onnx_url="https://zenodo.org/record/3236545/files/ssd_resnet34_mAP_20.2.onnx",
+                onnx_url="https://zenodo.org/record/4735664/files/ssd_resnet34_mAP_20.2.onnx",
             ),
             dataset=DatasetConfig(
                 name="coco2017",

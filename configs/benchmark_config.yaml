@@ -205,7 +205,7 @@ models:
 
     # Model sources (official MLPerf model)
     sources:
-      onnx_url: "https://zenodo.org/record/3236545/files/ssd_resnet34_mAP_20.2.onnx"
+      onnx_url: "https://zenodo.org/record/4735664/files/ssd_resnet34_mAP_20.2.onnx"
 
     # MLPerf LoadGen settings
     performance_sample_count: 256  # QSL size for performance runs

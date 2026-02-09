@@ -44,7 +44,7 @@ MODEL_REGISTRY: Dict[str, Dict] = {
     },
     "ssd-resnet34": {
         "onnx": {
-            "url": "https://zenodo.org/record/3236545/files/ssd_resnet34_mAP_20.2.onnx",
+            "url": "https://zenodo.org/record/4735664/files/ssd_resnet34_mAP_20.2.onnx",
             "filename": "ssd_resnet34_mAP_20.2.onnx",
             "md5": None,
         },
