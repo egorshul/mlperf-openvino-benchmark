@@ -35,12 +35,14 @@ def get_default_config(model: str) -> BenchmarkConfig:
         return BenchmarkConfig.default_whisper()
     elif model == 'sdxl':
         return BenchmarkConfig.default_sdxl()
+    elif model == 'ssd-resnet34':
+        return BenchmarkConfig.default_ssd_resnet34()
     else:
         return BenchmarkConfig.default_resnet50()
 
 
 @main.command()
-@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl']),
+@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl', 'ssd-resnet34']),
               default='resnet50', help='Model to benchmark')
 @click.option('--scenario', '-s', type=click.Choice(['Offline', 'Server']),
               default='Offline', help='Test scenario')
@@ -155,7 +157,7 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
             actual_hint = None
         elif scenario == 'Offline':
             actual_hint = 'THROUGHPUT'
-            if batch_size is None and model != 'sdxl':
+            if batch_size is None and model not in ('sdxl', 'ssd-resnet34'):
                 batch_size = 32
         else:
             actual_hint = 'THROUGHPUT'
@@ -303,13 +305,16 @@ def _print_dataset_help(model: str) -> None:
     elif model == 'whisper':
         click.echo("Please download the LibriSpeech dataset.")
         click.echo("Run: mlperf-ov download-dataset --dataset librispeech")
+    elif model == 'ssd-resnet34':
+        click.echo("Please download the COCO 2017 validation dataset.")
+        click.echo("Run: mlperf-ov download-dataset --dataset coco2017")
     elif model == 'sdxl':
         click.echo("Please download the COCO 2014 captions dataset.")
         click.echo("Run: mlperf-ov download-dataset --dataset coco2014")
 
 
 @main.command('download-model')
-@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl']),
+@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl', 'ssd-resnet34']),
               default='resnet50', help='Model to download')
 @click.option('--output-dir', '-o', type=click.Path(),
               default='./models', help='Output directory')
@@ -431,7 +436,7 @@ def info():
 
 
 @main.command('download-dataset')
-@click.option('--dataset', '-d', type=click.Choice(['imagenet', 'librispeech', 'squad', 'openimages', 'coco2014']),
+@click.option('--dataset', '-d', type=click.Choice(['imagenet', 'librispeech', 'squad', 'openimages', 'coco2014', 'coco2017']),
               required=True, help='Dataset to download')
 @click.option('--output-dir', '-o', type=click.Path(),
               default='./data', help='Output directory')
@@ -468,6 +473,9 @@ def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str],
         if dataset == 'openimages':
             from .utils.dataset_downloader import download_openimages
             paths = download_openimages(output_dir, force=force, max_images=count)
+        elif dataset == 'coco2017':
+            from .utils.dataset_downloader import download_coco2017
+            paths = download_coco2017(output_dir, force=force)
         elif dataset == 'coco2014':
             from .utils.dataset_downloader import download_coco2014
             paths = download_coco2014(output_dir, force=force, download_images=with_images)
@@ -490,7 +498,7 @@ def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str],
 
 
 @main.command('setup')
-@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl']),
+@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl', 'ssd-resnet34']),
               required=True, help='Model to set up')
 @click.option('--output-dir', '-o', type=click.Path(),
               default='.', help='Base output directory')
@@ -560,6 +568,9 @@ def setup_cmd(model: str, output_dir: str, format: str):
         elif model == 'whisper':
             # MLPerf requires dev-clean + dev-other combined
             dataset_paths = download_dataset('librispeech', str(data_dir), 'mlperf')
+        elif model == 'ssd-resnet34':
+            from .utils.dataset_downloader import download_coco2017
+            dataset_paths = download_coco2017(str(data_dir))
         elif model == 'sdxl':
             dataset_paths = download_dataset('coco2014', str(data_dir))
 
@@ -624,6 +635,15 @@ def list_models():
             'dataset': 'LibriSpeech',
             'metric': 'Word Accuracy',
             'target': '97.93%',
+        },
+        {
+            'name': 'SSD-ResNet34',
+            'id': 'ssd-resnet34',
+            'type': ModelType.SSD_RESNET34,
+            'task': 'Object Detection',
+            'dataset': 'COCO 2017',
+            'metric': 'mAP',
+            'target': '20.0%',
         },
         {
             'name': 'Stable Diffusion XL',

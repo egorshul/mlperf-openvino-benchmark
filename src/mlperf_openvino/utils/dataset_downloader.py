@@ -136,6 +136,21 @@ DATASET_REGISTRY: Dict[str, Dict] = {
         "num_samples": 5000,  # MLPerf uses 5000 samples
         "note": "For MLPerf SDXL benchmark (closed division)",
     },
+    "coco2017": {
+        "description": "COCO 2017 validation set for SSD-ResNet34 Object Detection",
+        "images": {
+            "url": "http://images.cocodataset.org/zips/val2017.zip",
+            "filename": "val2017.zip",
+            "size_gb": 1.0,
+        },
+        "annotations": {
+            "url": "http://images.cocodataset.org/annotations/annotations_trainval2017.zip",
+            "filename": "annotations_trainval2017.zip",
+            "size_mb": 252,
+        },
+        "num_samples": 5000,  # COCO 2017 val set
+        "note": "For MLPerf SSD-ResNet34 benchmark",
+    },
 }
 
 
@@ -143,7 +158,8 @@ def _download_file(
     url: str,
     destination: str,
     show_progress: bool = True,
-    expected_size_mb: Optional[float] = None
+    expected_size_mb: Optional[float] = None,
+    min_size_bytes: int = 0,
 ) -> None:
     logger.info(f"Downloading from {url}")
 
@@ -167,9 +183,25 @@ def _download_file(
         else:
             urllib.request.urlretrieve(url, destination)
 
-        logger.info(f"Downloaded to {destination}")
+        # Validate download: check file exists and meets minimum size
+        dest_path = Path(destination)
+        if not dest_path.exists():
+            raise RuntimeError(f"Download completed but file not found: {destination}")
+        actual_size = dest_path.stat().st_size
+        if min_size_bytes > 0 and actual_size < min_size_bytes:
+            dest_path.unlink()
+            raise RuntimeError(
+                f"Downloaded file is too small ({actual_size} bytes, expected >= {min_size_bytes}). "
+                f"The server may have returned an error page instead of the actual file."
+            )
+
+        logger.info(f"Downloaded to {destination} ({actual_size / (1024*1024):.1f} MB)")
 
     except URLError as e:
+        # Clean up partial download
+        dest_path = Path(destination)
+        if dest_path.exists():
+            dest_path.unlink()
         raise RuntimeError(f"Failed to download {url}: {e}")
 
 
@@ -1374,6 +1406,117 @@ def download_dataset(
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
 
+def _is_valid_zip(path: Path) -> bool:
+    """Check if a file is a valid ZIP archive."""
+    import zipfile
+    if not path.exists():
+        return False
+    if path.stat().st_size < 100:
+        return False
+    try:
+        with zipfile.ZipFile(str(path), 'r') as zf:
+            # testzip() returns the name of the first bad file, or None if OK
+            return zf.testzip() is None
+    except (zipfile.BadZipFile, Exception):
+        return False
+
+
+def _download_and_extract_zip(
+    url: str,
+    zip_path: Path,
+    extract_dir: Path,
+    description: str,
+    expected_size_mb: float,
+    force: bool = False,
+) -> None:
+    """Download a ZIP file and extract it, with validation and auto-retry."""
+    import zipfile
+
+    need_download = force or not zip_path.exists()
+
+    # If file exists but is not a valid ZIP, delete and re-download
+    if zip_path.exists() and not need_download:
+        if not _is_valid_zip(zip_path):
+            logger.warning(f"Existing {zip_path.name} is corrupted, re-downloading...")
+            zip_path.unlink()
+            need_download = True
+
+    if need_download:
+        logger.info(f"Downloading {description} (~{expected_size_mb:.0f}MB)...")
+        # Expect at least 1MB for any real dataset file
+        _download_file(url, str(zip_path), expected_size_mb=expected_size_mb,
+                        min_size_bytes=1024 * 1024)
+
+        # Validate the download is a valid ZIP
+        if not _is_valid_zip(zip_path):
+            size_kb = zip_path.stat().st_size / 1024
+            zip_path.unlink()
+            raise RuntimeError(
+                f"Downloaded file {zip_path.name} ({size_kb:.0f}KB) is not a valid ZIP archive. "
+                f"The URL may have returned an error page. Check your network connection and "
+                f"verify the URL is accessible: {url}"
+            )
+
+    logger.info(f"Extracting {description}...")
+    with zipfile.ZipFile(str(zip_path), 'r') as zf:
+        zf.extractall(str(extract_dir))
+    logger.info(f"Extracted to {extract_dir}")
+
+
+def download_coco2017(
+    output_dir: str,
+    force: bool = False,
+) -> Dict[str, str]:
+    """Download COCO 2017 validation dataset for SSD-ResNet34."""
+    registry = DATASET_REGISTRY["coco2017"]
+
+    output_path = Path(output_dir) / "coco2017"
+    output_path.mkdir(parents=True, exist_ok=True)
+    images_dir = output_path / "val2017"
+    annotations_dir = output_path / "annotations"
+
+    # Download and extract images
+    if not images_dir.exists() or force:
+        img_info = registry["images"]
+        zip_path = output_path / img_info["filename"]
+        _download_and_extract_zip(
+            url=img_info["url"],
+            zip_path=zip_path,
+            extract_dir=output_path,
+            description="COCO 2017 validation images",
+            expected_size_mb=1024,
+            force=force,
+        )
+    else:
+        num_images = len(list(images_dir.glob("*.jpg")))
+        logger.info(f"COCO 2017 images already exist: {num_images} images")
+
+    # Download and extract annotations
+    if not annotations_dir.exists() or not (annotations_dir / "instances_val2017.json").exists() or force:
+        ann_info = registry["annotations"]
+        zip_path = output_path / ann_info["filename"]
+        _download_and_extract_zip(
+            url=ann_info["url"],
+            zip_path=zip_path,
+            extract_dir=output_path,
+            description="COCO 2017 annotations",
+            expected_size_mb=252,
+            force=force,
+        )
+    else:
+        logger.info("COCO 2017 annotations already exist")
+
+    num_images = len(list(images_dir.glob("*.jpg"))) if images_dir.exists() else 0
+    logger.info(f"COCO 2017 dataset ready: {num_images} images")
+
+    return {
+        "data_path": str(output_path),
+        "images_dir": str(images_dir),
+        "annotations_file": str(annotations_dir / "instances_val2017.json"),
+        "num_samples": num_images,
+    }
+
+
 def list_available_datasets() -> Dict[str, str]:
     return {
         "imagenet": DATASET_REGISTRY["imagenet"]["description"],
@@ -1381,6 +1524,7 @@ def list_available_datasets() -> Dict[str, str]:
         "openimages": DATASET_REGISTRY["openimages"]["description"],
         "librispeech": DATASET_REGISTRY["librispeech"]["description"],
         "coco2014": DATASET_REGISTRY["coco2014"]["description"],
+        "coco2017": DATASET_REGISTRY["coco2017"]["description"],
     }
 
 

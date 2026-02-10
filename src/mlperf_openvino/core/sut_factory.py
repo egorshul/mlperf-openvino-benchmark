@@ -30,6 +30,8 @@ class SUTFactory:
             return SUTFactory._create_bert_sut(config, qsl, is_accuracy_mode, backend)
         elif model_type == ModelType.RETINANET:
             return SUTFactory._create_retinanet_sut(config, qsl, is_accuracy_mode, backend)
+        elif model_type == ModelType.SSD_RESNET34:
+            return SUTFactory._create_ssd_resnet34_sut(config, qsl, is_accuracy_mode, backend)
         elif model_type == ModelType.WHISPER:
             return SUTFactory._create_whisper_sut(config, qsl, encoder_path, decoder_path)
         elif model_type == ModelType.SDXL:
@@ -151,6 +153,46 @@ class SUTFactory:
         from .retinanet_sut import RetinaNetSUT
         logger.info(f"Using RetinaNet Python SUT on {config.openvino.device}")
         return RetinaNetSUT(
+            config=config,
+            backend=backend,
+            qsl=qsl,
+            scenario=config.scenario,
+        )
+
+    @staticmethod
+    def _create_ssd_resnet34_sut(
+        config: BenchmarkConfig,
+        qsl: QuerySampleLibrary,
+        is_accuracy_mode: bool,
+        backend: Optional[Any],
+    ) -> Any:
+        """Create SSD-ResNet34 multi-die SUT."""
+        try:
+            from .ssd_resnet34_multi_die_sut import (
+                SSDResNet34MultiDieCppSUTWrapper,
+                is_ssd_resnet34_multi_die_cpp_available
+            )
+
+            if is_ssd_resnet34_multi_die_cpp_available():
+                logger.info(f"Using SSD-ResNet34 C++ multi-die SUT on {config.openvino.device}")
+                sut = SSDResNet34MultiDieCppSUTWrapper(
+                    config=config,
+                    qsl=qsl,
+                    scenario=config.scenario,
+                )
+                sut.load(is_accuracy_mode=is_accuracy_mode)
+                return sut
+        except ImportError as e:
+            logger.warning(f"C++ SSD-ResNet34 multi-die SUT not available: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to create C++ SSD-ResNet34 multi-die SUT: {e}")
+
+        if backend is None:
+            raise RuntimeError("C++ SUT not available and Python backend is None. Build C++ SUT first.")
+
+        from .ssd_resnet34_sut import SSDResNet34SUT
+        logger.info(f"Using SSD-ResNet34 Python SUT on {config.openvino.device}")
+        return SSDResNet34SUT(
             config=config,
             backend=backend,
             qsl=qsl,

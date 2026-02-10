@@ -53,7 +53,7 @@ class BenchmarkRunner:
         is_whisper = model_type == ModelType.WHISPER
         is_accelerator = self.config.openvino.is_accelerator_device()
         uses_cpp_multi_die_sut = (
-            model_type in (ModelType.RESNET50, ModelType.BERT, ModelType.RETINANET)
+            model_type in (ModelType.RESNET50, ModelType.BERT, ModelType.RETINANET, ModelType.SSD_RESNET34)
             and is_accelerator
         )
 
@@ -81,6 +81,8 @@ class BenchmarkRunner:
             self._setup_bert()
         elif model_type == ModelType.RETINANET:
             self._setup_retinanet()
+        elif model_type == ModelType.SSD_RESNET34:
+            self._setup_ssd_resnet34()
         else:
             raise ValueError(f"Unsupported model type: {model_type}")
 
@@ -210,6 +212,37 @@ class BenchmarkRunner:
             )
         else:
             self.sut = create_retinanet_sut(
+                config=self.config,
+                model_path=self.config.model.model_path,
+                qsl=self.qsl,
+                scenario=self.config.scenario,
+            )
+
+    def _setup_ssd_resnet34(self) -> None:
+        """Set up SSD-ResNet34 benchmark."""
+        from ..datasets.coco import COCOQSL
+        from .cpp_sut_wrapper import create_ssd_resnet34_sut
+
+        output_layout = "NHWC"
+        if hasattr(self.config.model, 'preprocessing') and self.config.model.preprocessing:
+            output_layout = getattr(self.config.model.preprocessing, 'output_layout', 'NHWC')
+
+        self.qsl = COCOQSL(
+            data_path=self.config.dataset.path,
+            annotations_file=self.config.dataset.val_map,
+            count=self.config.dataset.num_samples if self.config.dataset.num_samples > 0 else None,
+            performance_sample_count=256,
+            input_size=1200,
+            output_layout=output_layout,
+        )
+        self.qsl.load()
+
+        if self.config.openvino.is_accelerator_device():
+            self.sut = SUTFactory.create_multi_die_sut(
+                ModelType.SSD_RESNET34, self.config, self.qsl, self.backend
+            )
+        else:
+            self.sut = create_ssd_resnet34_sut(
                 config=self.config,
                 model_path=self.config.model.model_path,
                 qsl=self.qsl,
@@ -428,12 +461,35 @@ class BenchmarkRunner:
         else:
             settings.mode = lg.TestMode.PerformanceOnly
 
+        # For Closed Division: load official MLPerf settings from config files.
+        # These override any programmatic settings below (min_duration, seeds, etc.).
+        scenario_str = self.config.scenario.value  # "offline" or "server"
+        model_name = self.config.model.model_type.value if self.config.model.model_type else ""
+
+        if self.config.mlperf_conf:
+            conf_path = Path(self.config.mlperf_conf)
+            if conf_path.exists():
+                logger.info(f"Loading mlperf.conf from {conf_path}")
+                settings.FromConfig(str(conf_path), model_name, scenario_str)
+            else:
+                logger.warning(f"mlperf.conf not found: {conf_path}")
+
+        if self.config.user_conf:
+            conf_path = Path(self.config.user_conf)
+            if conf_path.exists():
+                logger.info(f"Loading user.conf from {conf_path}")
+                settings.FromConfig(str(conf_path), model_name, scenario_str)
+            else:
+                logger.warning(f"user.conf not found: {conf_path}")
+
+        # Programmatic defaults (used when config files are not provided)
         scenario_config = self.config.get_scenario_config()
-        settings.min_duration_ms = scenario_config.min_duration_ms
-        settings.min_query_count = scenario_config.min_query_count
-        settings.qsl_rng_seed = scenario_config.qsl_rng_seed
-        settings.sample_index_rng_seed = scenario_config.sample_index_rng_seed
-        settings.schedule_rng_seed = scenario_config.schedule_rng_seed
+        if not self.config.mlperf_conf:
+            settings.min_duration_ms = scenario_config.min_duration_ms
+            settings.min_query_count = scenario_config.min_query_count
+            settings.qsl_rng_seed = scenario_config.qsl_rng_seed
+            settings.sample_index_rng_seed = scenario_config.sample_index_rng_seed
+            settings.schedule_rng_seed = scenario_config.schedule_rng_seed
 
         logger.info(f"LoadGen settings: min_duration={scenario_config.min_duration_ms/1000:.0f}s, min_query_count={scenario_config.min_query_count}")
 
@@ -541,6 +597,9 @@ class BenchmarkRunner:
         elif model_type == ModelType.RETINANET:
             primary_metric = "mAP"
             metric_value = self._accuracy_results.get("mAP", 0.0)
+        elif model_type == ModelType.SSD_RESNET34:
+            primary_metric = "mAP"
+            metric_value = self._accuracy_results.get("mAP", 0.0)
         elif model_type == ModelType.WHISPER:
             primary_metric = "word_accuracy"
             metric_value = self._accuracy_results.get("word_accuracy", 0.0)
@@ -584,6 +643,8 @@ class BenchmarkRunner:
             self._compute_bert_accuracy()
         elif model_type == ModelType.RETINANET:
             self._compute_retinanet_accuracy()
+        elif model_type == ModelType.SSD_RESNET34:
+            self._compute_ssd_resnet34_accuracy()
         elif model_type == ModelType.WHISPER:
             self._compute_whisper_accuracy()
         elif model_type == ModelType.SDXL:
@@ -633,6 +694,12 @@ class BenchmarkRunner:
 
     def _compute_retinanet_accuracy(self) -> None:
         """Compute RetinaNet accuracy (mAP)."""
+        self._accuracy_results = self.sut.compute_accuracy()
+
+        logger.info(f"mAP: {self._accuracy_results.get('mAP', 0):.4f}")
+
+    def _compute_ssd_resnet34_accuracy(self) -> None:
+        """Compute SSD-ResNet34 accuracy (mAP on COCO 2017)."""
         self._accuracy_results = self.sut.compute_accuracy()
 
         logger.info(f"mAP: {self._accuracy_results.get('mAP', 0):.4f}")
@@ -737,6 +804,11 @@ class BenchmarkRunner:
             mAP = acc.get('mAP', 0)
             # MLPerf RetinaNet threshold: 37.19% mAP (99% of 37.57%)
             status = "PASS" if mAP >= 0.3719 else "FAIL"
+            print(f"mAP: {mAP:.4f} [{status}]")
+        elif model_type == 'ssd-resnet34':
+            mAP = acc.get('mAP', 0)
+            # MLPerf SSD-ResNet34 threshold: 19.8% mAP (99% of 20.0%)
+            status = "PASS" if mAP >= 0.198 else "FAIL"
             print(f"mAP: {mAP:.4f} [{status}]")
         elif model_type == 'whisper':
             word_acc = acc.get('word_accuracy', 0)

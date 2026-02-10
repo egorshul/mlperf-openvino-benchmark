@@ -45,6 +45,10 @@ whisper = [
     "jiwer>=3.0.0",
     "optimum[openvino]>=1.16.0",
 ]
+ssd-resnet34 = [
+    "pycocotools>=2.0.0",
+    "opencv-python>=4.5.0",
+]
 sdxl = [
     "optimum[openvino]>=1.16.0",
     "diffusers>=0.25.0",
@@ -56,7 +60,7 @@ sdxl = [
     "scipy>=1.10.0",
 ]
 all = [
-    "mlperf-openvino-benchmark[dev,resnet,bert,retinanet,whisper,sdxl]",
+    "mlperf-openvino-benchmark[dev,resnet,bert,retinanet,ssd-resnet34,whisper,sdxl]",
 ]
 
 [project.scripts]
