@@ -252,14 +252,9 @@ class BenchmarkRunner:
             )
 
     def _setup_3dunet(self) -> None:
-        """Set up 3D UNET benchmark.
-
-        Routes through SUTFactory (same pattern as other models):
-        - Accelerator: C++ multi-die SUT (backend=None)
-        - CPU: C++ multi-die SUT with single CPU die,
-               falls back to Python SUT with backend
-        """
+        """Set up 3D UNET benchmark."""
         from ..datasets.kits19 import KiTS19QSL
+        from .cpp_sut_wrapper import create_unet3d_sut
 
         self.qsl = KiTS19QSL(
             data_path=self.config.dataset.path,
@@ -268,9 +263,17 @@ class BenchmarkRunner:
         )
         self.qsl.load()
 
-        self.sut = SUTFactory.create_multi_die_sut(
-            ModelType.UNET3D, self.config, self.qsl, self.backend,
-        )
+        if self.config.openvino.is_accelerator_device():
+            self.sut = SUTFactory.create_multi_die_sut(
+                ModelType.UNET3D, self.config, self.qsl, self.backend
+            )
+        else:
+            self.sut = create_unet3d_sut(
+                config=self.config,
+                model_path=self.config.model.model_path,
+                qsl=self.qsl,
+                scenario=self.config.scenario,
+            )
 
     def _setup_whisper(self) -> None:
         """Set up Whisper benchmark."""
