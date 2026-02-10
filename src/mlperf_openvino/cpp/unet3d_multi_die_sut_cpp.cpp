@@ -255,6 +255,17 @@ std::vector<std::string> UNet3DMultiDieCppSUT::discover_dies() {
         }
     }
 
+    // For non-numbered devices (e.g. "CPU", "GPU") that don't have
+    // die suffixes like ".0", ".1", use the prefix itself as a single die.
+    if (dies.empty()) {
+        for (const auto& device : all_devices) {
+            if (device == device_prefix_) {
+                dies.push_back(device);
+                break;
+            }
+        }
+    }
+
     std::sort(dies.begin(), dies.end(), [](const std::string& a, const std::string& b) {
         auto get_num = [](const std::string& s) -> int {
             size_t pos = s.find('.');
