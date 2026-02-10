@@ -1505,18 +1505,9 @@ def _preprocess_kits19_case(
     image = np.clip(image, -79.0, 304.0)
     image = (image - 101.0) / 76.9
 
-    # Pad to 64-divisible
-    padded_shape = []
-    for s in image.shape:
-        target = int(np.ceil(s / 64.0)) * 64
-        padded_shape.append(max(target, 128))
-    if tuple(padded_shape) != image.shape:
-        padded = np.full(padded_shape, -2.2, dtype=np.float32)
-        padded[:image.shape[0], :image.shape[1], :image.shape[2]] = image
-        image = padded
-
-    # Add channel dim: (D,H,W) -> (1,D,H,W)
-    image = image[np.newaxis, ...]
+    # NOTE: No padding here — padding is applied at inference time in get_features().
+    # This matches the MLCommons reference build_preprocessed_data.py format:
+    # pickle contains [image(D,H,W), label(D,H,W)] at target spacing, normalized.
 
     # Load segmentation label (if available)
     label = None

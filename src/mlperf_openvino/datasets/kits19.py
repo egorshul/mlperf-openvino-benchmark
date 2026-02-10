@@ -457,6 +457,9 @@ class KiTS19Dataset(BaseDataset):
         for pred, label in zip(predictions, labels):
             if label is None:
                 continue
+            # Crop prediction to label shape (undo inference padding)
+            if pred.shape != label.shape:
+                pred = pred[:label.shape[0], :label.shape[1], :label.shape[2]]
             # Class 1 = kidney, Class 2 = tumor
             kidney_dices.append(dice_score(pred, label, class_id=1))
             tumor_dices.append(dice_score(pred, label, class_id=2))
@@ -505,10 +508,12 @@ class KiTS19QSL(QuerySampleLibrary):
             self._loaded_samples.pop(idx, None)
             self.dataset.samples.pop(idx, None)
 
-    def get_features(self, sample_id: int) -> Dict[str, np.ndarray]:
+    def get_features(self, sample_id: int) -> Dict[str, Any]:
         """Get preprocessed features for a sample.
 
-        Returns dict with 'input': preprocessed 3D volume as (1, C, D, H, W) tensor.
+        Returns dict with:
+        - 'input': preprocessed 3D volume as (1, C, D, H, W) tensor (padded)
+        - 'original_shape': spatial shape before padding (D, H, W)
         """
         sample = self._loaded_samples.get(sample_id)
         if sample is None:
@@ -516,13 +521,28 @@ class KiTS19QSL(QuerySampleLibrary):
             self._loaded_samples[sample_id] = sample
 
         data = sample["data"]
-        # Ensure shape is (1, C, D, H, W)
-        if data.ndim == 3:
-            data = data[np.newaxis, np.newaxis, ...]  # (1, 1, D, H, W)
-        elif data.ndim == 4:
-            data = data[np.newaxis, ...]  # (1, C, D, H, W)
 
-        return {"input": data.astype(np.float32)}
+        if data.ndim == 3:
+            # (D, H, W) — MLCommons standard pickle format (no padding, no channel dim)
+            original_shape = data.shape
+            data = pad_to_min_shape(data, ROI_SHAPE)
+            data = data[np.newaxis, np.newaxis, ...]  # (1, 1, D', H', W')
+        elif data.ndim == 4:
+            # (C, D, H, W) — may be already padded (old format) or not
+            original_shape = data.shape[1:]  # spatial dims
+            spatial = data[0]
+            padded = pad_to_min_shape(spatial, ROI_SHAPE)
+            if padded.shape != spatial.shape:
+                new_data = np.full((data.shape[0], *padded.shape), PAD_VALUE, dtype=data.dtype)
+                new_data[:, :spatial.shape[0], :spatial.shape[1], :spatial.shape[2]] = data
+                data = new_data
+            data = data[np.newaxis, ...]  # (1, C, D', H', W')
+        else:
+            # (1, C, D, H, W) — already batched
+            original_shape = data.shape[2:]
+            return {"input": data.astype(np.float32), "original_shape": original_shape}
+
+        return {"input": data.astype(np.float32), "original_shape": original_shape}
 
     def get_label(self, sample_id: int) -> Optional[np.ndarray]:
         """Get ground truth label."""

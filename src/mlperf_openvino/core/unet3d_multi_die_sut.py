@@ -195,12 +195,18 @@ class UNet3DMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
             # Get volume data
             features = self.qsl.get_features(sample_idx)
             volume = features["input"]
+            original_shape = features.get("original_shape")
             if volume.ndim == 5:
                 volume = volume[0]  # (1, C, D, H, W) -> (C, D, H, W)
 
             # Run sliding window inference
             logits = self._sliding_window_inference(volume, sample_idx)
             segmentation = np.argmax(logits, axis=0).astype(np.int8)
+
+            # Crop to original (pre-padding) shape per MLCommons spec
+            if original_shape is not None and segmentation.shape != tuple(original_shape):
+                segmentation = segmentation[:original_shape[0], :original_shape[1], :original_shape[2]]
+
             self._segmentation_predictions[sample_idx] = segmentation
 
             # Create LoadGen response

@@ -160,11 +160,17 @@ class UNet3DSUT:
         """Process a single sample through sliding window inference."""
         features = self.qsl.get_features(sample_idx)
         volume = features["input"]  # (1, C, D, H, W)
+        original_shape = features.get("original_shape")
         if volume.ndim == 5:
             volume = volume[0]  # Remove batch dim -> (C, D, H, W)
 
         logits = self._sliding_window_inference(volume)
         segmentation = np.argmax(logits, axis=0).astype(np.int8)
+
+        # Crop to original (pre-padding) shape per MLCommons spec
+        if original_shape is not None and segmentation.shape != tuple(original_shape):
+            segmentation = segmentation[:original_shape[0], :original_shape[1], :original_shape[2]]
+
         return segmentation
 
     def _start_progress(self, total: int, desc: str = "Processing") -> None:
