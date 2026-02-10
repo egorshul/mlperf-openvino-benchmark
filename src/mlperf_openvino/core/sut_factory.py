@@ -253,6 +253,11 @@ class SUTFactory:
             logger.warning(f"Failed to create C++ 3D UNET multi-die SUT: {e}")
 
         # Fall back to Python SUT
+        if backend is None:
+            raise RuntimeError(
+                "C++ 3D UNET SUT not available and Python backend is None. "
+                "Build the C++ SUT first or provide an OpenVINO backend."
+            )
         from .unet3d_sut import UNet3DSUT
         logger.info(f"Using 3D UNET Python SUT on {config.openvino.device}")
         return UNet3DSUT(

@@ -55,10 +55,11 @@ class UNet3DMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
     def __init__(
         self,
         config: BenchmarkConfig,
-        qsl: QuerySampleLibrary,
+        qsl: "KiTS19QSL",
         scenario: Scenario = Scenario.OFFLINE,
     ):
         self._gaussian_map = get_gaussian_importance_map(ROI_SHAPE)
+        self._segmentation_predictions: Dict[int, np.ndarray] = {}
         super().__init__(config, qsl, scenario)
 
     def supports_native_benchmark(self) -> bool:
@@ -234,8 +235,8 @@ class UNet3DMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
             raise ValueError(f"3D UNET only supports Offline scenario, got: {self.scenario}")
 
     def load(self, is_accuracy_mode: bool = False) -> None:
-        """Load C++ SUT and initialize segmentation storage."""
-        self._segmentation_predictions: Dict[int, np.ndarray] = {}
+        """Load C++ SUT and reset segmentation storage."""
+        self._segmentation_predictions.clear()
         super().load(is_accuracy_mode=is_accuracy_mode)
 
     def get_predictions(self) -> Dict[int, np.ndarray]:

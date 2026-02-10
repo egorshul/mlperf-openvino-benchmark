@@ -156,8 +156,8 @@ class KiTS19Dataset(BaseDataset):
         data_path: str,
         count: Optional[int] = None,
     ):
+        super().__init__(data_path, count)
         self.data_path = Path(data_path)
-        self.count = count
         self.samples: Dict[int, Dict[str, Any]] = {}
         self.case_ids: List[str] = []
         self.labels: Dict[int, np.ndarray] = {}
@@ -421,6 +421,19 @@ class KiTS19Dataset(BaseDataset):
         if all(abs(z - 1.0) < 1e-6 for z in zoom_factors):
             return data
         return zoom(data, zoom_factors, order=order).astype(data.dtype)
+
+    def get_samples(self, indices: List[int]) -> Tuple[List[Dict[str, Any]], List[Optional[np.ndarray]]]:
+        """Get multiple preprocessed samples by indices.
+
+        Returns (samples, labels) tuple. 3D volumes have variable spatial shapes,
+        so samples are returned as a list of dicts rather than a stacked ndarray.
+        """
+        samples = []
+        labels = []
+        for idx in indices:
+            samples.append(self.get_sample(idx))
+            labels.append(self.get_label(idx))
+        return samples, labels
 
     def get_label(self, index: int) -> Optional[np.ndarray]:
         """Get ground truth segmentation label for a sample."""
