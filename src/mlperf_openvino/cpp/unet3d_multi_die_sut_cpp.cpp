@@ -518,9 +518,10 @@ void UNet3DMultiDieCppSUT::start_async_batch(const float* input_data,
 
     pending_count_.fetch_add(1, std::memory_order_relaxed);
     ctx->request.start_async();
-    if (store_predictions_) {
-        ctx->request.wait();
-    }
+    // No synchronous wait here — on_inference_complete() callback stores
+    // predictions in mutex-protected map, and wait_all() ensures completion
+    // before Python reads results. This enables parallel sub-volume dispatch
+    // across multiple dies for sliding window inference.
     issued_count_.fetch_add(actual_batch_size, std::memory_order_relaxed);
 }
 

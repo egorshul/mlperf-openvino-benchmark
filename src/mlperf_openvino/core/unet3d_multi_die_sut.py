@@ -104,20 +104,13 @@ class UNet3DMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
         positions = compute_sliding_window_positions(spatial_shape)
         num_positions = len(positions)
 
-        # Infer number of output classes from first patch
-        first_slices = positions[0]
-        sub_vol = volume[:, first_slices[0], first_slices[1], first_slices[2]]
-        sub_vol_batch = sub_vol[np.newaxis, ...].astype(np.float32)  # (1, C, 128, 128, 128)
-
-        if not sub_vol_batch.flags['C_CONTIGUOUS']:
-            sub_vol_batch = np.ascontiguousarray(sub_vol_batch)
-
-        # Use synchronous inference via C++ start_async_batch + wait
+        # Dispatch sub-volumes asynchronously across dies
         self._cpp_sut.reset_counters()
+        self._cpp_sut.clear_predictions()
         self._cpp_sut.enable_direct_loadgen(False)
         self._cpp_sut.set_store_predictions(True)
 
-        # Submit all sub-volumes
+        # Submit all sub-volumes (async — parallel across dies)
         dummy_query_ids = list(range(num_positions))
         dummy_sample_indices = list(range(num_positions))
 
