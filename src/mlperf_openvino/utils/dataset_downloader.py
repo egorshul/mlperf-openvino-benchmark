@@ -1390,74 +1390,248 @@ def download_coco2014(
     }
 
 
+def _download_kits19_case(
+    case_id: str,
+    raw_dir: Path,
+    force: bool = False,
+) -> bool:
+    """Download a single KiTS19 case (imaging + segmentation NIfTI).
+
+    Tries multiple mirror URLs with retries.
+    Returns True if both files are present after download.
+    """
+    import time
+
+    case_dir = raw_dir / case_id
+    case_dir.mkdir(parents=True, exist_ok=True)
+
+    imaging_path = case_dir / "imaging.nii.gz"
+    seg_path = case_dir / "segmentation.nii.gz"
+
+    # Skip if already downloaded (validate minimum size: NIfTI files are >1MB)
+    if not force and imaging_path.exists() and seg_path.exists():
+        if imaging_path.stat().st_size > 1_000_000 and seg_path.stat().st_size > 10_000:
+            return True
+
+    # Mirror URLs to try (in order of reliability)
+    MIRROR_URLS = [
+        f"https://kits19.sfo2.digitaloceanspaces.com/{case_id}/{{filename}}",
+        f"https://kits19.sfo2.cdn.digitaloceanspaces.com/{case_id}/{{filename}}",
+    ]
+
+    for filename, dest_path, min_size in [
+        ("imaging.nii.gz", imaging_path, 1_000_000),
+        ("segmentation.nii.gz", seg_path, 10_000),
+    ]:
+        if not force and dest_path.exists() and dest_path.stat().st_size > min_size:
+            continue
+
+        downloaded = False
+        for url_template in MIRROR_URLS:
+            url = url_template.format(filename=filename)
+            for attempt in range(3):
+                try:
+                    logger.debug(f"Downloading {case_id}/{filename} (attempt {attempt+1})")
+                    urllib.request.urlretrieve(url, str(dest_path))
+                    if dest_path.exists() and dest_path.stat().st_size > min_size:
+                        downloaded = True
+                        break
+                    else:
+                        if dest_path.exists():
+                            dest_path.unlink()
+                except Exception as e:
+                    logger.debug(f"Failed: {e}")
+                    if dest_path.exists():
+                        dest_path.unlink()
+                    if attempt < 2:
+                        time.sleep(2 ** attempt)
+            if downloaded:
+                break
+
+        if not downloaded:
+            logger.warning(f"Failed to download {case_id}/{filename}")
+            return False
+
+    return True
+
+
+def _preprocess_kits19_case(
+    case_id: str,
+    raw_dir: Path,
+    preprocessed_dir: Path,
+) -> bool:
+    """Preprocess a single KiTS19 case: NIfTI -> pickle.
+
+    Per MLCommons reference:
+    1. Load NIfTI volumes
+    2. Resample to target spacing (1.6, 1.2, 1.2) mm
+    3. Clip to [-79, 304], z-score normalize (mean=101, std=76.9)
+    4. Pad to 64-divisible dimensions
+    5. Save as pickle: [image_array, label_array]
+    """
+    try:
+        import nibabel as nib
+    except ImportError:
+        raise ImportError("nibabel is required: pip install nibabel")
+    try:
+        from scipy.ndimage import zoom
+    except ImportError:
+        raise ImportError("scipy is required: pip install scipy")
+
+    import numpy as np
+
+    pkl_path = preprocessed_dir / f"{case_id}.pkl"
+    if pkl_path.exists():
+        return True
+
+    case_dir = raw_dir / case_id
+    imaging_path = case_dir / "imaging.nii.gz"
+    seg_path = case_dir / "segmentation.nii.gz"
+
+    if not imaging_path.exists():
+        logger.warning(f"Missing {imaging_path}")
+        return False
+
+    # Load imaging
+    img_nii = nib.load(str(imaging_path))
+    image = img_nii.get_fdata().astype(np.float32)
+    original_spacing = img_nii.header.get_zooms()[:3]
+
+    # Resample to target spacing
+    TARGET_SPACING = (1.6, 1.2, 1.2)
+    zoom_factors = tuple(o / t for o, t in zip(original_spacing, TARGET_SPACING))
+    if not all(abs(z - 1.0) < 1e-6 for z in zoom_factors):
+        image = zoom(image, zoom_factors, order=1).astype(np.float32)
+
+    # Clip, normalize
+    image = np.clip(image, -79.0, 304.0)
+    image = (image - 101.0) / 76.9
+
+    # Pad to 64-divisible
+    padded_shape = []
+    for s in image.shape:
+        target = int(np.ceil(s / 64.0)) * 64
+        padded_shape.append(max(target, 128))
+    if tuple(padded_shape) != image.shape:
+        padded = np.full(padded_shape, -2.2, dtype=np.float32)
+        padded[:image.shape[0], :image.shape[1], :image.shape[2]] = image
+        image = padded
+
+    # Add channel dim: (D,H,W) -> (1,D,H,W)
+    image = image[np.newaxis, ...]
+
+    # Load segmentation label (if available)
+    label = None
+    if seg_path.exists():
+        seg_nii = nib.load(str(seg_path))
+        label = seg_nii.get_fdata().astype(np.int8)
+        if not all(abs(z - 1.0) < 1e-6 for z in zoom_factors):
+            label = zoom(label, zoom_factors, order=0).astype(np.int8)
+
+    # Save as MLCommons format: [image, label]
+    import pickle
+    with open(pkl_path, "wb") as f:
+        pickle.dump([image, label], f)
+
+    return True
+
+
 def download_kits19(
     output_dir: str,
     force: bool = False,
 ) -> Dict[str, str]:
-    """Download KiTS 2019 dataset for 3D UNET benchmark.
+    """Download and preprocess KiTS 2019 dataset for 3D UNET benchmark.
 
-    The KiTS 2019 dataset must be cloned from GitHub and then the data
-    downloaded using the starter_code/get_imaging.py script.
+    Downloads only the 43 official MLPerf inference cases (not all 300).
+    Preprocesses raw NIfTI into pickle format per MLCommons reference.
     """
+    # Official MLPerf inference case list (43 cases)
+    INFERENCE_CASES = [
+        "case_00000", "case_00003", "case_00005", "case_00006", "case_00012",
+        "case_00024", "case_00034", "case_00041", "case_00044", "case_00049",
+        "case_00052", "case_00056", "case_00061", "case_00065", "case_00066",
+        "case_00070", "case_00076", "case_00078", "case_00080", "case_00084",
+        "case_00086", "case_00087", "case_00092", "case_00111", "case_00112",
+        "case_00125", "case_00128", "case_00138", "case_00157", "case_00160",
+        "case_00161", "case_00162", "case_00169", "case_00171", "case_00176",
+        "case_00185", "case_00187", "case_00189", "case_00198", "case_00203",
+        "case_00206", "case_00207", "case_00400",
+    ]
+
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
     data_dir = output_path / "kits19"
+    raw_dir = data_dir / "raw"
+    preprocessed_dir = data_dir / "preprocessed"
 
-    # Check if already exists
-    if data_dir.exists() and not force:
-        case_dirs = sorted(data_dir.glob("case_*"))
-        if len(case_dirs) >= 43:
-            logger.info(f"KiTS 2019 already exists at {data_dir} with {len(case_dirs)} cases")
+    # Check if preprocessed data already exists
+    if not force and preprocessed_dir.exists():
+        pkl_files = sorted(preprocessed_dir.glob("case_*.pkl"))
+        if len(pkl_files) >= 43:
+            logger.info(f"KiTS19 preprocessed data exists: {len(pkl_files)} cases at {preprocessed_dir}")
             return {
                 "data_path": str(data_dir),
-                "num_samples": len(case_dirs),
+                "num_samples": len(pkl_files),
             }
 
-    data_dir.mkdir(parents=True, exist_ok=True)
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    preprocessed_dir.mkdir(parents=True, exist_ok=True)
 
-    # Clone the repository to get case metadata and download script
-    repo_dir = data_dir / "kits19_repo"
-    if not repo_dir.exists() or force:
-        logger.info("Cloning KiTS 2019 repository...")
-        try:
-            subprocess.run(
-                ["git", "clone", "https://github.com/neheller/kits19.git", str(repo_dir)],
-                check=True,
-                capture_output=True,
+    # Step 1: Download raw NIfTI data for 43 inference cases
+    logger.info(f"Downloading KiTS19 raw data for {len(INFERENCE_CASES)} inference cases...")
+    downloaded = 0
+    failed_cases = []
+
+    for i, case_id in enumerate(INFERENCE_CASES):
+        print(f"\rDownloading: {i+1}/{len(INFERENCE_CASES)} ({case_id})", end="", flush=True)
+        if _download_kits19_case(case_id, raw_dir, force=force):
+            downloaded += 1
+        else:
+            failed_cases.append(case_id)
+    print()
+
+    if failed_cases:
+        logger.warning(
+            f"Failed to download {len(failed_cases)} cases: {failed_cases[:5]}"
+            f"{'...' if len(failed_cases) > 5 else ''}"
+        )
+        if downloaded == 0:
+            raise RuntimeError(
+                "Failed to download any KiTS19 cases. "
+                "The KiTS19 data server may be unavailable. "
+                "You can manually download data from https://github.com/neheller/kits19 "
+                f"and place imaging.nii.gz/segmentation.nii.gz files in {raw_dir}/case_XXXXX/"
             )
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Failed to clone KiTS 2019 repo: {e.stderr.decode()}")
-        except FileNotFoundError:
-            raise RuntimeError("git is required to download KiTS 2019 dataset")
 
-    # Run the data download script
-    get_imaging = repo_dir / "starter_code" / "get_imaging.py"
-    if get_imaging.exists():
-        logger.info("Downloading KiTS 2019 imaging data (this may take a while)...")
+    logger.info(f"Downloaded {downloaded}/{len(INFERENCE_CASES)} cases")
+
+    # Step 2: Preprocess raw NIfTI -> pickle
+    logger.info("Preprocessing KiTS19 data (resample, normalize, save pickle)...")
+    preprocessed = 0
+
+    for i, case_id in enumerate(INFERENCE_CASES):
+        if case_id in failed_cases:
+            continue
+        print(f"\rPreprocessing: {i+1}/{len(INFERENCE_CASES)} ({case_id})", end="", flush=True)
         try:
-            subprocess.run(
-                ["python", str(get_imaging)],
-                check=True,
-                cwd=str(repo_dir),
-            )
-        except subprocess.CalledProcessError as e:
-            logger.warning(f"get_imaging.py failed: {e}. You may need to download data manually.")
+            if _preprocess_kits19_case(case_id, raw_dir, preprocessed_dir):
+                preprocessed += 1
+        except Exception as e:
+            logger.warning(f"Failed to preprocess {case_id}: {e}")
+    print()
 
-    # Move/symlink case directories to data_dir
-    kits_data = repo_dir / "data"
-    if kits_data.exists():
-        for case_dir in sorted(kits_data.glob("case_*")):
-            dest = data_dir / case_dir.name
-            if not dest.exists():
-                shutil.copytree(str(case_dir), str(dest))
+    logger.info(f"Preprocessed {preprocessed}/{downloaded} cases to {preprocessed_dir}")
 
-    case_dirs = sorted(data_dir.glob("case_*"))
-    logger.info(f"KiTS 2019 dataset ready: {len(case_dirs)} cases at {data_dir}")
+    if preprocessed == 0:
+        raise RuntimeError(
+            "Failed to preprocess any KiTS19 cases. "
+            "Ensure nibabel and scipy are installed: pip install nibabel scipy"
+        )
 
     return {
         "data_path": str(data_dir),
-        "num_samples": len(case_dirs),
+        "num_samples": preprocessed,
     }
 
 
