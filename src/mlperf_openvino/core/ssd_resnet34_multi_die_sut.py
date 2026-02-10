@@ -161,11 +161,13 @@ class SSDResNet34MultiDieCppSUTWrapper(ImageMultiDieSUTBase):
                 img_height = img_info.get('height', 1)
 
                 for box, score, label in zip(boxes, scores, labels):
-                    # Boxes are normalized [0, 1] per MLCommons SSD-ResNet34 reference
-                    x1_px = float(box[0]) * img_width
-                    y1_px = float(box[1]) * img_height
-                    x2_px = float(box[2]) * img_width
-                    y2_px = float(box[3]) * img_height
+                    if float(score) < 0.05:
+                        continue
+                    # Model outputs normalized [0,1] as [y1, x1, y2, x2]
+                    y1_px = float(box[0]) * img_height
+                    x1_px = float(box[1]) * img_width
+                    y2_px = float(box[2]) * img_height
+                    x2_px = float(box[3]) * img_width
 
                     # Map 1-indexed label (1-80) to COCO category ID
                     # Matches MLCommons: inv_map = [0] + cocoGt.getCatIds()

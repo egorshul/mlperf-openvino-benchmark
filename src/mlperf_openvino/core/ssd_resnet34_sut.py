@@ -274,23 +274,6 @@ class SSDResNet34SUT:
         if labels is not None and labels.ndim == 2:
             labels = labels[0]
 
-        # One-time diagnostic: log raw model output stats before filtering
-        if self._sample_count == 0:
-            logger.info(f"[DIAG] Raw model output (first sample, before filtering):")
-            logger.info(f"  boxes: shape={boxes.shape}, dtype={boxes.dtype}")
-            logger.info(f"  scores: shape={scores.shape}, dtype={scores.dtype}, "
-                        f"min={scores.min():.4f}, max={scores.max():.4f}")
-            if labels is not None:
-                logger.info(f"  labels: shape={labels.shape}, dtype={labels.dtype}, "
-                            f"min={labels.min()}, max={labels.max()}")
-            if len(boxes) > 0:
-                logger.info(f"  box[0]={boxes[0]}")
-                if boxes.ndim == 2:
-                    logger.info(f"  box ranges: col0=[{boxes[:,0].min():.4f},{boxes[:,0].max():.4f}] "
-                                f"col1=[{boxes[:,1].min():.4f},{boxes[:,1].max():.4f}] "
-                                f"col2=[{boxes[:,2].min():.4f},{boxes[:,2].max():.4f}] "
-                                f"col3=[{boxes[:,3].min():.4f},{boxes[:,3].max():.4f}]")
-
         # Reference PostProcessCocoOnnx filters at score < 0.5
         mask = scores >= 0.5
         boxes = boxes[mask]
@@ -503,10 +486,6 @@ class SSDResNet34SUT:
             # - Labels are 1-indexed (1-80), map via inv_map = [0] + getCatIds()
             coco_results = []
             evaluated_image_ids = []
-            skipped_labels = 0
-            total_dets = 0
-            diag_printed = False
-
             for sample_idx, pred in self._predictions.items():
                 image_id = sample_to_image_id.get(sample_idx)
                 if image_id is None:
@@ -521,37 +500,12 @@ class SSDResNet34SUT:
                 if len(boxes) == 0:
                     continue
 
-                # Diagnostic: print first image's raw model output statistics
-                if not diag_printed:
-                    logger.info(f"[DIAG] First prediction (sample_idx={sample_idx}, image_id={image_id}):")
-                    logger.info(f"  boxes: shape={boxes.shape}, dtype={boxes.dtype}")
-                    logger.info(f"  scores: shape={scores.shape}, dtype={scores.dtype}")
-                    logger.info(f"  labels: shape={labels.shape}, dtype={labels.dtype}")
-                    if len(boxes) > 0:
-                        logger.info(f"  box[0]={boxes[0]} (expect normalized [0,1])")
-                        if boxes.ndim == 2:
-                            logger.info(f"  box coord ranges: col0=[{boxes[:,0].min():.4f},{boxes[:,0].max():.4f}] "
-                                        f"col1=[{boxes[:,1].min():.4f},{boxes[:,1].max():.4f}] "
-                                        f"col2=[{boxes[:,2].min():.4f},{boxes[:,2].max():.4f}] "
-                                        f"col3=[{boxes[:,3].min():.4f},{boxes[:,3].max():.4f}]")
-                    if len(scores) > 0:
-                        logger.info(f"  scores: min={scores.min():.4f}, max={scores.max():.4f}, "
-                                    f">=0.5: {(scores >= 0.5).sum()}, >=0.05: {(scores >= 0.05).sum()}")
-                    if len(labels) > 0:
-                        unique_labels = np.unique(labels)
-                        logger.info(f"  labels: min={labels.min()}, max={labels.max()}, "
-                                    f"unique={unique_labels[:20]}{'...' if len(unique_labels) > 20 else ''}")
-                        logger.info(f"  labels in [1,80]: {((labels >= 1) & (labels <= 80)).sum()}, "
-                                    f"label=0: {(labels == 0).sum()}")
-                    diag_printed = True
-
                 # Get original image dimensions for coordinate denormalization
                 img_info = coco_gt.imgs.get(image_id, {})
                 img_width = img_info.get('width', 1)
                 img_height = img_info.get('height', 1)
 
                 for box, score, label in zip(boxes, scores, labels):
-                    total_dets += 1
                     # Model outputs normalized [0,1] as [y1, x1, y2, x2]
                     y1_px = float(box[0]) * img_height
                     x1_px = float(box[1]) * img_width
@@ -562,7 +516,6 @@ class SSDResNet34SUT:
                     # Matches MLCommons: inv_map = [0] + cocoGt.getCatIds()
                     label_int = int(label)
                     if label_int < 1 or label_int > 80:
-                        skipped_labels += 1
                         continue
                     category_id = LABEL_TO_COCO_ID[label_int]
 
@@ -572,9 +525,6 @@ class SSDResNet34SUT:
                         'bbox': [x1_px, y1_px, x2_px - x1_px, y2_px - y1_px],
                         'score': float(score),
                     })
-
-            logger.info(f"[DIAG] Total detections={total_dets}, valid={len(coco_results)}, "
-                        f"skipped(label out of range)={skipped_labels}")
 
             if not coco_results:
                 logger.error("No predictions to evaluate after label mapping!")
