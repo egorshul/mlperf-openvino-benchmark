@@ -85,7 +85,6 @@ class SSDResNet34MultiDieCppSUTWrapper(ImageMultiDieSUTBase):
         return result
 
     def compute_accuracy(self) -> Dict[str, float]:
-        """Compute mAP using pycocotools, aligned with MLCommons accuracy-coco.py."""
         predictions = self.get_predictions()
 
         if not predictions:
@@ -132,12 +131,7 @@ class SSDResNet34MultiDieCppSUTWrapper(ImageMultiDieSUTBase):
         try:
             coco_gt = COCO(coco_file)
 
-            # Get sample → image_id mapping directly from QSL
             sample_to_image_id = self.qsl.get_sample_to_image_id_mapping()
-
-            # Build COCO-format detections per MLCommons accuracy-coco.py:
-            # - Boxes are normalized [0, 1], scale to original image dimensions
-            # - Labels are 1-indexed (1-80), map via inv_map = [0] + getCatIds()
             coco_results = []
             evaluated_image_ids = []
 
@@ -155,7 +149,6 @@ class SSDResNet34MultiDieCppSUTWrapper(ImageMultiDieSUTBase):
                 if len(boxes) == 0:
                     continue
 
-                # Get original image dimensions for coordinate denormalization
                 img_info = coco_gt.imgs.get(image_id, {})
                 img_width = img_info.get('width', 1)
                 img_height = img_info.get('height', 1)
@@ -163,14 +156,11 @@ class SSDResNet34MultiDieCppSUTWrapper(ImageMultiDieSUTBase):
                 for box, score, label in zip(boxes, scores, labels):
                     if float(score) < 0.05:
                         continue
-                    # Model outputs normalized [0,1] as [y1, x1, y2, x2]
                     y1_px = float(box[0]) * img_height
                     x1_px = float(box[1]) * img_width
                     y2_px = float(box[2]) * img_height
                     x2_px = float(box[3]) * img_width
 
-                    # Map 1-indexed label (1-80) to COCO category ID
-                    # Matches MLCommons: inv_map = [0] + cocoGt.getCatIds()
                     label_int = int(label)
                     if label_int < 1 or label_int > 80:
                         continue

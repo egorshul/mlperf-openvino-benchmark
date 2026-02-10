@@ -729,9 +729,6 @@ class SSDResNet34CppSUTWrapper:
                 if len(boxes_arr) > 0 and len(boxes_arr) % 4 == 0:
                     boxes_arr = boxes_arr.reshape(-1, 4)
 
-                # Build MLCommons accuracy-coco.py response format:
-                # Each detection = 7 float32: [qsl_idx, ymin, xmin, ymax, xmax, score, label]
-                # Model boxes are [y1, x1, y2, x2] — already in the right order
                 response_data = []
                 for det_idx in range(len(scores_arr)):
                     score = float(scores_arr[det_idx])
@@ -741,10 +738,10 @@ class SSDResNet34CppSUTWrapper:
                     label = float(labels_arr[det_idx]) if labels_arr is not None and det_idx < len(labels_arr) else 0.0
                     response_data.extend([
                         float(sample_idx),
-                        float(box[0]),  # ymin
-                        float(box[1]),  # xmin
-                        float(box[2]),  # ymax
-                        float(box[3]),  # xmax
+                        float(box[0]),
+                        float(box[1]),
+                        float(box[2]),
+                        float(box[3]),
                         score,
                         label,
                     ])

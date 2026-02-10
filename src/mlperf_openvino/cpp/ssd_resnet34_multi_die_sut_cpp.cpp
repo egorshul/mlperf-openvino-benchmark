@@ -669,16 +669,11 @@ void SSDResNet34MultiDieCppSUT::on_inference_complete(SSDResNet34MultiDieInferCo
             }
         }
 
-        // Format response data in MLCommons accuracy-coco.py format:
-        // Each detection = 7 float32: [qsl_idx, ymin, xmin, ymax, xmax, score, label]
-        // Model boxes are [y1, x1, y2, x2] normalized — already in the right order.
-        // Labels are raw model output (1-indexed, 1-80); accuracy-coco.py with
-        // --use-inv-map converts to COCO category IDs.
         response_buffers.resize(real_samples);
         for (int i = 0; i < real_samples; ++i) {
             int sample_idx = ctx->sample_indices[i];
             auto& buf = response_buffers[i];
-            buf.reserve(200 * 7);  // NMS baked in model caps at 200 detections
+            buf.reserve(200 * 7);
 
             const float* sample_boxes = boxes_data + (i * boxes_per_sample);
             const float* sample_scores = scores_data + (i * scores_per_sample);
@@ -686,9 +681,8 @@ void SSDResNet34MultiDieCppSUT::on_inference_complete(SSDResNet34MultiDieInferCo
 
             for (size_t det = 0; det < num_dets; ++det) {
                 float score = sample_scores[det];
-                if (score < 0.5f) continue;  // Reference PostProcessCocoOnnx filters at score < 0.5
+                if (score < 0.5f) continue;
 
-                // Model output: box = [y1, x1, y2, x2] (confirmed by IoU diagnostic)
                 float y1 = sample_boxes[det * 4 + 0];
                 float x1 = sample_boxes[det * 4 + 1];
                 float y2 = sample_boxes[det * 4 + 2];
@@ -698,12 +692,11 @@ void SSDResNet34MultiDieCppSUT::on_inference_complete(SSDResNet34MultiDieInferCo
                     label = (labels_data + i * labels_per_sample)[det];
                 }
 
-                // accuracy-coco.py format: [qsl_idx, ymin, xmin, ymax, xmax, score, label]
                 buf.push_back(static_cast<float>(sample_idx));
-                buf.push_back(y1);    // ymin
-                buf.push_back(x1);    // xmin
-                buf.push_back(y2);    // ymax
-                buf.push_back(x2);    // xmax
+                buf.push_back(y1);
+                buf.push_back(x1);
+                buf.push_back(y2);
+                buf.push_back(x2);
                 buf.push_back(score);
                 buf.push_back(label);
             }

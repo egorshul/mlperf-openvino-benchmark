@@ -31,7 +31,6 @@ NORMALIZE_MEAN = [0.485, 0.456, 0.406]
 NORMALIZE_STD = [0.229, 0.224, 0.225]
 
 # Cache version: bump when preprocessing changes to invalidate stale caches.
-# v2: float32 resize (matches MLCommons reference; v1 was uint8 resize)
 _CACHE_VERSION = "v2"
 
 # COCO 2017 has 80 categories
@@ -516,17 +515,13 @@ class COCODataset(BaseDataset):
                     break
 
                 score = float(scores[i])
-                # Filter low-confidence detections (model NMS uses score > 0.05)
                 if score < 0.05:
                     continue
 
                 box = boxes[i]
                 label = int(labels[i]) if i < len(labels) else 0
 
-                # Convert to COCO format: [x, y, width, height]
                 # Model outputs normalized [0, 1] as [y1, x1, y2, x2]
-                # (confirmed by IoU diagnostic: swapped coords match GT)
-                # Reference PostProcessCocoOnnx also swaps: stores [box[1], box[0], box[3], box[2]]
                 y1 = float(box[0]) * orig_h
                 x1 = float(box[1]) * orig_w
                 y2 = float(box[2]) * orig_h
@@ -535,8 +530,6 @@ class COCODataset(BaseDataset):
                 w = x2 - x1
                 h = y2 - y1
 
-                # Map 1-indexed label (1-80) to COCO category ID
-                # Matches MLCommons inv_map = [0] + cocoGt.getCatIds()
                 label_int = int(label)
                 if 1 <= label_int <= 80:
                     category_id = LABEL_TO_COCO_ID[label_int]
@@ -558,7 +551,6 @@ class COCODataset(BaseDataset):
 
         coco_eval = COCOeval(coco_gt, coco_dt, 'bbox')
 
-        # Evaluate only on images we actually predicted on
         eval_image_ids = [self._samples[idx]['image_id'] for idx in indices]
         coco_eval.params.imgIds = eval_image_ids
 

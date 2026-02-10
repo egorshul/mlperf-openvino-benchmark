@@ -41,8 +41,7 @@ void SSDResNet34CppSUT::map_output_names() {
     scores_name_.clear();
     labels_name_.clear();
 
-    // Find output names by examining names and shapes
-    // SSD-ResNet34 ONNX model uses: "bboxes", "labels", "scores"
+    // Map output names by keywords
     for (size_t i = 0; i < outputs.size(); ++i) {
         const auto& output = outputs[i];
         std::string name = output.get_any_name();
@@ -66,8 +65,7 @@ void SSDResNet34CppSUT::map_output_names() {
         }
     }
 
-    // Fallback: use positional mapping
-    // MLPerf SSD-ResNet34 ONNX model outputs: [0]=bboxes, [1]=labels, [2]=scores
+    // Fallback: positional mapping
     if (boxes_name_.empty() && outputs.size() >= 1) {
         boxes_name_ = outputs[0].get_any_name();
         boxes_idx_ = 0;
@@ -104,8 +102,7 @@ void SSDResNet34CppSUT::load() {
         model_input_shape[0] = 1;
     }
 
-    // Apply NHWC input layout if requested (default)
-    // Model expects NCHW [1, 3, 1200, 1200], we provide NHWC [1, 1200, 1200, 3]
+    // Apply NHWC→NCHW layout conversion
     if (use_nhwc_input_) {
         ov::preprocess::PrePostProcessor ppp(model_);
         ppp.input().tensor().set_layout("NHWC");
@@ -245,7 +242,7 @@ void SSDResNet34CppSUT::on_inference_complete(SSDResNet34InferContext* ctx) {
         size_t boxes_size = boxes_tensor.get_size();
         size_t scores_size = scores_tensor.get_size();
 
-        // Labels handling - model outputs int64_t, we convert to float for API compatibility
+        // Convert labels to float for API compatibility
         std::vector<float> labels_float;
         const float* labels_data = nullptr;
         size_t labels_size = 0;
@@ -258,7 +255,7 @@ void SSDResNet34CppSUT::on_inference_complete(SSDResNet34InferContext* ctx) {
                 // Check element type and convert if needed
                 auto elem_type = labels_tensor.get_element_type();
                 if (elem_type == ov::element::i64) {
-                    // Model outputs int64_t labels - convert to float
+                    // int64 -> float
                     const int64_t* labels_int64 = labels_tensor.data<int64_t>();
                     labels_float.resize(labels_size);
                     for (size_t i = 0; i < labels_size; ++i) {
@@ -266,7 +263,7 @@ void SSDResNet34CppSUT::on_inference_complete(SSDResNet34InferContext* ctx) {
                     }
                     labels_data = labels_float.data();
                 } else if (elem_type == ov::element::i32) {
-                    // Model outputs int32_t labels - convert to float
+                    // int32 -> float
                     const int32_t* labels_int32 = labels_tensor.data<int32_t>();
                     labels_float.resize(labels_size);
                     for (size_t i = 0; i < labels_size; ++i) {

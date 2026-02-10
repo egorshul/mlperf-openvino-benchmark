@@ -96,9 +96,6 @@ class SSDResNet34SUT:
         self.score_threshold = score_threshold
         self.nms_threshold = nms_threshold
         self.max_detections = max_detections
-        # The MLPerf ONNX model (ssd_resnet34_mAP_20.2.onnx) has NMS baked in.
-        # When True, skip redundant per-class NMS and just pass through model
-        # output (matching the reference PostProcessCocoOnnx behavior).
         self.model_has_nms = model_has_nms
 
         if not self.backend.is_loaded:
@@ -261,12 +258,6 @@ class SSDResNet34SUT:
         scores: np.ndarray,
         labels: Optional[np.ndarray] = None
     ) -> Dict[str, np.ndarray]:
-        """Pass through model output for NMS-baked ONNX model.
-
-        Matches the MLCommons reference PostProcessCocoOnnx which only strips
-        the batch dimension and filters by score — no additional NMS.
-        """
-        # Remove batch dimension
         if boxes.ndim == 3:
             boxes = boxes[0]
         if scores.ndim == 2:
@@ -303,13 +294,6 @@ class SSDResNet34SUT:
         return self._postprocess_detections(boxes, scores, labels)
 
     def _format_response_data(self, sample_idx: int, detections: Dict[str, np.ndarray]) -> np.ndarray:
-        """Format detections as MLCommons accuracy-coco.py response data.
-
-        Each detection = 7 float32: [qsl_idx, ymin, xmin, ymax, xmax, score, label].
-        Model boxes are [x1, y1, x2, y2] normalized, reordered to [y1, x1, y2, x2].
-        Labels are raw model output (1-indexed, 1-80); accuracy-coco.py with
-        --use-inv-map converts to COCO category IDs.
-        """
         boxes = detections.get('boxes', np.array([]))
         scores = detections.get('scores', np.array([]))
         labels = detections.get('labels', np.array([]))
@@ -329,10 +313,10 @@ class SSDResNet34SUT:
             label = float(labels[i]) if i < len(labels) else 0.0
             response_vals.extend([
                 float(sample_idx),
-                float(box[0]),  # ymin (model outputs [y1,x1,y2,x2])
-                float(box[1]),  # xmin
-                float(box[2]),  # ymax
-                float(box[3]),  # xmax
+                float(box[0]),
+                float(box[1]),
+                float(box[2]),
+                float(box[3]),
                 score,
                 label,
             ])
@@ -443,7 +427,6 @@ class SSDResNet34SUT:
         self._sample_count = 0
 
     def compute_accuracy(self) -> Dict[str, float]:
-        """Compute mAP using pycocotools, aligned with MLCommons accuracy-coco.py."""
         if not self._predictions:
             logger.warning(f"No predictions (sample_count={self._sample_count}, query_count={self._query_count})")
             return {'mAP': 0.0, 'num_samples': 0}
@@ -481,9 +464,6 @@ class SSDResNet34SUT:
             # Get sample → image_id mapping directly from QSL
             sample_to_image_id = self.qsl.get_sample_to_image_id_mapping()
 
-            # Build COCO-format detections per MLCommons accuracy-coco.py:
-            # - Boxes are normalized [0, 1], scale to original image dimensions
-            # - Labels are 1-indexed (1-80), map via inv_map = [0] + getCatIds()
             coco_results = []
             evaluated_image_ids = []
             for sample_idx, pred in self._predictions.items():
@@ -506,14 +486,11 @@ class SSDResNet34SUT:
                 img_height = img_info.get('height', 1)
 
                 for box, score, label in zip(boxes, scores, labels):
-                    # Model outputs normalized [0,1] as [y1, x1, y2, x2]
                     y1_px = float(box[0]) * img_height
                     x1_px = float(box[1]) * img_width
                     y2_px = float(box[2]) * img_height
                     x2_px = float(box[3]) * img_width
 
-                    # Map 1-indexed label (1-80) to COCO category ID
-                    # Matches MLCommons: inv_map = [0] + cocoGt.getCatIds()
                     label_int = int(label)
                     if label_int < 1 or label_int > 80:
                         continue
@@ -534,7 +511,6 @@ class SSDResNet34SUT:
 
             coco_dt = coco_gt.loadRes(coco_results)
             coco_eval = COCOeval(coco_gt, coco_dt, iouType='bbox')
-            # Only evaluate on images that were actually processed
             coco_eval.params.imgIds = evaluated_image_ids
             coco_eval.evaluate()
             coco_eval.accumulate()
