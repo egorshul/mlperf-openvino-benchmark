@@ -173,7 +173,12 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
     benchmark_config.openvino.batch_size = batch_size
 
     if hasattr(benchmark_config.model, 'preprocessing') and benchmark_config.model.preprocessing:
-        benchmark_config.model.preprocessing.output_layout = 'NCHW' if nchw else 'NHWC'
+        current_layout = getattr(benchmark_config.model.preprocessing, 'output_layout', 'NHWC')
+        # Only override layout for 4D models; 5D models (3D UNET: NCDHW) keep their layout
+        if nchw:
+            benchmark_config.model.preprocessing.output_layout = 'NCHW'
+        elif current_layout not in ('NCDHW', 'NDHWC'):
+            benchmark_config.model.preprocessing.output_layout = 'NHWC'
 
     if not is_accelerator and actual_hint:
         benchmark_config.openvino.performance_hint = actual_hint

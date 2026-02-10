@@ -194,14 +194,28 @@ class OpenVINOBackend(BaseBackend):
         logger.debug(f"Model reshaped for batch_size={batch_size}")
 
     def _apply_nhwc_input_layout(self) -> None:
-        """Apply NHWC input layout via PrePostProcessor (model uses NCHW internally)."""
+        """Apply channels-last input layout via PrePostProcessor.
+
+        Supports both 4D (NCHW -> NHWC) and 5D (NCDHW -> NDHWC) tensors.
+        """
         from openvino.preprocess import PrePostProcessor
 
+        # Determine tensor rank from model input shape
+        input_shape = self._model.input().get_partial_shape()
+        rank = input_shape.rank.get_length() if input_shape.rank.is_static else 4
+
+        if rank == 5:
+            tensor_layout = "NDHWC"
+            model_layout = "NCDHW"
+        else:
+            tensor_layout = "NHWC"
+            model_layout = "NCHW"
+
         ppp = PrePostProcessor(self._model)
-        ppp.input().tensor().set_layout("NHWC")
-        ppp.input().model().set_layout("NCHW")
+        ppp.input().tensor().set_layout(tensor_layout)
+        ppp.input().model().set_layout(model_layout)
         self._model = ppp.build()
-        logger.debug("Applied NHWC input layout via PrePostProcessor")
+        logger.debug(f"Applied {tensor_layout} input layout via PrePostProcessor (rank={rank})")
 
     def _extract_model_info(self) -> None:
         self._input_names = []

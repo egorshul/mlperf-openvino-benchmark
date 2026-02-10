@@ -584,7 +584,7 @@ class BenchmarkConfig:
                 dtype="FP32",
                 accuracy_target=0.86170,  # Mean DICE (official MLPerf reference)
                 accuracy_threshold=0.99,  # 3d-unet-99: >= 99% of reference
-                preprocessing=PreprocessingConfig(),  # Not used (3D medical preprocessing)
+                preprocessing=PreprocessingConfig(output_layout="NCDHW"),  # 5D: no NHWC conversion
                 offline=ScenarioConfig(
                     min_duration_ms=600000,  # MLPerf official: 10 minutes
                     min_query_count=43,  # MLPerf official for 3D UNET
