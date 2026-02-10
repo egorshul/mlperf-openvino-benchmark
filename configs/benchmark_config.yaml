@@ -251,10 +251,10 @@ models:
 
     # Model sources (official MLPerf model from Zenodo)
     sources:
-      onnx_url: "https://zenodo.org/records/5597155/files/3dunet_kits19.onnx"
+      onnx_url: "https://zenodo.org/record/5597155/files/3dunet_kits19_128x128x128.onnx?download=1"
 
     # MLPerf LoadGen settings
-    performance_sample_count: 42  # Total validation cases
+    performance_sample_count: 43  # 43 official inference cases
 
     # 3D UNET supports Offline scenario only (per MLCommons specification)
     offline:

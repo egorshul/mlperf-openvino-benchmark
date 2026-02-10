@@ -138,8 +138,8 @@ DATASET_REGISTRY: Dict[str, Dict] = {
     },
     "kits19": {
         "description": "KiTS 2019 kidney tumor segmentation dataset for 3D UNET",
-        "num_samples": 42,
-        "note": "For MLPerf 3D UNET benchmark. Uses cases 00000-00209 (42 validation cases).",
+        "num_samples": 43,
+        "note": "For MLPerf 3D UNET benchmark. 43 official inference cases (see meta/inference_cases.json).",
         "github_url": "https://github.com/neheller/kits19",
     },
     "coco2017": {
@@ -1407,7 +1407,7 @@ def download_kits19(
     # Check if already exists
     if data_dir.exists() and not force:
         case_dirs = sorted(data_dir.glob("case_*"))
-        if len(case_dirs) >= 42:
+        if len(case_dirs) >= 43:
             logger.info(f"KiTS 2019 already exists at {data_dir} with {len(case_dirs)} cases")
             return {
                 "data_path": str(data_dir),

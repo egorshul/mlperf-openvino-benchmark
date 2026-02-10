@@ -59,8 +59,8 @@ MODEL_REGISTRY: Dict[str, Dict] = {
     },
     "3d-unet": {
         "onnx": {
-            "url": "https://zenodo.org/records/5597155/files/3dunet_kits19.onnx",
-            "filename": "3dunet_kits19.onnx",
+            "url": "https://zenodo.org/record/5597155/files/3dunet_kits19_128x128x128.onnx?download=1",
+            "filename": "3dunet_kits19_128x128x128.onnx",
             "md5": None,
         },
         "description": "3D UNET for medical image segmentation (KiTS 2019)",

@@ -27,6 +27,19 @@ ROI_SHAPE = (128, 128, 128)
 SLIDE_OVERLAP_FACTOR = 0.5
 PAD_VALUE = -2.2  # (MIN_CLIP_VAL - NORM_MEAN) / NORM_STD ≈ -2.34, but MLPerf uses -2.2
 
+# Official MLPerf inference case list (43 cases from meta/inference_cases.json)
+MLPERF_INFERENCE_CASES = [
+    "case_00000", "case_00003", "case_00005", "case_00006", "case_00012",
+    "case_00024", "case_00034", "case_00041", "case_00044", "case_00049",
+    "case_00052", "case_00056", "case_00061", "case_00065", "case_00066",
+    "case_00070", "case_00076", "case_00078", "case_00080", "case_00084",
+    "case_00086", "case_00087", "case_00092", "case_00111", "case_00112",
+    "case_00125", "case_00128", "case_00138", "case_00157", "case_00160",
+    "case_00161", "case_00162", "case_00169", "case_00171", "case_00176",
+    "case_00185", "case_00187", "case_00189", "case_00198", "case_00203",
+    "case_00206", "case_00207", "case_00400",
+]
+
 
 def get_gaussian_importance_map(roi_shape: Tuple[int, ...], sigma_scale: float = 0.125) -> np.ndarray:
     """Create 3D Gaussian importance map for sliding window aggregation.
@@ -188,25 +201,48 @@ class KiTS19Dataset(BaseDataset):
         logger.info(f"KiTS19: Loaded {self._total_count} cases from {self.data_path}")
 
     def _load_preprocessed(self, data_dir: Path) -> None:
-        """Load preprocessed pickle files (MLCommons format)."""
-        # Look for case directories or direct pickle files
-        case_dirs = sorted(data_dir.glob("case_*"))
-        if case_dirs:
-            for case_dir in case_dirs:
-                pkl_file = case_dir / "data.pkl"
-                if not pkl_file.exists():
-                    # Try any .pkl file in the case directory
-                    pkl_files = list(case_dir.glob("*.pkl"))
-                    if pkl_files:
-                        pkl_file = pkl_files[0]
-                    else:
-                        continue
-                self.case_ids.append(case_dir.name)
+        """Load preprocessed pickle files (MLCommons format).
+
+        Supports two layouts:
+        1. MLCommons format: {data_dir}/{case_name}.pkl containing [image, label]
+        2. Directory format: {data_dir}/{case_name}/data.pkl + label.pkl
+        """
+        # First, try to use official MLPerf inference case list
+        mlperf_cases_found = []
+        for case_id in MLPERF_INFERENCE_CASES:
+            # Check MLCommons format: case_XXXXX.pkl
+            pkl_file = data_dir / f"{case_id}.pkl"
+            if pkl_file.exists():
+                mlperf_cases_found.append(case_id)
+                continue
+            # Check directory format: case_XXXXX/data.pkl or case_XXXXX/*.pkl
+            case_dir = data_dir / case_id
+            if case_dir.is_dir():
+                pkl_files = list(case_dir.glob("*.pkl"))
+                if pkl_files:
+                    mlperf_cases_found.append(case_id)
+                    continue
+
+        if mlperf_cases_found:
+            self.case_ids = mlperf_cases_found
         else:
-            # Direct pickle files
-            pkl_files = sorted(data_dir.glob("*.pkl"))
-            for pkl_file in pkl_files:
-                self.case_ids.append(pkl_file.stem)
+            # Fall back to auto-discovery
+            # Try direct pickle files first (MLCommons format)
+            pkl_files = sorted(data_dir.glob("case_*.pkl"))
+            if pkl_files:
+                self.case_ids = [p.stem for p in pkl_files]
+            else:
+                # Try case directories
+                case_dirs = sorted(data_dir.glob("case_*"))
+                for case_dir in case_dirs:
+                    if not case_dir.is_dir():
+                        continue
+                    pkl_file = case_dir / "data.pkl"
+                    if not pkl_file.exists():
+                        sub_pkls = list(case_dir.glob("*.pkl"))
+                        if not sub_pkls:
+                            continue
+                    self.case_ids.append(case_dir.name)
 
         self._total_count = len(self.case_ids)
 
@@ -232,30 +268,96 @@ class KiTS19Dataset(BaseDataset):
         return self._load_case(case_id, index)
 
     def _load_case(self, case_id: str, index: int) -> Dict[str, Any]:
-        """Load and preprocess a single case."""
+        """Load and preprocess a single case.
+
+        Supports:
+        1. MLCommons pickle format: {case_id}.pkl containing [image, label]
+        2. Directory format: {case_id}/data.pkl + {case_id}/label.pkl
+        3. Raw NIfTI format: {case_id}/imaging.nii.gz
+        """
         preprocessed_dir = self.data_path / "preprocessed"
         raw_dir = self.data_path / "raw"
 
-        # Try preprocessed first
+        # Try preprocessed pickle files
         for base_dir in [preprocessed_dir, self.data_path]:
+            # MLCommons format: {case_id}.pkl with [image, label]
+            pkl_path = base_dir / f"{case_id}.pkl"
+            if pkl_path.exists():
+                with open(pkl_path, "rb") as f:
+                    data = pickle.load(f)
+                if isinstance(data, (list, tuple)) and len(data) >= 2:
+                    # MLCommons format: [image_array, label_array]
+                    image = data[0]
+                    label = data[1]
+                    sample = {
+                        "data": image,
+                        "case_id": case_id,
+                        "original_shape": image.shape if hasattr(image, 'shape') else None,
+                    }
+                    self.samples[index] = sample
+                    if label is not None:
+                        self.labels[index] = label
+                    return sample
+
+            # Directory format: {case_id}/data.pkl
             pkl_path = base_dir / case_id / "data.pkl"
             if pkl_path.exists():
                 with open(pkl_path, "rb") as f:
                     data = pickle.load(f)
+                if isinstance(data, (list, tuple)) and len(data) >= 2:
+                    image = data[0]
+                    label = data[1] if len(data) > 1 else None
+                elif isinstance(data, dict) and "data" in data:
+                    image = data["data"]
+                    label = None
+                else:
+                    image = data
+                    label = None
+
                 sample = {
-                    "data": data["data"] if isinstance(data, dict) and "data" in data else data,
+                    "data": image,
                     "case_id": case_id,
-                    "original_shape": data.get("original_shape", None) if isinstance(data, dict) else None,
+                    "original_shape": image.shape if hasattr(image, 'shape') else None,
                 }
                 self.samples[index] = sample
 
-                # Load label if available
-                label_path = base_dir / case_id / "label.pkl"
-                if label_path.exists():
-                    with open(label_path, "rb") as f:
-                        self.labels[index] = pickle.load(f)
+                if label is not None:
+                    self.labels[index] = label
+                else:
+                    # Try separate label file
+                    label_path = base_dir / case_id / "label.pkl"
+                    if label_path.exists():
+                        with open(label_path, "rb") as f:
+                            self.labels[index] = pickle.load(f)
 
                 return sample
+
+            # Try any .pkl file in the case directory
+            case_dir = base_dir / case_id
+            if case_dir.is_dir():
+                pkl_files = sorted(case_dir.glob("*.pkl"))
+                for pf in pkl_files:
+                    with open(pf, "rb") as f:
+                        data = pickle.load(f)
+                    if isinstance(data, (list, tuple)) and len(data) >= 2:
+                        image = data[0]
+                        label = data[1]
+                    elif isinstance(data, dict) and "data" in data:
+                        image = data["data"]
+                        label = None
+                    else:
+                        image = data
+                        label = None
+
+                    sample = {
+                        "data": image,
+                        "case_id": case_id,
+                        "original_shape": image.shape if hasattr(image, 'shape') else None,
+                    }
+                    self.samples[index] = sample
+                    if label is not None:
+                        self.labels[index] = label
+                    return sample
 
         # Try NIfTI
         for base_dir in [raw_dir, self.data_path]:
@@ -368,7 +470,7 @@ class KiTS19QSL(QuerySampleLibrary):
         self,
         data_path: str,
         count: Optional[int] = None,
-        performance_sample_count: int = 42,
+        performance_sample_count: int = 43,
     ):
         self.dataset = KiTS19Dataset(data_path=data_path, count=count)
         self._performance_sample_count = performance_sample_count
@@ -419,5 +521,5 @@ class KiTS19QSL(QuerySampleLibrary):
 
     @property
     def performance_sample_count(self) -> int:
-        # MLPerf 3D UNET: use all samples (42) for performance
+        # MLPerf 3D UNET: use all samples (43) for performance
         return min(self._performance_sample_count, self.dataset.total_count)

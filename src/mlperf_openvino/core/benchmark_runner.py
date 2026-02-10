@@ -53,10 +53,18 @@ class BenchmarkRunner:
         is_whisper = model_type == ModelType.WHISPER
         is_accelerator = self.config.openvino.is_accelerator_device()
         is_3dunet = model_type == ModelType.UNET3D
+        # Check if 3D UNET C++ SUT is available (works on both CPU and accelerator)
+        is_3dunet_cpp_on_cpu = False
+        if is_3dunet and not is_accelerator:
+            try:
+                from .unet3d_multi_die_sut import is_unet3d_multi_die_cpp_available
+                is_3dunet_cpp_on_cpu = is_unet3d_multi_die_cpp_available()
+            except ImportError:
+                pass
         uses_cpp_multi_die_sut = (
             model_type in (ModelType.RESNET50, ModelType.BERT, ModelType.RETINANET, ModelType.SSD_RESNET34, ModelType.UNET3D)
             and is_accelerator
-        )
+        ) or is_3dunet_cpp_on_cpu
 
         if is_sdxl:
             self.backend = None
@@ -259,22 +267,41 @@ class BenchmarkRunner:
         self.qsl = KiTS19QSL(
             data_path=self.config.dataset.path,
             count=self.config.dataset.num_samples if self.config.dataset.num_samples > 0 else None,
-            performance_sample_count=42,
+            performance_sample_count=43,
         )
         self.qsl.load()
 
-        if self.config.openvino.is_accelerator_device():
-            self.sut = SUTFactory.create_multi_die_sut(
-                ModelType.UNET3D, self.config, self.qsl, self.backend
+        # Try C++ SUT first (works on both CPU and accelerator devices)
+        try:
+            from .unet3d_multi_die_sut import (
+                UNet3DMultiDieCppSUTWrapper,
+                is_unet3d_multi_die_cpp_available,
             )
-        else:
-            from .unet3d_sut import UNet3DSUT
-            self.sut = UNet3DSUT(
-                config=self.config,
-                backend=self.backend,
-                qsl=self.qsl,
-                scenario=self.config.scenario,
-            )
+            if is_unet3d_multi_die_cpp_available():
+                logger.info(f"Using 3D UNET C++ SUT on {self.config.openvino.device}")
+                self.sut = UNet3DMultiDieCppSUTWrapper(
+                    config=self.config,
+                    qsl=self.qsl,
+                    scenario=self.config.scenario,
+                )
+                is_accuracy = self.config.test_mode == TestMode.ACCURACY_ONLY
+                self.sut.load(is_accuracy_mode=is_accuracy)
+                return
+        except ImportError as e:
+            logger.info(f"C++ 3D UNET SUT not available: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to create C++ 3D UNET SUT: {e}, falling back to Python")
+
+        # Fall back to Python SUT
+        if self.backend is None:
+            self.backend = self._create_backend()
+        from .unet3d_sut import UNet3DSUT
+        self.sut = UNet3DSUT(
+            config=self.config,
+            backend=self.backend,
+            qsl=self.qsl,
+            scenario=self.config.scenario,
+        )
 
     def _setup_whisper(self) -> None:
         """Set up Whisper benchmark."""

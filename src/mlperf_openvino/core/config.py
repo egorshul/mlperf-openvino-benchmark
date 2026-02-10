@@ -591,7 +591,7 @@ class BenchmarkConfig:
                     samples_per_query=1,
                     target_qps=1.0,
                 ),
-                onnx_url="https://zenodo.org/records/5597155/files/3dunet_kits19.onnx",
+                onnx_url="https://zenodo.org/record/5597155/files/3dunet_kits19_128x128x128.onnx?download=1",
             ),
             dataset=DatasetConfig(
                 name="kits19",
