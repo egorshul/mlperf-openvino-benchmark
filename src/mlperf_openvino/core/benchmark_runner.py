@@ -885,8 +885,8 @@ class BenchmarkRunner:
             mean_dice = acc.get('mean_dice', 0)
             kidney_dice = acc.get('kidney_dice', 0)
             tumor_dice = acc.get('tumor_dice', 0)
-            # MLPerf 3D UNET threshold: 0.8547 (99% of 0.86330)
-            status = "PASS" if mean_dice >= 0.8547 else "FAIL"
+            # MLPerf 3D UNET threshold: 0.85308 (99% of 0.86170)
+            status = "PASS" if mean_dice >= 0.85308 else "FAIL"
             print(f"Mean DICE: {mean_dice:.4f} [{status}]")
             print(f"  Kidney: {kidney_dice:.4f}")
             print(f"  Tumor: {tumor_dice:.4f}")

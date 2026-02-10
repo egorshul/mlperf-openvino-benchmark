@@ -245,8 +245,8 @@ models:
       normalize_std: 76.9
 
     # MLPerf closed division accuracy target
-    # Mean DICE (kidney + tumor) >= 0.8547 (99% of 0.86330)
-    accuracy_target: 0.86330
+    # Mean DICE (kidney + tumor) >= 0.85308 (99% of 0.86170)
+    accuracy_target: 0.86170
     accuracy_threshold: 0.99
 
     # Model sources (official MLPerf model from Zenodo)

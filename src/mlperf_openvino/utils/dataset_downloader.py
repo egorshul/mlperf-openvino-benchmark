@@ -1393,13 +1393,13 @@ def download_coco2014(
 def _download_kits19_imaging(
     case_num: int,
     dest_path: Path,
+    opener=None,
 ) -> bool:
     """Download a single KiTS19 imaging NIfTI from DigitalOcean Spaces.
 
     The correct URL pattern is master_{num:05d}.nii.gz (flat, not nested).
     Imaging files are hosted on DO Spaces; segmentation files are in Git LFS.
     """
-    import ssl
     import time
 
     if dest_path.exists() and dest_path.stat().st_size > 1_000_000:
@@ -1411,18 +1411,8 @@ def _download_kits19_imaging(
         f"https://kits19.sfo2.cdn.digitaloceanspaces.com/master_{case_num:05d}.nii.gz",
     ]
 
-    # Some environments block or have SSL issues; try with relaxed SSL
-    ssl_ctx = ssl.create_default_context()
-    try:
-        ssl_ctx.check_hostname = False
-        ssl_ctx.verify_mode = ssl.CERT_NONE
-    except Exception:
-        pass
-
-    opener = urllib.request.build_opener(
-        urllib.request.HTTPSHandler(context=ssl_ctx)
-    )
-    opener.addheaders = [('User-Agent', 'Mozilla/5.0 (kits19-downloader)')]
+    if opener is None:
+        opener = _kits19_url_opener()
 
     for url in URLS:
         for attempt in range(3):
@@ -1443,6 +1433,24 @@ def _download_kits19_imaging(
                     time.sleep(2 ** attempt)
         # Try next URL
     return False
+
+
+def _kits19_url_opener():
+    """Create a reusable URL opener for KiTS19 downloads."""
+    import ssl
+
+    ssl_ctx = ssl.create_default_context()
+    try:
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+    except Exception:
+        pass
+
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=ssl_ctx)
+    )
+    opener.addheaders = [('User-Agent', 'Mozilla/5.0 (kits19-downloader)')]
+    return opener
 
 
 def _preprocess_kits19_case(
@@ -1529,6 +1537,7 @@ def _preprocess_kits19_case(
 def download_kits19(
     output_dir: str,
     force: bool = False,
+    num_workers: int = 8,
 ) -> Dict[str, str]:
     """Download and preprocess KiTS 2019 dataset for 3D UNET benchmark.
 
@@ -1539,8 +1548,12 @@ def download_kits19(
     4. Preprocess 43 inference cases into pickle format
 
     Only the 43 official MLPerf inference cases are processed.
+    Downloads are parallelized for speed.
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     # Official MLPerf inference case list (43 cases).
+    # Source: mlcommons/inference/vision/medical_imaging/3d-unet-kits19/meta/inference_cases.json
     # case_00400 is a duplicate of case_00185 per MLCommons spec.
     INFERENCE_CASES = [
         "case_00000", "case_00003", "case_00005", "case_00006", "case_00012",
@@ -1577,20 +1590,22 @@ def download_kits19(
     preprocessed_dir.mkdir(parents=True, exist_ok=True)
 
     # ----------------------------------------------------------------
-    # Step 1: Clone neheller/kits19 repo to get segmentation via Git LFS
+    # Step 1: Clone neheller/kits19 repo (shallow) for segmentation via Git LFS
+    # Only needed for accuracy mode; skip failures gracefully.
     # ----------------------------------------------------------------
     repo_dir = data_dir / "kits19_repo"
     repo_data_dir = repo_dir / "data"
     need_clone = not repo_data_dir.exists() or force
 
     if need_clone:
-        logger.info("Cloning neheller/kits19 repository (segmentation labels via Git LFS)...")
+        logger.info("Cloning neheller/kits19 repository (shallow, segmentation labels via Git LFS)...")
         if repo_dir.exists():
             shutil.rmtree(str(repo_dir))
         try:
             subprocess.run(
-                ["git", "clone", "https://github.com/neheller/kits19.git", str(repo_dir)],
-                check=True, capture_output=True, timeout=300,
+                ["git", "clone", "--depth", "1",
+                 "https://github.com/neheller/kits19.git", str(repo_dir)],
+                check=True, capture_output=True, timeout=120,
             )
         except subprocess.CalledProcessError as e:
             logger.warning(f"git clone failed: {e.stderr.decode() if e.stderr else e}")
@@ -1603,11 +1618,11 @@ def download_kits19(
     # Try git lfs pull for the specific cases we need
     if repo_data_dir.exists():
         try:
-            # Check if git-lfs is available
             subprocess.run(["git", "lfs", "version"], capture_output=True, check=True)
-            lfs_patterns = " ".join(f"data/{c}/segmentation.nii.gz" for c in REAL_CASES)
+            # Pull only segmentation files for our 42 real cases
+            lfs_includes = ",".join(f"data/{c}/segmentation.nii.gz" for c in REAL_CASES)
             subprocess.run(
-                ["git", "lfs", "pull", f"--include={lfs_patterns}"],
+                ["git", "lfs", "pull", f"--include={lfs_includes}"],
                 cwd=str(repo_dir), capture_output=True, timeout=600,
             )
             logger.info("Git LFS pull completed for segmentation files")
@@ -1615,41 +1630,74 @@ def download_kits19(
             logger.warning(f"git lfs pull failed: {e}. Segmentation labels may be LFS pointers.")
 
     # ----------------------------------------------------------------
-    # Step 2: Populate raw_dir with imaging + segmentation for each case
+    # Step 2: Download imaging in parallel + copy segmentation labels
     # ----------------------------------------------------------------
-    logger.info(f"Downloading imaging data for {len(REAL_CASES)} cases...")
-    downloaded = 0
-    failed_cases = []
+    # Prepare directories first
+    for case_id in REAL_CASES:
+        (raw_dir / case_id).mkdir(parents=True, exist_ok=True)
 
-    for i, case_id in enumerate(REAL_CASES):
-        case_num = int(case_id.replace("case_", ""))
-        case_raw = raw_dir / case_id
-        case_raw.mkdir(parents=True, exist_ok=True)
+    # Copy segmentation labels from cloned repo (fast, local)
+    if repo_data_dir.exists():
+        for case_id in REAL_CASES:
+            seg_path = raw_dir / case_id / "segmentation.nii.gz"
+            if not seg_path.exists() or force:
+                repo_seg = repo_data_dir / case_id / "segmentation.nii.gz"
+                if repo_seg.exists() and repo_seg.stat().st_size > 10_000:
+                    shutil.copy2(str(repo_seg), str(seg_path))
 
-        imaging_path = case_raw / "imaging.nii.gz"
-        seg_path = case_raw / "segmentation.nii.gz"
-
-        # Copy segmentation from cloned repo (Git LFS)
-        if not seg_path.exists() or force:
-            repo_seg = repo_data_dir / case_id / "segmentation.nii.gz"
-            if repo_seg.exists() and repo_seg.stat().st_size > 10_000:
-                shutil.copy2(str(repo_seg), str(seg_path))
-
-        # Download imaging from DigitalOcean Spaces
-        ok = True
-        if not imaging_path.exists() or imaging_path.stat().st_size < 1_000_000 or force:
-            # Also check if repo has it (from get_imaging.py run)
-            repo_img = repo_data_dir / case_id / "imaging.nii.gz"
-            if repo_img.exists() and repo_img.stat().st_size > 1_000_000:
+    # Determine which cases need imaging download
+    cases_to_download = []
+    for case_id in REAL_CASES:
+        imaging_path = raw_dir / case_id / "imaging.nii.gz"
+        if force or not imaging_path.exists() or imaging_path.stat().st_size < 1_000_000:
+            # Check if repo already has imaging (from prior get_imaging.py run)
+            repo_img = repo_data_dir / case_id / "imaging.nii.gz" if repo_data_dir.exists() else None
+            if repo_img and repo_img.exists() and repo_img.stat().st_size > 1_000_000:
                 shutil.copy2(str(repo_img), str(imaging_path))
             else:
-                print(f"\rDownloading: {i+1}/{len(REAL_CASES)} ({case_id})", end="", flush=True)
-                ok = _download_kits19_imaging(case_num, imaging_path)
+                cases_to_download.append(case_id)
 
-        if ok and imaging_path.exists() and imaging_path.stat().st_size > 1_000_000:
-            downloaded += 1
-        else:
-            failed_cases.append(case_id)
+    already_have = len(REAL_CASES) - len(cases_to_download)
+    if already_have > 0:
+        logger.info(f"Already have {already_have}/{len(REAL_CASES)} imaging files")
+
+    downloaded = already_have
+    failed_cases = []
+
+    if cases_to_download:
+        logger.info(
+            f"Downloading {len(cases_to_download)} imaging files in parallel "
+            f"({num_workers} workers)..."
+        )
+        opener = _kits19_url_opener()
+
+        def _download_one(case_id: str) -> tuple:
+            case_num = int(case_id.replace("case_", ""))
+            dest = raw_dir / case_id / "imaging.nii.gz"
+            ok = _download_kits19_imaging(case_num, dest, opener=opener)
+            return case_id, ok
+
+        completed = 0
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = {executor.submit(_download_one, cid): cid for cid in cases_to_download}
+            for future in as_completed(futures):
+                case_id, ok = future.result()
+                completed += 1
+                if ok:
+                    downloaded += 1
+                    print(
+                        f"\rDownloaded: {downloaded}/{len(REAL_CASES)} "
+                        f"(parallel {completed}/{len(cases_to_download)})",
+                        end="", flush=True,
+                    )
+                else:
+                    failed_cases.append(case_id)
+                    print(
+                        f"\rDownloaded: {downloaded}/{len(REAL_CASES)} "
+                        f"(failed: {case_id})",
+                        end="", flush=True,
+                    )
+        print()  # newline after progress
 
     # Create case_00400 as copy of case_00185 (MLCommons requirement)
     case_400_dir = raw_dir / "case_00400"
@@ -1664,8 +1712,6 @@ def download_kits19(
         downloaded += 1  # case_00400
     else:
         failed_cases.append("case_00400")
-
-    print()  # newline after progress
 
     if failed_cases:
         logger.warning(
@@ -1688,21 +1734,56 @@ def download_kits19(
     logger.info(f"Raw data ready: {downloaded}/{len(INFERENCE_CASES)} cases")
 
     # ----------------------------------------------------------------
-    # Step 3: Preprocess raw NIfTI -> pickle
+    # Step 3: Preprocess raw NIfTI -> pickle (parallel)
     # ----------------------------------------------------------------
-    logger.info("Preprocessing KiTS19 data (resample, normalize, save pickle)...")
-    preprocessed = 0
+    cases_to_preprocess = [c for c in INFERENCE_CASES if c not in failed_cases]
+    # Check which ones still need preprocessing
+    cases_needing_preprocess = []
+    for case_id in cases_to_preprocess:
+        pkl_path = preprocessed_dir / f"{case_id}.pkl"
+        if not pkl_path.exists() or force:
+            cases_needing_preprocess.append(case_id)
 
-    for i, case_id in enumerate(INFERENCE_CASES):
-        if case_id in failed_cases:
-            continue
-        print(f"\rPreprocessing: {i+1}/{len(INFERENCE_CASES)} ({case_id})", end="", flush=True)
-        try:
-            if _preprocess_kits19_case(case_id, raw_dir, preprocessed_dir):
-                preprocessed += 1
-        except Exception as e:
-            logger.warning(f"\nFailed to preprocess {case_id}: {e}")
-    print()
+    already_preprocessed = len(cases_to_preprocess) - len(cases_needing_preprocess)
+    if already_preprocessed > 0:
+        logger.info(f"Already preprocessed: {already_preprocessed}/{len(cases_to_preprocess)} cases")
+
+    preprocessed = already_preprocessed
+
+    if cases_needing_preprocess:
+        logger.info(
+            f"Preprocessing {len(cases_needing_preprocess)} cases "
+            f"(resample, normalize, pickle)..."
+        )
+
+        def _preprocess_one(case_id: str) -> tuple:
+            try:
+                ok = _preprocess_kits19_case(case_id, raw_dir, preprocessed_dir)
+                return case_id, ok, None
+            except Exception as e:
+                return case_id, False, str(e)
+
+        # Use fewer workers for preprocessing (CPU/memory intensive)
+        preprocess_workers = min(4, num_workers)
+        with ThreadPoolExecutor(max_workers=preprocess_workers) as executor:
+            futures = {
+                executor.submit(_preprocess_one, cid): cid
+                for cid in cases_needing_preprocess
+            }
+            completed_pp = 0
+            for future in as_completed(futures):
+                case_id, ok, err = future.result()
+                completed_pp += 1
+                if ok:
+                    preprocessed += 1
+                    print(
+                        f"\rPreprocessed: {preprocessed}/{len(cases_to_preprocess)} "
+                        f"({completed_pp}/{len(cases_needing_preprocess)})",
+                        end="", flush=True,
+                    )
+                else:
+                    logger.warning(f"\nFailed to preprocess {case_id}: {err}")
+        print()
 
     logger.info(f"Preprocessed {preprocessed}/{downloaded} cases to {preprocessed_dir}")
 
