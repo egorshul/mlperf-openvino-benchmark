@@ -10,6 +10,7 @@ MLPerf Inference v5.1 benchmark implementation using Intel OpenVINO as the infer
 | BERT-Large | Question Answering | SQuAD v1.1 | F1 Score | >= 89.97% | Offline, Server |
 | RetinaNet | Object Detection | OpenImages | mAP | >= 37.19% | Offline, Server |
 | SSD-ResNet34 | Object Detection | COCO 2017 | mAP | >= 19.80% | Offline, Server |
+| 3D UNET | Medical Image Segmentation | KiTS 2019 | Mean DICE | >= 85.47% | Offline |
 | Whisper Large v3 | Speech Recognition | LibriSpeech | Word Accuracy | >= 96.95% | Offline |
 | Stable Diffusion XL | Text-to-Image | COCO 2014 | CLIP / FID | 31.69-31.81 / 23.01-23.95 | Offline, Server |
 
@@ -39,6 +40,7 @@ pip install -e ".[whisper]"
 pip install -e ".[sdxl]"
 pip install -e ".[retinanet]"
 pip install -e ".[ssd-resnet34]"
+pip install -e ".[3d-unet]"
 
 # Development
 pip install -e ".[dev]"
@@ -129,6 +131,17 @@ mlperf-ov run --model ssd-resnet34 --scenario Offline --device NPU
 mlperf-ov run --model ssd-resnet34 --scenario Server --device NPU
 ```
 
+### 3D UNET
+
+Medical image segmentation on the KiTS 2019 kidney tumor dataset. Uses sliding window inference with 128x128x128 sub-volumes and Gaussian-weighted aggregation. Only supports Offline scenario per MLPerf specification.
+
+```bash
+mlperf-ov setup --model 3d-unet
+mlperf-ov run --model 3d-unet --scenario Offline --device CPU
+mlperf-ov run --model 3d-unet --scenario Offline --device NPU
+mlperf-ov run --model 3d-unet --mode accuracy --device CPU
+```
+
 ### Whisper Large v3
 
 ```bash
@@ -164,7 +177,7 @@ mlperf-ov run --model sdxl --scenario Offline --device NPU
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--model, -m` | Model: resnet50, bert, retinanet, ssd-resnet34, whisper, sdxl | (required) |
+| `--model, -m` | Model: resnet50, bert, retinanet, ssd-resnet34, 3d-unet, whisper, sdxl | (required) |
 | `--mode` | Mode: accuracy, performance, both | accuracy |
 | `--scenario, -s` | Scenario: Offline, Server | Offline |
 | `--device, -d` | Device: CPU, NPU, NPU.0, NPU.0,NPU.2 | CPU |
@@ -197,6 +210,7 @@ mlperf-ov download-model --model resnet50 --format openvino
 mlperf-ov download-dataset --dataset imagenet
 mlperf-ov download-dataset --dataset librispeech --subset dev-clean
 mlperf-ov download-dataset --dataset coco2017
+mlperf-ov download-dataset --dataset kits19
 mlperf-ov download-dataset --dataset coco2014 --with-images
 
 # Download RetinaNet with batch sizes
@@ -279,6 +293,8 @@ mlperf-openvino-benchmark/
 │   │   ├── retinanet_multi_die_sut.py
 │   │   ├── ssd_resnet34_sut.py
 │   │   ├── ssd_resnet34_multi_die_sut.py
+│   │   ├── unet3d_sut.py
+│   │   ├── unet3d_multi_die_sut.py
 │   │   ├── whisper_multi_die_sut.py
 │   │   ├── sdxl_multi_die_sut.py
 │   │   ├── whisper_sut.py
@@ -288,6 +304,7 @@ mlperf-openvino-benchmark/
 │   │   ├── squad.py              # SQuAD v1.1 (BERT)
 │   │   ├── openimages.py         # OpenImages (RetinaNet)
 │   │   ├── coco.py               # COCO 2017 (SSD-ResNet34)
+│   │   ├── kits19.py             # KiTS 2019 (3D UNET)
 │   │   ├── librispeech.py        # LibriSpeech (Whisper)
 │   │   └── coco_prompts.py       # COCO 2014 (SDXL)
 │   ├── utils/
@@ -296,7 +313,8 @@ mlperf-openvino-benchmark/
 │   └── cpp/                      # C++ SUT (pybind11)
 │       ├── CMakeLists.txt
 │       ├── resnet_multi_die_sut_cpp.hpp/cpp
-│       └── ssd_resnet34_multi_die_sut_cpp.hpp/cpp
+│       ├── ssd_resnet34_multi_die_sut_cpp.hpp/cpp
+│       └── unet3d_multi_die_sut_cpp.hpp/cpp
 ├── build_cpp.sh                  # Build script for C++ SUT
 └── pyproject.toml
 ```

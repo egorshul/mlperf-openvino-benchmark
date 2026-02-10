@@ -23,6 +23,7 @@
 #include "retinanet_multi_die_sut_cpp.hpp"
 #include "ssd_resnet34_sut_cpp.hpp"
 #include "ssd_resnet34_multi_die_sut_cpp.hpp"
+#include "unet3d_multi_die_sut_cpp.hpp"
 
 namespace py = pybind11;
 
@@ -1234,6 +1235,124 @@ PYBIND11_MODULE(_cpp_sut, m) {
              py::arg("min_query_count") = 0,
              py::arg("is_accuracy_mode") = false,
              "Run Server benchmark with pure C++ SUT");
+
+    // =========================================================================
+    // 3D UNET Multi-Die C++ SUT
+    // =========================================================================
+
+    py::class_<mlperf_ov::UNet3DMultiDieCppSUT>(m, "UNet3DMultiDieCppSUT")
+        .def(py::init<const std::string&, const std::string&, int,
+                      const std::unordered_map<std::string, std::string>&, bool, int>(),
+             py::arg("model_path"),
+             py::arg("device_prefix"),
+             py::arg("batch_size") = 1,
+             py::arg("compile_properties") = std::unordered_map<std::string, std::string>{},
+             py::arg("use_nhwc_input") = false,
+             py::arg("nireq_multiplier") = 4,
+             "Create multi-die 3D UNET SUT")
+
+        .def("load", &mlperf_ov::UNet3DMultiDieCppSUT::load,
+             py::call_guard<py::gil_scoped_release>())
+        .def("warmup", &mlperf_ov::UNet3DMultiDieCppSUT::warmup,
+             py::call_guard<py::gil_scoped_release>(),
+             py::arg("iterations") = 2)
+        .def("set_target_devices", &mlperf_ov::UNet3DMultiDieCppSUT::set_target_devices,
+             py::arg("devices"))
+        .def("is_loaded", &mlperf_ov::UNet3DMultiDieCppSUT::is_loaded)
+        .def("get_num_dies", &mlperf_ov::UNet3DMultiDieCppSUT::get_num_dies)
+        .def("get_active_devices", &mlperf_ov::UNet3DMultiDieCppSUT::get_active_devices)
+        .def("get_batch_size", &mlperf_ov::UNet3DMultiDieCppSUT::get_batch_size)
+        .def("get_total_requests", &mlperf_ov::UNet3DMultiDieCppSUT::get_total_requests)
+        .def("get_input_name", &mlperf_ov::UNet3DMultiDieCppSUT::get_input_name)
+        .def("get_output_name", &mlperf_ov::UNet3DMultiDieCppSUT::get_output_name)
+
+        .def("start_async_batch",
+             [](mlperf_ov::UNet3DMultiDieCppSUT& self,
+                py::array_t<float, py::array::c_style | py::array::forcecast> input,
+                const std::vector<uint64_t>& query_ids,
+                const std::vector<int>& sample_indices,
+                int actual_batch_size) {
+                 py::buffer_info buf = input.request();
+                 const float* data = static_cast<const float*>(buf.ptr);
+                 size_t size = buf.size * sizeof(float);
+                 py::gil_scoped_release release;
+                 self.start_async_batch(data, size, query_ids, sample_indices, actual_batch_size);
+             },
+             py::arg("input"), py::arg("query_ids"),
+             py::arg("sample_indices"), py::arg("actual_batch_size"),
+             "Start async batch inference (GIL released)")
+
+        .def("wait_all", &mlperf_ov::UNet3DMultiDieCppSUT::wait_all,
+             py::call_guard<py::gil_scoped_release>())
+        .def("get_completed_count", &mlperf_ov::UNet3DMultiDieCppSUT::get_completed_count)
+        .def("get_issued_count", &mlperf_ov::UNet3DMultiDieCppSUT::get_issued_count)
+        .def("reset_counters", &mlperf_ov::UNet3DMultiDieCppSUT::reset_counters)
+        .def("set_store_predictions", &mlperf_ov::UNet3DMultiDieCppSUT::set_store_predictions,
+             py::arg("store"))
+
+        .def("get_predictions", &mlperf_ov::UNet3DMultiDieCppSUT::get_predictions,
+             "Get stored predictions as dict[int, list[float]]")
+
+        .def("clear_predictions", &mlperf_ov::UNet3DMultiDieCppSUT::clear_predictions)
+
+        .def("set_batch_response_callback",
+             [](mlperf_ov::UNet3DMultiDieCppSUT& self, py::function callback) {
+                 self.set_batch_response_callback(
+                     [callback](const std::vector<uint64_t>& query_ids) {
+                         py::gil_scoped_acquire acquire;
+                         callback(query_ids);
+                     });
+             },
+             py::arg("callback"))
+
+        .def("register_sample_data",
+             [](mlperf_ov::UNet3DMultiDieCppSUT& self,
+                int sample_idx,
+                py::array_t<float, py::array::c_style | py::array::forcecast> data) {
+                 py::buffer_info buf = data.request();
+                 self.register_sample_data(
+                     sample_idx,
+                     static_cast<const float*>(buf.ptr),
+                     buf.size * sizeof(float));
+             },
+             py::arg("sample_idx"), py::arg("data"))
+
+        .def("clear_sample_data", &mlperf_ov::UNet3DMultiDieCppSUT::clear_sample_data)
+
+        .def("issue_queries_server_fast",
+             [](mlperf_ov::UNet3DMultiDieCppSUT& self,
+                py::list query_ids,
+                py::list sample_indices) {
+                 // Stub - 3D UNET only supports Offline
+             },
+             py::arg("query_ids"), py::arg("sample_indices"))
+
+        .def("enable_direct_loadgen", &mlperf_ov::UNet3DMultiDieCppSUT::enable_direct_loadgen,
+             py::arg("enable"))
+
+        .def("enable_explicit_batching", &mlperf_ov::UNet3DMultiDieCppSUT::enable_explicit_batching,
+             py::arg("enable"),
+             py::arg("batch_size") = 1,
+             py::arg("timeout_us") = 2000)
+
+        .def("is_explicit_batching_enabled", &mlperf_ov::UNet3DMultiDieCppSUT::is_explicit_batching_enabled)
+
+        .def("run_server_benchmark",
+             [](mlperf_ov::UNet3DMultiDieCppSUT&,
+                size_t, size_t, const std::string&, const std::string&,
+                const std::string&, double, int64_t, int64_t, int64_t, bool) {
+                 // Stub - 3D UNET only supports Offline
+             },
+             py::arg("total_sample_count"),
+             py::arg("performance_sample_count"),
+             py::arg("mlperf_conf_path") = "",
+             py::arg("user_conf_path") = "",
+             py::arg("log_output_dir") = ".",
+             py::arg("target_qps") = 0.0,
+             py::arg("target_latency_ns") = 0,
+             py::arg("min_duration_ms") = 0,
+             py::arg("min_query_count") = 0,
+             py::arg("is_accuracy_mode") = false);
 
     m.attr("__version__") = "1.0.0";
 }

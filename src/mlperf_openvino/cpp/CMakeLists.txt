@@ -217,6 +217,7 @@ pybind11_add_module(_cpp_sut
     bert_multi_die_sut.cpp
     retinanet_multi_die_sut_cpp.cpp
     ssd_resnet34_multi_die_sut_cpp.cpp
+    unet3d_multi_die_sut_cpp.cpp
     bindings.cpp
 )
 

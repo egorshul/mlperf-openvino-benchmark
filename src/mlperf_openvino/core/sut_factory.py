@@ -34,6 +34,8 @@ class SUTFactory:
             return SUTFactory._create_ssd_resnet34_sut(config, qsl, is_accuracy_mode, backend)
         elif model_type == ModelType.WHISPER:
             return SUTFactory._create_whisper_sut(config, qsl, encoder_path, decoder_path)
+        elif model_type == ModelType.UNET3D:
+            return SUTFactory._create_3dunet_sut(config, qsl, is_accuracy_mode, backend)
         elif model_type == ModelType.SDXL:
             return SUTFactory._create_sdxl_sut(config, qsl, model_path)
         else:
@@ -218,6 +220,44 @@ class SUTFactory:
             config=config,
             encoder_path=encoder_path,
             decoder_path=decoder_path,
+            qsl=qsl,
+            scenario=config.scenario,
+        )
+
+    @staticmethod
+    def _create_3dunet_sut(
+        config: BenchmarkConfig,
+        qsl: QuerySampleLibrary,
+        is_accuracy_mode: bool,
+        backend: Optional[Any],
+    ) -> Any:
+        """Create 3D UNET multi-die SUT."""
+        try:
+            from .unet3d_multi_die_sut import (
+                UNet3DMultiDieCppSUTWrapper,
+                is_unet3d_multi_die_cpp_available
+            )
+
+            if is_unet3d_multi_die_cpp_available():
+                logger.info(f"Using 3D UNET C++ multi-die SUT on {config.openvino.device}")
+                sut = UNet3DMultiDieCppSUTWrapper(
+                    config=config,
+                    qsl=qsl,
+                    scenario=config.scenario,
+                )
+                sut.load(is_accuracy_mode=is_accuracy_mode)
+                return sut
+        except ImportError as e:
+            logger.warning(f"C++ 3D UNET multi-die SUT not available: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to create C++ 3D UNET multi-die SUT: {e}")
+
+        # Fall back to Python SUT
+        from .unet3d_sut import UNet3DSUT
+        logger.info(f"Using 3D UNET Python SUT on {config.openvino.device}")
+        return UNet3DSUT(
+            config=config,
+            backend=backend,
             qsl=qsl,
             scenario=config.scenario,
         )

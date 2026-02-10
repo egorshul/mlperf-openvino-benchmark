@@ -9,6 +9,7 @@ ResNetMultiDieCppSUT = None
 BertMultiDieSUT = None
 RetinaNetMultiDieCppSUT = None
 SSDResNet34MultiDieCppSUT = None
+UNet3DMultiDieCppSUT = None
 
 try:
     from ._cpp_sut import (
@@ -20,6 +21,7 @@ try:
         BertMultiDieSUT,
         RetinaNetMultiDieCppSUT,
         SSDResNet34MultiDieCppSUT,
+        UNet3DMultiDieCppSUT,
     )
     CPP_AVAILABLE = True
 except ImportError as e:
@@ -32,6 +34,6 @@ except ImportError as e:
 __all__ = [
     "ResNetCppSUT", "BertCppSUT", "RetinaNetCppSUT", "SSDResNet34CppSUT",
     "ResNetMultiDieCppSUT", "BertMultiDieSUT", "RetinaNetMultiDieCppSUT",
-    "SSDResNet34MultiDieCppSUT",
+    "SSDResNet34MultiDieCppSUT", "UNet3DMultiDieCppSUT",
     "CPP_AVAILABLE",
 ]

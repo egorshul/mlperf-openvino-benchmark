@@ -37,12 +37,14 @@ def get_default_config(model: str) -> BenchmarkConfig:
         return BenchmarkConfig.default_sdxl()
     elif model == 'ssd-resnet34':
         return BenchmarkConfig.default_ssd_resnet34()
+    elif model == '3d-unet':
+        return BenchmarkConfig.default_3dunet()
     else:
         return BenchmarkConfig.default_resnet50()
 
 
 @main.command()
-@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl', 'ssd-resnet34']),
+@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl', 'ssd-resnet34', '3d-unet']),
               default='resnet50', help='Model to benchmark')
 @click.option('--scenario', '-s', type=click.Choice(['Offline', 'Server']),
               default='Offline', help='Test scenario')
@@ -311,10 +313,13 @@ def _print_dataset_help(model: str) -> None:
     elif model == 'sdxl':
         click.echo("Please download the COCO 2014 captions dataset.")
         click.echo("Run: mlperf-ov download-dataset --dataset coco2014")
+    elif model == '3d-unet':
+        click.echo("Please download the KiTS 2019 dataset.")
+        click.echo("Run: mlperf-ov download-dataset --dataset kits19")
 
 
 @main.command('download-model')
-@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl', 'ssd-resnet34']),
+@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl', 'ssd-resnet34', '3d-unet']),
               default='resnet50', help='Model to download')
 @click.option('--output-dir', '-o', type=click.Path(),
               default='./models', help='Output directory')
@@ -368,6 +373,9 @@ def download_model_cmd(model: str, output_dir: str, format: str, batch_sizes: st
                 click.echo("OpenVINO IR models:")
                 for bs, path in sorted(paths['batch_models'].items()):
                     click.echo(f"  Batch size {bs}: {path}")
+        elif model == '3d-unet':
+            model_path = download_model('3d-unet', str(output_path), format)
+            click.echo(f"Model downloaded to: {model_path}")
         else:
             model_path = download_model(model, str(output_path), format)
             click.echo(f"Model downloaded to: {model_path}")
@@ -431,12 +439,14 @@ def info():
     click.echo("  - ResNet50 (Image Classification)")
     click.echo("  - BERT-Large (Question Answering)")
     click.echo("  - RetinaNet (Object Detection)")
+    click.echo("  - SSD-ResNet34 (Object Detection)")
+    click.echo("  - 3D UNET (Medical Image Segmentation)")
     click.echo("  - Whisper (Speech Recognition)")
     click.echo("  - SDXL (Text-to-Image Generation)")
 
 
 @main.command('download-dataset')
-@click.option('--dataset', '-d', type=click.Choice(['imagenet', 'librispeech', 'squad', 'openimages', 'coco2014', 'coco2017']),
+@click.option('--dataset', '-d', type=click.Choice(['imagenet', 'librispeech', 'squad', 'openimages', 'coco2014', 'coco2017', 'kits19']),
               required=True, help='Dataset to download')
 @click.option('--output-dir', '-o', type=click.Path(),
               default='./data', help='Output directory')
@@ -479,6 +489,9 @@ def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str],
         elif dataset == 'coco2014':
             from .utils.dataset_downloader import download_coco2014
             paths = download_coco2014(output_dir, force=force, download_images=with_images)
+        elif dataset == 'kits19':
+            from .utils.dataset_downloader import download_kits19
+            paths = download_kits19(output_dir, force=force)
         else:
             paths = download_dataset(dataset, output_dir, subset, force)
 
@@ -498,7 +511,7 @@ def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str],
 
 
 @main.command('setup')
-@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl', 'ssd-resnet34']),
+@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl', 'ssd-resnet34', '3d-unet']),
               required=True, help='Model to set up')
 @click.option('--output-dir', '-o', type=click.Path(),
               default='.', help='Base output directory')
@@ -508,7 +521,7 @@ def setup_cmd(model: str, output_dir: str, format: str):
     """Download both model and dataset for a benchmark."""
     from .utils.model_downloader import download_model, download_whisper_model, download_sdxl_model
     from .utils.model_downloader import download_retinanet_model
-    from .utils.dataset_downloader import download_dataset
+    from .utils.dataset_downloader import download_dataset, download_kits19
 
     output_path = Path(output_dir)
     models_dir = output_path / "models"
@@ -573,6 +586,8 @@ def setup_cmd(model: str, output_dir: str, format: str):
             dataset_paths = download_coco2017(str(data_dir))
         elif model == 'sdxl':
             dataset_paths = download_dataset('coco2014', str(data_dir))
+        elif model == '3d-unet':
+            dataset_paths = download_kits19(str(data_dir))
 
         click.echo(f"  Dataset: {dataset_paths.get('data_path', 'N/A')}\n")
     except Exception as e:
@@ -644,6 +659,15 @@ def list_models():
             'dataset': 'COCO 2017',
             'metric': 'mAP',
             'target': '20.0%',
+        },
+        {
+            'name': '3D UNET',
+            'id': '3d-unet',
+            'type': ModelType.UNET3D,
+            'task': 'Medical Image Segmentation',
+            'dataset': 'KiTS 2019',
+            'metric': 'Mean DICE',
+            'target': '86.33%',
         },
         {
             'name': 'Stable Diffusion XL',

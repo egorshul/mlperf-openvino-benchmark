@@ -221,6 +221,48 @@ models:
       min_duration_ms: 600000  # 10 minutes (MLPerf official requirement)
       min_query_count: 24576
 
+  3d-unet:
+    name: "3D-UNET"
+    task: "medical_image_segmentation"
+    dataset: "kits19"
+    input_shape: [1, 1, 128, 128, 128]
+    input_name: "input"
+    output_name: "output"
+    data_format: "NCDHW"
+    dtype: "FP32"
+
+    # Sliding window inference parameters
+    sliding_window:
+      roi_shape: [128, 128, 128]
+      overlap: 0.5
+      gaussian_sigma: 0.125
+
+    # Preprocessing (MLPerf reference)
+    preprocessing:
+      target_spacing: [1.6, 1.2, 1.2]  # mm
+      clip_range: [-79, 304]
+      normalize_mean: 101.0
+      normalize_std: 76.9
+
+    # MLPerf closed division accuracy target
+    # Mean DICE (kidney + tumor) >= 0.8547 (99% of 0.86330)
+    accuracy_target: 0.86330
+    accuracy_threshold: 0.99
+
+    # Model sources (official MLPerf model from Zenodo)
+    sources:
+      onnx_url: "https://zenodo.org/records/5597155/files/3dunet_kits19.onnx"
+
+    # MLPerf LoadGen settings
+    performance_sample_count: 42  # Total validation cases
+
+    # 3D UNET supports Offline scenario only (per MLCommons specification)
+    offline:
+      min_duration_ms: 600000  # 10 minutes (MLPerf v5.1 official requirement)
+      min_query_count: 43  # MLPerf official requirement
+      samples_per_query: 1
+      target_qps: 1.0
+
   sdxl:
     name: "Stable-Diffusion-XL"
     task: "text_to_image"
@@ -326,6 +368,10 @@ datasets:
     path: "./data/librispeech"
     subset: "dev-clean"  # dev-clean, dev-other, test-clean, test-other
     transcript_file: "transcripts.txt"
+
+  kits19:
+    path: "./data/kits19"
+    preprocessed_dir: "./data/kits19/preprocessed"
 
   coco2017:
     path: "./data/coco2017"

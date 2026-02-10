@@ -52,8 +52,9 @@ class BenchmarkRunner:
         is_sdxl = model_type == ModelType.SDXL
         is_whisper = model_type == ModelType.WHISPER
         is_accelerator = self.config.openvino.is_accelerator_device()
+        is_3dunet = model_type == ModelType.UNET3D
         uses_cpp_multi_die_sut = (
-            model_type in (ModelType.RESNET50, ModelType.BERT, ModelType.RETINANET, ModelType.SSD_RESNET34)
+            model_type in (ModelType.RESNET50, ModelType.BERT, ModelType.RETINANET, ModelType.SSD_RESNET34, ModelType.UNET3D)
             and is_accelerator
         )
 
@@ -83,6 +84,8 @@ class BenchmarkRunner:
             self._setup_retinanet()
         elif model_type == ModelType.SSD_RESNET34:
             self._setup_ssd_resnet34()
+        elif model_type == ModelType.UNET3D:
+            self._setup_3dunet()
         else:
             raise ValueError(f"Unsupported model type: {model_type}")
 
@@ -245,6 +248,30 @@ class BenchmarkRunner:
             self.sut = create_ssd_resnet34_sut(
                 config=self.config,
                 model_path=self.config.model.model_path,
+                qsl=self.qsl,
+                scenario=self.config.scenario,
+            )
+
+    def _setup_3dunet(self) -> None:
+        """Set up 3D UNET benchmark."""
+        from ..datasets.kits19 import KiTS19QSL
+
+        self.qsl = KiTS19QSL(
+            data_path=self.config.dataset.path,
+            count=self.config.dataset.num_samples if self.config.dataset.num_samples > 0 else None,
+            performance_sample_count=42,
+        )
+        self.qsl.load()
+
+        if self.config.openvino.is_accelerator_device():
+            self.sut = SUTFactory.create_multi_die_sut(
+                ModelType.UNET3D, self.config, self.qsl, self.backend
+            )
+        else:
+            from .unet3d_sut import UNet3DSUT
+            self.sut = UNet3DSUT(
+                config=self.config,
+                backend=self.backend,
                 qsl=self.qsl,
                 scenario=self.config.scenario,
             )
@@ -600,6 +627,9 @@ class BenchmarkRunner:
         elif model_type == ModelType.SSD_RESNET34:
             primary_metric = "mAP"
             metric_value = self._accuracy_results.get("mAP", 0.0)
+        elif model_type == ModelType.UNET3D:
+            primary_metric = "mean_dice"
+            metric_value = self._accuracy_results.get("mean_dice", 0.0)
         elif model_type == ModelType.WHISPER:
             primary_metric = "word_accuracy"
             metric_value = self._accuracy_results.get("word_accuracy", 0.0)
@@ -645,6 +675,8 @@ class BenchmarkRunner:
             self._compute_retinanet_accuracy()
         elif model_type == ModelType.SSD_RESNET34:
             self._compute_ssd_resnet34_accuracy()
+        elif model_type == ModelType.UNET3D:
+            self._compute_3dunet_accuracy()
         elif model_type == ModelType.WHISPER:
             self._compute_whisper_accuracy()
         elif model_type == ModelType.SDXL:
@@ -703,6 +735,18 @@ class BenchmarkRunner:
         self._accuracy_results = self.sut.compute_accuracy()
 
         logger.info(f"mAP: {self._accuracy_results.get('mAP', 0):.4f}")
+
+    def _compute_3dunet_accuracy(self) -> None:
+        """Compute 3D UNET accuracy (Mean DICE score on KiTS 2019)."""
+        self._accuracy_results = self.sut.compute_accuracy()
+
+        mean_dice = self._accuracy_results.get('mean_dice', 0)
+        kidney_dice = self._accuracy_results.get('kidney_dice', 0)
+        tumor_dice = self._accuracy_results.get('tumor_dice', 0)
+
+        logger.info(f"Mean DICE: {mean_dice:.4f}")
+        logger.info(f"  Kidney DICE: {kidney_dice:.4f}")
+        logger.info(f"  Tumor DICE: {tumor_dice:.4f}")
 
     def _compute_whisper_accuracy(self) -> None:
         """Compute Whisper accuracy (Word Accuracy - MLPerf v5.1 metric)."""
@@ -810,6 +854,15 @@ class BenchmarkRunner:
             # MLPerf SSD-ResNet34 threshold: 19.8% mAP (99% of 20.0%)
             status = "PASS" if mAP >= 0.198 else "FAIL"
             print(f"mAP: {mAP:.4f} [{status}]")
+        elif model_type == '3d-unet':
+            mean_dice = acc.get('mean_dice', 0)
+            kidney_dice = acc.get('kidney_dice', 0)
+            tumor_dice = acc.get('tumor_dice', 0)
+            # MLPerf 3D UNET threshold: 0.8547 (99% of 0.86330)
+            status = "PASS" if mean_dice >= 0.8547 else "FAIL"
+            print(f"Mean DICE: {mean_dice:.4f} [{status}]")
+            print(f"  Kidney: {kidney_dice:.4f}")
+            print(f"  Tumor: {tumor_dice:.4f}")
         elif model_type == 'whisper':
             word_acc = acc.get('word_accuracy', 0)
             wer = acc.get('wer', 0)

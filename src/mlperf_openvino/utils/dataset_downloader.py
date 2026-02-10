@@ -136,6 +136,12 @@ DATASET_REGISTRY: Dict[str, Dict] = {
         "num_samples": 5000,  # MLPerf uses 5000 samples
         "note": "For MLPerf SDXL benchmark (closed division)",
     },
+    "kits19": {
+        "description": "KiTS 2019 kidney tumor segmentation dataset for 3D UNET",
+        "num_samples": 42,
+        "note": "For MLPerf 3D UNET benchmark. Uses cases 00000-00209 (42 validation cases).",
+        "github_url": "https://github.com/neheller/kits19",
+    },
     "coco2017": {
         "description": "COCO 2017 validation set for SSD-ResNet34 Object Detection",
         "images": {
@@ -1384,6 +1390,77 @@ def download_coco2014(
     }
 
 
+def download_kits19(
+    output_dir: str,
+    force: bool = False,
+) -> Dict[str, str]:
+    """Download KiTS 2019 dataset for 3D UNET benchmark.
+
+    The KiTS 2019 dataset must be cloned from GitHub and then the data
+    downloaded using the starter_code/get_imaging.py script.
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    data_dir = output_path / "kits19"
+
+    # Check if already exists
+    if data_dir.exists() and not force:
+        case_dirs = sorted(data_dir.glob("case_*"))
+        if len(case_dirs) >= 42:
+            logger.info(f"KiTS 2019 already exists at {data_dir} with {len(case_dirs)} cases")
+            return {
+                "data_path": str(data_dir),
+                "num_samples": len(case_dirs),
+            }
+
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    # Clone the repository to get case metadata and download script
+    repo_dir = data_dir / "kits19_repo"
+    if not repo_dir.exists() or force:
+        logger.info("Cloning KiTS 2019 repository...")
+        try:
+            subprocess.run(
+                ["git", "clone", "https://github.com/neheller/kits19.git", str(repo_dir)],
+                check=True,
+                capture_output=True,
+            )
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"Failed to clone KiTS 2019 repo: {e.stderr.decode()}")
+        except FileNotFoundError:
+            raise RuntimeError("git is required to download KiTS 2019 dataset")
+
+    # Run the data download script
+    get_imaging = repo_dir / "starter_code" / "get_imaging.py"
+    if get_imaging.exists():
+        logger.info("Downloading KiTS 2019 imaging data (this may take a while)...")
+        try:
+            subprocess.run(
+                ["python", str(get_imaging)],
+                check=True,
+                cwd=str(repo_dir),
+            )
+        except subprocess.CalledProcessError as e:
+            logger.warning(f"get_imaging.py failed: {e}. You may need to download data manually.")
+
+    # Move/symlink case directories to data_dir
+    kits_data = repo_dir / "data"
+    if kits_data.exists():
+        for case_dir in sorted(kits_data.glob("case_*")):
+            dest = data_dir / case_dir.name
+            if not dest.exists():
+                shutil.copytree(str(case_dir), str(dest))
+
+    case_dirs = sorted(data_dir.glob("case_*"))
+    logger.info(f"KiTS 2019 dataset ready: {len(case_dirs)} cases at {data_dir}")
+
+    return {
+        "data_path": str(data_dir),
+        "num_samples": len(case_dirs),
+    }
+
+
 def download_dataset(
     dataset_name: str,
     output_dir: str,
@@ -1402,6 +1479,8 @@ def download_dataset(
         return download_whisper_mlperf(output_dir)
     elif dataset_name == "coco2014":
         return download_coco2014(output_dir, force)
+    elif dataset_name == "kits19":
+        return download_kits19(output_dir, force)
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
@@ -1523,6 +1602,7 @@ def list_available_datasets() -> Dict[str, str]:
         "squad": DATASET_REGISTRY["squad"]["description"],
         "openimages": DATASET_REGISTRY["openimages"]["description"],
         "librispeech": DATASET_REGISTRY["librispeech"]["description"],
+        "kits19": DATASET_REGISTRY["kits19"]["description"],
         "coco2014": DATASET_REGISTRY["coco2014"]["description"],
         "coco2017": DATASET_REGISTRY["coco2017"]["description"],
     }
