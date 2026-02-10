@@ -9,7 +9,7 @@ import logging
 import os
 import pickle
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
@@ -44,32 +44,19 @@ MLPERF_INFERENCE_CASES = [
 def get_gaussian_importance_map(roi_shape: Tuple[int, ...], sigma_scale: float = 0.125) -> np.ndarray:
     """Create 3D Gaussian importance map for sliding window aggregation.
 
-    Per MLCommons reference: sigma = sigma_scale * roi_shape[0].
+    Matches MLCommons reference inference_utils.py gaussian_kernel() exactly:
+    Uses scipy.signal.gaussian with outer products and cube root normalization.
     """
-    tmp = np.zeros(roi_shape, dtype=np.float32)
-    center = [i // 2 for i in roi_shape]
-    sigmas = [i * sigma_scale for i in roi_shape]
-    tmp[tuple(center)] = 1.0
+    from scipy import signal
 
-    try:
-        from scipy.ndimage import gaussian_filter
-        gaussian = gaussian_filter(tmp, sigmas, mode='constant', cval=0)
-    except ImportError:
-        # Fallback: create separable Gaussian
-        axes = [np.arange(s, dtype=np.float32) for s in roi_shape]
-        gaussian = np.ones(roi_shape, dtype=np.float32)
-        for ax_idx, (ax, c, sig) in enumerate(zip(axes, center, sigmas)):
-            shape = [1] * len(roi_shape)
-            shape[ax_idx] = len(ax)
-            g = np.exp(-0.5 * ((ax - c) / sig) ** 2).reshape(shape)
-            gaussian *= g
-        gaussian = gaussian.astype(np.float32)
-
-    # Cube root transform per MLCommons reference
-    gaussian = np.power(gaussian, 1.0 / 3.0)
-    gaussian[gaussian == 0] = np.min(gaussian[gaussian != 0])
-    gaussian /= gaussian.max()
-    return gaussian.astype(np.float32)
+    n = roi_shape[0]
+    std = sigma_scale * n
+    gaussian1D = signal.gaussian(n, std)
+    gaussian2D = np.outer(gaussian1D, gaussian1D)
+    gaussian3D = np.outer(gaussian2D, gaussian1D).reshape(n, n, n)
+    gaussian3D = np.cbrt(gaussian3D)
+    gaussian3D /= gaussian3D.max()
+    return gaussian3D.astype(np.float32)
 
 
 def compute_sliding_window_positions(
@@ -77,69 +64,146 @@ def compute_sliding_window_positions(
     roi_shape: Tuple[int, ...] = ROI_SHAPE,
     overlap: float = SLIDE_OVERLAP_FACTOR,
 ) -> List[Tuple[slice, ...]]:
-    """Compute sliding window positions with given overlap factor."""
+    """Compute sliding window positions per MLCommons reference.
+
+    Matches inference_utils.py get_slice_for_sliding_window() exactly.
+    Assumes image dimensions are already adjusted for sliding window
+    (divisible by stride via adjust_shape_for_sliding_window).
+    """
+    dim = len(image_shape)
+    strides = [int(roi_shape[i] * (1 - overlap)) for i in range(dim)]
+    size = [(image_shape[i] - roi_shape[i]) // strides[i] + 1 for i in range(dim)]
+
     positions = []
-    steps = [max(1, int(r * (1.0 - overlap))) for r in roi_shape]
-
-    for d_start in range(0, max(1, image_shape[0] - roi_shape[0] + 1), steps[0]):
-        d_end = min(d_start + roi_shape[0], image_shape[0])
-        d_start = d_end - roi_shape[0]
-
-        for h_start in range(0, max(1, image_shape[1] - roi_shape[1] + 1), steps[1]):
-            h_end = min(h_start + roi_shape[1], image_shape[1])
-            h_start = h_end - roi_shape[1]
-
-            for w_start in range(0, max(1, image_shape[2] - roi_shape[2] + 1), steps[2]):
-                w_end = min(w_start + roi_shape[2], image_shape[2])
-                w_start = w_end - roi_shape[2]
-
+    for i in range(0, strides[0] * size[0], strides[0]):
+        for j in range(0, strides[1] * size[1], strides[1]):
+            for k in range(0, strides[2] * size[2], strides[2]):
                 slices = (
-                    slice(d_start, d_end),
-                    slice(h_start, h_end),
-                    slice(w_start, w_end),
+                    slice(i, i + roi_shape[0]),
+                    slice(j, j + roi_shape[1]),
+                    slice(k, k + roi_shape[2]),
                 )
                 positions.append(slices)
 
     return positions
 
 
-def pad_to_min_shape(data: np.ndarray, min_shape: Tuple[int, ...], pad_value: float = PAD_VALUE) -> np.ndarray:
-    """Pad 3D volume to minimum shape, with dimensions divisible by 64."""
-    padded_shape = []
-    for i, (s, m) in enumerate(zip(data.shape, min_shape)):
-        target = max(s, m)
-        # Make divisible by 64 for sliding window compatibility
-        target = int(np.ceil(target / 64.0)) * 64
-        padded_shape.append(target)
+def pad_to_min_shape(
+    image: np.ndarray,
+    label: np.ndarray = None,
+) -> "Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]":
+    """Pad 4D volumes (C,D,H,W) to minimum ROI shape using symmetric edge padding.
 
-    if tuple(padded_shape) == data.shape:
-        return data
+    Matches MLCommons reference preprocess.py pad_to_min_shape() exactly.
+    """
+    current_shape = image.shape[1:]  # spatial dims
+    bounds = [max(0, ROI_SHAPE[i] - current_shape[i]) for i in range(3)]
 
-    padded = np.full(padded_shape, pad_value, dtype=data.dtype)
-    padded[:data.shape[0], :data.shape[1], :data.shape[2]] = data
-    return padded
+    if all(b == 0 for b in bounds):
+        if label is not None:
+            return image, label
+        return image
+
+    paddings = [(0, 0)]  # channel dim
+    paddings.extend([(bounds[i] // 2, bounds[i] - bounds[i] // 2) for i in range(3)])
+
+    image = np.pad(image, paddings, mode="edge")
+    if label is not None:
+        label = np.pad(label, paddings, mode="edge")
+        return image, label
+    return image
 
 
-def preprocess_volume(image: np.ndarray) -> np.ndarray:
-    """Preprocess a single 3D volume per MLCommons KiTS19 specification.
+def adjust_shape_for_sliding_window(
+    image: np.ndarray,
+    label: np.ndarray = None,
+    roi_shape: Tuple[int, ...] = ROI_SHAPE,
+    overlap: float = SLIDE_OVERLAP_FACTOR,
+    padding_val: float = PAD_VALUE,
+) -> "Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]":
+    """Adjust volume shape for sliding window inference per MLCommons reference.
 
-    Steps: clip -> z-score normalize -> pad.
-    Resampling is expected to be done beforehand (during dataset download).
+    Matches preprocess.py adjust_shape_for_sliding_window() + constant_pad_volume().
+    Two steps:
+    1. Crop dimensions where remainder < stride/2
+    2. Pad to make divisible by stride (symmetric, constant mode)
+
+    Input/output arrays are 4D: (C, D, H, W).
+    """
+    image_shape = list(image.shape[1:])
+    dim = len(image_shape)
+    strides = [int(roi_shape[i] * (1 - overlap)) for i in range(dim)]
+
+    # Step 1: Crop dimensions where remainder < stride/2
+    bounds = [image_shape[i] % strides[i] for i in range(dim)]
+    bounds = [bounds[i] if bounds[i] < strides[i] // 2 else 0 for i in range(dim)]
+
+    image = image[
+        ...,
+        bounds[0] // 2: image_shape[0] - (bounds[0] - bounds[0] // 2),
+        bounds[1] // 2: image_shape[1] - (bounds[1] - bounds[1] // 2),
+        bounds[2] // 2: image_shape[2] - (bounds[2] - bounds[2] // 2),
+    ]
+    if label is not None:
+        label = label[
+            ...,
+            bounds[0] // 2: image_shape[0] - (bounds[0] - bounds[0] // 2),
+            bounds[1] // 2: image_shape[1] - (bounds[1] - bounds[1] // 2),
+            bounds[2] // 2: image_shape[2] - (bounds[2] - bounds[2] // 2),
+        ]
+
+    # Step 2: Constant pad to make divisible by stride
+    def _constant_pad(volume: np.ndarray, pad_val: float) -> np.ndarray:
+        vol_shape = list(volume.shape[1:])
+        pad_bounds = [(strides[i] - vol_shape[i] % strides[i]) % strides[i] for i in range(dim)]
+        pad_bounds = [
+            pad_bounds[i] if (vol_shape[i] + pad_bounds[i]) >= roi_shape[i]
+            else pad_bounds[i] + strides[i]
+            for i in range(dim)
+        ]
+        paddings = [
+            (0, 0),  # channel dim
+            (pad_bounds[0] // 2, pad_bounds[0] - pad_bounds[0] // 2),
+            (pad_bounds[1] // 2, pad_bounds[1] - pad_bounds[1] // 2),
+            (pad_bounds[2] // 2, pad_bounds[2] - pad_bounds[2] // 2),
+        ]
+        return np.pad(volume, paddings, mode="constant", constant_values=[pad_val])
+
+    image = _constant_pad(image, padding_val)
+    if label is not None:
+        label = _constant_pad(label, 0)
+        return image, label
+    return image
+
+
+def preprocess_volume(image: np.ndarray, label: np.ndarray = None) -> "Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]":
+    """Preprocess a 4D volume (C,D,H,W) per MLCommons reference pipeline.
+
+    Steps: clip → z-score normalize → pad_to_min_shape → adjust_shape_for_sliding_window.
+    Resampling and channel dim expansion must be done beforehand.
     """
     image = np.clip(image, MIN_CLIP_VAL, MAX_CLIP_VAL)
     image = (image - NORM_MEAN) / NORM_STD
-    image = pad_to_min_shape(image, ROI_SHAPE)
-    return image.astype(np.float32)
+
+    if label is not None:
+        image, label = pad_to_min_shape(image, label)
+        image, label = adjust_shape_for_sliding_window(image, label)
+        return image.astype(np.float32), label
+    else:
+        image = pad_to_min_shape(image)
+        image = adjust_shape_for_sliding_window(image)
+        return image.astype(np.float32)
 
 
 def dice_score(prediction: np.ndarray, target: np.ndarray, class_id: int) -> float:
     """Compute Dice score for a specific class.
 
     DICE = (2 * intersection + eps) / (pred_sum + target_sum + eps)
+    Uses float64 precision per MLCommons reference accuracy_kits.py.
     """
     eps = 1e-6
-    pred_mask = (prediction == class_id).astype(np.float32)
-    target_mask = (target == class_id).astype(np.float32)
+    pred_mask = (prediction == class_id).astype(np.float64)
+    target_mask = (target == class_id).astype(np.float64)
     intersection = np.sum(pred_mask * target_mask)
     return float((2.0 * intersection + eps) / (np.sum(pred_mask) + np.sum(target_mask) + eps))
 
@@ -259,7 +323,7 @@ class KiTS19Dataset(BaseDataset):
     def get_sample(self, index: int) -> Dict[str, Any]:
         """Get a preprocessed sample by index.
 
-        Returns dict with 'data' (preprocessed volume) and 'original_shape'.
+        Returns dict with 'data' (preprocessed volume).
         """
         if index in self.samples:
             return self.samples[index]
@@ -267,11 +331,18 @@ class KiTS19Dataset(BaseDataset):
         case_id = self.case_ids[index]
         return self._load_case(case_id, index)
 
+    @staticmethod
+    def _store_label(label: np.ndarray) -> np.ndarray:
+        """Strip channel dim from label if present. Store as (D,H,W) for DICE."""
+        if label.ndim == 4:
+            return label[0]  # (1,D,H,W) -> (D,H,W)
+        return label
+
     def _load_case(self, case_id: str, index: int) -> Dict[str, Any]:
         """Load and preprocess a single case.
 
         Supports:
-        1. MLCommons pickle format: {case_id}.pkl containing [image, label]
+        1. MLCommons pickle format: {case_id}.pkl containing [image(1,D,H,W), label(1,D,H,W)]
         2. Directory format: {case_id}/data.pkl + {case_id}/label.pkl
         3. Raw NIfTI format: {case_id}/imaging.nii.gz
         """
@@ -286,17 +357,12 @@ class KiTS19Dataset(BaseDataset):
                 with open(pkl_path, "rb") as f:
                     data = pickle.load(f)
                 if isinstance(data, (list, tuple)) and len(data) >= 2:
-                    # MLCommons format: [image_array, label_array]
                     image = data[0]
                     label = data[1]
-                    sample = {
-                        "data": image,
-                        "case_id": case_id,
-                        "original_shape": image.shape if hasattr(image, 'shape') else None,
-                    }
+                    sample = {"data": image, "case_id": case_id}
                     self.samples[index] = sample
                     if label is not None:
-                        self.labels[index] = label
+                        self.labels[index] = self._store_label(label)
                     return sample
 
             # Directory format: {case_id}/data.pkl
@@ -314,21 +380,18 @@ class KiTS19Dataset(BaseDataset):
                     image = data
                     label = None
 
-                sample = {
-                    "data": image,
-                    "case_id": case_id,
-                    "original_shape": image.shape if hasattr(image, 'shape') else None,
-                }
+                sample = {"data": image, "case_id": case_id}
                 self.samples[index] = sample
 
                 if label is not None:
-                    self.labels[index] = label
+                    self.labels[index] = self._store_label(label)
                 else:
                     # Try separate label file
                     label_path = base_dir / case_id / "label.pkl"
                     if label_path.exists():
                         with open(label_path, "rb") as f:
-                            self.labels[index] = pickle.load(f)
+                            raw_label = pickle.load(f)
+                        self.labels[index] = self._store_label(raw_label)
 
                 return sample
 
@@ -349,14 +412,10 @@ class KiTS19Dataset(BaseDataset):
                         image = data
                         label = None
 
-                    sample = {
-                        "data": image,
-                        "case_id": case_id,
-                        "original_shape": image.shape if hasattr(image, 'shape') else None,
-                    }
+                    sample = {"data": image, "case_id": case_id}
                     self.samples[index] = sample
                     if label is not None:
-                        self.labels[index] = label
+                        self.labels[index] = self._store_label(label)
                     return sample
 
         # Try NIfTI
@@ -368,7 +427,10 @@ class KiTS19Dataset(BaseDataset):
         raise FileNotFoundError(f"Case {case_id} not found in {self.data_path}")
 
     def _load_nifti_case(self, nii_path: Path, case_id: str, index: int, base_dir: Path) -> Dict[str, Any]:
-        """Load and preprocess a NIfTI case."""
+        """Load and preprocess a NIfTI case per MLCommons reference pipeline.
+
+        Pipeline: resample → channel dim → normalize → pad_to_min_shape → adjust_shape_for_sliding_window.
+        """
         try:
             import nibabel as nib
         except ImportError:
@@ -379,28 +441,44 @@ class KiTS19Dataset(BaseDataset):
 
         # Resample to target spacing
         original_spacing = img.header.get_zooms()[:3]
-        data = self._resample_volume(data, original_spacing, TARGET_SPACING)
-
-        original_shape = data.shape
-        data = preprocess_volume(data)
+        data = self._resample_volume(data, original_spacing, TARGET_SPACING, order=1)
 
         # Add channel dimension: (D, H, W) -> (1, D, H, W)
         data = data[np.newaxis, ...]
 
-        sample = {
-            "data": data,
-            "case_id": case_id,
-            "original_shape": original_shape,
-        }
-        self.samples[index] = sample
+        # Normalize intensity
+        data = np.clip(data, MIN_CLIP_VAL, MAX_CLIP_VAL)
+        data = (data - NORM_MEAN) / NORM_STD
 
         # Load segmentation label if available
+        label = None
         label_path = base_dir / case_id / "segmentation.nii.gz"
         if label_path.exists():
             label_img = nib.load(str(label_path))
-            label = label_img.get_fdata().astype(np.int8)
+            label = label_img.get_fdata().astype(np.uint8)
             label = self._resample_volume(label, original_spacing, TARGET_SPACING, order=0)
-            self.labels[index] = label
+            label = label[np.newaxis, ...]  # (1, D, H, W)
+
+        # Pad to min shape (symmetric edge)
+        if label is not None:
+            data, label = pad_to_min_shape(data, label)
+        else:
+            data = pad_to_min_shape(data)
+
+        # Adjust shape for sliding window (crop + constant pad)
+        if label is not None:
+            data, label = adjust_shape_for_sliding_window(data, label)
+        else:
+            data = adjust_shape_for_sliding_window(data)
+
+        sample = {
+            "data": data,
+            "case_id": case_id,
+        }
+        self.samples[index] = sample
+
+        if label is not None:
+            self.labels[index] = label[0]  # Store as (D, H, W) for DICE computation
 
         return sample
 
@@ -411,7 +489,10 @@ class KiTS19Dataset(BaseDataset):
         target_spacing: Tuple[float, ...],
         order: int = 1,
     ) -> np.ndarray:
-        """Resample a 3D volume to target voxel spacing."""
+        """Resample a 3D volume to target voxel spacing.
+
+        Per MLCommons reference: mode='constant', cval=data.min().
+        """
         try:
             from scipy.ndimage import zoom
         except ImportError:
@@ -420,7 +501,10 @@ class KiTS19Dataset(BaseDataset):
         zoom_factors = tuple(o / t for o, t in zip(original_spacing, target_spacing))
         if all(abs(z - 1.0) < 1e-6 for z in zoom_factors):
             return data
-        return zoom(data, zoom_factors, order=order).astype(data.dtype)
+        return zoom(
+            data, zoom_factors, order=order,
+            mode="constant", cval=data.min(),
+        ).astype(data.dtype)
 
     def get_samples(self, indices: List[int]) -> Tuple[List[Dict[str, Any]], List[Optional[np.ndarray]]]:
         """Get multiple preprocessed samples by indices.
@@ -440,14 +524,17 @@ class KiTS19Dataset(BaseDataset):
         return self.labels.get(index, None)
 
     def postprocess(self, result: np.ndarray, sample_indices: List[int]) -> List[np.ndarray]:
-        """Postprocess model output: argmax over class dimension."""
+        """Postprocess model output: argmax over class dimension.
+
+        Uses uint8 per MLCommons reference inference_utils.py apply_argmax().
+        """
         # result shape: (num_classes, D, H, W) -> (D, H, W) via argmax
         if result.ndim == 4:
-            return [np.argmax(result, axis=0).astype(np.int8)]
+            return [np.argmax(result, axis=0).astype(np.uint8)]
         elif result.ndim == 5:
             # Batched: (B, C, D, H, W)
-            return [np.argmax(result[i], axis=0).astype(np.int8) for i in range(result.shape[0])]
-        return [result.astype(np.int8)]
+            return [np.argmax(result[i], axis=0).astype(np.uint8) for i in range(result.shape[0])]
+        return [result.astype(np.uint8)]
 
     def compute_accuracy(self, predictions: List[np.ndarray], labels: List[np.ndarray]) -> Dict[str, Any]:
         """Compute mean Dice score (kidney + tumor)."""
@@ -511,9 +598,9 @@ class KiTS19QSL(QuerySampleLibrary):
     def get_features(self, sample_id: int) -> Dict[str, Any]:
         """Get preprocessed features for a sample.
 
-        Returns dict with:
-        - 'input': preprocessed 3D volume as (1, C, D, H, W) tensor (padded)
-        - 'original_shape': spatial shape before padding (D, H, W)
+        Returns dict with 'input' as (1, 1, D, H, W) tensor.
+        Preprocessed pickle data (1, D, H, W) is already padded and adjusted
+        for sliding window, matching MLCommons reference format.
         """
         sample = self._loaded_samples.get(sample_id)
         if sample is None:
@@ -523,26 +610,20 @@ class KiTS19QSL(QuerySampleLibrary):
         data = sample["data"]
 
         if data.ndim == 3:
-            # (D, H, W) — MLCommons standard pickle format (no padding, no channel dim)
-            original_shape = data.shape
-            data = pad_to_min_shape(data, ROI_SHAPE)
-            data = data[np.newaxis, np.newaxis, ...]  # (1, 1, D', H', W')
+            # (D, H, W) — old pickle format: already normalized, but no padding/adjustment
+            # Only pad and adjust (do NOT re-normalize)
+            data = data[np.newaxis, ...]  # (1, D, H, W)
+            data = pad_to_min_shape(data)
+            data = adjust_shape_for_sliding_window(data)
+            data = data[np.newaxis, ...]  # (1, 1, D', H', W')
         elif data.ndim == 4:
-            # (C, D, H, W) — may be already padded (old format) or not
-            original_shape = data.shape[1:]  # spatial dims
-            spatial = data[0]
-            padded = pad_to_min_shape(spatial, ROI_SHAPE)
-            if padded.shape != spatial.shape:
-                new_data = np.full((data.shape[0], *padded.shape), PAD_VALUE, dtype=data.dtype)
-                new_data[:, :spatial.shape[0], :spatial.shape[1], :spatial.shape[2]] = data
-                data = new_data
-            data = data[np.newaxis, ...]  # (1, C, D', H', W')
+            # (1, D, H, W) — reference format: already normalized, padded, adjusted
+            data = data[np.newaxis, ...]  # (1, 1, D, H, W)
         else:
-            # (1, C, D, H, W) — already batched
-            original_shape = data.shape[2:]
-            return {"input": data.astype(np.float32), "original_shape": original_shape}
+            # (1, 1, D, H, W) — already batched
+            pass
 
-        return {"input": data.astype(np.float32), "original_shape": original_shape}
+        return {"input": data.astype(np.float32)}
 
     def get_label(self, sample_id: int) -> Optional[np.ndarray]:
         """Get ground truth label."""

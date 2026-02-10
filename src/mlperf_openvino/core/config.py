@@ -582,7 +582,7 @@ class BenchmarkConfig:
                 output_name="output",
                 data_format="NCDHW",
                 dtype="FP32",
-                accuracy_target=0.86170,  # Mean DICE (official MLPerf reference)
+                accuracy_target=0.86330,  # Mean DICE (official MLPerf reference FP32)
                 accuracy_threshold=0.99,  # 3d-unet-99: >= 99% of reference
                 preprocessing=PreprocessingConfig(output_layout="NCDHW"),  # 5D: no NHWC conversion
                 offline=ScenarioConfig(

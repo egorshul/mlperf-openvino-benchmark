@@ -1495,32 +1495,49 @@ def _preprocess_kits19_case(
     image = img_nii.get_fdata().astype(np.float32)
     original_spacing = img_nii.header.get_zooms()[:3]
 
-    # Resample to target spacing
+    # Resample to target spacing per MLCommons reference preprocess.py
     TARGET_SPACING = (1.6, 1.2, 1.2)
     zoom_factors = tuple(o / t for o, t in zip(original_spacing, TARGET_SPACING))
-    if not all(abs(z - 1.0) < 1e-6 for z in zoom_factors):
-        image = zoom(image, zoom_factors, order=1).astype(np.float32)
-
-    # Clip, normalize
-    image = np.clip(image, -79.0, 304.0)
-    image = (image - 101.0) / 76.9
-
-    # NOTE: No padding here — padding is applied at inference time in get_features().
-    # This matches the MLCommons reference build_preprocessed_data.py format:
-    # pickle contains [image(D,H,W), label(D,H,W)] at target spacing, normalized.
 
     # Load segmentation label (if available)
     label = None
     if seg_path.exists():
         seg_nii = nib.load(str(seg_path))
-        label = seg_nii.get_fdata().astype(np.int8)
-        if not all(abs(z - 1.0) < 1e-6 for z in zoom_factors):
-            label = zoom(label, zoom_factors, order=0).astype(np.int8)
+        label = seg_nii.get_fdata().astype(np.uint8)
 
-    # Save as MLCommons format: [image, label]
+    if not all(abs(z - 1.0) < 1e-6 for z in zoom_factors):
+        image = zoom(
+            image, zoom_factors, order=1,
+            mode="constant", cval=image.min(),
+        ).astype(np.float32)
+        if label is not None:
+            label = zoom(
+                label, zoom_factors, order=0,
+                mode="constant", cval=label.min(),
+            ).astype(np.uint8)
+
+    # Add channel dimension: (D,H,W) -> (1,D,H,W)
+    image = np.expand_dims(image, 0)
+
+    # Clip, normalize
+    image = np.clip(image, -79.0, 304.0)
+    image = (image - 101.0) / 76.9
+
+    # Pad to min shape (symmetric, edge mode) per MLCommons reference
+    from ..datasets.kits19 import pad_to_min_shape, adjust_shape_for_sliding_window
+
+    if label is not None:
+        label = np.expand_dims(label, 0)  # (1,D,H,W)
+        image, label = pad_to_min_shape(image, label)
+        image, label = adjust_shape_for_sliding_window(image, label)
+    else:
+        image = pad_to_min_shape(image)
+        image = adjust_shape_for_sliding_window(image)
+
+    # Save as MLCommons reference format: [image(1,D',H',W'), label(1,D',H',W')]
     import pickle
     with open(pkl_path, "wb") as f:
-        pickle.dump([image, label], f)
+        pickle.dump([image.astype(np.float32), label], f)
 
     return True
 
