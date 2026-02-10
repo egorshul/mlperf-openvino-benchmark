@@ -1390,69 +1390,59 @@ def download_coco2014(
     }
 
 
-def _download_kits19_case(
-    case_id: str,
-    raw_dir: Path,
-    force: bool = False,
+def _download_kits19_imaging(
+    case_num: int,
+    dest_path: Path,
 ) -> bool:
-    """Download a single KiTS19 case (imaging + segmentation NIfTI).
+    """Download a single KiTS19 imaging NIfTI from DigitalOcean Spaces.
 
-    Tries multiple mirror URLs with retries.
-    Returns True if both files are present after download.
+    The correct URL pattern is master_{num:05d}.nii.gz (flat, not nested).
+    Imaging files are hosted on DO Spaces; segmentation files are in Git LFS.
     """
+    import ssl
     import time
 
-    case_dir = raw_dir / case_id
-    case_dir.mkdir(parents=True, exist_ok=True)
+    if dest_path.exists() and dest_path.stat().st_size > 1_000_000:
+        return True
 
-    imaging_path = case_dir / "imaging.nii.gz"
-    seg_path = case_dir / "segmentation.nii.gz"
-
-    # Skip if already downloaded (validate minimum size: NIfTI files are >1MB)
-    if not force and imaging_path.exists() and seg_path.exists():
-        if imaging_path.stat().st_size > 1_000_000 and seg_path.stat().st_size > 10_000:
-            return True
-
-    # Mirror URLs to try (in order of reliability)
-    MIRROR_URLS = [
-        f"https://kits19.sfo2.digitaloceanspaces.com/{case_id}/{{filename}}",
-        f"https://kits19.sfo2.cdn.digitaloceanspaces.com/{case_id}/{{filename}}",
+    # Correct URL pattern per neheller/kits19 starter_code/get_imaging.py
+    URLS = [
+        f"https://kits19.sfo2.digitaloceanspaces.com/master_{case_num:05d}.nii.gz",
+        f"https://kits19.sfo2.cdn.digitaloceanspaces.com/master_{case_num:05d}.nii.gz",
     ]
 
-    for filename, dest_path, min_size in [
-        ("imaging.nii.gz", imaging_path, 1_000_000),
-        ("segmentation.nii.gz", seg_path, 10_000),
-    ]:
-        if not force and dest_path.exists() and dest_path.stat().st_size > min_size:
-            continue
+    # Some environments block or have SSL issues; try with relaxed SSL
+    ssl_ctx = ssl.create_default_context()
+    try:
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+    except Exception:
+        pass
 
-        downloaded = False
-        for url_template in MIRROR_URLS:
-            url = url_template.format(filename=filename)
-            for attempt in range(3):
-                try:
-                    logger.debug(f"Downloading {case_id}/{filename} (attempt {attempt+1})")
-                    urllib.request.urlretrieve(url, str(dest_path))
-                    if dest_path.exists() and dest_path.stat().st_size > min_size:
-                        downloaded = True
-                        break
-                    else:
-                        if dest_path.exists():
-                            dest_path.unlink()
-                except Exception as e:
-                    logger.debug(f"Failed: {e}")
-                    if dest_path.exists():
-                        dest_path.unlink()
-                    if attempt < 2:
-                        time.sleep(2 ** attempt)
-            if downloaded:
-                break
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=ssl_ctx)
+    )
+    opener.addheaders = [('User-Agent', 'Mozilla/5.0 (kits19-downloader)')]
 
-        if not downloaded:
-            logger.warning(f"Failed to download {case_id}/{filename}")
-            return False
-
-    return True
+    for url in URLS:
+        for attempt in range(3):
+            try:
+                logger.debug(f"Downloading master_{case_num:05d}.nii.gz (attempt {attempt+1}) from {url}")
+                with opener.open(url, timeout=120) as response:
+                    with open(dest_path, 'wb') as f:
+                        shutil.copyfileobj(response, f)
+                if dest_path.exists() and dest_path.stat().st_size > 1_000_000:
+                    return True
+                if dest_path.exists():
+                    dest_path.unlink()
+            except Exception as e:
+                logger.debug(f"Failed: {e}")
+                if dest_path.exists():
+                    dest_path.unlink()
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+        # Try next URL
+    return False
 
 
 def _preprocess_kits19_case(
@@ -1542,10 +1532,16 @@ def download_kits19(
 ) -> Dict[str, str]:
     """Download and preprocess KiTS 2019 dataset for 3D UNET benchmark.
 
-    Downloads only the 43 official MLPerf inference cases (not all 300).
-    Preprocesses raw NIfTI into pickle format per MLCommons reference.
+    Per MLCommons reference (https://github.com/mlcommons/inference):
+    1. Clone neheller/kits19 repo (segmentation files are in Git LFS)
+    2. Download imaging data from DigitalOcean Spaces (master_{num}.nii.gz)
+    3. case_00400 = copy of case_00185 (MLCommons requirement)
+    4. Preprocess 43 inference cases into pickle format
+
+    Only the 43 official MLPerf inference cases are processed.
     """
-    # Official MLPerf inference case list (43 cases)
+    # Official MLPerf inference case list (43 cases).
+    # case_00400 is a duplicate of case_00185 per MLCommons spec.
     INFERENCE_CASES = [
         "case_00000", "case_00003", "case_00005", "case_00006", "case_00012",
         "case_00024", "case_00034", "case_00041", "case_00044", "case_00049",
@@ -1557,6 +1553,8 @@ def download_kits19(
         "case_00185", "case_00187", "case_00189", "case_00198", "case_00203",
         "case_00206", "case_00207", "case_00400",
     ]
+    # Real cases to download (case_00400 is copied from case_00185)
+    REAL_CASES = [c for c in INFERENCE_CASES if c != "case_00400"]
 
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -1578,35 +1576,120 @@ def download_kits19(
     raw_dir.mkdir(parents=True, exist_ok=True)
     preprocessed_dir.mkdir(parents=True, exist_ok=True)
 
-    # Step 1: Download raw NIfTI data for 43 inference cases
-    logger.info(f"Downloading KiTS19 raw data for {len(INFERENCE_CASES)} inference cases...")
+    # ----------------------------------------------------------------
+    # Step 1: Clone neheller/kits19 repo to get segmentation via Git LFS
+    # ----------------------------------------------------------------
+    repo_dir = data_dir / "kits19_repo"
+    repo_data_dir = repo_dir / "data"
+    need_clone = not repo_data_dir.exists() or force
+
+    if need_clone:
+        logger.info("Cloning neheller/kits19 repository (segmentation labels via Git LFS)...")
+        if repo_dir.exists():
+            shutil.rmtree(str(repo_dir))
+        try:
+            subprocess.run(
+                ["git", "clone", "https://github.com/neheller/kits19.git", str(repo_dir)],
+                check=True, capture_output=True, timeout=300,
+            )
+        except subprocess.CalledProcessError as e:
+            logger.warning(f"git clone failed: {e.stderr.decode() if e.stderr else e}")
+            logger.warning("Segmentation labels will not be available (accuracy mode won't work).")
+        except FileNotFoundError:
+            logger.warning("git not found. Segmentation labels won't be available.")
+        except subprocess.TimeoutExpired:
+            logger.warning("git clone timed out. Segmentation labels won't be available.")
+
+    # Try git lfs pull for the specific cases we need
+    if repo_data_dir.exists():
+        try:
+            # Check if git-lfs is available
+            subprocess.run(["git", "lfs", "version"], capture_output=True, check=True)
+            lfs_patterns = " ".join(f"data/{c}/segmentation.nii.gz" for c in REAL_CASES)
+            subprocess.run(
+                ["git", "lfs", "pull", f"--include={lfs_patterns}"],
+                cwd=str(repo_dir), capture_output=True, timeout=600,
+            )
+            logger.info("Git LFS pull completed for segmentation files")
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as e:
+            logger.warning(f"git lfs pull failed: {e}. Segmentation labels may be LFS pointers.")
+
+    # ----------------------------------------------------------------
+    # Step 2: Populate raw_dir with imaging + segmentation for each case
+    # ----------------------------------------------------------------
+    logger.info(f"Downloading imaging data for {len(REAL_CASES)} cases...")
     downloaded = 0
     failed_cases = []
 
-    for i, case_id in enumerate(INFERENCE_CASES):
-        print(f"\rDownloading: {i+1}/{len(INFERENCE_CASES)} ({case_id})", end="", flush=True)
-        if _download_kits19_case(case_id, raw_dir, force=force):
+    for i, case_id in enumerate(REAL_CASES):
+        case_num = int(case_id.replace("case_", ""))
+        case_raw = raw_dir / case_id
+        case_raw.mkdir(parents=True, exist_ok=True)
+
+        imaging_path = case_raw / "imaging.nii.gz"
+        seg_path = case_raw / "segmentation.nii.gz"
+
+        # Copy segmentation from cloned repo (Git LFS)
+        if not seg_path.exists() or force:
+            repo_seg = repo_data_dir / case_id / "segmentation.nii.gz"
+            if repo_seg.exists() and repo_seg.stat().st_size > 10_000:
+                shutil.copy2(str(repo_seg), str(seg_path))
+
+        # Download imaging from DigitalOcean Spaces
+        ok = True
+        if not imaging_path.exists() or imaging_path.stat().st_size < 1_000_000 or force:
+            # Also check if repo has it (from get_imaging.py run)
+            repo_img = repo_data_dir / case_id / "imaging.nii.gz"
+            if repo_img.exists() and repo_img.stat().st_size > 1_000_000:
+                shutil.copy2(str(repo_img), str(imaging_path))
+            else:
+                print(f"\rDownloading: {i+1}/{len(REAL_CASES)} ({case_id})", end="", flush=True)
+                ok = _download_kits19_imaging(case_num, imaging_path)
+
+        if ok and imaging_path.exists() and imaging_path.stat().st_size > 1_000_000:
             downloaded += 1
         else:
             failed_cases.append(case_id)
-    print()
+
+    # Create case_00400 as copy of case_00185 (MLCommons requirement)
+    case_400_dir = raw_dir / "case_00400"
+    case_185_dir = raw_dir / "case_00185"
+    if case_185_dir.exists() and "case_00185" not in failed_cases:
+        case_400_dir.mkdir(parents=True, exist_ok=True)
+        for fname in ["imaging.nii.gz", "segmentation.nii.gz"]:
+            src = case_185_dir / fname
+            dst = case_400_dir / fname
+            if src.exists() and (not dst.exists() or force):
+                shutil.copy2(str(src), str(dst))
+        downloaded += 1  # case_00400
+    else:
+        failed_cases.append("case_00400")
+
+    print()  # newline after progress
 
     if failed_cases:
         logger.warning(
-            f"Failed to download {len(failed_cases)} cases: {failed_cases[:5]}"
+            f"Failed to obtain {len(failed_cases)} cases: {failed_cases[:5]}"
             f"{'...' if len(failed_cases) > 5 else ''}"
         )
-        if downloaded == 0:
-            raise RuntimeError(
-                "Failed to download any KiTS19 cases. "
-                "The KiTS19 data server may be unavailable. "
-                "You can manually download data from https://github.com/neheller/kits19 "
-                f"and place imaging.nii.gz/segmentation.nii.gz files in {raw_dir}/case_XXXXX/"
-            )
 
-    logger.info(f"Downloaded {downloaded}/{len(INFERENCE_CASES)} cases")
+    if downloaded == 0:
+        raise RuntimeError(
+            "Failed to download any KiTS19 cases.\n"
+            "Options:\n"
+            "  1. Clone and download manually:\n"
+            "     git clone https://github.com/neheller/kits19\n"
+            "     cd kits19 && pip install -r requirements.txt\n"
+            "     python -m starter_code.get_imaging\n"
+            f"     Then copy case directories to {raw_dir}/\n"
+            "  2. Check your network (DO Spaces may be blocked by firewall)\n"
+        )
 
-    # Step 2: Preprocess raw NIfTI -> pickle
+    logger.info(f"Raw data ready: {downloaded}/{len(INFERENCE_CASES)} cases")
+
+    # ----------------------------------------------------------------
+    # Step 3: Preprocess raw NIfTI -> pickle
+    # ----------------------------------------------------------------
     logger.info("Preprocessing KiTS19 data (resample, normalize, save pickle)...")
     preprocessed = 0
 
@@ -1618,7 +1701,7 @@ def download_kits19(
             if _preprocess_kits19_case(case_id, raw_dir, preprocessed_dir):
                 preprocessed += 1
         except Exception as e:
-            logger.warning(f"Failed to preprocess {case_id}: {e}")
+            logger.warning(f"\nFailed to preprocess {case_id}: {e}")
     print()
 
     logger.info(f"Preprocessed {preprocessed}/{downloaded} cases to {preprocessed_dir}")
