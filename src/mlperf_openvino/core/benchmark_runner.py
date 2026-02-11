@@ -450,7 +450,7 @@ class BenchmarkRunner:
 
         self.qsl = CnnDailyMailQSL(
             data_path=self.config.dataset.path,
-            model_name="meta-llama/Llama-3.1-8B-Instruct",
+            model_name="meta-llama/Meta-Llama-3.1-8B-Instruct",
             count=self.config.dataset.num_samples if self.config.dataset.num_samples > 0 else None,
             performance_sample_count=13368,
             max_seq_length=8000,
@@ -941,12 +941,14 @@ class BenchmarkRunner:
             r2_status = "PASS" if rouge2 >= ref_r2 * 0.99 else "FAIL"
             rL_status = "PASS" if rougeL >= ref_rL * 0.99 else "FAIL"
             rLsum_status = "PASS" if rougeLsum >= ref_rLsum * 0.99 else "FAIL"
-            gen_len_status = "PASS" if gen_len >= ref_gen_len * 0.90 else "FAIL"
+            gen_len_lower = ref_gen_len * 0.90
+            gen_len_upper = ref_gen_len * 1.10
+            gen_len_status = "PASS" if gen_len_lower <= gen_len <= gen_len_upper else "FAIL"
             print(f"ROUGE-1: {rouge1:.4f} (ref: {ref_r1:.4f}) [{r1_status}]")
             print(f"ROUGE-2: {rouge2:.4f} (ref: {ref_r2:.4f}) [{r2_status}]")
             print(f"ROUGE-L: {rougeL:.4f} (ref: {ref_rL:.4f}) [{rL_status}]")
             print(f"ROUGE-Lsum: {rougeLsum:.4f} (ref: {ref_rLsum:.4f}) [{rLsum_status}]")
-            print(f"gen_len: {gen_len} (ref: {ref_gen_len}, 90%: {int(ref_gen_len * 0.90)}) [{gen_len_status}]")
+            print(f"gen_len: {gen_len} (ref: {ref_gen_len}, range: {int(gen_len_lower)}-{int(gen_len_upper)}) [{gen_len_status}]")
             print(f"Tokens/sample: {tokens:.2f} | Samples: {num_samples}")
 
         print("="*50 + "\n")

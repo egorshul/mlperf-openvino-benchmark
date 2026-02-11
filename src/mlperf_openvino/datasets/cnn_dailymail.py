@@ -46,7 +46,7 @@ class CnnDailyMailDataset(BaseDataset):
     def __init__(
         self,
         data_path: str,
-        model_name: str = "meta-llama/Llama-3.1-8B-Instruct",
+        model_name: str = "meta-llama/Meta-Llama-3.1-8B-Instruct",
         count: Optional[int] = None,
         max_seq_length: int = 8000,
         **kwargs,
@@ -360,7 +360,7 @@ class CnnDailyMailQSL(QuerySampleLibrary):
     def __init__(
         self,
         data_path: str,
-        model_name: str = "meta-llama/Llama-3.1-8B-Instruct",
+        model_name: str = "meta-llama/Meta-Llama-3.1-8B-Instruct",
         count: Optional[int] = None,
         performance_sample_count: int = 13368,
         max_seq_length: int = 8000,

@@ -68,15 +68,18 @@ def _print_progress(completed: int, total: int, start_time: float) -> None:
         print(line, end="", file=sys.stderr, flush=True)
 
 
-def _make_response(sample_id: int, text: str, n_tokens: int):
-    """Build a QuerySampleResponse with n_tokens (required for LLM benchmarks).
+def _make_response(sample_id: int, token_ids: np.ndarray, n_tokens: int):
+    """Build a QuerySampleResponse with int64 token IDs.
+
+    The data is stored as int64 bytes so that the official MLCommons
+    evaluation.py can parse it via np.frombuffer(..., np.int64).
 
     Returns:
         (response, response_array) — caller must keep response_array alive
         until QuerySamplesComplete processes the response buffer.
     """
-    text_bytes = text.encode("utf-8")
-    response_array = array.array("B", text_bytes)
+    token_bytes = token_ids.astype(np.int64).tobytes()
+    response_array = array.array("B", token_bytes)
     bi = response_array.buffer_info()
     try:
         resp = lg.QuerySampleResponse(sample_id, bi[0], bi[1], n_tokens)
@@ -164,9 +167,9 @@ class LlamaMultiDieSUT:
         try:
             self._tokenizer = AutoTokenizer.from_pretrained(str(self.model_path))
         except Exception:
-            logger.debug("Loading tokenizer from meta-llama/Llama-3.1-8B-Instruct")
+            logger.debug("Loading tokenizer from meta-llama/Meta-Llama-3.1-8B-Instruct")
             self._tokenizer = AutoTokenizer.from_pretrained(
-                "meta-llama/Llama-3.1-8B-Instruct"
+                "meta-llama/Meta-Llama-3.1-8B-Instruct"
             )
 
         if self._tokenizer.pad_token is None:
@@ -210,11 +213,12 @@ class LlamaMultiDieSUT:
             f"[Llama] {len(self._models)} die(s) ready: {', '.join(die_names)}"
         )
 
-    def _process_sample(self, sample_idx: int, model: Any) -> Tuple[str, int]:
+    def _process_sample(self, sample_idx: int, model: Any) -> Tuple[str, np.ndarray, int]:
         """Run inference on a single sample using the given model.
 
         Returns:
-            (decoded_text, n_tokens) — generated text and token count.
+            (decoded_text, output_token_ids, n_tokens) — generated text,
+            raw token IDs (for QuerySampleResponse), and token count.
         """
         features = self.qsl.get_features(sample_idx)
         input_ids = features["input_ids"]
@@ -246,7 +250,8 @@ class LlamaMultiDieSUT:
         new_token_ids = generated_ids[0, input_len:]
         n_tokens = len(new_token_ids)
         text = self._tokenizer.decode(new_token_ids, skip_special_tokens=True)
-        return text, n_tokens
+        output_ids = new_token_ids.cpu().numpy()
+        return text, output_ids, n_tokens
 
     def issue_queries(self, query_samples: List[Any]) -> None:
         self._query_count += len(query_samples)
@@ -274,20 +279,20 @@ class LlamaMultiDieSUT:
         for i, sample in enumerate(query_samples):
             die_batches[i % num_dies].append((sample, sample.index))
 
-        all_results: List[Tuple[Any, int, str, int]] = []  # (sample, idx, text, n_tokens)
+        all_results: List[Tuple[Any, int, str, np.ndarray, int]] = []
         results_lock = threading.Lock()
 
         def _die_worker(die_idx: int, batch: List[Tuple[Any, int]]) -> None:
             _, model = self._models[die_idx]
             for sample, sample_idx in batch:
-                text, n_tokens = self._process_sample(sample_idx, model)
+                text, output_ids, n_tokens = self._process_sample(sample_idx, model)
                 with self._predictions_lock:
                     if self._store_predictions:
                         self._predictions[sample_idx] = text
                 with self._count_lock:
                     self._sample_count += 1
                 with results_lock:
-                    all_results.append((sample, sample_idx, text, n_tokens))
+                    all_results.append((sample, sample_idx, text, output_ids, n_tokens))
 
         with ThreadPoolExecutor(max_workers=num_dies) as pool:
             futures = [
@@ -311,8 +316,8 @@ class LlamaMultiDieSUT:
 
         responses = []
         response_arrays = []  # prevent GC before QuerySamplesComplete
-        for sample, _idx, text, n_tokens in sorted(all_results, key=lambda r: r[1]):
-            resp, resp_arr = _make_response(sample.id, text, n_tokens)
+        for sample, _idx, _text, output_ids, n_tokens in sorted(all_results, key=lambda r: r[1]):
+            resp, resp_arr = _make_response(sample.id, output_ids, n_tokens)
             responses.append(resp)
             response_arrays.append(resp_arr)
         lg.QuerySamplesComplete(responses)
@@ -325,13 +330,13 @@ class LlamaMultiDieSUT:
         _, model = self._models[0]
         for sample in query_samples:
             sample_idx = sample.index
-            text, n_tokens = self._process_sample(sample_idx, model)
+            text, output_ids, n_tokens = self._process_sample(sample_idx, model)
 
             if self._store_predictions:
                 self._predictions[sample_idx] = text
             self._sample_count += 1
 
-            resp, resp_arr = _make_response(sample.id, text, n_tokens)
+            resp, resp_arr = _make_response(sample.id, output_ids, n_tokens)
             responses.append(resp)
             response_arrays.append(resp_arr)
             _print_progress(self._sample_count, total, self._start_time)
@@ -348,14 +353,14 @@ class LlamaMultiDieSUT:
                 _name, model = self._models[self._model_index]
                 self._model_index = (self._model_index + 1) % len(self._models)
 
-            text, n_tokens = self._process_sample(sample_idx, model)
+            text, output_ids, n_tokens = self._process_sample(sample_idx, model)
 
             if self._store_predictions:
                 with self._predictions_lock:
                     self._predictions[sample_idx] = text
             self._sample_count += 1
 
-            resp, resp_arr = _make_response(sample.id, text, n_tokens)
+            resp, resp_arr = _make_response(sample.id, output_ids, n_tokens)
 
             try:
                 lg.FirstTokenComplete([resp])

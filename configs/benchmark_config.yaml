@@ -297,7 +297,7 @@ models:
       gen_len: 8167644       # FP32 reference gen_len (sum of char lengths, 90% threshold)
 
     sources:
-      huggingface_model_id: "meta-llama/Llama-3.1-8B-Instruct"
+      huggingface_model_id: "meta-llama/Meta-Llama-3.1-8B-Instruct"
 
     # MLPerf LoadGen settings (from mlperf.conf)
     performance_sample_count: 13368    # = total CNN-DailyMail eval samples
@@ -309,10 +309,10 @@ models:
       samples_per_query: 1
 
     server:
-      target_latency_ns: 2000000000    # 2s TTFT (Time To First Token)
+      target_latency_ns: 20000000000   # 20s TTFT per MLPerf constants.py
       target_qps: 1.0
       min_duration_ms: 600000          # 10 minutes (MLPerf v5.1)
-      # TPOT: 100ms per output token (conversational profile)
+      min_query_count: 270336          # MLPerf constants.py min-queries Server
 
 # OpenVINO specific settings
 openvino:

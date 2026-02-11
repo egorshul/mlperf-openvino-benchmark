@@ -59,7 +59,7 @@ MODEL_REGISTRY: Dict[str, Dict] = {
     },
     "llama3.1-8b": {
         "huggingface": {
-            "model_id": "meta-llama/Llama-3.1-8B-Instruct",
+            "model_id": "meta-llama/Meta-Llama-3.1-8B-Instruct",
             "filename": "Llama-3.1-8B-Instruct",
         },
         "description": "Meta Llama 3.1 8B Instruct for text generation (MLPerf v5.1)",
@@ -617,7 +617,7 @@ def download_retinanet_model(
 
 def download_llama_model(
     output_dir: str,
-    model_id: str = "meta-llama/Llama-3.1-8B-Instruct",
+    model_id: str = "meta-llama/Meta-Llama-3.1-8B-Instruct",
     export_to_openvino: bool = True,
     weight_format: str = "int8",
 ) -> Dict[str, str]:

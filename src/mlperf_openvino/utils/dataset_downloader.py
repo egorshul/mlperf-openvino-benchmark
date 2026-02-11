@@ -1397,7 +1397,7 @@ def download_coco2014(
 
 def download_cnn_dailymail(
     output_dir: str,
-    model_name: str = "meta-llama/Llama-3.1-8B-Instruct",
+    model_name: str = "meta-llama/Meta-Llama-3.1-8B-Instruct",
     force: bool = False,
 ) -> Dict[str, str]:
     """Download and process CNN-DailyMail for MLPerf Llama 3.1 8B benchmark.
