@@ -878,23 +878,13 @@ def create_ssd_resnet34_sut(
     return SSDResNet34SUT(config, backend, qsl, scenario)
 
 
-# =============================================================================
-# 3D UNET SUT (Python only — sliding window requires Python orchestration)
-# =============================================================================
-
-
 def create_unet3d_sut(
     config: BenchmarkConfig,
     model_path: str,
     qsl: "QuerySampleLibrary",
     scenario: Scenario = Scenario.OFFLINE,
 ):
-    """Create 3D UNET SUT for single-device (CPU).
-
-    3D UNET uses sliding window inference with Python-side orchestration,
-    matching the MLCommons reference implementation. No C++ single-device
-    SUT wrapper is needed — always uses Python UNet3DSUT.
-    """
+    """Create 3D UNET SUT for single-device (CPU)."""
     if config.openvino.is_accelerator_device():
         device = config.openvino.device
         raise ValueError(
@@ -906,7 +896,6 @@ def create_unet3d_sut(
     from .unet3d_sut import UNet3DSUT
     from ..backends.openvino_backend import OpenVINOBackend
 
-    # 3D UNET uses 5D tensors (NCDHW) — no NHWC layout conversion
     backend = OpenVINOBackend(model_path, config.openvino, use_nhwc_input=False)
     backend.load()
     return UNet3DSUT(config, backend, qsl, scenario)

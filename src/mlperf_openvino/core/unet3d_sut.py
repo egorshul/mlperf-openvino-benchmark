@@ -1,4 +1,4 @@
-"""3D UNET SUT with sliding window inference for single-device (CPU/single die)."""
+"""3D UNET SUT with sliding window inference for single-device."""
 
 import array
 import logging
@@ -35,14 +35,7 @@ logger = logging.getLogger(__name__)
 
 
 class UNet3DSUT:
-    """3D UNET SUT with sliding window inference for KiTS 2019.
-
-    Implements the MLCommons sliding window inference:
-    - Decompose variable-shape volume into 128x128x128 sub-volumes
-    - Run inference on each sub-volume
-    - Aggregate results using Gaussian importance weighting
-    - Argmax over classes to produce segmentation
-    """
+    """3D UNET SUT with sliding window inference for KiTS 2019."""
 
     def __init__(
         self,
@@ -102,43 +95,31 @@ class UNet3DSUT:
             self.output_name = model_outputs[0]
 
     def _sliding_window_inference(self, volume: np.ndarray) -> np.ndarray:
-        """Run sliding window inference on a single volume.
-
-        Args:
-            volume: Input volume of shape (C, D, H, W).
-
-        Returns:
-            Segmentation output of shape (num_classes, D, H, W).
-        """
+        """Run sliding window inference on a single volume (C, D, H, W)."""
         spatial_shape = volume.shape[1:]  # (D, H, W)
         positions = compute_sliding_window_positions(spatial_shape)
 
-        # Get number of output classes from first inference
         first_slices = positions[0]
         sub_vol = volume[:, first_slices[0], first_slices[1], first_slices[2]]
-        sub_vol_batch = sub_vol[np.newaxis, ...]  # (1, C, D, H, W)
+        sub_vol_batch = sub_vol[np.newaxis, ...]
         inputs = {self.input_name: sub_vol_batch.astype(np.float32)}
         output = self.backend.predict(inputs)
         first_result = output.get(self.output_name, list(output.values())[0])
         if first_result.ndim == 5:
-            first_result = first_result[0]  # Remove batch dim
+            first_result = first_result[0]
 
         num_classes = first_result.shape[0]
-
-        # Accumulation buffers
         accumulator = np.zeros((num_classes, *spatial_shape), dtype=np.float32)
         weight_map = np.zeros(spatial_shape, dtype=np.float32)
 
-        # Process first patch
         accumulator[:, first_slices[0], first_slices[1], first_slices[2]] += (
             first_result * self._gaussian_map[np.newaxis, ...]
         )
         weight_map[first_slices[0], first_slices[1], first_slices[2]] += self._gaussian_map
 
-        # Process remaining patches
         for slices in positions[1:]:
             sub_vol = volume[:, slices[0], slices[1], slices[2]]
-            sub_vol_batch = sub_vol[np.newaxis, ...]  # (1, C, D, H, W)
+            sub_vol_batch = sub_vol[np.newaxis, ...]
             inputs = {self.input_name: sub_vol_batch.astype(np.float32)}
             output = self.backend.predict(inputs)
             result = output.get(self.output_name, list(output.values())[0])
@@ -150,23 +131,17 @@ class UNet3DSUT:
             )
             weight_map[slices[0], slices[1], slices[2]] += self._gaussian_map
 
-        # Normalize by weight map
         weight_map = np.maximum(weight_map, 1e-8)
         accumulator /= weight_map[np.newaxis, ...]
 
         return accumulator
 
     def _process_sample(self, sample_idx: int) -> np.ndarray:
-        """Process a single sample through sliding window inference.
-
-        Input volume is already preprocessed to exact sliding window dimensions
-        per MLCommons reference (padded + adjusted). Output segmentation matches
-        the label shape — no cropping needed.
-        """
+        """Process a single sample through sliding window inference."""
         features = self.qsl.get_features(sample_idx)
-        volume = features["input"]  # (1, C, D, H, W)
+        volume = features["input"]
         if volume.ndim == 5:
-            volume = volume[0]  # Remove batch dim -> (C, D, H, W)
+            volume = volume[0]
 
         logits = self._sliding_window_inference(volume)
         segmentation = np.argmax(logits, axis=0).astype(np.uint8)

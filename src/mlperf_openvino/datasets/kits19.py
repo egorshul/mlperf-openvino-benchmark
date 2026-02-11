@@ -1,12 +1,9 @@
 """KiTS 2019 dataset for 3D UNET medical image segmentation benchmark.
 
-MLPerf Inference v5.1 - Kidney Tumor Segmentation (KiTS 2019).
-Implements sliding window inference with Gaussian importance weighting
-per MLCommons reference implementation.
+Implements sliding window inference with Gaussian importance weighting.
 """
 
 import logging
-import os
 import pickle
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -17,17 +14,14 @@ from .base import BaseDataset, QuerySampleLibrary
 
 logger = logging.getLogger(__name__)
 
-# MLPerf KiTS19 preprocessing constants
-TARGET_SPACING = (1.6, 1.2, 1.2)  # Target voxel spacing in mm (z, y, x)
+TARGET_SPACING = (1.6, 1.2, 1.2)
 MIN_CLIP_VAL = -79.0
 MAX_CLIP_VAL = 304.0
 NORM_MEAN = 101.0
 NORM_STD = 76.9
 ROI_SHAPE = (128, 128, 128)
 SLIDE_OVERLAP_FACTOR = 0.5
-PAD_VALUE = -2.2  # (MIN_CLIP_VAL - NORM_MEAN) / NORM_STD ≈ -2.34, but MLPerf uses -2.2
-
-# Official MLPerf inference case list (43 cases from meta/inference_cases.json)
+PAD_VALUE = -2.2
 MLPERF_INFERENCE_CASES = [
     "case_00000", "case_00003", "case_00005", "case_00006", "case_00012",
     "case_00024", "case_00034", "case_00041", "case_00044", "case_00049",
@@ -42,11 +36,7 @@ MLPERF_INFERENCE_CASES = [
 
 
 def get_gaussian_importance_map(roi_shape: Tuple[int, ...], sigma_scale: float = 0.125) -> np.ndarray:
-    """Create 3D Gaussian importance map for sliding window aggregation.
-
-    Matches MLCommons reference inference_utils.py gaussian_kernel() exactly:
-    Uses scipy.signal.windows.gaussian with outer products and cube root normalization.
-    """
+    """Create 3D Gaussian importance map for sliding window aggregation."""
     from scipy.signal.windows import gaussian
 
     n = roi_shape[0]
@@ -64,12 +54,7 @@ def compute_sliding_window_positions(
     roi_shape: Tuple[int, ...] = ROI_SHAPE,
     overlap: float = SLIDE_OVERLAP_FACTOR,
 ) -> List[Tuple[slice, ...]]:
-    """Compute sliding window positions per MLCommons reference.
-
-    Matches inference_utils.py get_slice_for_sliding_window() exactly.
-    Assumes image dimensions are already adjusted for sliding window
-    (divisible by stride via adjust_shape_for_sliding_window).
-    """
+    """Compute sliding window positions for the given image shape."""
     dim = len(image_shape)
     strides = [int(roi_shape[i] * (1 - overlap)) for i in range(dim)]
     size = [(image_shape[i] - roi_shape[i]) // strides[i] + 1 for i in range(dim)]
@@ -92,10 +77,7 @@ def pad_to_min_shape(
     image: np.ndarray,
     label: np.ndarray = None,
 ) -> "Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]":
-    """Pad 4D volumes (C,D,H,W) to minimum ROI shape using symmetric edge padding.
-
-    Matches MLCommons reference preprocess.py pad_to_min_shape() exactly.
-    """
+    """Pad 4D volumes (C,D,H,W) to minimum ROI shape using symmetric edge padding."""
     current_shape = image.shape[1:]  # spatial dims
     bounds = [max(0, ROI_SHAPE[i] - current_shape[i]) for i in range(3)]
 
@@ -121,9 +103,8 @@ def adjust_shape_for_sliding_window(
     overlap: float = SLIDE_OVERLAP_FACTOR,
     padding_val: float = PAD_VALUE,
 ) -> "Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]":
-    """Adjust volume shape for sliding window inference per MLCommons reference.
+    """Adjust volume shape for sliding window inference.
 
-    Matches preprocess.py adjust_shape_for_sliding_window() + constant_pad_volume().
     Two steps:
     1. Crop dimensions where remainder < stride/2
     2. Pad to make divisible by stride (symmetric, constant mode)
@@ -177,11 +158,7 @@ def adjust_shape_for_sliding_window(
 
 
 def preprocess_volume(image: np.ndarray, label: np.ndarray = None) -> "Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]":
-    """Preprocess a 4D volume (C,D,H,W) per MLCommons reference pipeline.
-
-    Steps: clip → z-score normalize → pad_to_min_shape → adjust_shape_for_sliding_window.
-    Resampling and channel dim expansion must be done beforehand.
-    """
+    """Preprocess a 4D volume (C,D,H,W): clip, normalize, pad, adjust for sliding window."""
     image = np.clip(image, MIN_CLIP_VAL, MAX_CLIP_VAL)
     image = (image - NORM_MEAN) / NORM_STD
 
@@ -196,11 +173,7 @@ def preprocess_volume(image: np.ndarray, label: np.ndarray = None) -> "Union[np.
 
 
 def dice_score(prediction: np.ndarray, target: np.ndarray, class_id: int) -> float:
-    """Compute Dice score for a specific class.
-
-    DICE = (2 * intersection + eps) / (pred_sum + target_sum + eps)
-    Uses float64 precision per MLCommons reference accuracy_kits.py.
-    """
+    """Compute Dice score for a specific class using float64 precision."""
     eps = 1e-6
     pred_mask = (prediction == class_id).astype(np.float64)
     target_mask = (target == class_id).astype(np.float64)
@@ -211,8 +184,7 @@ def dice_score(prediction: np.ndarray, target: np.ndarray, class_id: int) -> flo
 class KiTS19Dataset(BaseDataset):
     """KiTS 2019 dataset for 3D UNET segmentation.
 
-    Expects preprocessed data in pickle format (per MLCommons reference)
-    or raw NIfTI volumes.
+    Expects preprocessed data in pickle format or raw NIfTI volumes.
     """
 
     def __init__(
@@ -241,7 +213,6 @@ class KiTS19Dataset(BaseDataset):
         elif raw_dir.exists():
             self._load_nifti(raw_dir)
         elif self.data_path.exists():
-            # Try loading directly from data_path
             pkl_files = sorted(self.data_path.glob("case_*/*.pkl")) or \
                         sorted(self.data_path.glob("*.pkl"))
             nii_files = sorted(self.data_path.glob("case_*/imaging.nii.gz"))
@@ -265,21 +236,18 @@ class KiTS19Dataset(BaseDataset):
         logger.info(f"KiTS19: Loaded {self._total_count} cases from {self.data_path}")
 
     def _load_preprocessed(self, data_dir: Path) -> None:
-        """Load preprocessed pickle files (MLCommons format).
+        """Load preprocessed pickle files.
 
         Supports two layouts:
-        1. MLCommons format: {data_dir}/{case_name}.pkl containing [image, label]
+        1. Flat format: {data_dir}/{case_name}.pkl containing [image, label]
         2. Directory format: {data_dir}/{case_name}/data.pkl + label.pkl
         """
-        # First, try to use official MLPerf inference case list
         mlperf_cases_found = []
         for case_id in MLPERF_INFERENCE_CASES:
-            # Check MLCommons format: case_XXXXX.pkl
             pkl_file = data_dir / f"{case_id}.pkl"
             if pkl_file.exists():
                 mlperf_cases_found.append(case_id)
                 continue
-            # Check directory format: case_XXXXX/data.pkl or case_XXXXX/*.pkl
             case_dir = data_dir / case_id
             if case_dir.is_dir():
                 pkl_files = list(case_dir.glob("*.pkl"))
@@ -290,13 +258,10 @@ class KiTS19Dataset(BaseDataset):
         if mlperf_cases_found:
             self.case_ids = mlperf_cases_found
         else:
-            # Fall back to auto-discovery
-            # Try direct pickle files first (MLCommons format)
             pkl_files = sorted(data_dir.glob("case_*.pkl"))
             if pkl_files:
                 self.case_ids = [p.stem for p in pkl_files]
             else:
-                # Try case directories
                 case_dirs = sorted(data_dir.glob("case_*"))
                 for case_dir in case_dirs:
                     if not case_dir.is_dir():
@@ -333,25 +298,17 @@ class KiTS19Dataset(BaseDataset):
 
     @staticmethod
     def _store_label(label: np.ndarray) -> np.ndarray:
-        """Strip channel dim from label if present. Store as (D,H,W) for DICE."""
+        """Strip channel dim from label if present."""
         if label.ndim == 4:
             return label[0]  # (1,D,H,W) -> (D,H,W)
         return label
 
     def _load_case(self, case_id: str, index: int) -> Dict[str, Any]:
-        """Load and preprocess a single case.
-
-        Supports:
-        1. MLCommons pickle format: {case_id}.pkl containing [image(1,D,H,W), label(1,D,H,W)]
-        2. Directory format: {case_id}/data.pkl + {case_id}/label.pkl
-        3. Raw NIfTI format: {case_id}/imaging.nii.gz
-        """
+        """Load a single case from pickle or NIfTI format."""
         preprocessed_dir = self.data_path / "preprocessed"
         raw_dir = self.data_path / "raw"
 
-        # Try preprocessed pickle files
         for base_dir in [preprocessed_dir, self.data_path]:
-            # MLCommons format: {case_id}.pkl with [image, label]
             pkl_path = base_dir / f"{case_id}.pkl"
             if pkl_path.exists():
                 with open(pkl_path, "rb") as f:
@@ -365,7 +322,6 @@ class KiTS19Dataset(BaseDataset):
                         self.labels[index] = self._store_label(label)
                     return sample
 
-            # Directory format: {case_id}/data.pkl
             pkl_path = base_dir / case_id / "data.pkl"
             if pkl_path.exists():
                 with open(pkl_path, "rb") as f:
@@ -386,7 +342,6 @@ class KiTS19Dataset(BaseDataset):
                 if label is not None:
                     self.labels[index] = self._store_label(label)
                 else:
-                    # Try separate label file
                     label_path = base_dir / case_id / "label.pkl"
                     if label_path.exists():
                         with open(label_path, "rb") as f:
@@ -395,7 +350,6 @@ class KiTS19Dataset(BaseDataset):
 
                 return sample
 
-            # Try any .pkl file in the case directory
             case_dir = base_dir / case_id
             if case_dir.is_dir():
                 pkl_files = sorted(case_dir.glob("*.pkl"))
@@ -418,7 +372,6 @@ class KiTS19Dataset(BaseDataset):
                         self.labels[index] = self._store_label(label)
                     return sample
 
-        # Try NIfTI
         for base_dir in [raw_dir, self.data_path]:
             nii_path = base_dir / case_id / "imaging.nii.gz"
             if nii_path.exists():
@@ -427,10 +380,7 @@ class KiTS19Dataset(BaseDataset):
         raise FileNotFoundError(f"Case {case_id} not found in {self.data_path}")
 
     def _load_nifti_case(self, nii_path: Path, case_id: str, index: int, base_dir: Path) -> Dict[str, Any]:
-        """Load and preprocess a NIfTI case per MLCommons reference pipeline.
-
-        Pipeline: resample → channel dim → normalize → pad_to_min_shape → adjust_shape_for_sliding_window.
-        """
+        """Load and preprocess a raw NIfTI case."""
         try:
             import nibabel as nib
         except ImportError:
@@ -439,33 +389,24 @@ class KiTS19Dataset(BaseDataset):
         img = nib.load(str(nii_path))
         data = img.get_fdata().astype(np.float32)
 
-        # Resample to target spacing
         original_spacing = img.header.get_zooms()[:3]
         data = self._resample_volume(data, original_spacing, TARGET_SPACING, order=1)
-
-        # Add channel dimension: (D, H, W) -> (1, D, H, W)
         data = data[np.newaxis, ...]
-
-        # Normalize intensity
         data = np.clip(data, MIN_CLIP_VAL, MAX_CLIP_VAL)
         data = (data - NORM_MEAN) / NORM_STD
-
-        # Load segmentation label if available
         label = None
         label_path = base_dir / case_id / "segmentation.nii.gz"
         if label_path.exists():
             label_img = nib.load(str(label_path))
             label = label_img.get_fdata().astype(np.uint8)
             label = self._resample_volume(label, original_spacing, TARGET_SPACING, order=0)
-            label = label[np.newaxis, ...]  # (1, D, H, W)
+            label = label[np.newaxis, ...]
 
-        # Pad to min shape (symmetric edge)
         if label is not None:
             data, label = pad_to_min_shape(data, label)
         else:
             data = pad_to_min_shape(data)
 
-        # Adjust shape for sliding window (crop + constant pad)
         if label is not None:
             data, label = adjust_shape_for_sliding_window(data, label)
         else:
@@ -478,7 +419,7 @@ class KiTS19Dataset(BaseDataset):
         self.samples[index] = sample
 
         if label is not None:
-            self.labels[index] = label[0]  # Store as (D, H, W) for DICE computation
+            self.labels[index] = label[0]
 
         return sample
 
@@ -489,10 +430,7 @@ class KiTS19Dataset(BaseDataset):
         target_spacing: Tuple[float, ...],
         order: int = 1,
     ) -> np.ndarray:
-        """Resample a 3D volume to target voxel spacing.
-
-        Per MLCommons reference: mode='constant', cval=data.min().
-        """
+        """Resample a 3D volume to target voxel spacing."""
         try:
             from scipy.ndimage import zoom
         except ImportError:
@@ -507,11 +445,7 @@ class KiTS19Dataset(BaseDataset):
         ).astype(data.dtype)
 
     def get_samples(self, indices: List[int]) -> Tuple[List[Dict[str, Any]], List[Optional[np.ndarray]]]:
-        """Get multiple preprocessed samples by indices.
-
-        Returns (samples, labels) tuple. 3D volumes have variable spatial shapes,
-        so samples are returned as a list of dicts rather than a stacked ndarray.
-        """
+        """Get multiple preprocessed samples by indices."""
         samples = []
         labels = []
         for idx in indices:
@@ -524,11 +458,7 @@ class KiTS19Dataset(BaseDataset):
         return self.labels.get(index, None)
 
     def postprocess(self, result: np.ndarray, sample_indices: List[int]) -> List[np.ndarray]:
-        """Postprocess model output: argmax over class dimension.
-
-        Uses uint8 per MLCommons reference inference_utils.py apply_argmax().
-        """
-        # result shape: (num_classes, D, H, W) -> (D, H, W) via argmax
+        """Postprocess model output: argmax over class dimension."""
         if result.ndim == 4:
             return [np.argmax(result, axis=0).astype(np.uint8)]
         elif result.ndim == 5:
@@ -544,10 +474,8 @@ class KiTS19Dataset(BaseDataset):
         for pred, label in zip(predictions, labels):
             if label is None:
                 continue
-            # Crop prediction to label shape (undo inference padding)
             if pred.shape != label.shape:
                 pred = pred[:label.shape[0], :label.shape[1], :label.shape[2]]
-            # Class 1 = kidney, Class 2 = tumor
             kidney_dices.append(dice_score(pred, label, class_id=1))
             tumor_dices.append(dice_score(pred, label, class_id=2))
 
@@ -596,12 +524,7 @@ class KiTS19QSL(QuerySampleLibrary):
             self.dataset.samples.pop(idx, None)
 
     def get_features(self, sample_id: int) -> Dict[str, Any]:
-        """Get preprocessed features for a sample.
-
-        Returns dict with 'input' as (1, 1, D, H, W) tensor.
-        Preprocessed pickle data (1, D, H, W) is already padded and adjusted
-        for sliding window, matching MLCommons reference format.
-        """
+        """Get preprocessed features for a sample as (1, 1, D, H, W) tensor."""
         sample = self._loaded_samples.get(sample_id)
         if sample is None:
             sample = self.dataset.get_sample(sample_id)
@@ -610,18 +533,12 @@ class KiTS19QSL(QuerySampleLibrary):
         data = sample["data"]
 
         if data.ndim == 3:
-            # (D, H, W) — old pickle format: already normalized, but no padding/adjustment
-            # Only pad and adjust (do NOT re-normalize)
-            data = data[np.newaxis, ...]  # (1, D, H, W)
+            data = data[np.newaxis, ...]
             data = pad_to_min_shape(data)
             data = adjust_shape_for_sliding_window(data)
-            data = data[np.newaxis, ...]  # (1, 1, D', H', W')
+            data = data[np.newaxis, ...]
         elif data.ndim == 4:
-            # (1, D, H, W) — reference format: already normalized, padded, adjusted
-            data = data[np.newaxis, ...]  # (1, 1, D, H, W)
-        else:
-            # (1, 1, D, H, W) — already batched
-            pass
+            data = data[np.newaxis, ...]
 
         return {"input": data.astype(np.float32)}
 
@@ -635,5 +552,4 @@ class KiTS19QSL(QuerySampleLibrary):
 
     @property
     def performance_sample_count(self) -> int:
-        # MLPerf 3D UNET: use all samples (43) for performance
         return min(self._performance_sample_count, self.dataset.total_count)

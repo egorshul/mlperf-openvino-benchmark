@@ -1,8 +1,5 @@
 /**
  * C++ SUT for 3D UNET on multi-die accelerators.
- *
- * Handles async batch inference of 128x128x128 sub-volumes across multiple dies.
- * Sliding window decomposition and aggregation are handled in Python.
  */
 
 #pragma once
@@ -108,7 +105,6 @@ public:
     // Target devices
     void set_target_devices(const std::vector<std::string>& devices) { target_devices_ = devices; }
 
-    // Server mode stubs (3D UNET only supports Offline)
     void issue_queries_server_fast(const std::vector<uint64_t>&, const std::vector<int>&) {}
     void run_server_benchmark(size_t, size_t, const std::string&, const std::string&,
                               const std::string&, double = 0, int64_t = 0,

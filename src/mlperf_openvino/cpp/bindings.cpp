@@ -1323,7 +1323,6 @@ PYBIND11_MODULE(_cpp_sut, m) {
              [](mlperf_ov::UNet3DMultiDieCppSUT& self,
                 py::list query_ids,
                 py::list sample_indices) {
-                 // Stub - 3D UNET only supports Offline
              },
              py::arg("query_ids"), py::arg("sample_indices"))
 
@@ -1341,7 +1340,6 @@ PYBIND11_MODULE(_cpp_sut, m) {
              [](mlperf_ov::UNet3DMultiDieCppSUT&,
                 size_t, size_t, const std::string&, const std::string&,
                 const std::string&, double, int64_t, int64_t, int64_t, bool) {
-                 // Stub - 3D UNET only supports Offline
              },
              py::arg("total_sample_count"),
              py::arg("performance_sample_count"),

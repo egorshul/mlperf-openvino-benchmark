@@ -1395,17 +1395,12 @@ def _download_kits19_imaging(
     dest_path: Path,
     opener=None,
 ) -> bool:
-    """Download a single KiTS19 imaging NIfTI from DigitalOcean Spaces.
-
-    The correct URL pattern is master_{num:05d}.nii.gz (flat, not nested).
-    Imaging files are hosted on DO Spaces; segmentation files are in Git LFS.
-    """
+    """Download a single KiTS19 imaging NIfTI from DigitalOcean Spaces."""
     import time
 
     if dest_path.exists() and dest_path.stat().st_size > 1_000_000:
         return True
 
-    # Correct URL pattern per neheller/kits19 starter_code/get_imaging.py
     URLS = [
         f"https://kits19.sfo2.digitaloceanspaces.com/master_{case_num:05d}.nii.gz",
         f"https://kits19.sfo2.cdn.digitaloceanspaces.com/master_{case_num:05d}.nii.gz",
@@ -1460,12 +1455,7 @@ def _preprocess_kits19_case(
 ) -> bool:
     """Preprocess a single KiTS19 case: NIfTI -> pickle.
 
-    Per MLCommons reference:
-    1. Load NIfTI volumes
-    2. Resample to target spacing (1.6, 1.2, 1.2) mm
-    3. Clip to [-79, 304], z-score normalize (mean=101, std=76.9)
-    4. Pad to 64-divisible dimensions
-    5. Save as pickle: [image_array, label_array]
+    Pipeline: resample -> normalize -> pad -> adjust for sliding window -> save.
     """
     try:
         import nibabel as nib
@@ -1490,16 +1480,13 @@ def _preprocess_kits19_case(
         logger.warning(f"Missing {imaging_path}")
         return False
 
-    # Load imaging
     img_nii = nib.load(str(imaging_path))
     image = img_nii.get_fdata().astype(np.float32)
     original_spacing = img_nii.header.get_zooms()[:3]
 
-    # Resample to target spacing per MLCommons reference preprocess.py
     TARGET_SPACING = (1.6, 1.2, 1.2)
     zoom_factors = tuple(o / t for o, t in zip(original_spacing, TARGET_SPACING))
 
-    # Load segmentation label (if available)
     label = None
     if seg_path.exists():
         seg_nii = nib.load(str(seg_path))
@@ -1516,25 +1503,20 @@ def _preprocess_kits19_case(
                 mode="constant", cval=label.min(),
             ).astype(np.uint8)
 
-    # Add channel dimension: (D,H,W) -> (1,D,H,W)
     image = np.expand_dims(image, 0)
-
-    # Clip, normalize
     image = np.clip(image, -79.0, 304.0)
     image = (image - 101.0) / 76.9
 
-    # Pad to min shape (symmetric, edge mode) per MLCommons reference
     from ..datasets.kits19 import pad_to_min_shape, adjust_shape_for_sliding_window
 
     if label is not None:
-        label = np.expand_dims(label, 0)  # (1,D,H,W)
+        label = np.expand_dims(label, 0)
         image, label = pad_to_min_shape(image, label)
         image, label = adjust_shape_for_sliding_window(image, label)
     else:
         image = pad_to_min_shape(image)
         image = adjust_shape_for_sliding_window(image)
 
-    # Save as MLCommons reference format: [image(1,D',H',W'), label(1,D',H',W')]
     import pickle
     with open(pkl_path, "wb") as f:
         pickle.dump([image.astype(np.float32), label], f)
@@ -1547,22 +1529,9 @@ def download_kits19(
     force: bool = False,
     num_workers: int = 8,
 ) -> Dict[str, str]:
-    """Download and preprocess KiTS 2019 dataset for 3D UNET benchmark.
-
-    Per MLCommons reference (https://github.com/mlcommons/inference):
-    1. Clone neheller/kits19 repo (segmentation files are in Git LFS)
-    2. Download imaging data from DigitalOcean Spaces (master_{num}.nii.gz)
-    3. case_00400 = copy of case_00185 (MLCommons requirement)
-    4. Preprocess 43 inference cases into pickle format
-
-    Only the 43 official MLPerf inference cases are processed.
-    Downloads are parallelized for speed.
-    """
+    """Download and preprocess KiTS 2019 dataset for 3D UNET benchmark."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    # Official MLPerf inference case list (43 cases).
-    # Source: mlcommons/inference/vision/medical_imaging/3d-unet-kits19/meta/inference_cases.json
-    # case_00400 is a duplicate of case_00185 per MLCommons spec.
     INFERENCE_CASES = [
         "case_00000", "case_00003", "case_00005", "case_00006", "case_00012",
         "case_00024", "case_00034", "case_00041", "case_00044", "case_00049",
@@ -1574,7 +1543,6 @@ def download_kits19(
         "case_00185", "case_00187", "case_00189", "case_00198", "case_00203",
         "case_00206", "case_00207", "case_00400",
     ]
-    # Real cases to download (case_00400 is copied from case_00185)
     REAL_CASES = [c for c in INFERENCE_CASES if c != "case_00400"]
 
     output_path = Path(output_dir)
@@ -1584,7 +1552,6 @@ def download_kits19(
     raw_dir = data_dir / "raw"
     preprocessed_dir = data_dir / "preprocessed"
 
-    # Check if preprocessed data already exists
     if not force and preprocessed_dir.exists():
         pkl_files = sorted(preprocessed_dir.glob("case_*.pkl"))
         if len(pkl_files) >= 43:
@@ -1597,16 +1564,12 @@ def download_kits19(
     raw_dir.mkdir(parents=True, exist_ok=True)
     preprocessed_dir.mkdir(parents=True, exist_ok=True)
 
-    # ----------------------------------------------------------------
-    # Step 1: Clone neheller/kits19 repo (shallow) for segmentation via Git LFS
-    # Only needed for accuracy mode; skip failures gracefully.
-    # ----------------------------------------------------------------
     repo_dir = data_dir / "kits19_repo"
     repo_data_dir = repo_dir / "data"
     need_clone = not repo_data_dir.exists() or force
 
     if need_clone:
-        logger.info("Cloning neheller/kits19 repository (shallow, segmentation labels via Git LFS)...")
+        logger.info("Cloning neheller/kits19 repository...")
         if repo_dir.exists():
             shutil.rmtree(str(repo_dir))
         try:
@@ -1623,11 +1586,9 @@ def download_kits19(
         except subprocess.TimeoutExpired:
             logger.warning("git clone timed out. Segmentation labels won't be available.")
 
-    # Try git lfs pull for the specific cases we need
     if repo_data_dir.exists():
         try:
             subprocess.run(["git", "lfs", "version"], capture_output=True, check=True)
-            # Pull only segmentation files for our 42 real cases
             lfs_includes = ",".join(f"data/{c}/segmentation.nii.gz" for c in REAL_CASES)
             subprocess.run(
                 ["git", "lfs", "pull", f"--include={lfs_includes}"],
@@ -1637,14 +1598,9 @@ def download_kits19(
         except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as e:
             logger.warning(f"git lfs pull failed: {e}. Segmentation labels may be LFS pointers.")
 
-    # ----------------------------------------------------------------
-    # Step 2: Download imaging in parallel + copy segmentation labels
-    # ----------------------------------------------------------------
-    # Prepare directories first
     for case_id in REAL_CASES:
         (raw_dir / case_id).mkdir(parents=True, exist_ok=True)
 
-    # Copy segmentation labels from cloned repo (fast, local)
     if repo_data_dir.exists():
         for case_id in REAL_CASES:
             seg_path = raw_dir / case_id / "segmentation.nii.gz"
@@ -1653,12 +1609,10 @@ def download_kits19(
                 if repo_seg.exists() and repo_seg.stat().st_size > 10_000:
                     shutil.copy2(str(repo_seg), str(seg_path))
 
-    # Determine which cases need imaging download
     cases_to_download = []
     for case_id in REAL_CASES:
         imaging_path = raw_dir / case_id / "imaging.nii.gz"
         if force or not imaging_path.exists() or imaging_path.stat().st_size < 1_000_000:
-            # Check if repo already has imaging (from prior get_imaging.py run)
             repo_img = repo_data_dir / case_id / "imaging.nii.gz" if repo_data_dir.exists() else None
             if repo_img and repo_img.exists() and repo_img.stat().st_size > 1_000_000:
                 shutil.copy2(str(repo_img), str(imaging_path))
@@ -1707,7 +1661,6 @@ def download_kits19(
                     )
         print()  # newline after progress
 
-    # Create case_00400 as copy of case_00185 (MLCommons requirement)
     case_400_dir = raw_dir / "case_00400"
     case_185_dir = raw_dir / "case_00185"
     if case_185_dir.exists() and "case_00185" not in failed_cases:
@@ -1717,7 +1670,7 @@ def download_kits19(
             dst = case_400_dir / fname
             if src.exists() and (not dst.exists() or force):
                 shutil.copy2(str(src), str(dst))
-        downloaded += 1  # case_00400
+        downloaded += 1
     else:
         failed_cases.append("case_00400")
 
@@ -1745,7 +1698,6 @@ def download_kits19(
     # Step 3: Preprocess raw NIfTI -> pickle (parallel)
     # ----------------------------------------------------------------
     cases_to_preprocess = [c for c in INFERENCE_CASES if c not in failed_cases]
-    # Check which ones still need preprocessing
     cases_needing_preprocess = []
     for case_id in cases_to_preprocess:
         pkl_path = preprocessed_dir / f"{case_id}.pkl"
@@ -1771,7 +1723,6 @@ def download_kits19(
             except Exception as e:
                 return case_id, False, str(e)
 
-        # Use fewer workers for preprocessing (CPU/memory intensive)
         preprocess_workers = min(4, num_workers)
         with ThreadPoolExecutor(max_workers=preprocess_workers) as executor:
             futures = {

@@ -571,23 +571,23 @@ class BenchmarkConfig:
 
     @classmethod
     def default_3dunet(cls) -> "BenchmarkConfig":
-        """Create default 3D UNET configuration for KiTS 2019."""
+        """Create default 3D UNET configuration."""
         return cls(
             model=ModelConfig(
                 name="3D-UNET",
                 task="medical_image_segmentation",
                 model_type=ModelType.UNET3D,
-                input_shape=[1, 1, 128, 128, 128],  # ROI shape for sliding window
+                input_shape=[1, 1, 128, 128, 128],
                 input_name="input",
                 output_name="output",
                 data_format="NCDHW",
                 dtype="FP32",
-                accuracy_target=0.86330,  # Mean DICE (official MLPerf reference FP32)
-                accuracy_threshold=0.99,  # 3d-unet-99: >= 99% of reference
-                preprocessing=PreprocessingConfig(output_layout="NCDHW"),  # 5D: no NHWC conversion
+                accuracy_target=0.86330,
+                accuracy_threshold=0.99,
+                preprocessing=PreprocessingConfig(output_layout="NCDHW"),
                 offline=ScenarioConfig(
-                    min_duration_ms=600000,  # MLPerf official: 10 minutes
-                    min_query_count=43,  # MLPerf official for 3D UNET
+                    min_duration_ms=600000,
+                    min_query_count=43,
                     samples_per_query=1,
                     target_qps=1.0,
                 ),

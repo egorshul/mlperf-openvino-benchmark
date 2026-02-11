@@ -1,4 +1,4 @@
-"""3D UNET multi-die SUT with C++ acceleration and sliding window inference."""
+"""3D UNET multi-die SUT with C++ acceleration."""
 
 import logging
 import sys
@@ -34,19 +34,11 @@ logger = logging.getLogger(__name__)
 
 
 class UNet3DMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
-    """Multi-die C++ SUT wrapper for 3D UNET with sliding window inference.
-
-    The C++ SUT handles raw sub-volume inference across multiple dies.
-    This wrapper handles:
-    - Sliding window decomposition of variable-shape volumes
-    - Dispatching sub-volume batches to C++ SUT
-    - Gaussian-weighted aggregation of results
-    - Dice score computation
-    """
+    """Multi-die C++ SUT wrapper for 3D UNET with sliding window inference."""
 
     MODEL_NAME = "3D-UNET"
-    DEFAULT_OFFLINE_BATCH_SIZE = 1  # 128^3 volumes are large
-    DEFAULT_OFFLINE_NIREQ_MULTIPLIER = 1  # 1 request per die — 128^3 activations consume nearly all device memory
+    DEFAULT_OFFLINE_BATCH_SIZE = 1
+    DEFAULT_OFFLINE_NIREQ_MULTIPLIER = 1
     DEFAULT_SERVER_NIREQ_MULTIPLIER = 2
     DEFAULT_EXPLICIT_BATCH_SIZE = 1
     DEFAULT_BATCH_TIMEOUT_US = 2000
@@ -63,7 +55,7 @@ class UNet3DMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
         super().__init__(config, qsl, scenario)
 
     def supports_native_benchmark(self) -> bool:
-        return False  # 3D UNET requires Python-side sliding window
+        return False
 
     def _check_cpp_availability(self) -> None:
         if not CPP_SUT_AVAILABLE:
@@ -86,31 +78,21 @@ class UNet3DMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
             device_prefix,
             batch_size,
             compile_props,
-            False,  # 3D UNET uses NCDHW, not NHWC
+            False,
             nireq_multiplier,
         )
 
     def _sliding_window_inference(self, volume: np.ndarray, sample_idx: int) -> np.ndarray:
-        """Run sliding window inference dispatching sub-volumes to C++ dies.
-
-        Args:
-            volume: Input of shape (C, D, H, W).
-            sample_idx: Sample index for tracking.
-
-        Returns:
-            Segmentation logits of shape (num_classes, D, H, W).
-        """
-        spatial_shape = volume.shape[1:]  # (D, H, W)
+        """Run sliding window inference dispatching sub-volumes to C++ dies."""
+        spatial_shape = volume.shape[1:]
         positions = compute_sliding_window_positions(spatial_shape)
         num_positions = len(positions)
 
-        # Dispatch sub-volumes asynchronously across dies
         self._cpp_sut.reset_counters()
         self._cpp_sut.clear_predictions()
         self._cpp_sut.enable_direct_loadgen(False)
         self._cpp_sut.set_store_predictions(True)
 
-        # Submit all sub-volumes (async — parallel across dies)
         dummy_query_ids = list(range(num_positions))
         dummy_sample_indices = list(range(num_positions))
 
@@ -127,13 +109,8 @@ class UNet3DMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
                 1,
             )
 
-        # Wait for all sub-volumes
         self._cpp_sut.wait_all()
-
-        # Collect results
         preds = self._cpp_sut.get_predictions()
-
-        # Determine output shape from first prediction
         first_pred = preds.get(0)
         if first_pred is None:
             logger.error("No predictions from C++ SUT")
@@ -141,18 +118,16 @@ class UNet3DMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
 
         first_output = np.array(first_pred, dtype=np.float32)
         if first_output.ndim == 1:
-            # Flat array - need to reshape. Assume (num_classes, 128, 128, 128)
             num_classes = first_output.size // (ROI_SHAPE[0] * ROI_SHAPE[1] * ROI_SHAPE[2])
             first_output = first_output.reshape(num_classes, *ROI_SHAPE)
         elif first_output.ndim == 4:
             num_classes = first_output.shape[0]
         elif first_output.ndim == 5:
-            first_output = first_output[0]  # Remove batch
+            first_output = first_output[0]
             num_classes = first_output.shape[0]
         else:
-            num_classes = 3  # Default for KiTS19
+            num_classes = 3
 
-        # Accumulate with Gaussian weighting
         accumulator = np.zeros((num_classes, *spatial_shape), dtype=np.float32)
         weight_map = np.zeros(spatial_shape, dtype=np.float32)
 
@@ -192,19 +167,16 @@ class UNet3DMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
         for idx, qs in enumerate(query_samples):
             sample_idx = qs.index
 
-            # Get volume data (already preprocessed to exact sliding window dims)
             features = self.qsl.get_features(sample_idx)
             volume = features["input"]
             if volume.ndim == 5:
-                volume = volume[0]  # (1, C, D, H, W) -> (C, D, H, W)
+                volume = volume[0]
 
-            # Run sliding window inference
             logits = self._sliding_window_inference(volume, sample_idx)
             segmentation = np.argmax(logits, axis=0).astype(np.uint8)
 
             self._segmentation_predictions[sample_idx] = segmentation
 
-            # Create LoadGen response
             response_data = segmentation.tobytes()
             response_array = array_module.array('B', response_data)
             response_arrays.append(response_array)
@@ -218,7 +190,7 @@ class UNet3DMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
                 end="", file=sys.stderr, flush=True,
             )
 
-        print(file=sys.stderr)  # Newline after progress
+        print(file=sys.stderr)
         lg.QuerySamplesComplete(responses)
         self._query_count += 1
 

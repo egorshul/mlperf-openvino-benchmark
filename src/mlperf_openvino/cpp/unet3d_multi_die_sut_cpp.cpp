@@ -1,9 +1,5 @@
 /**
  * C++ SUT implementation for 3D UNET on multi-die accelerators.
- *
- * Handles async batch inference of sub-volumes across multiple dies.
- * Sliding window decomposition is handled in Python.
- * Only Offline scenario is supported (per MLPerf spec).
  */
 
 #include "unet3d_multi_die_sut_cpp.hpp"
@@ -49,10 +45,6 @@ UNet3DMultiDieCppSUT::~UNet3DMultiDieCppSUT() {
         batch_response_callback_ = nullptr;
     }
 }
-
-// =============================================================================
-// REQUEST POOL
-// =============================================================================
 
 size_t UNet3DMultiDieCppSUT::acquire_request() {
     size_t num_requests = infer_contexts_.size();
@@ -148,16 +140,11 @@ size_t UNet3DMultiDieCppSUT::acquire_request_for_die(size_t die_idx) {
     }
 }
 
-// =============================================================================
-// INFERENCE COMPLETE CALLBACK
-// =============================================================================
-
 void UNet3DMultiDieCppSUT::on_inference_complete(UNet3DInferContext* ctx) {
     int actual_batch_size = ctx->actual_batch_size;
     int num_dummies = ctx->num_dummies;
     int real_samples = actual_batch_size - num_dummies;
 
-    // Store predictions (output logits for Gaussian-weighted aggregation in Python)
     if (store_predictions_ && real_samples > 0) {
         ov::Tensor output_tensor = ctx->request.get_output_tensor(output_idx_);
         auto actual_type = output_tensor.get_element_type();
@@ -199,7 +186,6 @@ void UNet3DMultiDieCppSUT::on_inference_complete(UNet3DInferContext* ctx) {
         }
     }
 
-    // Send responses
     mlperf::QuerySampleResponse responses[UNet3DInferContext::MAX_BATCH];
     for (int i = 0; i < real_samples; ++i) {
         responses[i] = {ctx->query_ids[i], 0, 0};
@@ -233,10 +219,6 @@ void UNet3DMultiDieCppSUT::on_inference_complete(UNet3DInferContext* ctx) {
     release_request(pool_id);
 }
 
-// =============================================================================
-// DIE DISCOVERY
-// =============================================================================
-
 std::vector<std::string> UNet3DMultiDieCppSUT::discover_dies() {
     if (!target_devices_.empty()) {
         return target_devices_;
@@ -255,8 +237,6 @@ std::vector<std::string> UNet3DMultiDieCppSUT::discover_dies() {
         }
     }
 
-    // For non-numbered devices (e.g. "CPU", "GPU") that don't have
-    // die suffixes like ".0", ".1", use the prefix itself as a single die.
     if (dies.empty()) {
         for (const auto& device : all_devices) {
             if (device == device_prefix_) {
@@ -308,10 +288,6 @@ ov::AnyMap UNet3DMultiDieCppSUT::build_compile_properties() {
     return properties;
 }
 
-// =============================================================================
-// LOAD MODEL
-// =============================================================================
-
 void UNet3DMultiDieCppSUT::load() {
     if (loaded_) return;
 
@@ -341,7 +317,6 @@ void UNet3DMultiDieCppSUT::load() {
     input_shape_ = inputs[0].get_partial_shape().get_min_shape();
     input_type_ = inputs[0].get_element_type();
 
-    // Find float output
     output_idx_ = 0;
     for (size_t i = 0; i < outputs.size(); ++i) {
         auto out_type = outputs[i].get_element_type();
@@ -354,7 +329,6 @@ void UNet3DMultiDieCppSUT::load() {
     output_name_ = outputs[output_idx_].get_any_name();
     output_type_ = outputs[output_idx_].get_element_type();
 
-    // Set batch size
     if (batch_size_ > 1 || input_shape_[0] == 0) {
         std::map<std::string, ov::PartialShape> new_shapes;
         for (const auto& input : inputs) {
@@ -365,9 +339,6 @@ void UNet3DMultiDieCppSUT::load() {
         model_->reshape(new_shapes);
         input_shape_ = model_->inputs()[0].get_partial_shape().get_min_shape();
     }
-
-    // 3D UNET uses NCDHW format - no layout conversion needed
-    // (use_nhwc_input_ is always false for this model)
 
     input_byte_size_ = 1;
     for (auto d : input_shape_) input_byte_size_ *= d;
@@ -428,7 +399,6 @@ void UNet3DMultiDieCppSUT::load() {
         die_contexts_.push_back(std::move(die_ctx));
     }
 
-    // Calculate output size per sample
     auto output_shape = model_->outputs()[output_idx_].get_partial_shape().get_min_shape();
     single_output_size_ = 1;
     for (size_t i = 1; i < output_shape.size(); ++i) {
@@ -444,10 +414,6 @@ void UNet3DMultiDieCppSUT::load() {
 
     loaded_ = true;
 }
-
-// =============================================================================
-// WARMUP
-// =============================================================================
 
 void UNet3DMultiDieCppSUT::warmup(int iterations) {
     if (!loaded_) return;
@@ -479,10 +445,6 @@ void UNet3DMultiDieCppSUT::warmup(int iterations) {
 
     std::cerr << "[3D-UNET] Warmup complete" << std::endl;
 }
-
-// =============================================================================
-// PUBLIC API
-// =============================================================================
 
 std::vector<std::string> UNet3DMultiDieCppSUT::get_active_devices() const {
     return active_devices_;
@@ -518,10 +480,6 @@ void UNet3DMultiDieCppSUT::start_async_batch(const float* input_data,
 
     pending_count_.fetch_add(1, std::memory_order_relaxed);
     ctx->request.start_async();
-    // No synchronous wait here — on_inference_complete() callback stores
-    // predictions in mutex-protected map, and wait_all() ensures completion
-    // before Python reads results. This enables parallel sub-volume dispatch
-    // across multiple dies for sliding window inference.
     issued_count_.fetch_add(actual_batch_size, std::memory_order_relaxed);
 }
 
@@ -529,9 +487,7 @@ void UNet3DMultiDieCppSUT::enable_direct_loadgen(bool enable) {
     use_direct_loadgen_.store(enable, std::memory_order_release);
 }
 
-void UNet3DMultiDieCppSUT::enable_explicit_batching(bool, int, int) {
-    // 3D UNET doesn't support explicit batching
-}
+void UNet3DMultiDieCppSUT::enable_explicit_batching(bool, int, int) {}
 
 void UNet3DMultiDieCppSUT::wait_all() {
     while (queued_count_.load(std::memory_order_acquire) > 0) {
