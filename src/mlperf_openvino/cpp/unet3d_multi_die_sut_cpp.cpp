@@ -150,8 +150,15 @@ void UNet3DMultiDieCppSUT::on_inference_complete(UNet3DInferContext* ctx) {
         auto actual_type = output_tensor.get_element_type();
         size_t total_elems = single_output_size_ * static_cast<size_t>(actual_batch_size);
 
+        if (!output_type_logged_.exchange(true, std::memory_order_relaxed)) {
+            std::cerr << "[3D-UNET] Actual output type from device: "
+                      << actual_type.get_type_name()
+                      << ", tensor shape: ";
+            for (auto d : output_tensor.get_shape()) std::cerr << d << " ";
+            std::cerr << std::endl;
+        }
+
         std::vector<float> local_output(total_elems);
-        bool copy_ok = true;
         if (actual_type == ov::element::f32) {
             const float* src = output_tensor.data<float>();
             std::memcpy(local_output.data(), src, total_elems * sizeof(float));
@@ -160,8 +167,18 @@ void UNet3DMultiDieCppSUT::on_inference_complete(UNet3DInferContext* ctx) {
             for (size_t j = 0; j < total_elems; ++j) {
                 local_output[j] = static_cast<float>(src[j]);
             }
+        } else if (actual_type == ov::element::bf16) {
+            const ov::bfloat16* src = output_tensor.data<ov::bfloat16>();
+            for (size_t j = 0; j < total_elems; ++j) {
+                local_output[j] = static_cast<float>(src[j]);
+            }
         } else if (actual_type == ov::element::i32) {
             const int32_t* src = output_tensor.data<int32_t>();
+            for (size_t j = 0; j < total_elems; ++j) {
+                local_output[j] = static_cast<float>(src[j]);
+            }
+        } else if (actual_type == ov::element::i64) {
+            const int64_t* src = output_tensor.data<int64_t>();
             for (size_t j = 0; j < total_elems; ++j) {
                 local_output[j] = static_cast<float>(src[j]);
             }
@@ -170,12 +187,18 @@ void UNet3DMultiDieCppSUT::on_inference_complete(UNet3DInferContext* ctx) {
             for (size_t j = 0; j < total_elems; ++j) {
                 local_output[j] = static_cast<float>(src[j]);
             }
+        } else if (actual_type == ov::element::u8) {
+            const uint8_t* src = output_tensor.data<uint8_t>();
+            for (size_t j = 0; j < total_elems; ++j) {
+                local_output[j] = static_cast<float>(src[j]);
+            }
         } else {
-            std::cerr << "[WARN] Unsupported output type: " << actual_type.get_type_name() << std::endl;
-            copy_ok = false;
+            std::cerr << "[WARN] Unsupported output type: " << actual_type.get_type_name()
+                      << ", storing zeros" << std::endl;
+            std::memset(local_output.data(), 0, total_elems * sizeof(float));
         }
 
-        if (copy_ok) {
+        {
             std::lock_guard<std::mutex> lock(predictions_mutex_);
             for (int i = 0; i < real_samples; ++i) {
                 int sample_idx = ctx->sample_indices[i];
@@ -407,9 +430,10 @@ void UNet3DMultiDieCppSUT::load() {
 
     std::cerr << "[3D-UNET] Output shape: ";
     for (auto d : output_shape) std::cerr << d << " ";
-    std::cerr << " (per-sample size: " << single_output_size_ << " elements)" << std::endl;
+    std::cerr << " (per-sample size: " << single_output_size_ << " elements)"
+              << ", model output type: " << output_type_.get_type_name() << std::endl;
 
-    std::cout << "[3D-UNET SUT] Loaded: " << die_contexts_.size() << " dies, "
+    std::cerr << "[3D-UNET SUT] Loaded: " << die_contexts_.size() << " dies, "
               << total_requests << " requests" << std::endl;
 
     loaded_ = true;

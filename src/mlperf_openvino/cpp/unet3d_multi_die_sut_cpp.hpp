@@ -144,6 +144,7 @@ private:
 
     // State
     bool loaded_ = false;
+    std::atomic<bool> output_type_logged_{false};
     std::atomic<uint64_t> issued_count_{0};
     std::atomic<uint64_t> completed_count_{0};
     std::atomic<int> pending_count_{0};

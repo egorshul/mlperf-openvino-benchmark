@@ -1,7 +1,6 @@
 """3D UNET multi-die SUT with C++ acceleration."""
 
 import logging
-import sys
 import time
 from typing import Any, Dict, List
 
@@ -111,14 +110,27 @@ class UNet3DMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
 
         self._cpp_sut.wait_all()
         preds = self._cpp_sut.get_predictions()
+
+        if len(preds) != num_positions:
+            logger.warning(
+                "Sample %d: got %d/%d predictions from C++ SUT",
+                sample_idx, len(preds), num_positions,
+            )
+
         first_pred = preds.get(0)
         if first_pred is None:
-            logger.error("No predictions from C++ SUT")
+            logger.error(
+                "Sample %d: no predictions from C++ SUT (issued=%d, completed=%d)",
+                sample_idx,
+                self._cpp_sut.get_issued_count(),
+                self._cpp_sut.get_completed_count(),
+            )
             return np.zeros((3, *spatial_shape), dtype=np.float32)
 
         first_output = np.array(first_pred, dtype=np.float32)
+        roi_size = ROI_SHAPE[0] * ROI_SHAPE[1] * ROI_SHAPE[2]
         if first_output.ndim == 1:
-            num_classes = first_output.size // (ROI_SHAPE[0] * ROI_SHAPE[1] * ROI_SHAPE[2])
+            num_classes = first_output.size // roi_size
             first_output = first_output.reshape(num_classes, *ROI_SHAPE)
         elif first_output.ndim == 4:
             num_classes = first_output.shape[0]
@@ -128,12 +140,23 @@ class UNet3DMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
         else:
             num_classes = 3
 
+        if sample_idx == 0:
+            logger.info(
+                "First prediction: size=%d, num_classes=%d, "
+                "min=%.4f, max=%.4f, mean=%.4f",
+                first_output.size, num_classes,
+                float(first_output.min()), float(first_output.max()),
+                float(first_output.mean()),
+            )
+
         accumulator = np.zeros((num_classes, *spatial_shape), dtype=np.float32)
         weight_map = np.zeros(spatial_shape, dtype=np.float32)
 
+        missing = 0
         for pos_idx, slices in enumerate(positions):
             pred = preds.get(pos_idx)
             if pred is None:
+                missing += 1
                 continue
 
             output = np.array(pred, dtype=np.float32)
@@ -147,6 +170,9 @@ class UNet3DMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
             )
             weight_map[slices[0], slices[1], slices[2]] += self._gaussian_map
 
+        if missing > 0:
+            logger.warning("Sample %d: %d/%d positions missing", sample_idx, missing, num_positions)
+
         weight_map = np.maximum(weight_map, 1e-8)
         accumulator /= weight_map[np.newaxis, ...]
 
@@ -158,8 +184,7 @@ class UNet3DMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
 
         self._start_time = time.time()
         num_samples = len(query_samples)
-
-        print(f"[3D-UNET Offline] {num_samples} samples, sliding window inference", file=sys.stderr)
+        logger.info("[3D-UNET Offline] %d samples, sliding window inference", num_samples)
 
         responses = []
         response_arrays = []
@@ -184,13 +209,11 @@ class UNet3DMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
             responses.append(lg.QuerySampleResponse(qs.id, bi[0], bi[1]))
 
             elapsed = time.time() - self._start_time
-            print(
-                f"\r[3D-UNET] {idx+1}/{num_samples} samples, "
-                f"{elapsed:.1f}s elapsed",
-                end="", file=sys.stderr, flush=True,
+            logger.info(
+                "[3D-UNET] %d/%d samples, %.1fs elapsed",
+                idx + 1, num_samples, elapsed,
             )
 
-        print(file=sys.stderr)
         lg.QuerySamplesComplete(responses)
         self._query_count += 1
 
@@ -219,10 +242,26 @@ class UNet3DMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
 
         pred_list = []
         label_list = []
+        missing_labels = 0
         for sample_idx in sorted(predictions.keys()):
-            pred_list.append(predictions[sample_idx])
+            pred = predictions[sample_idx]
+            pred_list.append(pred)
             label = self.qsl.get_label(sample_idx)
             label_list.append(label)
+            if label is None:
+                missing_labels += 1
+
+        logger.info(
+            "Accuracy: %d predictions, %d labels loaded, %d missing labels",
+            len(pred_list), len(pred_list) - missing_labels, missing_labels,
+        )
+        if pred_list:
+            first = pred_list[0]
+            unique_vals = np.unique(first)
+            logger.info(
+                "First prediction: shape=%s, dtype=%s, unique_values=%s",
+                first.shape, first.dtype, unique_vals,
+            )
 
         return self.qsl.dataset.compute_accuracy(pred_list, label_list)
 
