@@ -111,18 +111,9 @@ class UNet3DMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
 
         self._cpp_sut.wait_all()
         preds = self._cpp_sut.get_predictions()
-
-        received = len(preds)
-        if received < num_positions:
-            logger.warning(
-                "C++ SUT returned %d/%d predictions for sample %d "
-                "(check for unsupported output type warnings above)",
-                received, num_positions, sample_idx,
-            )
-
         first_pred = preds.get(0)
         if first_pred is None:
-            logger.error("No predictions from C++ SUT for sample %d", sample_idx)
+            logger.error("No predictions from C++ SUT")
             return np.zeros((3, *spatial_shape), dtype=np.float32)
 
         first_output = np.array(first_pred, dtype=np.float32)
