@@ -81,6 +81,69 @@ class UNet3DMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
             nireq_multiplier,
         )
 
+    def _run_cpu_comparison(self, volume: np.ndarray, positions) -> None:
+        """Run one sub-volume through CPU and C++ SUT, compare outputs."""
+        try:
+            import openvino as ov
+            core = ov.Core()
+            model = core.read_model(self.config.model.model_path)
+            compiled = core.compile_model(model, "CPU")
+            request = compiled.create_infer_request()
+
+            # Pick a MIDDLE position (more likely to have kidney/tumor)
+            mid_idx = len(positions) // 2
+            slices = positions[mid_idx]
+            sub_vol = volume[:, slices[0], slices[1], slices[2]]
+            sub_vol_batch = sub_vol[np.newaxis, ...].astype(np.float32)
+
+            # CPU inference
+            input_name = model.inputs[0].get_any_name()
+            request.infer({input_name: sub_vol_batch})
+            cpu_out = request.get_output_tensor(0).data.copy()
+            if cpu_out.ndim == 5:
+                cpu_out = cpu_out[0]
+
+            # C++ SUT inference (same sub-volume)
+            self._cpp_sut.reset_counters()
+            self._cpp_sut.clear_predictions()
+            self._cpp_sut.enable_direct_loadgen(False)
+            self._cpp_sut.set_store_predictions(True)
+            if not sub_vol_batch.flags['C_CONTIGUOUS']:
+                sub_vol_batch = np.ascontiguousarray(sub_vol_batch)
+            self._cpp_sut.start_async_batch(sub_vol_batch, [0], [0], 1)
+            self._cpp_sut.wait_all()
+            preds = self._cpp_sut.get_predictions()
+            acc_out = np.array(preds[0], dtype=np.float32).reshape(cpu_out.shape)
+
+            # Compare
+            cpu_argmax = np.argmax(cpu_out, axis=0)
+            acc_argmax = np.argmax(acc_out, axis=0)
+            cpu_counts = [int(np.sum(cpu_argmax == c)) for c in range(cpu_out.shape[0])]
+            acc_counts = [int(np.sum(acc_argmax == c)) for c in range(acc_out.shape[0])]
+            diff = np.abs(cpu_out - acc_out)
+            logger.info(
+                "=== CPU vs Accelerator comparison (pos %d) ===", mid_idx,
+            )
+            logger.info(
+                "  CPU:  per-class min=[%.2f,%.2f,%.2f] max=[%.2f,%.2f,%.2f] argmax=%s",
+                float(cpu_out[0].min()), float(cpu_out[1].min()), float(cpu_out[2].min()),
+                float(cpu_out[0].max()), float(cpu_out[1].max()), float(cpu_out[2].max()),
+                cpu_counts,
+            )
+            logger.info(
+                "  ACC:  per-class min=[%.2f,%.2f,%.2f] max=[%.2f,%.2f,%.2f] argmax=%s",
+                float(acc_out[0].min()), float(acc_out[1].min()), float(acc_out[2].min()),
+                float(acc_out[0].max()), float(acc_out[1].max()), float(acc_out[2].max()),
+                acc_counts,
+            )
+            logger.info(
+                "  DIFF: max=%.4f, mean=%.4f, match_pct=%.2f%%",
+                float(diff.max()), float(diff.mean()),
+                float(np.sum(cpu_argmax == acc_argmax)) / cpu_argmax.size * 100,
+            )
+        except Exception as e:
+            logger.warning("CPU comparison failed: %s", e)
+
     def _sliding_window_inference(self, volume: np.ndarray, sample_idx: int) -> np.ndarray:
         """Run sliding window inference dispatching sub-volumes to C++ dies."""
         spatial_shape = volume.shape[1:]
@@ -94,6 +157,7 @@ class UNet3DMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
                 volume.shape, float(volume.min()), float(volume.max()),
             )
             logger.info("Sliding window: %d positions, spatial=%s", num_positions, spatial_shape)
+            self._run_cpu_comparison(volume, positions)
 
         self._cpp_sut.reset_counters()
         self._cpp_sut.clear_predictions()
