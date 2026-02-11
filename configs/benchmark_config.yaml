@@ -270,7 +270,7 @@ models:
     name: "Llama-3.1-8B"
     task: "text_generation"
     dataset: "cnn-dailymail"
-    input_shape: [1, 2048]  # (batch, max_seq_length)
+    input_shape: [1, 8000]  # (batch, model_max_length per MLCommons reference)
     input_name: "input_ids"
     output_name: "logits"
     data_format: "NC"
@@ -294,7 +294,7 @@ models:
       rouge2: 15.9075        # FP32 reference (99% = 15.7484)
       rougeL: 24.4957        # FP32 reference (99% = 24.2507)
       rougeLsum: 35.793      # FP32 reference (99% = 35.4351)
-      tokens_per_sample: 0.0 # gen_len checked separately at 90% threshold
+      gen_len: 8167644       # FP32 reference gen_len (sum of char lengths, 90% threshold)
 
     sources:
       huggingface_model_id: "meta-llama/Llama-3.1-8B-Instruct"

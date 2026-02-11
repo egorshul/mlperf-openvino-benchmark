@@ -1402,14 +1402,14 @@ def download_cnn_dailymail(
 ) -> Dict[str, str]:
     """Download and process CNN-DailyMail for MLPerf Llama 3.1 8B benchmark.
 
-    Follows the MLCommons Inference v5.1 reference:
-    1. Downloads cnn_dailymail v3.0.0 from HuggingFace
-    2. Extracts validation split articles + highlights
-    3. Formats prompts with Llama 3.1 chat template for summarization
-    4. Tokenizes and filters by length (input <= 2048, output <= 128)
-    5. Saves as JSON in MLCommons format (cnn_eval.json)
+    Follows the MLCommons Inference v5.1 reference (download_cnndm.py) exactly:
+    1. Downloads cnn_dailymail v3.0.0 validation split from HuggingFace
+    2. Applies instruction template (plain text, NOT chat template)
+    3. Pre-tokenizes inputs with tokenizer.encode() (adds BOS implicitly)
+    4. NO token length filtering — all samples included (closed division)
+    5. Saves as JSON with fields: instruction, input, tok_input, output
 
-    Datacenter: 13,368 samples | Edge: 5,000 samples
+    Datacenter: 13,368 samples | Edge: 5,000 samples (shuffle seed=42)
     """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -1447,68 +1447,66 @@ def download_cnn_dailymail(
     logger.info("Loading cnn_dailymail v3.0.0 from HuggingFace...")
     dataset = load_dataset("cnn_dailymail", "3.0.0", split="validation")
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    # Tokenizer setup matching reference download_cnndm.py exactly
+    tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False)
+    tokenizer.padding_side = "left"
+    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.model_max_length = 8000
 
-    # MLCommons reference prompt template for Llama 3.1 8B summarization
-    # Plain instruction (NOT chat template) — matches download_cnndm.py reference
-    # BOS token (<|begin_of_text|>) is added implicitly by the tokenizer
-    PROMPT_TEMPLATE = (
+    # MLCommons reference instruction template (plain text, NOT chat template)
+    # BOS token is added implicitly by tokenizer.encode()
+    INSTRUCTION_TEMPLATE = (
         "Summarize the following news article in 128 tokens. "
         "Please output the summary only, without any other text.\n\n"
-        "Article:\n{article}\n\nSummary:"
+        "Article:\n{input}\n\nSummary:"
     )
 
-    logger.info("Processing articles with Llama 3.1 chat template...")
+    logger.info("Processing articles with MLCommons instruction template...")
     processed = []
-    skipped = 0
     for i, entry in enumerate(dataset):
         article = entry.get("article", "")
         highlights = entry.get("highlights", "")
 
         if not article or not highlights:
-            skipped += 1
             continue
 
-        input_text = PROMPT_TEMPLATE.format(article=article)
+        # Format prompt and pre-tokenize (matches reference exactly)
+        formatted_prompt = INSTRUCTION_TEMPLATE.format(input=article)
+        tok_input = tokenizer.encode(formatted_prompt)
 
-        # Token length check
-        input_tokens = tokenizer.encode(input_text)
-        output_tokens = tokenizer.encode(highlights)
-
-        if len(input_tokens) <= 2048 and len(output_tokens) <= 128:
-            processed.append({
-                "input": input_text,
-                "output": highlights,
-            })
+        processed.append({
+            "instruction": {"llama": INSTRUCTION_TEMPLATE},
+            "input": article,
+            "tok_input": tok_input,
+            "output": highlights,
+        })
 
         if (i + 1) % 5000 == 0:
-            logger.info(
-                f"Processed {i + 1}/{len(dataset)}, valid: {len(processed)}, skipped: {skipped}"
-            )
+            logger.info(f"Processed {i + 1}/{len(dataset)}, total: {len(processed)}")
 
-    logger.info(f"Total valid samples: {len(processed)} (skipped: {skipped})")
+    logger.info(f"Total samples: {len(processed)} (no filtering, closed division)")
 
     # Save full eval set (datacenter)
     import json
+    import random
 
     with open(eval_file, "w", encoding="utf-8") as f:
         json.dump(processed, f, ensure_ascii=False)
     logger.info(f"Datacenter eval set: {len(processed)} samples -> {eval_file}")
 
-    # Save edge subset (5000 samples, reproducible)
-    import random
-
+    # Save edge subset (5000 samples) — matches reference: shuffle(seed=42) + take
     random.seed(42)
-    edge_samples = random.sample(processed, min(5000, len(processed)))
+    n_edge = min(5000, len(processed))
+    edge_indices = random.sample(range(len(processed)), n_edge)
+    edge_samples = [processed[i] for i in sorted(edge_indices)]
     edge_file = data_dir / "sample_cnn_eval_5000.json"
     with open(edge_file, "w", encoding="utf-8") as f:
         json.dump(edge_samples, f, ensure_ascii=False)
     logger.info(f"Edge eval set: {len(edge_samples)} samples -> {edge_file}")
 
     # Save calibration subset (for quantization)
-    calib_samples = random.sample(processed, min(1000, len(processed)))
+    calib_indices = random.sample(range(len(processed)), min(1000, len(processed)))
+    calib_samples = [processed[i] for i in sorted(calib_indices)]
     calib_file = data_dir / "cnn_dailymail_calibration.json"
     with open(calib_file, "w", encoding="utf-8") as f:
         json.dump(calib_samples, f, ensure_ascii=False)

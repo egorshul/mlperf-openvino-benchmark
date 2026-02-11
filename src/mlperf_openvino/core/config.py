@@ -575,15 +575,15 @@ class BenchmarkConfig:
 
         Task: text summarization (CNN-DailyMail)
         Dataset: 13,368 samples (datacenter) / 5,000 (edge)
-        max_new_tokens: 128
-        Accuracy: ROUGE-1/2/L + gen_len (token count)
+        max_new_tokens: 128, model_max_length: 8000
+        Accuracy: ROUGE-1/2/L/Lsum (99% threshold) + gen_len (90% threshold)
         """
         return cls(
             model=ModelConfig(
                 name="Llama-3.1-8B",
                 task="text_generation",
                 model_type=ModelType.LLAMA3_1_8B,
-                input_shape=[1, 2048],  # (batch, max_seq_length)
+                input_shape=[1, 8000],  # (batch, model_max_length per reference)
                 input_name="input_ids",
                 output_name="logits",
                 data_format="NC",
@@ -595,7 +595,7 @@ class BenchmarkConfig:
                     "rouge2": 15.9075,
                     "rougeL": 24.4957,
                     "rougeLsum": 35.793,
-                    "tokens_per_sample": 0.0,  # gen_len checked at 90% threshold
+                    "gen_len": 8167644,  # FP32 reference, checked at 90% threshold
                 },
                 preprocessing=PreprocessingConfig(),  # Not used for text
                 offline=ScenarioConfig(

@@ -29,14 +29,26 @@ class CnnDailyMailDataset(BaseDataset):
 
     Loads the MLCommons-processed JSON file containing pre-formatted
     prompts and reference summaries for ROUGE-based accuracy evaluation.
+
+    Supports two JSON formats:
+    - Reference format: {instruction, input (raw article), tok_input, output}
+    - Simple format: {input (formatted prompt), output}
+    When tok_input is available, it is used directly (no re-tokenization).
     """
+
+    # MLCommons reference instruction template
+    _INSTRUCTION_TEMPLATE = (
+        "Summarize the following news article in 128 tokens. "
+        "Please output the summary only, without any other text.\n\n"
+        "Article:\n{input}\n\nSummary:"
+    )
 
     def __init__(
         self,
         data_path: str,
         model_name: str = "meta-llama/Llama-3.1-8B-Instruct",
         count: Optional[int] = None,
-        max_seq_length: int = 2048,
+        max_seq_length: int = 8000,
         **kwargs,
     ):
         super().__init__(data_path, count, **kwargs)
@@ -45,6 +57,7 @@ class CnnDailyMailDataset(BaseDataset):
 
         self._input_texts: List[str] = []
         self._reference_outputs: List[str] = []
+        self._tok_inputs: List[Optional[List[int]]] = []
         self._input_ids_cache: Dict[int, np.ndarray] = {}
         self._attention_mask_cache: Dict[int, np.ndarray] = {}
 
@@ -57,6 +70,7 @@ class CnnDailyMailDataset(BaseDataset):
             self._tokenizer = AutoTokenizer.from_pretrained(
                 self.model_name,
                 padding_side="left",
+                use_fast=False,
             )
             if self._tokenizer.pad_token is None:
                 self._tokenizer.pad_token = self._tokenizer.eos_token
@@ -98,18 +112,23 @@ class CnnDailyMailDataset(BaseDataset):
         if self.count is not None and self.count < len(self._input_texts):
             self._input_texts = self._input_texts[: self.count]
             self._reference_outputs = self._reference_outputs[: self.count]
+            self._tok_inputs = self._tok_inputs[: self.count]
 
         self._items = list(range(len(self._input_texts)))
         self._labels = self._reference_outputs
         self._loaded = True
 
+        has_tok = sum(1 for t in self._tok_inputs if t is not None)
         logger.info(
             f"CNN-DailyMail dataset loaded: {len(self._input_texts)} samples "
-            f"(max_seq_length={self.max_seq_length})"
+            f"(tok_input: {has_tok}, max_seq_length={self.max_seq_length})"
         )
 
     def _load_from_json(self, json_path: Path) -> None:
-        """Load MLCommons-format JSON (list of dicts with 'input' and 'output')."""
+        """Load MLCommons-format JSON.
+
+        Supports both reference format (with tok_input) and simple format.
+        """
         logger.info(f"Loading dataset from {json_path}...")
 
         with open(json_path, "r", encoding="utf-8") as f:
@@ -117,13 +136,32 @@ class CnnDailyMailDataset(BaseDataset):
 
         if isinstance(data, list):
             for entry in data:
-                self._input_texts.append(str(entry.get("input", "")))
+                tok_input = entry.get("tok_input", None)
+                raw_input = entry.get("input", "")
+
+                if tok_input is not None:
+                    # Reference format: input is raw article, tok_input has pre-tokenized IDs
+                    # Check if input looks like raw article (no instruction template)
+                    if "instruction" in entry:
+                        # Full reference format — reconstruct formatted prompt for display
+                        self._input_texts.append(
+                            self._INSTRUCTION_TEMPLATE.format(input=str(raw_input))
+                        )
+                    else:
+                        self._input_texts.append(str(raw_input))
+                    self._tok_inputs.append(list(tok_input))
+                else:
+                    # Simple format: input is already the formatted prompt
+                    self._input_texts.append(str(raw_input))
+                    self._tok_inputs.append(None)
+
                 self._reference_outputs.append(str(entry.get("output", "")))
         elif isinstance(data, dict):
             inputs = data.get("input", data.get("inputs", []))
             outputs = data.get("output", data.get("outputs", []))
             self._input_texts = [str(x) for x in inputs]
             self._reference_outputs = [str(x) for x in outputs]
+            self._tok_inputs = [None] * len(self._input_texts)
 
         logger.info(f"Loaded {len(self._input_texts)} samples from JSON")
 
@@ -139,36 +177,54 @@ class CnnDailyMailDataset(BaseDataset):
                 if isinstance(entry, dict):
                     self._input_texts.append(str(entry.get("input", "")))
                     self._reference_outputs.append(str(entry.get("output", "")))
+                    self._tok_inputs.append(entry.get("tok_input", None))
         elif hasattr(data, "to_dict"):
-            # pandas DataFrame
             records = data.to_dict("records")
             for entry in records:
                 self._input_texts.append(str(entry.get("input", "")))
                 self._reference_outputs.append(str(entry.get("output", "")))
+                self._tok_inputs.append(entry.get("tok_input", None))
+
+        if len(self._tok_inputs) < len(self._input_texts):
+            self._tok_inputs.extend(
+                [None] * (len(self._input_texts) - len(self._tok_inputs))
+            )
 
         logger.info(f"Loaded {len(self._input_texts)} samples from pickle")
 
     def tokenize_sample(self, index: int) -> Dict[str, np.ndarray]:
-        """Tokenize a single sample, with caching."""
+        """Get tokenized features for a sample.
+
+        Uses pre-tokenized tok_input when available (reference format),
+        otherwise tokenizes the formatted prompt text.
+        """
         if index in self._input_ids_cache:
             return {
                 "input_ids": self._input_ids_cache[index],
                 "attention_mask": self._attention_mask_cache[index],
             }
 
-        tokenizer = self._get_tokenizer()
-        text = self._input_texts[index]
+        tok_input = self._tok_inputs[index] if index < len(self._tok_inputs) else None
 
-        encoded = tokenizer(
-            text,
-            return_tensors="np",
-            padding=False,
-            truncation=True,
-            max_length=self.max_seq_length,
-        )
+        if tok_input is not None:
+            # Use pre-tokenized IDs from reference JSON (closed division)
+            input_ids = np.array(tok_input, dtype=np.int64).reshape(1, -1)
+            attention_mask = np.ones_like(input_ids)
+        else:
+            # Fallback: tokenize formatted prompt text
+            tokenizer = self._get_tokenizer()
+            text = self._input_texts[index]
 
-        input_ids = encoded["input_ids"].astype(np.int64)
-        attention_mask = encoded["attention_mask"].astype(np.int64)
+            encoded = tokenizer(
+                text,
+                return_tensors="np",
+                padding=False,
+                truncation=True,
+                max_length=self.max_seq_length,
+            )
+
+            input_ids = encoded["input_ids"].astype(np.int64)
+            attention_mask = encoded["attention_mask"].astype(np.int64)
 
         self._input_ids_cache[index] = input_ids
         self._attention_mask_cache[index] = attention_mask
@@ -307,7 +363,7 @@ class CnnDailyMailQSL(QuerySampleLibrary):
         model_name: str = "meta-llama/Llama-3.1-8B-Instruct",
         count: Optional[int] = None,
         performance_sample_count: int = 13368,
-        max_seq_length: int = 2048,
+        max_seq_length: int = 8000,
     ):
         self.dataset = CnnDailyMailDataset(
             data_path=data_path,

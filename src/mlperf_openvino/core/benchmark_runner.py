@@ -453,7 +453,7 @@ class BenchmarkRunner:
             model_name="meta-llama/Llama-3.1-8B-Instruct",
             count=self.config.dataset.num_samples if self.config.dataset.num_samples > 0 else None,
             performance_sample_count=13368,
-            max_seq_length=2048,
+            max_seq_length=8000,
         )
         self.qsl.load()
 
@@ -846,6 +846,7 @@ class BenchmarkRunner:
         logger.info(f"ROUGE-2: {self._accuracy_results.get('rouge2', 0):.4f}")
         logger.info(f"ROUGE-L: {self._accuracy_results.get('rougeL', 0):.4f}")
         logger.info(f"ROUGE-Lsum: {self._accuracy_results.get('rougeLsum', 0):.4f}")
+        logger.info(f"gen_len: {self._accuracy_results.get('gen_len', 0)}")
         logger.info(
             f"Tokens/sample: {self._accuracy_results.get('tokens_per_sample', 0):.2f}"
         )
@@ -925,25 +926,27 @@ class BenchmarkRunner:
             rouge1 = acc.get('rouge1', 0)
             rouge2 = acc.get('rouge2', 0)
             rougeL = acc.get('rougeL', 0)
+            rougeLsum = acc.get('rougeLsum', 0)
             tokens = acc.get('tokens_per_sample', 0)
             gen_len = acc.get('gen_len', 0)
             num_samples = acc.get('num_samples', 0)
-            # MLPerf thresholds: 99% of FP32 reference
+            # MLPerf thresholds: 99% of FP32 reference for ROUGE, 90% for gen_len
             metrics_cfg = self.config.model.accuracy_metrics
-            rougeLsum = acc.get('rougeLsum', 0)
             ref_r1 = metrics_cfg.get('rouge1', 38.7792)
             ref_r2 = metrics_cfg.get('rouge2', 15.9075)
             ref_rL = metrics_cfg.get('rougeL', 24.4957)
             ref_rLsum = metrics_cfg.get('rougeLsum', 35.793)
+            ref_gen_len = metrics_cfg.get('gen_len', 8167644)
             r1_status = "PASS" if rouge1 >= ref_r1 * 0.99 else "FAIL"
             r2_status = "PASS" if rouge2 >= ref_r2 * 0.99 else "FAIL"
             rL_status = "PASS" if rougeL >= ref_rL * 0.99 else "FAIL"
             rLsum_status = "PASS" if rougeLsum >= ref_rLsum * 0.99 else "FAIL"
+            gen_len_status = "PASS" if gen_len >= ref_gen_len * 0.90 else "FAIL"
             print(f"ROUGE-1: {rouge1:.4f} (ref: {ref_r1:.4f}) [{r1_status}]")
             print(f"ROUGE-2: {rouge2:.4f} (ref: {ref_r2:.4f}) [{r2_status}]")
             print(f"ROUGE-L: {rougeL:.4f} (ref: {ref_rL:.4f}) [{rL_status}]")
             print(f"ROUGE-Lsum: {rougeLsum:.4f} (ref: {ref_rLsum:.4f}) [{rLsum_status}]")
-            print(f"Tokens/sample: {tokens:.2f} | gen_len: {gen_len}")
-            print(f"Samples: {num_samples}")
+            print(f"gen_len: {gen_len} (ref: {ref_gen_len}, 90%: {int(ref_gen_len * 0.90)}) [{gen_len_status}]")
+            print(f"Tokens/sample: {tokens:.2f} | Samples: {num_samples}")
 
         print("="*50 + "\n")
