@@ -686,8 +686,8 @@ def list_models():
             'type': ModelType.LLAMA3_1_8B,
             'task': 'Text Generation',
             'dataset': 'CNN-DailyMail v3.0.0',
-            'metric': 'ROUGE-1/2/L',
-            'target': '42.9865 / 20.1235 / 29.9881',
+            'metric': 'ROUGE-1/2/L/Lsum',
+            'target': '38.7792 / 15.9075 / 24.4957 / 35.793',
         },
     ]
 

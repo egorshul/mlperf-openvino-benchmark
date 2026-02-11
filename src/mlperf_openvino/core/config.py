@@ -591,9 +591,10 @@ class BenchmarkConfig:
                 accuracy_target=0.0,
                 accuracy_threshold=0.99,
                 accuracy_metrics={
-                    "rouge1": 42.9865,
-                    "rouge2": 20.1235,
-                    "rougeL": 29.9881,
+                    "rouge1": 38.7792,
+                    "rouge2": 15.9075,
+                    "rougeL": 24.4957,
+                    "rougeLsum": 35.793,
                     "tokens_per_sample": 0.0,  # gen_len checked at 90% threshold
                 },
                 preprocessing=PreprocessingConfig(),  # Not used for text

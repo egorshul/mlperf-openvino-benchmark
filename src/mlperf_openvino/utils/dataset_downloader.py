@@ -1451,11 +1451,13 @@ def download_cnn_dailymail(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Llama 3.1 Instruct chat template for summarization
+    # MLCommons reference prompt template for Llama 3.1 8B summarization
+    # Plain instruction (NOT chat template) — matches download_cnndm.py reference
+    # BOS token (<|begin_of_text|>) is added implicitly by the tokenizer
     PROMPT_TEMPLATE = (
-        "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n"
-        "Briefly summarize this news article:\n\n{article}"
-        "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+        "Summarize the following news article in 128 tokens. "
+        "Please output the summary only, without any other text.\n\n"
+        "Article:\n{article}\n\nSummary:"
     )
 
     logger.info("Processing articles with Llama 3.1 chat template...")

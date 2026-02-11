@@ -290,9 +290,10 @@ models:
     accuracy_threshold: 0.99
 
     accuracy_metrics:
-      rouge1: 42.9865        # FP32 reference (99% = 42.5566)
-      rouge2: 20.1235        # FP32 reference (99% = 19.9223)
-      rougeL: 29.9881        # FP32 reference (99% = 29.6882)
+      rouge1: 38.7792        # FP32 reference (99% = 38.3914)
+      rouge2: 15.9075        # FP32 reference (99% = 15.7484)
+      rougeL: 24.4957        # FP32 reference (99% = 24.2507)
+      rougeLsum: 35.793      # FP32 reference (99% = 35.4351)
       tokens_per_sample: 0.0 # gen_len checked separately at 90% threshold
 
     sources:

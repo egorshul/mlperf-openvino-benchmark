@@ -212,50 +212,82 @@ class CnnDailyMailDataset(BaseDataset):
     def compute_accuracy(
         self, predictions: List[str], labels: List[str]
     ) -> Dict[str, float]:
-        """Compute ROUGE scores per MLCommons specification.
+        """Compute ROUGE scores per MLCommons Inference v5.1 specification.
 
-        Uses rouge_scorer with use_stemmer=True matching the MLPerf reference
-        evaluate-accuracy.py for Llama 3.1 8B.
+        Matches the reference evaluation.py for Llama 3.1 8B:
+        - Uses HuggingFace evaluate ROUGE metric (same as reference)
+        - NLTK sentence tokenization before scoring (required for rougeLsum)
+        - use_stemmer=True
+        - Computes rouge1, rouge2, rougeL, rougeLsum (all 4 required)
+        - gen_len = sum of prediction character lengths
         """
         try:
-            from rouge_score import rouge_scorer
+            import evaluate
         except ImportError:
             raise ImportError(
-                "rouge-score is required for LLM accuracy. "
-                "Install with: pip install rouge-score"
+                "evaluate is required for LLM accuracy. "
+                "Install with: pip install evaluate rouge-score"
             )
 
-        scorer = rouge_scorer.RougeScorer(
-            ["rouge1", "rouge2", "rougeL"], use_stemmer=True
+        try:
+            import nltk
+            nltk.data.find("tokenizers/punkt_tab")
+        except (ImportError, LookupError):
+            try:
+                import nltk
+                nltk.download("punkt_tab", quiet=True)
+            except Exception:
+                pass
+
+        # Postprocess text: sentence-tokenize and join with newlines
+        # This matches the MLCommons reference postprocess_text()
+        def _postprocess(texts: List[str]) -> List[str]:
+            processed = []
+            for text in texts:
+                text = text.strip()
+                try:
+                    import nltk
+                    sentences = nltk.sent_tokenize(text)
+                    text = "\n".join(sentences)
+                except Exception:
+                    pass
+                processed.append(text)
+            return processed
+
+        preds = _postprocess(predictions)
+        refs = _postprocess(labels)
+
+        metric = evaluate.load("rouge")
+        result = metric.compute(
+            predictions=preds,
+            references=refs,
+            use_stemmer=True,
+            use_aggregator=False,
         )
 
-        rouge1_scores = []
-        rouge2_scores = []
-        rougeL_scores = []
-        gen_lengths = []
-
-        tokenizer = self._get_tokenizer()
-
-        for pred, ref in zip(predictions, labels):
-            scores = scorer.score(ref, pred)
-            rouge1_scores.append(scores["rouge1"].fmeasure * 100)
-            rouge2_scores.append(scores["rouge2"].fmeasure * 100)
-            rougeL_scores.append(scores["rougeL"].fmeasure * 100)
-
-            gen_len = len(tokenizer.encode(pred))
-            gen_lengths.append(gen_len)
-
         num_samples = len(predictions)
+
+        # Per-sample scores → means (scaled to percentage)
+        rouge1_scores = [s * 100 for s in result["rouge1"]]
+        rouge2_scores = [s * 100 for s in result["rouge2"]]
+        rougeL_scores = [s * 100 for s in result["rougeL"]]
+        rougeLsum_scores = [s * 100 for s in result["rougeLsum"]]
+
         avg_rouge1 = sum(rouge1_scores) / num_samples if num_samples > 0 else 0.0
         avg_rouge2 = sum(rouge2_scores) / num_samples if num_samples > 0 else 0.0
         avg_rougeL = sum(rougeL_scores) / num_samples if num_samples > 0 else 0.0
-        total_gen_len = sum(gen_lengths)
+        avg_rougeLsum = sum(rougeLsum_scores) / num_samples if num_samples > 0 else 0.0
+
+        # gen_len: sum of prediction character lengths (matches reference)
+        prediction_lens = [len(pred) for pred in preds]
+        total_gen_len = sum(prediction_lens)
         avg_tokens = total_gen_len / num_samples if num_samples > 0 else 0.0
 
         return {
             "rouge1": avg_rouge1,
             "rouge2": avg_rouge2,
             "rougeL": avg_rougeL,
+            "rougeLsum": avg_rougeLsum,
             "tokens_per_sample": avg_tokens,
             "gen_len": total_gen_len,
             "num_samples": num_samples,

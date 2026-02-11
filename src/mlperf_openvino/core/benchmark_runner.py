@@ -820,6 +820,7 @@ class BenchmarkRunner:
                 "rouge1": 0.0,
                 "rouge2": 0.0,
                 "rougeL": 0.0,
+                "rougeLsum": 0.0,
                 "tokens_per_sample": 0.0,
                 "num_samples": 0,
             }
@@ -844,6 +845,7 @@ class BenchmarkRunner:
         logger.info(f"ROUGE-1: {self._accuracy_results.get('rouge1', 0):.4f}")
         logger.info(f"ROUGE-2: {self._accuracy_results.get('rouge2', 0):.4f}")
         logger.info(f"ROUGE-L: {self._accuracy_results.get('rougeL', 0):.4f}")
+        logger.info(f"ROUGE-Lsum: {self._accuracy_results.get('rougeLsum', 0):.4f}")
         logger.info(
             f"Tokens/sample: {self._accuracy_results.get('tokens_per_sample', 0):.2f}"
         )
@@ -928,15 +930,19 @@ class BenchmarkRunner:
             num_samples = acc.get('num_samples', 0)
             # MLPerf thresholds: 99% of FP32 reference
             metrics_cfg = self.config.model.accuracy_metrics
-            ref_r1 = metrics_cfg.get('rouge1', 42.9865)
-            ref_r2 = metrics_cfg.get('rouge2', 20.1235)
-            ref_rL = metrics_cfg.get('rougeL', 29.9881)
+            rougeLsum = acc.get('rougeLsum', 0)
+            ref_r1 = metrics_cfg.get('rouge1', 38.7792)
+            ref_r2 = metrics_cfg.get('rouge2', 15.9075)
+            ref_rL = metrics_cfg.get('rougeL', 24.4957)
+            ref_rLsum = metrics_cfg.get('rougeLsum', 35.793)
             r1_status = "PASS" if rouge1 >= ref_r1 * 0.99 else "FAIL"
             r2_status = "PASS" if rouge2 >= ref_r2 * 0.99 else "FAIL"
             rL_status = "PASS" if rougeL >= ref_rL * 0.99 else "FAIL"
+            rLsum_status = "PASS" if rougeLsum >= ref_rLsum * 0.99 else "FAIL"
             print(f"ROUGE-1: {rouge1:.4f} (ref: {ref_r1:.4f}) [{r1_status}]")
             print(f"ROUGE-2: {rouge2:.4f} (ref: {ref_r2:.4f}) [{r2_status}]")
             print(f"ROUGE-L: {rougeL:.4f} (ref: {ref_rL:.4f}) [{rL_status}]")
+            print(f"ROUGE-Lsum: {rougeLsum:.4f} (ref: {ref_rLsum:.4f}) [{rLsum_status}]")
             print(f"Tokens/sample: {tokens:.2f} | gen_len: {gen_len}")
             print(f"Samples: {num_samples}")
 
