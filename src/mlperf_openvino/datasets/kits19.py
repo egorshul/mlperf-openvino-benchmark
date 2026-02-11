@@ -45,13 +45,13 @@ def get_gaussian_importance_map(roi_shape: Tuple[int, ...], sigma_scale: float =
     """Create 3D Gaussian importance map for sliding window aggregation.
 
     Matches MLCommons reference inference_utils.py gaussian_kernel() exactly:
-    Uses scipy.signal.gaussian with outer products and cube root normalization.
+    Uses scipy.signal.windows.gaussian with outer products and cube root normalization.
     """
-    from scipy import signal
+    from scipy.signal.windows import gaussian
 
     n = roi_shape[0]
     std = sigma_scale * n
-    gaussian1D = signal.gaussian(n, std)
+    gaussian1D = gaussian(n, std)
     gaussian2D = np.outer(gaussian1D, gaussian1D)
     gaussian3D = np.outer(gaussian2D, gaussian1D).reshape(n, n, n)
     gaussian3D = np.cbrt(gaussian3D)
