@@ -254,7 +254,6 @@ class BenchmarkRunner:
     def _setup_3dunet(self) -> None:
         """Set up 3D UNET benchmark."""
         from ..datasets.kits19 import KiTS19QSL
-        from .cpp_sut_wrapper import create_unet3d_sut
 
         self.qsl = KiTS19QSL(
             data_path=self.config.dataset.path,
@@ -264,16 +263,37 @@ class BenchmarkRunner:
         self.qsl.load()
 
         if self.config.openvino.is_accelerator_device():
-            self.sut = SUTFactory.create_multi_die_sut(
-                ModelType.UNET3D, self.config, self.qsl, self.backend
-            )
-        else:
-            self.sut = create_unet3d_sut(
-                config=self.config,
-                model_path=self.config.model.model_path,
-                qsl=self.qsl,
-                scenario=self.config.scenario,
-            )
+            try:
+                self.sut = SUTFactory.create_multi_die_sut(
+                    ModelType.UNET3D, self.config, self.qsl, self.backend
+                )
+                return
+            except Exception as e:
+                logger.warning(
+                    f"Accelerator SUT failed: {e}. "
+                    f"3D UNET model may exceed device memory. Falling back to CPU."
+                )
+
+        self._setup_3dunet_cpu()
+
+    def _setup_3dunet_cpu(self) -> None:
+        """Create 3D UNET Python SUT on CPU (also used as fallback from accelerator OOM)."""
+        from dataclasses import replace
+        from .unet3d_sut import UNet3DSUT
+        from ..backends.openvino_backend import OpenVINOBackend
+
+        cpu_ov_config = replace(self.config.openvino, device="CPU")
+        backend = OpenVINOBackend(
+            self.config.model.model_path, cpu_ov_config, use_nhwc_input=False
+        )
+        backend.load()
+        logger.info("Using 3D UNET Python SUT on CPU")
+        self.sut = UNet3DSUT(
+            config=self.config,
+            backend=backend,
+            qsl=self.qsl,
+            scenario=self.config.scenario,
+        )
 
     def _setup_whisper(self) -> None:
         """Set up Whisper benchmark."""
