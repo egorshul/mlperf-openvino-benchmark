@@ -136,6 +136,18 @@ DATASET_REGISTRY: Dict[str, Dict] = {
         "num_samples": 5000,  # MLPerf uses 5000 samples
         "note": "For MLPerf SDXL benchmark (closed division)",
     },
+    "open-orca": {
+        "description": "OpenORCA dataset for MLPerf LLM benchmarks (Llama 3.1 8B / Llama 2 70B)",
+        "huggingface": {
+            "dataset_id": "Open-Orca/OpenOrca",
+            "subset": "default",
+        },
+        "processed": {
+            "filename": "open_orca_gpt4_tokenized_llama.sampled_24576.pkl",
+        },
+        "num_samples": 24576,
+        "note": "MLCommons LLM benchmark dataset (processed OpenORCA GPT-4 subset)",
+    },
     "coco2017": {
         "description": "COCO 2017 validation set for SSD-ResNet34 Object Detection",
         "images": {
@@ -1384,6 +1396,143 @@ def download_coco2014(
     }
 
 
+def download_open_orca(
+    output_dir: str,
+    model_name: str = "meta-llama/Llama-3.1-8B-Instruct",
+    num_samples: int = 24576,
+    force: bool = False,
+) -> Dict[str, str]:
+    """Download and process the OpenORCA dataset for MLPerf LLM benchmarks.
+
+    Follows the MLCommons reference implementation:
+    1. Downloads Open-Orca/OpenOrca from HuggingFace
+    2. Filters GPT-4 responses
+    3. Tokenizes with the target model's tokenizer
+    4. Filters by token count (input <= 1024, output <= 1024)
+    5. Samples to the target count (24576 for MLPerf)
+    6. Saves as pickle in MLCommons format
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    data_dir = output_path / "open-orca"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    pkl_file = data_dir / "open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
+
+    if pkl_file.exists() and not force:
+        import pickle
+
+        with open(pkl_file, "rb") as f:
+            data = pickle.load(f)
+        actual_count = len(data) if isinstance(data, list) else 0
+        logger.info(f"OpenORCA dataset already exists: {actual_count} samples at {pkl_file}")
+        return {
+            "data_path": str(data_dir),
+            "pkl_file": str(pkl_file),
+            "num_samples": actual_count,
+        }
+
+    logger.info("Downloading and processing OpenORCA dataset for MLPerf LLM benchmark...")
+    logger.info(f"Target model: {model_name}")
+    logger.info(f"Target samples: {num_samples}")
+
+    try:
+        from datasets import load_dataset
+        from transformers import AutoTokenizer
+    except ImportError:
+        raise ImportError(
+            "datasets and transformers are required for OpenORCA download. "
+            "Install with: pip install datasets transformers"
+        )
+
+    logger.info("Loading Open-Orca/OpenOrca from HuggingFace...")
+    dataset = load_dataset("Open-Orca/OpenOrca", split="train")
+
+    # Filter for GPT-4 responses only (per MLCommons reference)
+    logger.info("Filtering GPT-4 responses...")
+    gpt4_data = dataset.filter(
+        lambda x: x.get("id", "").startswith("flan") is False
+        and "gpt4" in x.get("id", "").lower()
+    )
+    logger.info(f"GPT-4 filtered: {len(gpt4_data)} samples")
+
+    # If not enough GPT-4, fall back to all data
+    if len(gpt4_data) < num_samples:
+        logger.warning(
+            f"Only {len(gpt4_data)} GPT-4 samples (need {num_samples}). "
+            f"Using full dataset."
+        )
+        gpt4_data = dataset
+
+    # Load tokenizer for token counting
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+    # Process and filter by token length
+    logger.info("Tokenizing and filtering by length (input <= 1024, output <= 1024)...")
+    processed = []
+    for i, entry in enumerate(gpt4_data):
+        system_prompt = entry.get("system_prompt", "")
+        question = entry.get("question", "")
+        response = entry.get("response", "")
+
+        # Build input in chat format
+        if system_prompt:
+            input_text = f"{system_prompt}\n\n{question}"
+        else:
+            input_text = question
+
+        # Tokenize to check lengths
+        input_tokens = tokenizer.encode(input_text)
+        output_tokens = tokenizer.encode(response)
+
+        if len(input_tokens) <= 1024 and len(output_tokens) <= 1024:
+            processed.append({
+                "input": input_text,
+                "output": response,
+            })
+
+        if (i + 1) % 50000 == 0:
+            logger.info(
+                f"Processed {i + 1}/{len(gpt4_data)}, "
+                f"valid: {len(processed)}"
+            )
+
+        if len(processed) >= num_samples * 2:
+            break
+
+    logger.info(f"Valid samples after filtering: {len(processed)}")
+
+    # Sample to target count
+    import random
+
+    random.seed(42)  # Reproducible sampling
+    if len(processed) > num_samples:
+        processed = random.sample(processed, num_samples)
+    logger.info(f"Final dataset: {len(processed)} samples")
+
+    # Save as pickle (MLCommons format)
+    import pickle
+
+    with open(pkl_file, "wb") as f:
+        pickle.dump(processed, f)
+    logger.info(f"Dataset saved to {pkl_file}")
+
+    # Also save as JSON for inspection
+    import json
+
+    json_file = data_dir / "dataset.json"
+    with open(json_file, "w", encoding="utf-8") as f:
+        json.dump(processed[:100], f, indent=2, ensure_ascii=False)
+    logger.info(f"Sample JSON (100 entries) saved to {json_file}")
+
+    return {
+        "data_path": str(data_dir),
+        "pkl_file": str(pkl_file),
+        "num_samples": len(processed),
+    }
+
+
 def download_dataset(
     dataset_name: str,
     output_dir: str,
@@ -1402,6 +1551,8 @@ def download_dataset(
         return download_whisper_mlperf(output_dir)
     elif dataset_name == "coco2014":
         return download_coco2014(output_dir, force)
+    elif dataset_name == "open-orca":
+        return download_open_orca(output_dir, force=force)
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
@@ -1525,6 +1676,7 @@ def list_available_datasets() -> Dict[str, str]:
         "librispeech": DATASET_REGISTRY["librispeech"]["description"],
         "coco2014": DATASET_REGISTRY["coco2014"]["description"],
         "coco2017": DATASET_REGISTRY["coco2017"]["description"],
+        "open-orca": DATASET_REGISTRY["open-orca"]["description"],
     }
 
 

@@ -51,13 +51,14 @@ class BenchmarkRunner:
         model_type = self.config.model.model_type
         is_sdxl = model_type == ModelType.SDXL
         is_whisper = model_type == ModelType.WHISPER
+        is_llama = model_type == ModelType.LLAMA3_1_8B
         is_accelerator = self.config.openvino.is_accelerator_device()
         uses_cpp_multi_die_sut = (
             model_type in (ModelType.RESNET50, ModelType.BERT, ModelType.RETINANET, ModelType.SSD_RESNET34)
             and is_accelerator
         )
 
-        if is_sdxl:
+        if is_sdxl or is_llama:
             self.backend = None
         elif is_whisper:
             model_path = Path(self.config.model.model_path) if self.config.model.model_path else None
@@ -75,6 +76,8 @@ class BenchmarkRunner:
             self._setup_sdxl()
         elif is_whisper:
             self._setup_whisper()
+        elif is_llama:
+            self._setup_llama3_1_8b()
         elif model_type == ModelType.RESNET50:
             self._setup_resnet50()
         elif model_type == ModelType.BERT:
@@ -441,6 +444,39 @@ class BenchmarkRunner:
         )
         logger.info("SDXL: Using manual pipeline (SDXLManualSUT)")
 
+    def _setup_llama3_1_8b(self) -> None:
+        """Set up Llama 3.1 8B benchmark."""
+        from ..datasets.open_orca import OpenOrcaQSL
+
+        self.qsl = OpenOrcaQSL(
+            data_path=self.config.dataset.path,
+            model_name="meta-llama/Llama-3.1-8B-Instruct",
+            count=self.config.dataset.num_samples if self.config.dataset.num_samples > 0 else None,
+            performance_sample_count=24576,
+        )
+        self.qsl.load()
+
+        model_path = Path(self.config.model.model_path)
+
+        if self.config.openvino.is_accelerator_device():
+            from .llama_multi_die_sut import LlamaMultiDieSUT
+            logger.info(f"Using Llama multi-die SUT on {self.config.openvino.device}")
+            self.sut = LlamaMultiDieSUT(
+                config=self.config,
+                model_path=model_path,
+                qsl=self.qsl,
+                scenario=self.config.scenario,
+            )
+        else:
+            from .llama_sut import LlamaSUT
+            logger.info(f"Using Llama SUT on {self.config.openvino.device}")
+            self.sut = LlamaSUT(
+                config=self.config,
+                model_path=model_path,
+                qsl=self.qsl,
+                scenario=self.config.scenario,
+            )
+
     def _get_test_settings(self) -> "lg.TestSettings":
         """Create LoadGen test settings."""
         settings = lg.TestSettings()
@@ -606,6 +642,9 @@ class BenchmarkRunner:
         elif model_type == ModelType.SDXL:
             primary_metric = "clip_score"
             metric_value = self._accuracy_results.get("clip_score", 0.0)
+        elif model_type == ModelType.LLAMA3_1_8B:
+            primary_metric = "rougeL"
+            metric_value = self._accuracy_results.get("rougeL", 0.0)
         else:
             primary_metric = "accuracy"
             metric_value = 0.0
@@ -649,6 +688,8 @@ class BenchmarkRunner:
             self._compute_whisper_accuracy()
         elif model_type == ModelType.SDXL:
             self._compute_sdxl_accuracy()
+        elif model_type == ModelType.LLAMA3_1_8B:
+            self._compute_llama_accuracy()
 
     def _compute_resnet50_accuracy(self) -> None:
         """Compute ResNet50 accuracy (Top-1)."""
@@ -757,6 +798,44 @@ class BenchmarkRunner:
                 logger.warning(f"  CLIP Score {clip_score:.4f} not in [{clip_min}, {clip_max}]")
             if not fid_valid:
                 logger.warning(f"  FID Score {fid_score:.4f} not in [{fid_min}, {fid_max}]")
+
+    def _compute_llama_accuracy(self) -> None:
+        """Compute Llama accuracy (ROUGE scores per MLCommons specification)."""
+        predictions = self.sut.get_predictions()
+
+        if not predictions:
+            logger.error("No predictions found!")
+            self._accuracy_results = {
+                "rouge1": 0.0,
+                "rouge2": 0.0,
+                "rougeL": 0.0,
+                "tokens_per_sample": 0.0,
+                "num_samples": 0,
+            }
+            return
+
+        pred_texts = []
+        ground_truth = []
+
+        for sample_idx in sorted(predictions.keys()):
+            pred = predictions[sample_idx]
+            if isinstance(pred, str):
+                pred_texts.append(pred)
+            else:
+                pred_texts.append("")
+
+            ground_truth.append(self.qsl.get_label(sample_idx))
+
+        self._accuracy_results = self.qsl.dataset.compute_accuracy(
+            pred_texts, ground_truth
+        )
+
+        logger.info(f"ROUGE-1: {self._accuracy_results.get('rouge1', 0):.4f}")
+        logger.info(f"ROUGE-2: {self._accuracy_results.get('rouge2', 0):.4f}")
+        logger.info(f"ROUGE-L: {self._accuracy_results.get('rougeL', 0):.4f}")
+        logger.info(
+            f"Tokens/sample: {self._accuracy_results.get('tokens_per_sample', 0):.2f}"
+        )
 
     def save_results(self, output_path: Optional[str] = None) -> str:
         """Save benchmark results to file."""

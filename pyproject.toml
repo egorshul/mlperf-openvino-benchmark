@@ -59,8 +59,16 @@ sdxl = [
     "open_clip_torch>=2.20.0",
     "scipy>=1.10.0",
 ]
+llama = [
+    "optimum[openvino]>=1.16.0",
+    "transformers>=4.40.0",
+    "torch>=2.0.0",
+    "datasets>=2.14.0",
+    "rouge-score>=0.1.2",
+    "nncf>=2.7.0",
+]
 all = [
-    "mlperf-openvino-benchmark[dev,resnet,bert,retinanet,ssd-resnet34,whisper,sdxl]",
+    "mlperf-openvino-benchmark[dev,resnet,bert,retinanet,ssd-resnet34,whisper,sdxl,llama]",
 ]
 
 [project.scripts]

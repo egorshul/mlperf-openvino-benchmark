@@ -266,6 +266,47 @@ models:
       target_qps: 10.0  # Lower QPS due to high latency
       min_duration_ms: 600000  # 10 minutes (MLPerf v5.1 official requirement)
 
+  llama3.1-8b:
+    name: "Llama-3.1-8B"
+    task: "text_generation"
+    dataset: "open-orca"
+    input_shape: [1, 1024]  # (batch, max_seq_length)
+    input_name: "input_ids"
+    output_name: "logits"
+    data_format: "NC"
+    dtype: "FP16"
+
+    # Generation parameters (MLCommons reference)
+    generation:
+      max_new_tokens: 1024
+      do_sample: false  # Greedy decoding per MLPerf spec
+
+    # MLPerf v5.1 accuracy targets (ROUGE scores * 100)
+    accuracy_target: 0.0  # Composite - individual ROUGE thresholds below
+    accuracy_threshold: 0.99
+
+    accuracy_metrics:
+      rouge1: 44.4312
+      rouge2: 22.0352
+      rougeL: 28.6162
+      tokens_per_sample: 294.45
+
+    sources:
+      huggingface_model_id: "meta-llama/Llama-3.1-8B-Instruct"
+
+    # MLPerf LoadGen settings
+    performance_sample_count: 24576
+
+    offline:
+      min_duration_ms: 600000  # 10 minutes (MLPerf v5.1 official requirement)
+      min_query_count: 24576
+      samples_per_query: 1
+
+    server:
+      target_latency_ns: 2000000000  # 2s TTFT (Time To First Token)
+      target_qps: 1.0
+      min_duration_ms: 600000  # 10 minutes (MLPerf v5.1 official requirement)
+
 # OpenVINO specific settings
 openvino:
   device: "CPU"
@@ -337,6 +378,10 @@ datasets:
     prompts_file: "coco-1024.tsv"
     captions_file: "annotations/captions_val2014.json"
     images_dir: "coco-1024"  # Optional reference images for FID
+
+  open-orca:
+    path: "./data/open-orca"
+    processed_file: "open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
 
 # Output settings
 output:
