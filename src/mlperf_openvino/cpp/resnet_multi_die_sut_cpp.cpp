@@ -607,6 +607,11 @@ void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx
             for (size_t j = 0; j < total_elems; ++j) {
                 local_output[j] = static_cast<float>(src[j]);
             }
+        } else if (actual_type == ov::element::bf16) {
+            const ov::bfloat16* src = output_tensor.data<ov::bfloat16>();
+            for (size_t j = 0; j < total_elems; ++j) {
+                local_output[j] = static_cast<float>(src[j]);
+            }
         } else if (actual_type == ov::element::i64) {
             const int64_t* src = output_tensor.data<int64_t>();
             for (size_t j = 0; j < total_elems; ++j) {
@@ -614,6 +619,26 @@ void ResNetMultiDieCppSUT::on_inference_complete(ResNetMultiDieInferContext* ctx
             }
         } else if (actual_type == ov::element::i32) {
             const int32_t* src = output_tensor.data<int32_t>();
+            for (size_t j = 0; j < total_elems; ++j) {
+                local_output[j] = static_cast<float>(src[j]);
+            }
+        } else if (actual_type == ov::element::i8) {
+            const int8_t* src = output_tensor.data<int8_t>();
+            for (size_t j = 0; j < total_elems; ++j) {
+                local_output[j] = static_cast<float>(src[j]);
+            }
+        } else if (actual_type == ov::element::u8) {
+            const uint8_t* src = output_tensor.data<uint8_t>();
+            for (size_t j = 0; j < total_elems; ++j) {
+                local_output[j] = static_cast<float>(src[j]);
+            }
+        } else if (actual_type == ov::element::i16) {
+            const int16_t* src = output_tensor.data<int16_t>();
+            for (size_t j = 0; j < total_elems; ++j) {
+                local_output[j] = static_cast<float>(src[j]);
+            }
+        } else if (actual_type == ov::element::f64) {
+            const double* src = output_tensor.data<double>();
             for (size_t j = 0; j < total_elems; ++j) {
                 local_output[j] = static_cast<float>(src[j]);
             }
