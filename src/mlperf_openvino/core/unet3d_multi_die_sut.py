@@ -256,12 +256,24 @@ class UNet3DMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
             len(pred_list), len(pred_list) - missing_labels, missing_labels,
         )
         if pred_list:
-            first = pred_list[0]
-            unique_vals = np.unique(first)
+            first_pred = pred_list[0]
+            first_label = label_list[0]
+            unique_vals = np.unique(first_pred)
             logger.info(
                 "First prediction: shape=%s, dtype=%s, unique_values=%s",
-                first.shape, first.dtype, unique_vals,
+                first_pred.shape, first_pred.dtype, unique_vals,
             )
+            if first_label is not None:
+                label_unique = np.unique(first_label)
+                logger.info(
+                    "First label: shape=%s, dtype=%s, unique_values=%s",
+                    first_label.shape, first_label.dtype, label_unique,
+                )
+                if first_pred.shape != first_label.shape:
+                    logger.warning(
+                        "Shape mismatch: pred=%s, label=%s",
+                        first_pred.shape, first_label.shape,
+                    )
 
         return self.qsl.dataset.compute_accuracy(pred_list, label_list)
 
