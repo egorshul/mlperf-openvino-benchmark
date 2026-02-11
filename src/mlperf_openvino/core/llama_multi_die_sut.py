@@ -4,7 +4,8 @@ Distributes text generation across multiple accelerator dies using
 OVModelForCausalLM from Optimum-Intel. Each die gets a compiled copy
 of the model; samples are dispatched round-robin across dies.
 
-Follows the same pattern as WhisperMultiDieSUT.
+Follows the MLCommons Inference v5.1 reference:
+  https://github.com/mlcommons/inference/tree/master/language/llama3.1-8b
 """
 
 import array
@@ -34,8 +35,16 @@ except ImportError:
     OPTIMUM_CAUSAL_LM_AVAILABLE = False
     OVModelForCausalLM = None
 
+try:
+    import torch
+
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    torch = None
+
 from .config import BenchmarkConfig, Scenario
-from ..datasets.open_orca import OpenOrcaQSL
+from ..datasets.cnn_dailymail import CnnDailyMailQSL
 
 logger = logging.getLogger(__name__)
 
@@ -59,20 +68,37 @@ def _print_progress(completed: int, total: int, start_time: float) -> None:
         print(line, end="", file=sys.stderr, flush=True)
 
 
+def _make_response(sample_id: int, text: str, n_tokens: int) -> "lg.QuerySampleResponse":
+    """Build a QuerySampleResponse with n_tokens (required for LLM benchmarks)."""
+    text_bytes = text.encode("utf-8")
+    response_array = array.array("B", text_bytes)
+    bi = response_array.buffer_info()
+    try:
+        return lg.QuerySampleResponse(sample_id, bi[0], bi[1], n_tokens)
+    except TypeError:
+        return lg.QuerySampleResponse(sample_id, bi[0], bi[1])
+
+
 class LlamaMultiDieSUT:
     """Llama multi-die SUT using Optimum-Intel (OVModelForCausalLM).
 
     Per die: model is loaded and compiled on the accelerator.
     Offline mode distributes samples across dies in parallel via round-robin.
+
+    Per MLPerf v5.1 Llama 3.1 8B spec:
+      - Task: text summarization (CNN-DailyMail)
+      - max_new_tokens: 128
+      - Greedy decoding (do_sample=False)
+      - n_tokens reported per response (use_token_latencies=1)
     """
 
     def __init__(
         self,
         config: BenchmarkConfig,
         model_path: Union[str, Path],
-        qsl: OpenOrcaQSL,
+        qsl: CnnDailyMailQSL,
         scenario: Scenario = Scenario.OFFLINE,
-        max_new_tokens: int = 1024,
+        max_new_tokens: int = 128,
     ):
         if not LOADGEN_AVAILABLE:
             raise ImportError("MLPerf LoadGen is not installed")
@@ -81,6 +107,8 @@ class LlamaMultiDieSUT:
                 "optimum-intel is required for LlamaMultiDieSUT. "
                 "Install with: pip install optimum[openvino]"
             )
+        if not TORCH_AVAILABLE:
+            raise ImportError("torch is required for LlamaMultiDieSUT")
 
         self.config = config
         self.model_path = Path(model_path)
@@ -88,8 +116,11 @@ class LlamaMultiDieSUT:
         self.scenario = scenario
         self.max_new_tokens = max_new_tokens
 
+        self._store_predictions = True
         self._predictions: Dict[int, str] = {}
+        self._predictions_lock = threading.Lock()
         self._sample_count = 0
+        self._count_lock = threading.Lock()
         self._query_count = 0
         self._start_time = 0.0
 
@@ -98,6 +129,7 @@ class LlamaMultiDieSUT:
 
         self._models: List[Tuple[str, Any]] = []
         self._model_index = 0
+        self._model_index_lock = threading.Lock()
         self._tokenizer = None
 
         self._setup_models()
@@ -148,12 +180,14 @@ class LlamaMultiDieSUT:
                 f"Check that the device is available."
             )
 
-        ov_config: Dict[str, Any] = {"CACHE_DIR": ""}
-        if hasattr(self.config, "openvino") and hasattr(
-            self.config.openvino, "device_properties"
-        ):
-            for key, value in self.config.openvino.device_properties.items():
-                ov_config[key] = value
+        ov_config: Dict[str, Any] = {}
+        if hasattr(self.config, "openvino"):
+            if self.config.openvino.cache_dir:
+                ov_config["CACHE_DIR"] = self.config.openvino.cache_dir
+            if hasattr(self.config.openvino, "device_properties"):
+                if self.config.openvino.device_properties:
+                    for key, value in self.config.openvino.device_properties.items():
+                        ov_config[key] = value
 
         for die in device_dies:
             logger.info(f"[Llama] Loading model for {die} ...")
@@ -170,10 +204,12 @@ class LlamaMultiDieSUT:
             f"[Llama] {len(self._models)} die(s) ready: {', '.join(die_names)}"
         )
 
-    def _process_sample(self, sample_idx: int, model: Any) -> str:
-        """Run inference on a single sample using the given model."""
-        import torch
+    def _process_sample(self, sample_idx: int, model: Any) -> Tuple[str, int]:
+        """Run inference on a single sample using the given model.
 
+        Returns:
+            (decoded_text, n_tokens) — generated text and token count.
+        """
         features = self.qsl.get_features(sample_idx)
         input_ids = features["input_ids"]
         attention_mask = features["attention_mask"]
@@ -195,15 +231,16 @@ class LlamaMultiDieSUT:
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 max_new_tokens=self.max_new_tokens,
+                min_new_tokens=1,
                 do_sample=False,  # Greedy decoding per MLPerf spec
-                temperature=None,
-                top_p=None,
+                num_beams=1,
             )
 
-        # Decode only the generated tokens (exclude input prompt)
-        new_tokens = generated_ids[0, input_len:]
-        text = self._tokenizer.decode(new_tokens, skip_special_tokens=True)
-        return text
+        # Extract only the newly generated tokens (exclude input prompt)
+        new_token_ids = generated_ids[0, input_len:]
+        n_tokens = len(new_token_ids)
+        text = self._tokenizer.decode(new_token_ids, skip_special_tokens=True)
+        return text, n_tokens
 
     def issue_queries(self, query_samples: List[Any]) -> None:
         self._query_count += len(query_samples)
@@ -231,17 +268,20 @@ class LlamaMultiDieSUT:
         for i, sample in enumerate(query_samples):
             die_batches[i % num_dies].append((sample, sample.index))
 
-        all_results: List[Tuple[Any, int, str]] = []
+        all_results: List[Tuple[Any, int, str, int]] = []  # (sample, idx, text, n_tokens)
         results_lock = threading.Lock()
 
         def _die_worker(die_idx: int, batch: List[Tuple[Any, int]]) -> None:
             _, model = self._models[die_idx]
             for sample, sample_idx in batch:
-                text = self._process_sample(sample_idx, model)
-                self._predictions[sample_idx] = text
-                self._sample_count += 1
+                text, n_tokens = self._process_sample(sample_idx, model)
+                with self._predictions_lock:
+                    if self._store_predictions:
+                        self._predictions[sample_idx] = text
+                with self._count_lock:
+                    self._sample_count += 1
                 with results_lock:
-                    all_results.append((sample, sample_idx, text))
+                    all_results.append((sample, sample_idx, text, n_tokens))
 
         with ThreadPoolExecutor(max_workers=num_dies) as pool:
             futures = [
@@ -251,64 +291,66 @@ class LlamaMultiDieSUT:
             ]
             while True:
                 done = sum(1 for f in futures if f.done())
-                _print_progress(self._sample_count, total, self._start_time)
+                with self._count_lock:
+                    count = self._sample_count
+                _print_progress(count, total, self._start_time)
                 if done == len(futures):
                     break
                 time.sleep(0.5)
 
             for f in futures:
-                f.result()
+                f.result()  # raise exceptions from workers
 
         _print_progress(total, total, self._start_time)
 
         responses = []
-        arrays = []
-        for sample, _idx, text in sorted(all_results, key=lambda r: r[1]):
-            text_bytes = text.encode("utf-8")
-            arr = array.array("B", text_bytes)
-            arrays.append(arr)
-            bi = arr.buffer_info()
-            responses.append(lg.QuerySampleResponse(sample.id, bi[0], bi[1]))
+        for sample, _idx, text, n_tokens in sorted(all_results, key=lambda r: r[1]):
+            responses.append(_make_response(sample.id, text, n_tokens))
         lg.QuerySamplesComplete(responses)
 
     def _issue_queries_offline_sequential(self, query_samples: List[Any]) -> None:
         total = len(query_samples)
         responses = []
-        arrays = []
 
         _, model = self._models[0]
         for sample in query_samples:
             sample_idx = sample.index
-            text = self._process_sample(sample_idx, model)
-            self._predictions[sample_idx] = text
+            text, n_tokens = self._process_sample(sample_idx, model)
+
+            if self._store_predictions:
+                self._predictions[sample_idx] = text
             self._sample_count += 1
 
-            text_bytes = text.encode("utf-8")
-            arr = array.array("B", text_bytes)
-            arrays.append(arr)
-            bi = arr.buffer_info()
-            responses.append(lg.QuerySampleResponse(sample.id, bi[0], bi[1]))
+            responses.append(_make_response(sample.id, text, n_tokens))
             _print_progress(self._sample_count, total, self._start_time)
 
         _print_progress(total, total, self._start_time)
         lg.QuerySamplesComplete(responses)
 
     def _issue_queries_server(self, query_samples: List[Any]) -> None:
+        """Server mode: respond per query with TTFT via FirstTokenComplete."""
         for sample in query_samples:
             sample_idx = sample.index
-            _name, model = self._models[self._model_index]
-            self._model_index = (self._model_index + 1) % len(self._models)
 
-            text = self._process_sample(sample_idx, model)
-            self._predictions[sample_idx] = text
+            with self._model_index_lock:
+                _name, model = self._models[self._model_index]
+                self._model_index = (self._model_index + 1) % len(self._models)
+
+            text, n_tokens = self._process_sample(sample_idx, model)
+
+            if self._store_predictions:
+                with self._predictions_lock:
+                    self._predictions[sample_idx] = text
             self._sample_count += 1
 
-            text_bytes = text.encode("utf-8")
-            arr = array.array("B", text_bytes)
-            bi = arr.buffer_info()
-            lg.QuerySamplesComplete(
-                [lg.QuerySampleResponse(sample.id, bi[0], bi[1])]
-            )
+            resp = _make_response(sample.id, text, n_tokens)
+
+            try:
+                lg.FirstTokenComplete([resp])
+            except (AttributeError, TypeError):
+                pass
+
+            lg.QuerySamplesComplete([resp])
 
     def flush_queries(self) -> None:
         pass
@@ -332,13 +374,34 @@ class LlamaMultiDieSUT:
         return self._qsl_handle
 
     def get_predictions(self) -> Dict[int, str]:
-        return self._predictions.copy()
+        with self._predictions_lock:
+            return self._predictions.copy()
 
     def set_store_predictions(self, store: bool) -> None:
-        pass  # Always store for accuracy mode
+        self._store_predictions = store
 
     def reset(self) -> None:
-        self._predictions.clear()
+        with self._predictions_lock:
+            self._predictions.clear()
         self._query_count = 0
         self._sample_count = 0
-        self._model_index = 0
+        with self._model_index_lock:
+            self._model_index = 0
+
+    def warmup(self, num_iterations: int = 3) -> None:
+        """Warm up each die with dummy inputs."""
+        logger.info(f"[Llama] Warming up {len(self._models)} die(s)...")
+        dummy_input = torch.ones(1, 32, dtype=torch.long)
+        dummy_mask = torch.ones(1, 32, dtype=torch.long)
+
+        for die_name, model in self._models:
+            for _ in range(num_iterations):
+                with torch.no_grad():
+                    model.generate(
+                        input_ids=dummy_input,
+                        attention_mask=dummy_mask,
+                        max_new_tokens=1,
+                        do_sample=False,
+                    )
+            logger.info(f"  {die_name}: warmed up")
+        logger.info("[Llama] Warmup complete")

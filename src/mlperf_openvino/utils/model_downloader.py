@@ -713,16 +713,9 @@ def _export_llama_to_openvino(
 
     # Check if already exported
     if ov_model_path.exists():
-        openvino_model = ov_model_path / "openvino_model.xml"
-        if not openvino_model.exists():
-            openvino_model = ov_model_path / "openvino_model.xml"
-            # Check for any .xml file
-            xml_files = list(ov_model_path.glob("*.xml"))
-            if xml_files:
-                openvino_model = xml_files[0]
-
         config_file = ov_model_path / "config.json"
-        if config_file.exists() and (ov_model_path / "openvino_model.xml").exists():
+        xml_files = list(ov_model_path.glob("*.xml"))
+        if config_file.exists() and xml_files:
             logger.info(f"OpenVINO model already exists at {ov_model_path}")
             return {"model_path": str(ov_model_path)}
 

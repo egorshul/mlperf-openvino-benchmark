@@ -2,6 +2,9 @@
 
 Uses OVModelForCausalLM from optimum-intel for OpenVINO-accelerated
 autoregressive text generation with KV-cache support.
+
+Follows the MLCommons Inference v5.1 reference:
+  https://github.com/mlcommons/inference/tree/master/language/llama3.1-8b
 """
 
 import array
@@ -9,7 +12,7 @@ import logging
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Union
 
 import numpy as np
 
@@ -29,8 +32,16 @@ except ImportError:
     OPTIMUM_CAUSAL_LM_AVAILABLE = False
     OVModelForCausalLM = None
 
+try:
+    import torch
+
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    torch = None
+
 from .config import BenchmarkConfig, Scenario
-from ..datasets.open_orca import OpenOrcaQSL
+from ..datasets.cnn_dailymail import CnnDailyMailQSL
 
 logger = logging.getLogger(__name__)
 
@@ -54,20 +65,38 @@ def _print_progress(completed: int, total: int, start_time: float) -> None:
         print(line, end="", file=sys.stderr, flush=True)
 
 
+def _make_response(sample_id: int, text: str, n_tokens: int) -> "lg.QuerySampleResponse":
+    """Build a QuerySampleResponse with n_tokens (required for LLM benchmarks)."""
+    text_bytes = text.encode("utf-8")
+    response_array = array.array("B", text_bytes)
+    bi = response_array.buffer_info()
+    try:
+        return lg.QuerySampleResponse(sample_id, bi[0], bi[1], n_tokens)
+    except TypeError:
+        # Older LoadGen versions without n_tokens parameter
+        return lg.QuerySampleResponse(sample_id, bi[0], bi[1])
+
+
 class LlamaSUT:
     """Llama SUT for single-device inference (CPU/GPU).
 
     Uses Optimum-Intel OVModelForCausalLM for OpenVINO-optimized
     autoregressive generation with stateful KV-cache.
+
+    Per MLPerf v5.1 Llama 3.1 8B spec:
+      - Task: text summarization (CNN-DailyMail)
+      - max_new_tokens: 128
+      - Greedy decoding (do_sample=False)
+      - n_tokens reported per response (use_token_latencies=1)
     """
 
     def __init__(
         self,
         config: BenchmarkConfig,
         model_path: Union[str, Path],
-        qsl: OpenOrcaQSL,
+        qsl: CnnDailyMailQSL,
         scenario: Scenario = Scenario.OFFLINE,
-        max_new_tokens: int = 1024,
+        max_new_tokens: int = 128,
     ):
         if not LOADGEN_AVAILABLE:
             raise ImportError("MLPerf LoadGen is not installed")
@@ -76,6 +105,8 @@ class LlamaSUT:
                 "optimum-intel is required for LlamaSUT. "
                 "Install with: pip install optimum[openvino]"
             )
+        if not TORCH_AVAILABLE:
+            raise ImportError("torch is required for LlamaSUT")
 
         self.config = config
         self.model_path = Path(model_path)
@@ -83,6 +114,7 @@ class LlamaSUT:
         self.scenario = scenario
         self.max_new_tokens = max_new_tokens
 
+        self._store_predictions = True
         self._predictions: Dict[int, str] = {}
         self._sample_count = 0
         self._query_count = 0
@@ -101,8 +133,10 @@ class LlamaSUT:
 
         device = self.config.openvino.device if hasattr(self.config, "openvino") else "CPU"
 
-        ov_config: Dict[str, Any] = {"CACHE_DIR": ""}
+        ov_config: Dict[str, Any] = {}
         if hasattr(self.config, "openvino"):
+            if self.config.openvino.cache_dir:
+                ov_config["CACHE_DIR"] = self.config.openvino.cache_dir
             if self.config.openvino.performance_hint:
                 ov_config["PERFORMANCE_HINT"] = self.config.openvino.performance_hint
             if self.config.openvino.num_threads > 0:
@@ -132,10 +166,12 @@ class LlamaSUT:
 
         logger.info(f"[Llama] Model loaded on {device}")
 
-    def _process_sample(self, sample_idx: int) -> str:
-        """Run inference on a single sample: tokenize → generate → decode."""
-        import torch
+    def _process_sample(self, sample_idx: int) -> tuple:
+        """Run inference on a single sample.
 
+        Returns:
+            (decoded_text, n_tokens) — generated text and token count.
+        """
         features = self.qsl.get_features(sample_idx)
         input_ids = features["input_ids"]
         attention_mask = features["attention_mask"]
@@ -157,15 +193,16 @@ class LlamaSUT:
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 max_new_tokens=self.max_new_tokens,
+                min_new_tokens=1,
                 do_sample=False,  # Greedy decoding per MLPerf spec
-                temperature=None,
-                top_p=None,
+                num_beams=1,
             )
 
-        # Decode only the generated tokens (exclude input prompt)
-        new_tokens = generated_ids[0, input_len:]
-        text = self._tokenizer.decode(new_tokens, skip_special_tokens=True)
-        return text
+        # Extract only the newly generated tokens (exclude input prompt)
+        new_token_ids = generated_ids[0, input_len:]
+        n_tokens = len(new_token_ids)
+        text = self._tokenizer.decode(new_token_ids, skip_special_tokens=True)
+        return text, n_tokens
 
     def issue_queries(self, query_samples: List[Any]) -> None:
         self._query_count += len(query_samples)
@@ -179,40 +216,50 @@ class LlamaSUT:
         self._start_time = time.time()
         self._sample_count = 0
 
-        logger.info(f"[Offline] Processing {total} samples sequentially on CPU")
+        device = self.config.openvino.device if hasattr(self.config, "openvino") else "CPU"
+        logger.info(f"[Offline] Processing {total} samples on {device}")
 
         responses = []
-        arrays = []
+        response_arrays = []  # prevent GC before QuerySamplesComplete
 
         for sample in query_samples:
             sample_idx = sample.index
-            text = self._process_sample(sample_idx)
-            self._predictions[sample_idx] = text
+            text, n_tokens = self._process_sample(sample_idx)
+
+            if self._store_predictions:
+                self._predictions[sample_idx] = text
+
             self._sample_count += 1
 
-            text_bytes = text.encode("utf-8")
-            arr = array.array("B", text_bytes)
-            arrays.append(arr)
-            bi = arr.buffer_info()
-            responses.append(lg.QuerySampleResponse(sample.id, bi[0], bi[1]))
+            resp = _make_response(sample.id, text, n_tokens)
+            responses.append(resp)
             _print_progress(self._sample_count, total, self._start_time)
 
         _print_progress(total, total, self._start_time)
         lg.QuerySamplesComplete(responses)
 
     def _issue_queries_server(self, query_samples: List[Any]) -> None:
+        """Server mode: respond per query, report FirstTokenComplete for TTFT."""
         for sample in query_samples:
             sample_idx = sample.index
-            text = self._process_sample(sample_idx)
-            self._predictions[sample_idx] = text
+            text, n_tokens = self._process_sample(sample_idx)
+
+            if self._store_predictions:
+                self._predictions[sample_idx] = text
+
             self._sample_count += 1
 
-            text_bytes = text.encode("utf-8")
-            arr = array.array("B", text_bytes)
-            bi = arr.buffer_info()
-            lg.QuerySamplesComplete(
-                [lg.QuerySampleResponse(sample.id, bi[0], bi[1])]
-            )
+            resp = _make_response(sample.id, text, n_tokens)
+
+            # Report first-token latency (TTFT) per MLPerf LLM spec.
+            # With non-streaming OVModelForCausalLM.generate(), TTFT equals
+            # total generation time — streaming would improve this.
+            try:
+                lg.FirstTokenComplete([resp])
+            except (AttributeError, TypeError):
+                pass  # Older LoadGen without FirstTokenComplete
+
+            lg.QuerySamplesComplete([resp])
 
     def flush_queries(self) -> None:
         pass
@@ -239,7 +286,7 @@ class LlamaSUT:
         return self._predictions.copy()
 
     def set_store_predictions(self, store: bool) -> None:
-        pass  # Always store for accuracy mode
+        self._store_predictions = store
 
     def reset(self) -> None:
         self._predictions.clear()
@@ -248,8 +295,6 @@ class LlamaSUT:
 
     def warmup(self, num_iterations: int = 5) -> None:
         """Warm up the model with dummy inputs."""
-        import torch
-
         logger.info(f"[Llama] Warming up ({num_iterations} iterations)...")
         dummy_input = torch.ones(1, 32, dtype=torch.long)
         dummy_mask = torch.ones(1, 32, dtype=torch.long)

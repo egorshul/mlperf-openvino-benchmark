@@ -571,13 +571,19 @@ class BenchmarkConfig:
 
     @classmethod
     def default_llama3_1_8b(cls) -> "BenchmarkConfig":
-        """Create default Llama 3.1 8B configuration per MLPerf Inference v5.1."""
+        """Create default Llama 3.1 8B configuration per MLPerf Inference v5.1.
+
+        Task: text summarization (CNN-DailyMail)
+        Dataset: 13,368 samples (datacenter) / 5,000 (edge)
+        max_new_tokens: 128
+        Accuracy: ROUGE-1/2/L + gen_len (token count)
+        """
         return cls(
             model=ModelConfig(
                 name="Llama-3.1-8B",
                 task="text_generation",
                 model_type=ModelType.LLAMA3_1_8B,
-                input_shape=[1, 1024],  # (batch, max_seq_length)
+                input_shape=[1, 2048],  # (batch, max_seq_length)
                 input_name="input_ids",
                 output_name="logits",
                 data_format="NC",
@@ -585,27 +591,27 @@ class BenchmarkConfig:
                 accuracy_target=0.0,
                 accuracy_threshold=0.99,
                 accuracy_metrics={
-                    "rouge1": 44.4312,
-                    "rouge2": 22.0352,
-                    "rougeL": 28.6162,
-                    "tokens_per_sample": 294.45,
+                    "rouge1": 42.9865,
+                    "rouge2": 20.1235,
+                    "rougeL": 29.9881,
+                    "tokens_per_sample": 0.0,  # gen_len checked at 90% threshold
                 },
                 preprocessing=PreprocessingConfig(),  # Not used for text
                 offline=ScenarioConfig(
                     min_duration_ms=600000,  # MLPerf official: 10 minutes
-                    min_query_count=24576,
+                    min_query_count=13368,
                     samples_per_query=1,
                 ),
                 server=ScenarioConfig(
                     min_duration_ms=600000,  # MLPerf official: 10 minutes
-                    min_query_count=24576,
+                    min_query_count=13368,
                     target_latency_ns=2000000000,  # 2s TTFT (Time To First Token)
                     target_qps=1.0,
                 ),
             ),
             dataset=DatasetConfig(
-                name="open-orca",
-                path="./data/open-orca",
+                name="cnn-dailymail",
+                path="./data/cnn-dailymail",
             ),
         )
 

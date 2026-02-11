@@ -445,14 +445,15 @@ class BenchmarkRunner:
         logger.info("SDXL: Using manual pipeline (SDXLManualSUT)")
 
     def _setup_llama3_1_8b(self) -> None:
-        """Set up Llama 3.1 8B benchmark."""
-        from ..datasets.open_orca import OpenOrcaQSL
+        """Set up Llama 3.1 8B benchmark (CNN-DailyMail summarization)."""
+        from ..datasets.cnn_dailymail import CnnDailyMailQSL
 
-        self.qsl = OpenOrcaQSL(
+        self.qsl = CnnDailyMailQSL(
             data_path=self.config.dataset.path,
             model_name="meta-llama/Llama-3.1-8B-Instruct",
             count=self.config.dataset.num_samples if self.config.dataset.num_samples > 0 else None,
-            performance_sample_count=24576,
+            performance_sample_count=13368,
+            max_seq_length=2048,
         )
         self.qsl.load()
 
@@ -466,6 +467,7 @@ class BenchmarkRunner:
                 model_path=model_path,
                 qsl=self.qsl,
                 scenario=self.config.scenario,
+                max_new_tokens=128,
             )
         else:
             from .llama_sut import LlamaSUT
@@ -475,6 +477,7 @@ class BenchmarkRunner:
                 model_path=model_path,
                 qsl=self.qsl,
                 scenario=self.config.scenario,
+                max_new_tokens=128,
             )
 
     def _get_test_settings(self) -> "lg.TestSettings":
@@ -528,6 +531,14 @@ class BenchmarkRunner:
             settings.schedule_rng_seed = scenario_config.schedule_rng_seed
 
         logger.info(f"LoadGen settings: min_duration={scenario_config.min_duration_ms/1000:.0f}s, min_query_count={scenario_config.min_query_count}")
+
+        # Enable token-level latency tracking for LLM benchmarks (required by MLPerf)
+        if self.config.model.model_type == ModelType.LLAMA3_1_8B:
+            try:
+                settings.use_token_latencies = True
+                logger.info("Token latencies enabled (LLM benchmark)")
+            except AttributeError:
+                logger.warning("LoadGen does not support use_token_latencies (upgrade to >= 4.0)")
 
         if self.config.scenario == Scenario.OFFLINE:
             expected_qps = scenario_config.target_qps if scenario_config.target_qps > 0 else 1000.0
@@ -908,5 +919,25 @@ class BenchmarkRunner:
             fid_status = "PASS" if fid_min <= fid <= fid_max else "FAIL"
             print(f"CLIP: {clip:.4f} [{clip_status}]")
             print(f"FID: {fid:.4f} [{fid_status}]")
+        elif model_type == 'llama3.1-8b':
+            rouge1 = acc.get('rouge1', 0)
+            rouge2 = acc.get('rouge2', 0)
+            rougeL = acc.get('rougeL', 0)
+            tokens = acc.get('tokens_per_sample', 0)
+            gen_len = acc.get('gen_len', 0)
+            num_samples = acc.get('num_samples', 0)
+            # MLPerf thresholds: 99% of FP32 reference
+            metrics_cfg = self.config.model.accuracy_metrics
+            ref_r1 = metrics_cfg.get('rouge1', 42.9865)
+            ref_r2 = metrics_cfg.get('rouge2', 20.1235)
+            ref_rL = metrics_cfg.get('rougeL', 29.9881)
+            r1_status = "PASS" if rouge1 >= ref_r1 * 0.99 else "FAIL"
+            r2_status = "PASS" if rouge2 >= ref_r2 * 0.99 else "FAIL"
+            rL_status = "PASS" if rougeL >= ref_rL * 0.99 else "FAIL"
+            print(f"ROUGE-1: {rouge1:.4f} (ref: {ref_r1:.4f}) [{r1_status}]")
+            print(f"ROUGE-2: {rouge2:.4f} (ref: {ref_r2:.4f}) [{r2_status}]")
+            print(f"ROUGE-L: {rougeL:.4f} (ref: {ref_rL:.4f}) [{rL_status}]")
+            print(f"Tokens/sample: {tokens:.2f} | gen_len: {gen_len}")
+            print(f"Samples: {num_samples}")
 
         print("="*50 + "\n")

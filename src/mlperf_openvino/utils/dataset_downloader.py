@@ -136,17 +136,16 @@ DATASET_REGISTRY: Dict[str, Dict] = {
         "num_samples": 5000,  # MLPerf uses 5000 samples
         "note": "For MLPerf SDXL benchmark (closed division)",
     },
-    "open-orca": {
-        "description": "OpenORCA dataset for MLPerf LLM benchmarks (Llama 3.1 8B / Llama 2 70B)",
+    "cnn-dailymail": {
+        "description": "CNN-DailyMail v3.0.0 for MLPerf LLM benchmark (Llama 3.1 8B summarization)",
         "huggingface": {
-            "dataset_id": "Open-Orca/OpenOrca",
-            "subset": "default",
+            "dataset_id": "cnn_dailymail",
+            "version": "3.0.0",
         },
-        "processed": {
-            "filename": "open_orca_gpt4_tokenized_llama.sampled_24576.pkl",
-        },
-        "num_samples": 24576,
-        "note": "MLCommons LLM benchmark dataset (processed OpenORCA GPT-4 subset)",
+        "num_samples_datacenter": 13368,
+        "num_samples_edge": 5000,
+        "eval_file": "cnn_eval.json",
+        "note": "MLCommons Inference v5.1 — text summarization task for Llama 3.1 8B",
     },
     "coco2017": {
         "description": "COCO 2017 validation set for SSD-ResNet34 Object Detection",
@@ -1396,139 +1395,126 @@ def download_coco2014(
     }
 
 
-def download_open_orca(
+def download_cnn_dailymail(
     output_dir: str,
     model_name: str = "meta-llama/Llama-3.1-8B-Instruct",
-    num_samples: int = 24576,
     force: bool = False,
 ) -> Dict[str, str]:
-    """Download and process the OpenORCA dataset for MLPerf LLM benchmarks.
+    """Download and process CNN-DailyMail for MLPerf Llama 3.1 8B benchmark.
 
-    Follows the MLCommons reference implementation:
-    1. Downloads Open-Orca/OpenOrca from HuggingFace
-    2. Filters GPT-4 responses
-    3. Tokenizes with the target model's tokenizer
-    4. Filters by token count (input <= 1024, output <= 1024)
-    5. Samples to the target count (24576 for MLPerf)
-    6. Saves as pickle in MLCommons format
+    Follows the MLCommons Inference v5.1 reference:
+    1. Downloads cnn_dailymail v3.0.0 from HuggingFace
+    2. Extracts validation split articles + highlights
+    3. Formats prompts with Llama 3.1 chat template for summarization
+    4. Tokenizes and filters by length (input <= 2048, output <= 128)
+    5. Saves as JSON in MLCommons format (cnn_eval.json)
+
+    Datacenter: 13,368 samples | Edge: 5,000 samples
     """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    data_dir = output_path / "open-orca"
+    data_dir = output_path / "cnn-dailymail"
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    pkl_file = data_dir / "open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
+    eval_file = data_dir / "cnn_eval.json"
 
-    if pkl_file.exists() and not force:
-        import pickle
+    if eval_file.exists() and not force:
+        import json
 
-        with open(pkl_file, "rb") as f:
-            data = pickle.load(f)
+        with open(eval_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
         actual_count = len(data) if isinstance(data, list) else 0
-        logger.info(f"OpenORCA dataset already exists: {actual_count} samples at {pkl_file}")
+        logger.info(f"CNN-DailyMail dataset already exists: {actual_count} samples at {eval_file}")
         return {
             "data_path": str(data_dir),
-            "pkl_file": str(pkl_file),
+            "eval_file": str(eval_file),
             "num_samples": actual_count,
         }
 
-    logger.info("Downloading and processing OpenORCA dataset for MLPerf LLM benchmark...")
-    logger.info(f"Target model: {model_name}")
-    logger.info(f"Target samples: {num_samples}")
+    logger.info("Downloading CNN-DailyMail v3.0.0 for MLPerf Llama 3.1 8B benchmark...")
+    logger.info(f"Tokenizer model: {model_name}")
 
     try:
         from datasets import load_dataset
         from transformers import AutoTokenizer
     except ImportError:
         raise ImportError(
-            "datasets and transformers are required for OpenORCA download. "
+            "datasets and transformers are required for CNN-DailyMail download. "
             "Install with: pip install datasets transformers"
         )
 
-    logger.info("Loading Open-Orca/OpenOrca from HuggingFace...")
-    dataset = load_dataset("Open-Orca/OpenOrca", split="train")
+    logger.info("Loading cnn_dailymail v3.0.0 from HuggingFace...")
+    dataset = load_dataset("cnn_dailymail", "3.0.0", split="validation")
 
-    # Filter for GPT-4 responses only (per MLCommons reference)
-    logger.info("Filtering GPT-4 responses...")
-    gpt4_data = dataset.filter(
-        lambda x: x.get("id", "").startswith("flan") is False
-        and "gpt4" in x.get("id", "").lower()
-    )
-    logger.info(f"GPT-4 filtered: {len(gpt4_data)} samples")
-
-    # If not enough GPT-4, fall back to all data
-    if len(gpt4_data) < num_samples:
-        logger.warning(
-            f"Only {len(gpt4_data)} GPT-4 samples (need {num_samples}). "
-            f"Using full dataset."
-        )
-        gpt4_data = dataset
-
-    # Load tokenizer for token counting
     tokenizer = AutoTokenizer.from_pretrained(model_name)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
-    # Process and filter by token length
-    logger.info("Tokenizing and filtering by length (input <= 1024, output <= 1024)...")
+    # Llama 3.1 Instruct chat template for summarization
+    PROMPT_TEMPLATE = (
+        "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n"
+        "Briefly summarize this news article:\n\n{article}"
+        "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+    )
+
+    logger.info("Processing articles with Llama 3.1 chat template...")
     processed = []
-    for i, entry in enumerate(gpt4_data):
-        system_prompt = entry.get("system_prompt", "")
-        question = entry.get("question", "")
-        response = entry.get("response", "")
+    skipped = 0
+    for i, entry in enumerate(dataset):
+        article = entry.get("article", "")
+        highlights = entry.get("highlights", "")
 
-        # Build input in chat format
-        if system_prompt:
-            input_text = f"{system_prompt}\n\n{question}"
-        else:
-            input_text = question
+        if not article or not highlights:
+            skipped += 1
+            continue
 
-        # Tokenize to check lengths
+        input_text = PROMPT_TEMPLATE.format(article=article)
+
+        # Token length check
         input_tokens = tokenizer.encode(input_text)
-        output_tokens = tokenizer.encode(response)
+        output_tokens = tokenizer.encode(highlights)
 
-        if len(input_tokens) <= 1024 and len(output_tokens) <= 1024:
+        if len(input_tokens) <= 2048 and len(output_tokens) <= 128:
             processed.append({
                 "input": input_text,
-                "output": response,
+                "output": highlights,
             })
 
-        if (i + 1) % 50000 == 0:
+        if (i + 1) % 5000 == 0:
             logger.info(
-                f"Processed {i + 1}/{len(gpt4_data)}, "
-                f"valid: {len(processed)}"
+                f"Processed {i + 1}/{len(dataset)}, valid: {len(processed)}, skipped: {skipped}"
             )
 
-        if len(processed) >= num_samples * 2:
-            break
+    logger.info(f"Total valid samples: {len(processed)} (skipped: {skipped})")
 
-    logger.info(f"Valid samples after filtering: {len(processed)}")
-
-    # Sample to target count
-    import random
-
-    random.seed(42)  # Reproducible sampling
-    if len(processed) > num_samples:
-        processed = random.sample(processed, num_samples)
-    logger.info(f"Final dataset: {len(processed)} samples")
-
-    # Save as pickle (MLCommons format)
-    import pickle
-
-    with open(pkl_file, "wb") as f:
-        pickle.dump(processed, f)
-    logger.info(f"Dataset saved to {pkl_file}")
-
-    # Also save as JSON for inspection
+    # Save full eval set (datacenter)
     import json
 
-    json_file = data_dir / "dataset.json"
-    with open(json_file, "w", encoding="utf-8") as f:
-        json.dump(processed[:100], f, indent=2, ensure_ascii=False)
-    logger.info(f"Sample JSON (100 entries) saved to {json_file}")
+    with open(eval_file, "w", encoding="utf-8") as f:
+        json.dump(processed, f, ensure_ascii=False)
+    logger.info(f"Datacenter eval set: {len(processed)} samples -> {eval_file}")
+
+    # Save edge subset (5000 samples, reproducible)
+    import random
+
+    random.seed(42)
+    edge_samples = random.sample(processed, min(5000, len(processed)))
+    edge_file = data_dir / "sample_cnn_eval_5000.json"
+    with open(edge_file, "w", encoding="utf-8") as f:
+        json.dump(edge_samples, f, ensure_ascii=False)
+    logger.info(f"Edge eval set: {len(edge_samples)} samples -> {edge_file}")
+
+    # Save calibration subset (for quantization)
+    calib_samples = random.sample(processed, min(1000, len(processed)))
+    calib_file = data_dir / "cnn_dailymail_calibration.json"
+    with open(calib_file, "w", encoding="utf-8") as f:
+        json.dump(calib_samples, f, ensure_ascii=False)
+    logger.info(f"Calibration set: {len(calib_samples)} samples -> {calib_file}")
 
     return {
         "data_path": str(data_dir),
-        "pkl_file": str(pkl_file),
+        "eval_file": str(eval_file),
         "num_samples": len(processed),
     }
 
@@ -1551,8 +1537,8 @@ def download_dataset(
         return download_whisper_mlperf(output_dir)
     elif dataset_name == "coco2014":
         return download_coco2014(output_dir, force)
-    elif dataset_name == "open-orca":
-        return download_open_orca(output_dir, force=force)
+    elif dataset_name == "cnn-dailymail":
+        return download_cnn_dailymail(output_dir, force=force)
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
@@ -1676,7 +1662,7 @@ def list_available_datasets() -> Dict[str, str]:
         "librispeech": DATASET_REGISTRY["librispeech"]["description"],
         "coco2014": DATASET_REGISTRY["coco2014"]["description"],
         "coco2017": DATASET_REGISTRY["coco2017"]["description"],
-        "open-orca": DATASET_REGISTRY["open-orca"]["description"],
+        "cnn-dailymail": DATASET_REGISTRY["cnn-dailymail"]["description"],
     }
 
 

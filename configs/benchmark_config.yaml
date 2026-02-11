@@ -269,43 +269,49 @@ models:
   llama3.1-8b:
     name: "Llama-3.1-8B"
     task: "text_generation"
-    dataset: "open-orca"
-    input_shape: [1, 1024]  # (batch, max_seq_length)
+    dataset: "cnn-dailymail"
+    input_shape: [1, 2048]  # (batch, max_seq_length)
     input_name: "input_ids"
     output_name: "logits"
     data_format: "NC"
     dtype: "FP16"
 
-    # Generation parameters (MLCommons reference)
+    # Generation parameters (MLCommons Inference v5.1 reference)
+    # Task: text summarization (CNN-DailyMail)
     generation:
-      max_new_tokens: 1024
-      do_sample: false  # Greedy decoding per MLPerf spec
+      max_new_tokens: 128    # Summarization output is short
+      min_new_tokens: 1
+      do_sample: false       # Greedy decoding per MLPerf spec
+      num_beams: 1
 
-    # MLPerf v5.1 accuracy targets (ROUGE scores * 100)
-    accuracy_target: 0.0  # Composite - individual ROUGE thresholds below
+    # MLPerf v5.1 accuracy targets (ROUGE fmeasure * 100)
+    # Reference values from FP32 baseline; 99% threshold applied
+    accuracy_target: 0.0     # Composite - individual ROUGE thresholds below
     accuracy_threshold: 0.99
 
     accuracy_metrics:
-      rouge1: 44.4312
-      rouge2: 22.0352
-      rougeL: 28.6162
-      tokens_per_sample: 294.45
+      rouge1: 42.9865        # FP32 reference (99% = 42.5566)
+      rouge2: 20.1235        # FP32 reference (99% = 19.9223)
+      rougeL: 29.9881        # FP32 reference (99% = 29.6882)
+      tokens_per_sample: 0.0 # gen_len checked separately at 90% threshold
 
     sources:
       huggingface_model_id: "meta-llama/Llama-3.1-8B-Instruct"
 
-    # MLPerf LoadGen settings
-    performance_sample_count: 24576
+    # MLPerf LoadGen settings (from mlperf.conf)
+    performance_sample_count: 13368    # = total CNN-DailyMail eval samples
+    use_token_latencies: true          # Required for LLM benchmarks
 
     offline:
-      min_duration_ms: 600000  # 10 minutes (MLPerf v5.1 official requirement)
-      min_query_count: 24576
+      min_duration_ms: 600000          # 10 minutes (MLPerf v5.1)
+      min_query_count: 13368
       samples_per_query: 1
 
     server:
-      target_latency_ns: 2000000000  # 2s TTFT (Time To First Token)
+      target_latency_ns: 2000000000    # 2s TTFT (Time To First Token)
       target_qps: 1.0
-      min_duration_ms: 600000  # 10 minutes (MLPerf v5.1 official requirement)
+      min_duration_ms: 600000          # 10 minutes (MLPerf v5.1)
+      # TPOT: 100ms per output token (conversational profile)
 
 # OpenVINO specific settings
 openvino:
@@ -379,9 +385,10 @@ datasets:
     captions_file: "annotations/captions_val2014.json"
     images_dir: "coco-1024"  # Optional reference images for FID
 
-  open-orca:
-    path: "./data/open-orca"
-    processed_file: "open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
+  cnn-dailymail:
+    path: "./data/cnn-dailymail"
+    eval_file: "cnn_eval.json"          # 13,368 samples (datacenter)
+    edge_file: "sample_cnn_eval_5000.json"  # 5,000 samples (edge)
 
 # Output settings
 output:

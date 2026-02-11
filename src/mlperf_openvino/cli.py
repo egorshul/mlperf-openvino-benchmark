@@ -314,8 +314,8 @@ def _print_dataset_help(model: str) -> None:
         click.echo("Please download the COCO 2014 captions dataset.")
         click.echo("Run: mlperf-ov download-dataset --dataset coco2014")
     elif model == 'llama3.1-8b':
-        click.echo("Please download the OpenORCA dataset.")
-        click.echo("Run: mlperf-ov download-dataset --dataset open-orca")
+        click.echo("Please download the CNN-DailyMail dataset.")
+        click.echo("Run: mlperf-ov download-dataset --dataset cnn-dailymail")
 
 
 @main.command('download-model')
@@ -451,7 +451,7 @@ def info():
 
 
 @main.command('download-dataset')
-@click.option('--dataset', '-d', type=click.Choice(['imagenet', 'librispeech', 'squad', 'openimages', 'coco2014', 'coco2017', 'open-orca']),
+@click.option('--dataset', '-d', type=click.Choice(['imagenet', 'librispeech', 'squad', 'openimages', 'coco2014', 'coco2017', 'cnn-dailymail']),
               required=True, help='Dataset to download')
 @click.option('--output-dir', '-o', type=click.Path(),
               default='./data', help='Output directory')
@@ -597,8 +597,8 @@ def setup_cmd(model: str, output_dir: str, format: str):
         elif model == 'sdxl':
             dataset_paths = download_dataset('coco2014', str(data_dir))
         elif model == 'llama3.1-8b':
-            from .utils.dataset_downloader import download_open_orca
-            dataset_paths = download_open_orca(str(data_dir))
+            from .utils.dataset_downloader import download_cnn_dailymail
+            dataset_paths = download_cnn_dailymail(str(data_dir))
 
         click.echo(f"  Dataset: {dataset_paths.get('data_path', 'N/A')}\n")
     except Exception as e:
@@ -685,7 +685,7 @@ def list_models():
             'id': 'llama3.1-8b',
             'type': ModelType.LLAMA3_1_8B,
             'task': 'Text Generation',
-            'dataset': 'OpenORCA',
+            'dataset': 'CNN-DailyMail v3.0.0',
             'metric': 'ROUGE-1/2/L',
             'target': '44.4312 / 22.0352 / 28.6162',
         },
