@@ -86,6 +86,14 @@ class UNet3DMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
         spatial_shape = volume.shape[1:]
         positions = compute_sliding_window_positions(spatial_shape)
         num_positions = len(positions)
+        num_classes = 3
+
+        if sample_idx == 0:
+            logger.info(
+                "Volume: shape=%s, min=%.4f, max=%.4f",
+                volume.shape, float(volume.min()), float(volume.max()),
+            )
+            logger.info("Sliding window: %d positions, spatial=%s", num_positions, spatial_shape)
 
         self._cpp_sut.reset_counters()
         self._cpp_sut.clear_predictions()
@@ -98,6 +106,14 @@ class UNet3DMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
             if not sub_vol_batch.flags['C_CONTIGUOUS']:
                 sub_vol_batch = np.ascontiguousarray(sub_vol_batch)
 
+            if sample_idx == 0 and pos_idx < 3:
+                logger.info(
+                    "  pos %d: input shape=%s, min=%.4f, max=%.4f, sum=%.4f",
+                    pos_idx, sub_vol_batch.shape,
+                    float(sub_vol_batch.min()), float(sub_vol_batch.max()),
+                    float(sub_vol_batch.sum()),
+                )
+
             self._cpp_sut.start_async_batch(
                 sub_vol_batch,
                 [pos_idx],
@@ -105,6 +121,26 @@ class UNet3DMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
                 1,
             )
             self._cpp_sut.wait_all()
+
+            if sample_idx == 0 and pos_idx < 3:
+                tmp_preds = self._cpp_sut.get_predictions()
+                tmp_pred = tmp_preds.get(pos_idx)
+                if tmp_pred is not None:
+                    tmp_arr = np.array(tmp_pred, dtype=np.float32)
+                    roi_size = ROI_SHAPE[0] * ROI_SHAPE[1] * ROI_SHAPE[2]
+                    nc = tmp_arr.size // roi_size
+                    tmp_arr = tmp_arr.reshape(nc, *ROI_SHAPE)
+                    per_class_argmax = np.argmax(tmp_arr, axis=0)
+                    class_counts = [int(np.sum(per_class_argmax == c)) for c in range(nc)]
+                    logger.info(
+                        "  pos %d: output size=%d, nc=%d, min=%.4f, max=%.4f, "
+                        "per-class argmax counts=%s",
+                        pos_idx, tmp_arr.size, nc,
+                        float(tmp_arr.min()), float(tmp_arr.max()),
+                        class_counts,
+                    )
+                else:
+                    logger.warning("  pos %d: NO prediction returned!", pos_idx)
 
         preds = self._cpp_sut.get_predictions()
 
@@ -122,7 +158,7 @@ class UNet3DMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
                 self._cpp_sut.get_issued_count(),
                 self._cpp_sut.get_completed_count(),
             )
-            return np.zeros((3, *spatial_shape), dtype=np.float32)
+            return np.zeros((num_classes, *spatial_shape), dtype=np.float32)
 
         first_output = np.array(first_pred, dtype=np.float32)
         roi_size = ROI_SHAPE[0] * ROI_SHAPE[1] * ROI_SHAPE[2]
@@ -134,17 +170,6 @@ class UNet3DMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
         elif first_output.ndim == 5:
             first_output = first_output[0]
             num_classes = first_output.shape[0]
-        else:
-            num_classes = 3
-
-        if sample_idx == 0:
-            logger.info(
-                "First prediction: size=%d, num_classes=%d, "
-                "min=%.4f, max=%.4f, mean=%.4f",
-                first_output.size, num_classes,
-                float(first_output.min()), float(first_output.max()),
-                float(first_output.mean()),
-            )
 
         accumulator = np.zeros((num_classes, *spatial_shape), dtype=np.float32)
         weight_map = np.zeros(spatial_shape, dtype=np.float32)
@@ -172,6 +197,22 @@ class UNet3DMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
 
         weight_map = np.maximum(weight_map, 1e-8)
         accumulator /= weight_map[np.newaxis, ...]
+
+        if sample_idx == 0:
+            seg = np.argmax(accumulator, axis=0)
+            class_counts = [int(np.sum(seg == c)) for c in range(num_classes)]
+            logger.info(
+                "Assembled: accumulator shape=%s, "
+                "per-class [min,max]: c0=[%.2f,%.2f] c1=[%.2f,%.2f] c2=[%.2f,%.2f]",
+                accumulator.shape,
+                float(accumulator[0].min()), float(accumulator[0].max()),
+                float(accumulator[1].min()), float(accumulator[1].max()),
+                float(accumulator[2].min()), float(accumulator[2].max()),
+            )
+            logger.info(
+                "Segmentation class counts: %s (total=%d)",
+                class_counts, sum(class_counts),
+            )
 
         return accumulator
 
@@ -252,24 +293,45 @@ class UNet3DMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
             "Accuracy: %d predictions, %d labels loaded, %d missing labels",
             len(pred_list), len(pred_list) - missing_labels, missing_labels,
         )
-        if pred_list:
-            first_pred = pred_list[0]
-            first_label = label_list[0]
-            unique_vals = np.unique(first_pred)
+        from ..datasets.kits19 import dice_score
+        for i, (pred, label) in enumerate(zip(pred_list, label_list)):
+            if label is None:
+                logger.info("Sample %d: no label", i)
+                continue
+            pred_classes = np.unique(pred)
+            label_classes = np.unique(label)
+            pred_counts = {int(c): int(np.sum(pred == c)) for c in pred_classes}
+            label_counts = {int(c): int(np.sum(label == c)) for c in label_classes}
+            k_dice = dice_score(pred, label, class_id=1)
+            t_dice = dice_score(pred, label, class_id=2)
             logger.info(
-                "First prediction: shape=%s, dtype=%s, unique_values=%s",
-                first_pred.shape, first_pred.dtype, unique_vals,
+                "Sample %d: pred_shape=%s label_shape=%s "
+                "pred_counts=%s label_counts=%s "
+                "kidney_dice=%.4f tumor_dice=%.4f",
+                i, pred.shape, label.shape,
+                pred_counts, label_counts,
+                k_dice, t_dice,
             )
-            if first_label is not None:
-                label_unique = np.unique(first_label)
+            if pred.shape == label.shape and k_dice < 0.01:
+                # Check spatial overlap
+                pred_kidney = (pred == 1)
+                label_kidney = (label == 1)
+                overlap = int(np.sum(pred_kidney & label_kidney))
+                pred_k_total = int(np.sum(pred_kidney))
+                label_k_total = int(np.sum(label_kidney))
                 logger.info(
-                    "First label: shape=%s, dtype=%s, unique_values=%s",
-                    first_label.shape, first_label.dtype, label_unique,
+                    "  Kidney overlap: %d, pred_kidney=%d, label_kidney=%d",
+                    overlap, pred_k_total, label_k_total,
                 )
-                if first_pred.shape != first_label.shape:
-                    logger.warning(
-                        "Shape mismatch: pred=%s, label=%s",
-                        first_pred.shape, first_label.shape,
+                if pred_k_total > 0 and label_k_total > 0:
+                    # Find centroids
+                    pred_coords = np.argwhere(pred_kidney)
+                    label_coords = np.argwhere(label_kidney)
+                    pred_centroid = pred_coords.mean(axis=0)
+                    label_centroid = label_coords.mean(axis=0)
+                    logger.info(
+                        "  Pred kidney centroid: %s, Label kidney centroid: %s",
+                        pred_centroid.tolist(), label_centroid.tolist(),
                     )
 
         return self.qsl.dataset.compute_accuracy(pred_list, label_list)
