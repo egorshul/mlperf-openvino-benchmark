@@ -92,9 +92,6 @@ class UNet3DMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
         self._cpp_sut.enable_direct_loadgen(False)
         self._cpp_sut.set_store_predictions(True)
 
-        dummy_query_ids = list(range(num_positions))
-        dummy_sample_indices = list(range(num_positions))
-
         for pos_idx, slices in enumerate(positions):
             sub_vol = volume[:, slices[0], slices[1], slices[2]]
             sub_vol_batch = sub_vol[np.newaxis, ...].astype(np.float32)
@@ -103,12 +100,12 @@ class UNet3DMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
 
             self._cpp_sut.start_async_batch(
                 sub_vol_batch,
-                [dummy_query_ids[pos_idx]],
-                [dummy_sample_indices[pos_idx]],
+                [pos_idx],
+                [pos_idx],
                 1,
             )
+            self._cpp_sut.wait_all()
 
-        self._cpp_sut.wait_all()
         preds = self._cpp_sut.get_predictions()
 
         if len(preds) != num_positions:
