@@ -687,7 +687,7 @@ def list_models():
             'task': 'Text Generation',
             'dataset': 'CNN-DailyMail v3.0.0',
             'metric': 'ROUGE-1/2/L',
-            'target': '44.4312 / 22.0352 / 28.6162',
+            'target': '42.9865 / 20.1235 / 29.9881',
         },
     ]
 

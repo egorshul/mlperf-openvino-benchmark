@@ -68,15 +68,21 @@ def _print_progress(completed: int, total: int, start_time: float) -> None:
         print(line, end="", file=sys.stderr, flush=True)
 
 
-def _make_response(sample_id: int, text: str, n_tokens: int) -> "lg.QuerySampleResponse":
-    """Build a QuerySampleResponse with n_tokens (required for LLM benchmarks)."""
+def _make_response(sample_id: int, text: str, n_tokens: int):
+    """Build a QuerySampleResponse with n_tokens (required for LLM benchmarks).
+
+    Returns:
+        (response, response_array) — caller must keep response_array alive
+        until QuerySamplesComplete processes the response buffer.
+    """
     text_bytes = text.encode("utf-8")
     response_array = array.array("B", text_bytes)
     bi = response_array.buffer_info()
     try:
-        return lg.QuerySampleResponse(sample_id, bi[0], bi[1], n_tokens)
+        resp = lg.QuerySampleResponse(sample_id, bi[0], bi[1], n_tokens)
     except TypeError:
-        return lg.QuerySampleResponse(sample_id, bi[0], bi[1])
+        resp = lg.QuerySampleResponse(sample_id, bi[0], bi[1])
+    return resp, response_array
 
 
 class LlamaMultiDieSUT:
@@ -304,13 +310,17 @@ class LlamaMultiDieSUT:
         _print_progress(total, total, self._start_time)
 
         responses = []
+        response_arrays = []  # prevent GC before QuerySamplesComplete
         for sample, _idx, text, n_tokens in sorted(all_results, key=lambda r: r[1]):
-            responses.append(_make_response(sample.id, text, n_tokens))
+            resp, resp_arr = _make_response(sample.id, text, n_tokens)
+            responses.append(resp)
+            response_arrays.append(resp_arr)
         lg.QuerySamplesComplete(responses)
 
     def _issue_queries_offline_sequential(self, query_samples: List[Any]) -> None:
         total = len(query_samples)
         responses = []
+        response_arrays = []  # prevent GC before QuerySamplesComplete
 
         _, model = self._models[0]
         for sample in query_samples:
@@ -321,7 +331,9 @@ class LlamaMultiDieSUT:
                 self._predictions[sample_idx] = text
             self._sample_count += 1
 
-            responses.append(_make_response(sample.id, text, n_tokens))
+            resp, resp_arr = _make_response(sample.id, text, n_tokens)
+            responses.append(resp)
+            response_arrays.append(resp_arr)
             _print_progress(self._sample_count, total, self._start_time)
 
         _print_progress(total, total, self._start_time)
@@ -343,7 +355,7 @@ class LlamaMultiDieSUT:
                     self._predictions[sample_idx] = text
             self._sample_count += 1
 
-            resp = _make_response(sample.id, text, n_tokens)
+            resp, resp_arr = _make_response(sample.id, text, n_tokens)
 
             try:
                 lg.FirstTokenComplete([resp])
@@ -351,6 +363,7 @@ class LlamaMultiDieSUT:
                 pass
 
             lg.QuerySamplesComplete([resp])
+            del resp_arr  # safe to release after QuerySamplesComplete
 
     def flush_queries(self) -> None:
         pass

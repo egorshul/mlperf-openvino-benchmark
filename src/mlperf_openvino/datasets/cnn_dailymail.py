@@ -23,13 +23,6 @@ from .base import BaseDataset, QuerySampleLibrary
 
 logger = logging.getLogger(__name__)
 
-# Llama 3.1 Instruct chat template for summarization
-_SUMMARIZATION_PROMPT_TEMPLATE = (
-    "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n"
-    "Briefly summarize this news article:\n\n{article}"
-    "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
-)
-
 
 class CnnDailyMailDataset(BaseDataset):
     """CNN-DailyMail dataset for text summarization benchmarks.

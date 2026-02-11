@@ -65,16 +65,22 @@ def _print_progress(completed: int, total: int, start_time: float) -> None:
         print(line, end="", file=sys.stderr, flush=True)
 
 
-def _make_response(sample_id: int, text: str, n_tokens: int) -> "lg.QuerySampleResponse":
-    """Build a QuerySampleResponse with n_tokens (required for LLM benchmarks)."""
+def _make_response(sample_id: int, text: str, n_tokens: int):
+    """Build a QuerySampleResponse with n_tokens (required for LLM benchmarks).
+
+    Returns:
+        (response, response_array) — caller must keep response_array alive
+        until QuerySamplesComplete processes the response buffer.
+    """
     text_bytes = text.encode("utf-8")
     response_array = array.array("B", text_bytes)
     bi = response_array.buffer_info()
     try:
-        return lg.QuerySampleResponse(sample_id, bi[0], bi[1], n_tokens)
+        resp = lg.QuerySampleResponse(sample_id, bi[0], bi[1], n_tokens)
     except TypeError:
         # Older LoadGen versions without n_tokens parameter
-        return lg.QuerySampleResponse(sample_id, bi[0], bi[1])
+        resp = lg.QuerySampleResponse(sample_id, bi[0], bi[1])
+    return resp, response_array
 
 
 class LlamaSUT:
@@ -231,8 +237,9 @@ class LlamaSUT:
 
             self._sample_count += 1
 
-            resp = _make_response(sample.id, text, n_tokens)
+            resp, resp_arr = _make_response(sample.id, text, n_tokens)
             responses.append(resp)
+            response_arrays.append(resp_arr)
             _print_progress(self._sample_count, total, self._start_time)
 
         _print_progress(total, total, self._start_time)
@@ -249,7 +256,7 @@ class LlamaSUT:
 
             self._sample_count += 1
 
-            resp = _make_response(sample.id, text, n_tokens)
+            resp, resp_arr = _make_response(sample.id, text, n_tokens)
 
             # Report first-token latency (TTFT) per MLPerf LLM spec.
             # With non-streaming OVModelForCausalLM.generate(), TTFT equals
@@ -260,6 +267,7 @@ class LlamaSUT:
                 pass  # Older LoadGen without FirstTokenComplete
 
             lg.QuerySamplesComplete([resp])
+            del resp_arr  # safe to release after QuerySamplesComplete
 
     def flush_queries(self) -> None:
         pass
