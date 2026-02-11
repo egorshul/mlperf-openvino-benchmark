@@ -46,7 +46,7 @@ class UNet3DMultiDieCppSUTWrapper(ImageMultiDieSUTBase):
 
     MODEL_NAME = "3D-UNET"
     DEFAULT_OFFLINE_BATCH_SIZE = 1  # 128^3 volumes are large
-    DEFAULT_OFFLINE_NIREQ_MULTIPLIER = 2  # Lower than default due to large 128^3 sub-volumes
+    DEFAULT_OFFLINE_NIREQ_MULTIPLIER = 1  # 1 request per die — 128^3 activations consume nearly all device memory
     DEFAULT_SERVER_NIREQ_MULTIPLIER = 2
     DEFAULT_EXPLICIT_BATCH_SIZE = 1
     DEFAULT_BATCH_TIMEOUT_US = 2000
