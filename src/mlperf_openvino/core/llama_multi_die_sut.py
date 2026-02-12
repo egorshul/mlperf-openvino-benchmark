@@ -183,15 +183,22 @@ class LlamaMultiDieSUT:
                 f"Check that the device is available."
             )
 
-        # Build device config for LLMPipeline
-        ov_config: Dict[str, Any] = {}
+        # Build pipeline config for LLMPipeline (passed as dict, 3rd positional arg)
+        # MAX_PROMPT_LEN and MIN_RESPONSE_LEN define the static shapes for NPU.
+        max_prompt_len = self.qsl.get_max_input_length()
+        logger.info(f"[Llama] Max prompt length from dataset: {max_prompt_len}")
+
+        pipeline_config: Dict[str, Any] = {
+            "MAX_PROMPT_LEN": max_prompt_len,
+            "MIN_RESPONSE_LEN": self.max_new_tokens,
+        }
         if hasattr(self.config, "openvino"):
             if self.config.openvino.cache_dir:
-                ov_config["CACHE_DIR"] = self.config.openvino.cache_dir
+                pipeline_config["CACHE_DIR"] = self.config.openvino.cache_dir
             if hasattr(self.config.openvino, "device_properties"):
                 if self.config.openvino.device_properties:
                     for key, value in self.config.openvino.device_properties.items():
-                        ov_config[key] = value
+                        pipeline_config[key] = value
 
         # Generation config — greedy decoding per MLPerf spec
         self._gen_config = ov_genai.GenerationConfig()
@@ -199,8 +206,14 @@ class LlamaMultiDieSUT:
         self._gen_config.min_new_tokens = 1
 
         for die in device_dies:
-            logger.info(f"[Llama] Creating LLMPipeline for {die} ...")
-            pipe = ov_genai.LLMPipeline(str(self.model_path), die, **ov_config)
+            logger.info(
+                f"[Llama] Creating LLMPipeline for {die} "
+                f"(MAX_PROMPT_LEN={max_prompt_len}, "
+                f"MIN_RESPONSE_LEN={self.max_new_tokens}) ..."
+            )
+            pipe = ov_genai.LLMPipeline(
+                str(self.model_path), die, pipeline_config,
+            )
             self._pipelines.append((die, pipe))
 
         die_names = [name for name, _ in self._pipelines]
