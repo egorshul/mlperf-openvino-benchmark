@@ -12,6 +12,7 @@ MLPerf Inference v5.1 benchmark implementation using Intel OpenVINO as the infer
 | SSD-ResNet34 | Object Detection | COCO 2017 | mAP | >= 19.80% | Offline, Server |
 | Whisper Large v3 | Speech Recognition | LibriSpeech | Word Accuracy | >= 96.95% | Offline |
 | Stable Diffusion XL | Text-to-Image | COCO 2014 | CLIP / FID | 31.69-31.81 / 23.01-23.95 | Offline, Server |
+| Llama 3.1 8B | Text Summarization | CNN-DailyMail v3.0.0 | ROUGE-1/2/L/Lsum | >= 38.39 / 15.75 / 24.25 / 35.44 | Offline, Server |
 
 ## Requirements
 
@@ -39,6 +40,7 @@ pip install -e ".[whisper]"
 pip install -e ".[sdxl]"
 pip install -e ".[retinanet]"
 pip install -e ".[ssd-resnet34]"
+pip install -e ".[llama]"
 
 # Development
 pip install -e ".[dev]"
@@ -147,6 +149,30 @@ mlperf-ov run --model sdxl --scenario Offline --device CPU
 mlperf-ov run --model sdxl --scenario Offline --device NPU
 ```
 
+### Llama 3.1 8B
+
+Text summarization on CNN-DailyMail v3.0.0 using Optimum-Intel OVModelForCausalLM. Supports both CPU and multi-die accelerator inference. Follows the MLCommons Inference v5.1 closed division specification exactly.
+
+```bash
+# Download model and dataset
+mlperf-ov setup --model llama3.1-8b
+
+# CPU inference
+mlperf-ov run --model llama3.1-8b --scenario Offline --device CPU --mode accuracy
+mlperf-ov run --model llama3.1-8b --scenario Server --device CPU
+
+# Multi-die accelerator inference
+mlperf-ov run --model llama3.1-8b --scenario Offline --device NPU
+mlperf-ov run --model llama3.1-8b --scenario Server --device NPU
+```
+
+Key details:
+- Model: `meta-llama/Meta-Llama-3.1-8B-Instruct` (requires HuggingFace access token)
+- Dataset: 13,368 validation samples (datacenter), 5,000 (edge)
+- Generation: greedy decoding, max_new_tokens=128
+- Accuracy: ROUGE-1/2/L/Lsum at 99% of FP32 reference + gen_len at 90%-110% range
+- Token latencies reported via `use_token_latencies` (TTFT measurement in Server mode)
+
 ## CLI Reference
 
 ### Commands
@@ -164,7 +190,7 @@ mlperf-ov run --model sdxl --scenario Offline --device NPU
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--model, -m` | Model: resnet50, bert, retinanet, ssd-resnet34, whisper, sdxl | (required) |
+| `--model, -m` | Model: resnet50, bert, retinanet, ssd-resnet34, whisper, sdxl, llama3.1-8b | (required) |
 | `--mode` | Mode: accuracy, performance, both | accuracy |
 | `--scenario, -s` | Scenario: Offline, Server | Offline |
 | `--device, -d` | Device: CPU, NPU, NPU.0, NPU.0,NPU.2 | CPU |
@@ -198,6 +224,7 @@ mlperf-ov download-dataset --dataset imagenet
 mlperf-ov download-dataset --dataset librispeech --subset dev-clean
 mlperf-ov download-dataset --dataset coco2017
 mlperf-ov download-dataset --dataset coco2014 --with-images
+mlperf-ov download-dataset --dataset cnn-dailymail
 
 # Download RetinaNet with batch sizes
 mlperf-ov download-model --model retinanet --batch-sizes 1,2,4,8
@@ -282,14 +309,17 @@ mlperf-openvino-benchmark/
 │   │   ├── whisper_multi_die_sut.py
 │   │   ├── sdxl_multi_die_sut.py
 │   │   ├── whisper_sut.py
-│   │   └── sdxl_sut.py
+│   │   ├── sdxl_sut.py
+│   │   ├── llama_sut.py           # Llama 3.1 8B CPU/GPU SUT
+│   │   └── llama_multi_die_sut.py # Llama 3.1 8B multi-die SUT
 │   ├── datasets/                 # Dataset loaders and QSL
 │   │   ├── imagenet.py           # ImageNet 2012 (ResNet50)
 │   │   ├── squad.py              # SQuAD v1.1 (BERT)
 │   │   ├── openimages.py         # OpenImages (RetinaNet)
 │   │   ├── coco.py               # COCO 2017 (SSD-ResNet34)
 │   │   ├── librispeech.py        # LibriSpeech (Whisper)
-│   │   └── coco_prompts.py       # COCO 2014 (SDXL)
+│   │   ├── coco_prompts.py       # COCO 2014 (SDXL)
+│   │   └── cnn_dailymail.py     # CNN-DailyMail (Llama 3.1 8B)
 │   ├── utils/
 │   │   ├── model_downloader.py   # Model download from Zenodo/HuggingFace
 │   │   └── dataset_downloader.py # Dataset download
