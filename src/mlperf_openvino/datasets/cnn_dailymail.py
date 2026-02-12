@@ -397,6 +397,22 @@ class CnnDailyMailQSL(QuerySampleLibrary):
     def get_label(self, sample_id: int) -> str:
         return self.dataset.get_reference_output(sample_id)
 
+    def get_max_input_length(self) -> int:
+        """Scan all samples and return the max input sequence length.
+
+        Uses pre-tokenized tok_input lengths when available (fast path),
+        falls back to full tokenization otherwise.
+        """
+        max_len = 0
+        for i in range(self.total_sample_count):
+            tok = self.dataset._tok_inputs[i]
+            if tok is not None:
+                max_len = max(max_len, len(tok))
+            else:
+                features = self.dataset.tokenize_sample(i)
+                max_len = max(max_len, features["input_ids"].shape[-1])
+        return max_len
+
     @property
     def total_sample_count(self) -> int:
         return self.dataset.sample_count

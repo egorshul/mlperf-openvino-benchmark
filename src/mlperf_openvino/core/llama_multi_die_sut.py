@@ -175,6 +175,12 @@ class LlamaMultiDieSUT:
         if self._tokenizer.pad_token is None:
             self._tokenizer.pad_token = self._tokenizer.eos_token
 
+        self._pad_token_id = self._tokenizer.pad_token_id or 0
+
+        # Compute static sequence length from dataset (device has no dynamic shapes)
+        self._static_seq_len = self.qsl.get_max_input_length()
+        logger.info(f"[Llama] Static sequence length: {self._static_seq_len}")
+
         # Determine die list
         if "," in target_device:
             device_dies = [p.strip() for p in target_device.split(",")]
@@ -199,19 +205,29 @@ class LlamaMultiDieSUT:
                         ov_config[key] = value
 
         for die in device_dies:
-            logger.info(f"[Llama] Loading model for {die} ...")
+            logger.info(f"[Llama] Loading model for {die} (compile=False) ...")
             model = OVModelForCausalLM.from_pretrained(
                 str(self.model_path),
                 device=die,
                 ov_config=ov_config,
-                compile=True,
+                compile=False,
             )
             # Clean up generation_config to suppress noisy per-call warnings
             gen_cfg = model.generation_config
             gen_cfg.temperature = None
             gen_cfg.top_p = None
             if gen_cfg.pad_token_id is None:
-                gen_cfg.pad_token_id = self._tokenizer.pad_token_id
+                gen_cfg.pad_token_id = self._pad_token_id
+
+            # Reshape to static shapes (device supports only dynamic batch)
+            logger.info(
+                f"[Llama] Reshaping {die} to static shape: "
+                f"batch=1, seq_len={self._static_seq_len}"
+            )
+            model.reshape(1, self._static_seq_len)
+
+            logger.info(f"[Llama] Compiling {die} ...")
+            model.compile()
 
             self._models.append((die, model))
 
@@ -222,6 +238,10 @@ class LlamaMultiDieSUT:
 
     def _process_sample(self, sample_idx: int, model: Any) -> Tuple[str, np.ndarray, int]:
         """Run inference on a single sample using the given model.
+
+        Left-pads inputs to ``_static_seq_len`` so that every forward call
+        uses the same shape the model was compiled with (the device only
+        supports dynamic batch, all other dims must be static).
 
         Returns:
             (decoded_text, output_token_ids, n_tokens) — generated text,
@@ -241,7 +261,18 @@ class LlamaMultiDieSUT:
         if attention_mask.dim() == 1:
             attention_mask = attention_mask.unsqueeze(0)
 
-        input_len = input_ids.shape[-1]
+        # Left-pad to static sequence length (tokenizer already uses left padding)
+        seq_len = input_ids.shape[-1]
+        if seq_len < self._static_seq_len:
+            pad_len = self._static_seq_len - seq_len
+            input_ids = torch.nn.functional.pad(
+                input_ids, (pad_len, 0), value=self._pad_token_id,
+            )
+            attention_mask = torch.nn.functional.pad(
+                attention_mask, (pad_len, 0), value=0,
+            )
+
+        input_len = input_ids.shape[-1]  # == self._static_seq_len
 
         with torch.no_grad():
             generated_ids = model.generate(
@@ -253,7 +284,7 @@ class LlamaMultiDieSUT:
                 num_beams=1,
             )
 
-        # Extract only the newly generated tokens (exclude input prompt)
+        # Extract only the newly generated tokens (exclude padded input)
         new_token_ids = generated_ids[0, input_len:]
         n_tokens = len(new_token_ids)
         text = self._tokenizer.decode(new_token_ids, skip_special_tokens=True)
@@ -414,10 +445,10 @@ class LlamaMultiDieSUT:
             self._model_index = 0
 
     def warmup(self, num_iterations: int = 3) -> None:
-        """Warm up each die with dummy inputs."""
+        """Warm up each die with dummy inputs matching the static shape."""
         logger.info(f"[Llama] Warming up {len(self._models)} die(s)...")
-        dummy_input = torch.ones(1, 32, dtype=torch.long)
-        dummy_mask = torch.ones(1, 32, dtype=torch.long)
+        dummy_input = torch.ones(1, self._static_seq_len, dtype=torch.long)
+        dummy_mask = torch.ones(1, self._static_seq_len, dtype=torch.long)
 
         for die_name, model in self._models:
             for _ in range(num_iterations):
