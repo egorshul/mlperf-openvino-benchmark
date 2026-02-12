@@ -10,6 +10,35 @@ from urllib.error import URLError
 logger = logging.getLogger(__name__)
 
 
+def _resolve_hf_token(token: Optional[str] = None) -> Optional[str]:
+    """Resolve HuggingFace authentication token.
+
+    Checks (in order):
+    1. Explicitly passed token argument
+    2. HF_TOKEN environment variable
+    3. HUGGING_FACE_HUB_TOKEN environment variable (legacy)
+    4. Cached token from `huggingface-cli login`
+
+    Returns None if no token is found.
+    """
+    if token:
+        return token
+
+    env_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    if env_token:
+        return env_token
+
+    try:
+        from huggingface_hub import HfFolder
+        cached = HfFolder.get_token()
+        if cached:
+            return cached
+    except Exception:
+        pass
+
+    return None
+
+
 MODEL_REGISTRY: Dict[str, Dict] = {
     "resnet50": {
         "onnx": {
@@ -620,6 +649,7 @@ def download_llama_model(
     model_id: str = "meta-llama/Meta-Llama-3.1-8B-Instruct",
     export_to_openvino: bool = True,
     weight_format: str = "int8",
+    hf_token: Optional[str] = None,
 ) -> Dict[str, str]:
     """Download and export Llama model to OpenVINO IR format.
 
@@ -631,22 +661,32 @@ def download_llama_model(
         model_id: HuggingFace model ID.
         export_to_openvino: If True, export to OpenVINO IR (recommended).
         weight_format: Weight format for compression: "fp32", "fp16", "int8", "int4".
+        hf_token: HuggingFace access token (for gated models like Meta-Llama).
 
     Returns:
         Dict with model_path and metadata.
     """
+    token = _resolve_hf_token(hf_token)
+    if not token:
+        logger.warning(
+            "No HuggingFace token found. Meta-Llama models are gated and require authentication. "
+            "Set HF_TOKEN env var or run: huggingface-cli login"
+        )
+
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
     model_name = model_id.split("/")[-1]
 
     if export_to_openvino:
-        return _export_llama_to_openvino(output_dir, model_id, weight_format)
+        return _export_llama_to_openvino(output_dir, model_id, weight_format, token=token)
     else:
-        return _download_llama_from_hf(output_dir, model_id)
+        return _download_llama_from_hf(output_dir, model_id, token=token)
 
 
-def _download_llama_from_hf(output_dir: str, model_id: str) -> Dict[str, str]:
+def _download_llama_from_hf(
+    output_dir: str, model_id: str, token: Optional[str] = None
+) -> Dict[str, str]:
     """Download Llama model from HuggingFace (safetensors/PyTorch format)."""
     try:
         from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -674,10 +714,11 @@ def _download_llama_from_hf(output_dir: str, model_id: str) -> Dict[str, str]:
         return AutoModelForCausalLM.from_pretrained(
             model_id,
             use_safetensors=True,
+            token=token,
         )
 
     model = _download_with_retry(do_download, max_retries=3)
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    tokenizer = AutoTokenizer.from_pretrained(model_id, token=token)
 
     model.save_pretrained(str(model_path))
     tokenizer.save_pretrained(str(model_path))
@@ -690,6 +731,7 @@ def _export_llama_to_openvino(
     output_dir: str,
     model_id: str,
     weight_format: str = "int8",
+    token: Optional[str] = None,
 ) -> Dict[str, str]:
     """Export Llama model to OpenVINO IR using optimum-intel.
 
@@ -726,6 +768,7 @@ def _export_llama_to_openvino(
     ov_export_kwargs: Dict[str, Any] = {
         "export": True,
         "compile": False,
+        "token": token,
     }
 
     if weight_format in ("int8", "int4"):
@@ -755,7 +798,7 @@ def _export_llama_to_openvino(
     model.save_pretrained(str(ov_model_path))
 
     # Save tokenizer alongside the model
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    tokenizer = AutoTokenizer.from_pretrained(model_id, token=token)
     tokenizer.save_pretrained(str(ov_model_path))
 
     logger.info(f"OpenVINO model saved to {ov_model_path}")

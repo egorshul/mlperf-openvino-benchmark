@@ -327,7 +327,9 @@ def _print_dataset_help(model: str) -> None:
               default='onnx', help='Model format')
 @click.option('--batch-sizes', type=str, default='1,2,4,8',
               help='Batch sizes for RetinaNet (comma-separated, default: 1,2,4,8)')
-def download_model_cmd(model: str, output_dir: str, format: str, batch_sizes: str):
+@click.option('--hf-token', type=str, default=None, envvar='HF_TOKEN',
+              help='HuggingFace access token (for gated models like Meta-Llama). Also reads HF_TOKEN env var.')
+def download_model_cmd(model: str, output_dir: str, format: str, batch_sizes: str, hf_token: Optional[str]):
     """Download model files."""
     click.echo(f"Downloading {model} model...")
 
@@ -380,6 +382,7 @@ def download_model_cmd(model: str, output_dir: str, format: str, batch_sizes: st
             paths = download_llama_model(
                 str(output_path),
                 export_to_openvino=True,
+                hf_token=hf_token,
             )
             click.echo(f"Model downloaded to: {paths['model_path']}")
         else:
@@ -462,8 +465,11 @@ def info():
 @click.option('--with-images', is_flag=True,
               help='Download reference images (COCO 2014 only, ~6GB, required for FID computation)')
 @click.option('--force', is_flag=True, help='Force re-download')
+@click.option('--hf-token', type=str, default=None, envvar='HF_TOKEN',
+              help='HuggingFace access token (for CNN-DailyMail tokenizer). Also reads HF_TOKEN env var.')
 def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str],
-                         count: Optional[int], with_images: bool, force: bool):
+                         count: Optional[int], with_images: bool, force: bool,
+                         hf_token: Optional[str]):
     """Download dataset files."""
     from .utils.dataset_downloader import download_dataset, get_dataset_info
 
@@ -495,7 +501,7 @@ def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str],
             from .utils.dataset_downloader import download_coco2014
             paths = download_coco2014(output_dir, force=force, download_images=with_images)
         else:
-            paths = download_dataset(dataset, output_dir, subset, force)
+            paths = download_dataset(dataset, output_dir, subset, force, hf_token=hf_token)
 
         click.echo("\nDataset downloaded successfully!")
         click.echo(f"  Path: {paths.get('data_path', 'N/A')}")
@@ -519,7 +525,9 @@ def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str],
               default='.', help='Base output directory')
 @click.option('--format', '-f', type=click.Choice(['onnx', 'openvino']),
               default='onnx', help='Model format')
-def setup_cmd(model: str, output_dir: str, format: str):
+@click.option('--hf-token', type=str, default=None, envvar='HF_TOKEN',
+              help='HuggingFace access token (for gated models like Meta-Llama). Also reads HF_TOKEN env var.')
+def setup_cmd(model: str, output_dir: str, format: str, hf_token: Optional[str]):
     """Download both model and dataset for a benchmark."""
     from .utils.model_downloader import download_model, download_whisper_model, download_sdxl_model
     from .utils.model_downloader import download_retinanet_model, download_llama_model
@@ -571,6 +579,7 @@ def setup_cmd(model: str, output_dir: str, format: str):
             model_paths = download_llama_model(
                 str(models_dir),
                 export_to_openvino=True,
+                hf_token=hf_token,
             )
             model_path = model_paths['model_path']
         else:
@@ -598,7 +607,7 @@ def setup_cmd(model: str, output_dir: str, format: str):
             dataset_paths = download_dataset('coco2014', str(data_dir))
         elif model == 'llama3.1-8b':
             from .utils.dataset_downloader import download_cnn_dailymail
-            dataset_paths = download_cnn_dailymail(str(data_dir))
+            dataset_paths = download_cnn_dailymail(str(data_dir), hf_token=hf_token)
 
         click.echo(f"  Dataset: {dataset_paths.get('data_path', 'N/A')}\n")
     except Exception as e:

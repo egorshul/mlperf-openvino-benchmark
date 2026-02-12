@@ -1399,6 +1399,7 @@ def download_cnn_dailymail(
     output_dir: str,
     model_name: str = "meta-llama/Meta-Llama-3.1-8B-Instruct",
     force: bool = False,
+    hf_token: Optional[str] = None,
 ) -> Dict[str, str]:
     """Download and process CNN-DailyMail for MLPerf Llama 3.1 8B benchmark.
 
@@ -1447,8 +1448,17 @@ def download_cnn_dailymail(
     logger.info("Loading cnn_dailymail v3.0.0 from HuggingFace...")
     dataset = load_dataset("cnn_dailymail", "3.0.0", split="validation")
 
+    # Resolve HF token for gated models (Meta-Llama)
+    from .model_downloader import _resolve_hf_token
+    token = _resolve_hf_token(hf_token)
+    if not token:
+        logger.warning(
+            "No HuggingFace token found. Meta-Llama tokenizer requires authentication. "
+            "Set HF_TOKEN env var or run: huggingface-cli login"
+        )
+
     # Tokenizer setup matching reference download_cnndm.py exactly
-    tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False, token=token)
     tokenizer.padding_side = "left"
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.model_max_length = 8000
@@ -1523,7 +1533,8 @@ def download_dataset(
     dataset_name: str,
     output_dir: str,
     subset: Optional[str] = None,
-    force: bool = False
+    force: bool = False,
+    hf_token: Optional[str] = None,
 ) -> Dict[str, str]:
     if dataset_name == "imagenet":
         return download_imagenet(output_dir, force)
@@ -1538,7 +1549,7 @@ def download_dataset(
     elif dataset_name == "coco2014":
         return download_coco2014(output_dir, force)
     elif dataset_name == "cnn-dailymail":
-        return download_cnn_dailymail(output_dir, force=force)
+        return download_cnn_dailymail(output_dir, force=force, hf_token=hf_token)
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 

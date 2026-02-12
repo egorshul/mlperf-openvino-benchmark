@@ -153,6 +153,20 @@ mlperf-ov run --model sdxl --scenario Offline --device NPU
 
 Text summarization on CNN-DailyMail v3.0.0 using Optimum-Intel OVModelForCausalLM. Supports both CPU and multi-die accelerator inference. Follows the MLCommons Inference v5.1 closed division specification exactly.
 
+**Prerequisites:** Meta-Llama is a gated model. You must:
+1. Accept the license at https://huggingface.co/meta-llama/Meta-Llama-3.1-8B-Instruct
+2. Authenticate via one of:
+   ```bash
+   # Option A: Login interactively (recommended, token is cached)
+   huggingface-cli login
+
+   # Option B: Set environment variable
+   export HF_TOKEN=hf_your_token_here
+
+   # Option C: Pass token directly
+   mlperf-ov setup --model llama3.1-8b --hf-token hf_your_token_here
+   ```
+
 ```bash
 # Download model and dataset
 mlperf-ov setup --model llama3.1-8b
