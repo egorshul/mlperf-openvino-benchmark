@@ -218,6 +218,9 @@ class LlamaMultiDieSUT:
             f"max_context_len={self._max_context_len}"
         )
 
+        has_beam_idx = False
+        has_past_kv = False
+
         new_shapes: Dict[str, list] = {}
         for inp in model.inputs:
             names = set(inp.get_names())
@@ -237,9 +240,18 @@ class LlamaMultiDieSUT:
                 self._input_dtypes["position_ids"] = dtype
                 new_shapes[name] = [1, 1]
             elif any("beam_idx" in n for n in names):
+                has_beam_idx = True
                 self._input_map["beam_idx"] = name
                 self._input_dtypes["beam_idx"] = dtype
                 new_shapes[name] = [1]
+            elif any("past_key_values" in n for n in names):
+                has_past_kv = True
+                # collapse dynamic dims to 1
+                shape = inp.get_partial_shape()
+                static = []
+                for dim in shape:
+                    static.append(dim.get_length() if dim.is_static else 1)
+                new_shapes[name] = static
             else:
                 # Unknown input — make every dim static (keep static dims,
                 # collapse dynamic dims to 1).
@@ -248,6 +260,15 @@ class LlamaMultiDieSUT:
                 for dim in shape:
                     static.append(dim.get_length() if dim.is_static else 1)
                 new_shapes[name] = static
+
+        if has_past_kv and not has_beam_idx:
+            raise ValueError(
+                "Non-stateful with-past model detected (explicit past_key_values "
+                "inputs).  The multi-die SUT requires a stateful model whose "
+                "KV-cache is managed via OpenVINO state variables.  "
+                "Re-export with --stateful, or use the single-device LlamaSUT "
+                "(CPU/GPU) which handles non-stateful models via OVModelForCausalLM."
+            )
 
         logger.info(f"[Llama] Reshaping model to static shapes: {new_shapes}")
         model.reshape(new_shapes)

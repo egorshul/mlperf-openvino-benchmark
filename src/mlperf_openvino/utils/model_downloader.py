@@ -650,11 +650,12 @@ def download_llama_model(
     export_to_openvino: bool = True,
     weight_format: str = "int8",
     hf_token: Optional[str] = None,
+    stateful: bool = False,
 ) -> Dict[str, str]:
     """Download and export Llama model to OpenVINO IR format.
 
-    Uses optimum-cli to export the model from HuggingFace to OpenVINO IR,
-    with optional weight compression (FP16/INT8/INT4) via NNCF.
+    Uses ``optimum.exporters.openvino.main_export`` to export the model from
+    HuggingFace to OpenVINO IR, with optional weight compression via NNCF.
 
     Args:
         output_dir: Directory to save the exported model.
@@ -662,6 +663,8 @@ def download_llama_model(
         export_to_openvino: If True, export to OpenVINO IR (recommended).
         weight_format: Weight format for compression: "fp32", "fp16", "int8", "int4".
         hf_token: HuggingFace access token (for gated models like Meta-Llama).
+        stateful: If True, merge KV-cache into OpenVINO state variables.
+            If False (default), past_key_values are explicit graph I/O.
 
     Returns:
         Dict with model_path and metadata.
@@ -679,7 +682,9 @@ def download_llama_model(
     model_name = model_id.split("/")[-1]
 
     if export_to_openvino:
-        return _export_llama_to_openvino(output_dir, model_id, weight_format, token=token)
+        return _export_llama_to_openvino(
+            output_dir, model_id, weight_format, token=token, stateful=stateful,
+        )
     else:
         return _download_llama_from_hf(output_dir, model_id, token=token)
 
@@ -732,14 +737,21 @@ def _export_llama_to_openvino(
     model_id: str,
     weight_format: str = "int8",
     token: Optional[str] = None,
+    stateful: bool = False,
 ) -> Dict[str, str]:
-    """Export Llama model to OpenVINO IR using optimum-intel.
+    """Export Llama model to OpenVINO IR using optimum-intel main_export.
 
-    Uses OVModelForCausalLM.from_pretrained(export=True) for conversion,
-    with NNCF weight compression for INT8/INT4 formats.
+    Uses ``optimum.exporters.openvino.main_export`` with
+    ``task="text-generation-with-past"`` so that the exported model has
+    explicit past_key_values inputs/outputs (KV-cache reuse).
+
+    Args:
+        stateful: If True, KV-cache is merged into OpenVINO state variables
+            (best for accelerators).  If False (default), past_key_values
+            remain as explicit graph inputs/outputs.
     """
     try:
-        from optimum.intel.openvino import OVModelForCausalLM
+        from optimum.exporters.openvino import main_export
         from transformers import AutoTokenizer
     except ImportError:
         raise ImportError(
@@ -761,41 +773,35 @@ def _export_llama_to_openvino(
             logger.info(f"OpenVINO model already exists at {ov_model_path}")
             return {"model_path": str(ov_model_path)}
 
-    logger.info(f"Exporting {model_id} to OpenVINO IR (weight_format={weight_format})...")
+    logger.info(
+        f"Exporting {model_id} to OpenVINO IR "
+        f"(weight_format={weight_format}, stateful={stateful})..."
+    )
     logger.info("This may take a long time for large models...")
 
-    # Build quantization config for INT8/INT4
-    ov_export_kwargs: Dict[str, Any] = {
-        "export": True,
-        "compile": False,
-        "token": token,
+    export_kwargs: Dict[str, Any] = {
+        "model_name_or_path": model_id,
+        "output": str(ov_model_path),
+        "task": "text-generation-with-past",
+        "stateful": stateful,
     }
 
-    if weight_format in ("int8", "int4"):
-        try:
-            from optimum.intel import OVWeightQuantizationConfig
+    if token:
+        export_kwargs["token"] = token
 
-            ov_export_kwargs["quantization_config"] = OVWeightQuantizationConfig(
-                bits=8 if weight_format == "int8" else 4,
-                sym=True if weight_format == "int4" else False,
-            )
-            logger.info(f"Using NNCF weight-only compression: {weight_format}")
-        except ImportError:
-            logger.warning(
-                "NNCF not available for weight compression. "
-                "Exporting with FP16 weights instead. "
-                "Install with: pip install nncf"
-            )
-            weight_format = "fp16"
+    # Map weight format to main_export parameters
+    if weight_format == "fp16":
+        export_kwargs["weight_format"] = "fp16"
+    elif weight_format == "int8":
+        export_kwargs["weight_format"] = "int8"
+    elif weight_format == "int4":
+        export_kwargs["weight_format"] = "int4_sym_g128"
+    # fp32 is the default — no extra flag needed
 
     def do_export():
-        return OVModelForCausalLM.from_pretrained(
-            model_id,
-            **ov_export_kwargs,
-        )
+        main_export(**export_kwargs)
 
-    model = _download_with_retry(do_export, max_retries=3)
-    model.save_pretrained(str(ov_model_path))
+    _download_with_retry(do_export, max_retries=3)
 
     # Save tokenizer alongside the model
     tokenizer = AutoTokenizer.from_pretrained(model_id, token=token)
