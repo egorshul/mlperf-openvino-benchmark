@@ -2,12 +2,80 @@ import hashlib
 import logging
 import os
 import shutil
+import subprocess
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.error import URLError
 
 logger = logging.getLogger(__name__)
+
+# MLCommons R2 storage for downloading models/datasets without HuggingFace token.
+# See: https://github.com/mlcommons/inference/tree/master/language/llama3.1-8b
+R2_DOWNLOADER_SCRIPT = (
+    "https://raw.githubusercontent.com/mlcommons/r2-downloader/"
+    "refs/heads/main/mlc-r2-downloader.sh"
+)
+R2_LLAMA_MODEL_URI = (
+    "https://inference.mlcommons-storage.org/metadata/llama3-1-8b.uri"
+)
+
+
+def _run_r2_download(uri: str, output_dir: str, timeout: int = 7200) -> bool:
+    """Download files from MLCommons R2 storage using the R2 downloader script.
+
+    No HuggingFace token required. Uses wget internally.
+    Returns True on success, False on failure.
+    """
+    cmd = (
+        f'bash <(curl -s {R2_DOWNLOADER_SCRIPT}) '
+        f'-d {output_dir} {uri}'
+    )
+
+    logger.info("Downloading from MLCommons R2 storage (no HF token required)...")
+    logger.info(f"URI: {uri}")
+
+    try:
+        subprocess.run(
+            cmd, shell=True, check=True, timeout=timeout,
+            executable='/bin/bash',
+        )
+        return True
+    except subprocess.CalledProcessError as e:
+        logger.warning(f"R2 download failed (exit code {e.returncode})")
+        return False
+    except subprocess.TimeoutExpired:
+        logger.warning(f"R2 download timed out after {timeout}s")
+        return False
+    except FileNotFoundError:
+        logger.warning("bash not found, cannot use R2 downloader")
+        return False
+
+
+def _find_checkpoint_dir(base_dir: Path) -> Optional[Path]:
+    """Find directory containing model checkpoint files after R2 download.
+
+    The R2 downloader may create nested directories. This function locates
+    the actual checkpoint directory by looking for config.json + weight files.
+    """
+    if (base_dir / "config.json").exists():
+        has_weights = (
+            list(base_dir.glob("*.safetensors"))
+            or list(base_dir.glob("*.bin"))
+        )
+        if has_weights:
+            return base_dir
+
+    for config in base_dir.rglob("config.json"):
+        parent = config.parent
+        has_weights = (
+            list(parent.glob("*.safetensors"))
+            or list(parent.glob("*.bin"))
+        )
+        if has_weights:
+            return parent
+
+    return None
 
 
 def _resolve_hf_token(token: Optional[str] = None) -> Optional[str]:
@@ -653,34 +721,78 @@ def download_llama_model(
 ) -> Dict[str, str]:
     """Download and export Llama model to OpenVINO IR format.
 
-    Uses optimum-cli to export the model from HuggingFace to OpenVINO IR,
-    with optional weight compression (FP16/INT8/INT4) via NNCF.
+    Download priority:
+    1. MLCommons R2 storage (no HuggingFace token required)
+    2. HuggingFace Hub (requires token for gated models like Meta-Llama)
 
     Args:
         output_dir: Directory to save the exported model.
         model_id: HuggingFace model ID.
         export_to_openvino: If True, export to OpenVINO IR (recommended).
         weight_format: Weight format for compression: "fp32", "fp16", "int8", "int4".
-        hf_token: HuggingFace access token (for gated models like Meta-Llama).
+        hf_token: HuggingFace access token (only needed if R2 download fails).
 
     Returns:
         Dict with model_path and metadata.
     """
-    token = _resolve_hf_token(hf_token)
-    if not token:
-        logger.warning(
-            "No HuggingFace token found. Meta-Llama models are gated and require authentication. "
-            "Set HF_TOKEN env var or run: huggingface-cli login"
-        )
-
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
     model_name = model_id.split("/")[-1]
 
     if export_to_openvino:
-        return _export_llama_to_openvino(output_dir, model_id, weight_format, token=token)
+        # Check if already exported
+        ov_model_path = output_path / f"{model_name}-openvino-{weight_format}"
+        if ov_model_path.exists():
+            config_file = ov_model_path / "config.json"
+            xml_files = list(ov_model_path.glob("*.xml"))
+            if config_file.exists() and xml_files:
+                logger.info(f"OpenVINO model already exists at {ov_model_path}")
+                return {"model_path": str(ov_model_path)}
+
+        # Try R2 download first (no HF token needed)
+        checkpoint_dir = output_path / f"{model_name}-r2-checkpoint"
+        r2_model_source = None
+
+        if checkpoint_dir.exists():
+            actual_dir = _find_checkpoint_dir(checkpoint_dir)
+            if actual_dir:
+                r2_model_source = str(actual_dir)
+        else:
+            logger.info("Trying MLCommons R2 storage (no HF token required)...")
+            if _run_r2_download(R2_LLAMA_MODEL_URI, str(checkpoint_dir)):
+                actual_dir = _find_checkpoint_dir(checkpoint_dir)
+                if actual_dir:
+                    r2_model_source = str(actual_dir)
+                    logger.info(f"R2 download successful: {actual_dir}")
+                else:
+                    logger.warning("R2 download completed but no model checkpoint found")
+
+        if r2_model_source:
+            return _export_llama_to_openvino(
+                output_dir, r2_model_source, weight_format,
+                token=None, model_name=model_name,
+            )
+
+        # Fall back to HuggingFace download
+        logger.info("Falling back to HuggingFace download...")
+        token = _resolve_hf_token(hf_token)
+        if not token:
+            logger.warning(
+                "No HuggingFace token found. Meta-Llama models are gated and require authentication. "
+                "Set HF_TOKEN env var or run: huggingface-cli login"
+            )
+        return _export_llama_to_openvino(
+            output_dir, model_id, weight_format,
+            token=token, model_name=model_name,
+        )
     else:
+        token = _resolve_hf_token(hf_token)
+        if not token:
+            logger.warning(
+                "No HuggingFace token found. Meta-Llama models are gated and require authentication. "
+                "Set HF_TOKEN env var or run: huggingface-cli login"
+            )
         return _download_llama_from_hf(output_dir, model_id, token=token)
 
 
@@ -732,11 +844,15 @@ def _export_llama_to_openvino(
     model_id: str,
     weight_format: str = "int8",
     token: Optional[str] = None,
+    model_name: Optional[str] = None,
 ) -> Dict[str, str]:
     """Export Llama model to OpenVINO IR using optimum-intel.
 
     Uses OVModelForCausalLM.from_pretrained(export=True) for conversion,
     with NNCF weight compression for INT8/INT4 formats.
+
+    model_id can be a HuggingFace model ID or a local directory path
+    (e.g. from R2 download). When using a local path, token is not needed.
     """
     try:
         from optimum.intel.openvino import OVModelForCausalLM
@@ -750,7 +866,8 @@ def _export_llama_to_openvino(
     _configure_hf_download()
 
     output_path = Path(output_dir)
-    model_name = model_id.split("/")[-1]
+    if model_name is None:
+        model_name = model_id.split("/")[-1]
     ov_model_path = output_path / f"{model_name}-openvino-{weight_format}"
 
     # Check if already exported

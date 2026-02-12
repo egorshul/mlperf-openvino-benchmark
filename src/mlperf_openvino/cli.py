@@ -328,7 +328,7 @@ def _print_dataset_help(model: str) -> None:
 @click.option('--batch-sizes', type=str, default='1,2,4,8',
               help='Batch sizes for RetinaNet (comma-separated, default: 1,2,4,8)')
 @click.option('--hf-token', type=str, default=None, envvar='HF_TOKEN',
-              help='HuggingFace access token (for gated models like Meta-Llama). Also reads HF_TOKEN env var.')
+              help='HuggingFace access token (fallback if R2 download fails). Also reads HF_TOKEN env var.')
 def download_model_cmd(model: str, output_dir: str, format: str, batch_sizes: str, hf_token: Optional[str]):
     """Download model files."""
     click.echo(f"Downloading {model} model...")
@@ -466,7 +466,7 @@ def info():
               help='Download reference images (COCO 2014 only, ~6GB, required for FID computation)')
 @click.option('--force', is_flag=True, help='Force re-download')
 @click.option('--hf-token', type=str, default=None, envvar='HF_TOKEN',
-              help='HuggingFace access token (for CNN-DailyMail tokenizer). Also reads HF_TOKEN env var.')
+              help='HuggingFace access token (fallback if R2 download fails for CNN-DailyMail). Also reads HF_TOKEN env var.')
 def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str],
                          count: Optional[int], with_images: bool, force: bool,
                          hf_token: Optional[str]):
@@ -526,7 +526,7 @@ def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str],
 @click.option('--format', '-f', type=click.Choice(['onnx', 'openvino']),
               default='onnx', help='Model format')
 @click.option('--hf-token', type=str, default=None, envvar='HF_TOKEN',
-              help='HuggingFace access token (for gated models like Meta-Llama). Also reads HF_TOKEN env var.')
+              help='HuggingFace access token (fallback if R2 download fails). Also reads HF_TOKEN env var.')
 def setup_cmd(model: str, output_dir: str, format: str, hf_token: Optional[str]):
     """Download both model and dataset for a benchmark."""
     from .utils.model_downloader import download_model, download_whisper_model, download_sdxl_model

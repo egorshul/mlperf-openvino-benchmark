@@ -142,6 +142,11 @@ DATASET_REGISTRY: Dict[str, Dict] = {
             "dataset_id": "cnn_dailymail",
             "version": "3.0.0",
         },
+        "r2": {
+            "eval": "https://inference.mlcommons-storage.org/metadata/llama3-1-8b-cnn-eval.uri",
+            "edge": "https://inference.mlcommons-storage.org/metadata/llama3-1-8b-sample-cnn-eval-5000.uri",
+            "calibration": "https://inference.mlcommons-storage.org/metadata/llama3-1-8b-cnn-dailymail-calibration.uri",
+        },
         "num_samples_datacenter": 13368,
         "num_samples_edge": 5000,
         "eval_file": "cnn_eval.json",
@@ -1395,6 +1400,72 @@ def download_coco2014(
     }
 
 
+def _find_file_recursive(base_dir: Path, filename: str) -> Optional[Path]:
+    """Find a file by name in base_dir or its subdirectories."""
+    direct = base_dir / filename
+    if direct.exists():
+        return direct
+    for match in base_dir.rglob(filename):
+        return match
+    return None
+
+
+def _download_cnn_dailymail_from_r2(data_dir: Path) -> bool:
+    """Download pre-processed CNN-DailyMail dataset from MLCommons R2 storage.
+
+    Downloads pre-tokenized JSON files directly — no HuggingFace token required.
+    This matches the MLCommons Inference v5.1 reference implementation approach.
+    See: https://github.com/mlcommons/inference/tree/master/language/llama3.1-8b
+
+    Returns True if all required files were downloaded successfully.
+    """
+    R2_SCRIPT = (
+        "https://raw.githubusercontent.com/mlcommons/r2-downloader/"
+        "refs/heads/main/mlc-r2-downloader.sh"
+    )
+
+    r2_uris = DATASET_REGISTRY["cnn-dailymail"]["r2"]
+
+    files_to_download = [
+        ("eval (datacenter, 13368 samples)", r2_uris["eval"], "cnn_eval.json"),
+        ("edge (5000 samples)", r2_uris["edge"], "sample_cnn_eval_5000.json"),
+        ("calibration (1000 samples)", r2_uris["calibration"], "cnn_dailymail_calibration.json"),
+    ]
+
+    for description, uri, expected_file in files_to_download:
+        logger.info(f"Downloading {description} from MLCommons R2 storage...")
+        cmd = (
+            f'bash <(curl -s {R2_SCRIPT}) '
+            f'-d {data_dir} {uri}'
+        )
+        try:
+            subprocess.run(
+                cmd, shell=True, check=True, timeout=1800,
+                executable='/bin/bash',
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
+            logger.warning(f"R2 download failed for {description}: {e}")
+            return False
+
+    # Verify the main eval file exists (may be in subdirectories)
+    eval_file = _find_file_recursive(data_dir, "cnn_eval.json")
+    if not eval_file:
+        logger.warning("R2 download completed but cnn_eval.json not found")
+        return False
+
+    # Move files to expected locations if they ended up in subdirectories
+    expected_files = ["cnn_eval.json", "sample_cnn_eval_5000.json", "cnn_dailymail_calibration.json"]
+    for fname in expected_files:
+        target = data_dir / fname
+        if not target.exists():
+            found = _find_file_recursive(data_dir, fname)
+            if found and found != target:
+                shutil.move(str(found), str(target))
+                logger.info(f"Moved {fname} to {target}")
+
+    return (data_dir / "cnn_eval.json").exists()
+
+
 def download_cnn_dailymail(
     output_dir: str,
     model_name: str = "meta-llama/Meta-Llama-3.1-8B-Instruct",
@@ -1403,7 +1474,14 @@ def download_cnn_dailymail(
 ) -> Dict[str, str]:
     """Download and process CNN-DailyMail for MLPerf Llama 3.1 8B benchmark.
 
-    Follows the MLCommons Inference v5.1 reference (download_cnndm.py) exactly:
+    Download priority:
+    1. MLCommons R2 storage — pre-processed files, no HuggingFace token required
+    2. HuggingFace — downloads raw dataset + tokenizer (requires HF token for Meta-Llama)
+
+    The R2 approach matches the MLCommons Inference reference implementation:
+    https://github.com/mlcommons/inference/tree/master/language/llama3.1-8b
+
+    HuggingFace fallback follows the reference (download_cnndm.py) exactly:
     1. Downloads cnn_dailymail v3.0.0 validation split from HuggingFace
     2. Applies instruction template (plain text, NOT chat template)
     3. Pre-tokenizes inputs with tokenizer.encode() (adds BOS implicitly)
@@ -1433,7 +1511,23 @@ def download_cnn_dailymail(
             "num_samples": actual_count,
         }
 
-    logger.info("Downloading CNN-DailyMail v3.0.0 for MLPerf Llama 3.1 8B benchmark...")
+    # Try R2 download first (no HF token required)
+    logger.info("Trying MLCommons R2 storage (no HF token required)...")
+    if _download_cnn_dailymail_from_r2(data_dir):
+        import json
+
+        with open(eval_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        actual_count = len(data) if isinstance(data, list) else 0
+        logger.info(f"CNN-DailyMail downloaded from R2: {actual_count} samples")
+        return {
+            "data_path": str(data_dir),
+            "eval_file": str(eval_file),
+            "num_samples": actual_count,
+        }
+
+    # Fall back to HuggingFace-based processing
+    logger.info("R2 download unavailable, falling back to HuggingFace...")
     logger.info(f"Tokenizer model: {model_name}")
 
     try:
