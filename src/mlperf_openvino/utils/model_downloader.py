@@ -773,13 +773,13 @@ def _export_llama_to_openvino(
 
     if weight_format in ("int8", "int4"):
         try:
-            from optimum.intel import OVQuantizationConfig
+            from optimum.intel import OVWeightQuantizationConfig
 
-            ov_export_kwargs["quantization_config"] = OVQuantizationConfig(
+            ov_export_kwargs["quantization_config"] = OVWeightQuantizationConfig(
                 bits=8 if weight_format == "int8" else 4,
                 sym=True if weight_format == "int4" else False,
             )
-            logger.info(f"Using NNCF weight compression: {weight_format}")
+            logger.info(f"Using NNCF weight-only compression: {weight_format}")
         except ImportError:
             logger.warning(
                 "NNCF not available for weight compression. "
