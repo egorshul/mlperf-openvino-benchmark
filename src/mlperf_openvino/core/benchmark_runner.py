@@ -467,7 +467,7 @@ class BenchmarkRunner:
                 model_path=model_path,
                 qsl=self.qsl,
                 scenario=self.config.scenario,
-                max_new_tokens=128,
+                max_new_tokens=1024,
             )
         else:
             from .llama_sut import LlamaSUT
@@ -477,7 +477,7 @@ class BenchmarkRunner:
                 model_path=model_path,
                 qsl=self.qsl,
                 scenario=self.config.scenario,
-                max_new_tokens=128,
+                max_new_tokens=1024,
             )
 
     def _get_test_settings(self) -> "lg.TestSettings":

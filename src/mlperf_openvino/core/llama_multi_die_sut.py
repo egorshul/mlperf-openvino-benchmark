@@ -96,7 +96,7 @@ class LlamaMultiDieSUT:
 
     Per MLPerf v5.1 Llama 3.1 8B spec:
       - Task: text summarization (CNN-DailyMail)
-      - max_new_tokens: 128
+      - max_new_tokens: 1024
       - Greedy decoding (do_sample=False)
       - n_tokens reported per response (use_token_latencies=1)
     """
@@ -107,7 +107,7 @@ class LlamaMultiDieSUT:
         model_path: Union[str, Path],
         qsl: CnnDailyMailQSL,
         scenario: Scenario = Scenario.OFFLINE,
-        max_new_tokens: int = 128,
+        max_new_tokens: int = 1024,
     ):
         if not LOADGEN_AVAILABLE:
             raise ImportError("MLPerf LoadGen is not installed")
@@ -206,6 +206,13 @@ class LlamaMultiDieSUT:
                 ov_config=ov_config,
                 compile=True,
             )
+            # Clean up generation_config to suppress noisy per-call warnings
+            gen_cfg = model.generation_config
+            gen_cfg.temperature = None
+            gen_cfg.top_p = None
+            if gen_cfg.pad_token_id is None:
+                gen_cfg.pad_token_id = self._tokenizer.pad_token_id
+
             self._models.append((die, model))
 
         die_names = [name for name, _ in self._models]

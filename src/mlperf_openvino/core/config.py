@@ -575,7 +575,7 @@ class BenchmarkConfig:
 
         Task: text summarization (CNN-DailyMail)
         Dataset: 13,368 samples (datacenter) / 5,000 (edge)
-        max_new_tokens: 128, model_max_length: 8000
+        max_new_tokens: 1024, model_max_length: 8000
         Accuracy: ROUGE-1/2/L/Lsum (99% threshold) + gen_len (90% threshold)
         """
         return cls(
