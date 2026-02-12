@@ -1,8 +1,11 @@
 """Llama multi-die SUT for accelerator inference (NPU/VPU/XPU).
 
-Distributes text generation across multiple accelerator dies using
-OVModelForCausalLM from Optimum-Intel. Each die gets a compiled copy
-of the model; samples are dispatched round-robin across dies.
+Uses openvino_genai.LLMPipeline which handles static-shape compilation,
+KV-cache management, and prefill/decode switching internally — required
+for devices that only support dynamic batch dimension.
+
+Distributes text generation across multiple accelerator dies;
+samples are dispatched round-robin across dies.
 
 Follows the MLCommons Inference v5.1 reference:
   https://github.com/mlcommons/inference/tree/master/language/llama3.1-8b
@@ -28,20 +31,12 @@ except ImportError:
     lg = None
 
 try:
-    from optimum.intel.openvino import OVModelForCausalLM
+    import openvino_genai as ov_genai
 
-    OPTIMUM_CAUSAL_LM_AVAILABLE = True
+    GENAI_AVAILABLE = True
 except ImportError:
-    OPTIMUM_CAUSAL_LM_AVAILABLE = False
-    OVModelForCausalLM = None
-
-try:
-    import torch
-
-    TORCH_AVAILABLE = True
-except ImportError:
-    TORCH_AVAILABLE = False
-    torch = None
+    GENAI_AVAILABLE = False
+    ov_genai = None
 
 from .config import BenchmarkConfig, Scenario
 from ..datasets.cnn_dailymail import CnnDailyMailQSL
@@ -89,9 +84,10 @@ def _make_response(sample_id: int, token_ids: np.ndarray, n_tokens: int):
 
 
 class LlamaMultiDieSUT:
-    """Llama multi-die SUT using Optimum-Intel (OVModelForCausalLM).
+    """Llama multi-die SUT using OpenVINO GenAI (LLMPipeline).
 
-    Per die: model is loaded and compiled on the accelerator.
+    Per die: an LLMPipeline is created which handles model compilation
+    with static shapes, KV-cache management, and token generation.
     Offline mode distributes samples across dies in parallel via round-robin.
 
     Per MLPerf v5.1 Llama 3.1 8B spec:
@@ -111,13 +107,11 @@ class LlamaMultiDieSUT:
     ):
         if not LOADGEN_AVAILABLE:
             raise ImportError("MLPerf LoadGen is not installed")
-        if not OPTIMUM_CAUSAL_LM_AVAILABLE:
+        if not GENAI_AVAILABLE:
             raise ImportError(
-                "optimum-intel is required for LlamaMultiDieSUT. "
-                "Install with: pip install optimum[openvino]"
+                "openvino-genai is required for LlamaMultiDieSUT. "
+                "Install with: pip install openvino-genai"
             )
-        if not TORCH_AVAILABLE:
-            raise ImportError("torch is required for LlamaMultiDieSUT")
 
         self.config = config
         self.model_path = Path(model_path)
@@ -136,12 +130,12 @@ class LlamaMultiDieSUT:
         self._sut_handle = None
         self._qsl_handle = None
 
-        self._models: List[Tuple[str, Any]] = []
-        self._model_index = 0
-        self._model_index_lock = threading.Lock()
+        self._pipelines: List[Tuple[str, Any]] = []
+        self._pipe_index = 0
+        self._pipe_index_lock = threading.Lock()
         self._tokenizer = None
 
-        self._setup_models()
+        self._setup_pipelines()
 
     def _discover_device_dies(self, device: str) -> List[str]:
         import openvino as ov
@@ -150,7 +144,7 @@ class LlamaMultiDieSUT:
         pattern = re.compile(rf"^{re.escape(device)}\.(\d+)$")
         return sorted(d for d in core.available_devices if pattern.match(d))
 
-    def _setup_models(self) -> None:
+    def _setup_pipelines(self) -> None:
         from transformers import AutoTokenizer
 
         target_device = (
@@ -163,7 +157,7 @@ class LlamaMultiDieSUT:
                 "LlamaMultiDieSUT requires an accelerator device in config"
             )
 
-        # Load tokenizer
+        # Load HF tokenizer (for encoding generated text → token IDs)
         try:
             self._tokenizer = AutoTokenizer.from_pretrained(str(self.model_path))
         except Exception:
@@ -174,12 +168,6 @@ class LlamaMultiDieSUT:
 
         if self._tokenizer.pad_token is None:
             self._tokenizer.pad_token = self._tokenizer.eos_token
-
-        self._pad_token_id = self._tokenizer.pad_token_id or 0
-
-        # Compute static sequence length from dataset (device has no dynamic shapes)
-        self._static_seq_len = self.qsl.get_max_input_length()
-        logger.info(f"[Llama] Static sequence length: {self._static_seq_len}")
 
         # Determine die list
         if "," in target_device:
@@ -195,6 +183,7 @@ class LlamaMultiDieSUT:
                 f"Check that the device is available."
             )
 
+        # Build device config for LLMPipeline
         ov_config: Dict[str, Any] = {}
         if hasattr(self.config, "openvino"):
             if self.config.openvino.cache_dir:
@@ -204,91 +193,50 @@ class LlamaMultiDieSUT:
                     for key, value in self.config.openvino.device_properties.items():
                         ov_config[key] = value
 
+        # Generation config — greedy decoding per MLPerf spec
+        self._gen_config = ov_genai.GenerationConfig()
+        self._gen_config.max_new_tokens = self.max_new_tokens
+        self._gen_config.min_new_tokens = 1
+
         for die in device_dies:
-            logger.info(f"[Llama] Loading model for {die} (compile=False) ...")
-            model = OVModelForCausalLM.from_pretrained(
-                str(self.model_path),
-                device=die,
-                ov_config=ov_config,
-                compile=False,
-            )
-            # Clean up generation_config to suppress noisy per-call warnings
-            gen_cfg = model.generation_config
-            gen_cfg.temperature = None
-            gen_cfg.top_p = None
-            if gen_cfg.pad_token_id is None:
-                gen_cfg.pad_token_id = self._pad_token_id
+            logger.info(f"[Llama] Creating LLMPipeline for {die} ...")
+            pipe = ov_genai.LLMPipeline(str(self.model_path), die, **ov_config)
+            self._pipelines.append((die, pipe))
 
-            # Reshape to static shapes (device supports only dynamic batch)
-            logger.info(
-                f"[Llama] Reshaping {die} to static shape: "
-                f"batch=1, seq_len={self._static_seq_len}"
-            )
-            model.reshape(1, self._static_seq_len)
-
-            logger.info(f"[Llama] Compiling {die} ...")
-            model.compile()
-
-            self._models.append((die, model))
-
-        die_names = [name for name, _ in self._models]
+        die_names = [name for name, _ in self._pipelines]
         logger.info(
-            f"[Llama] {len(self._models)} die(s) ready: {', '.join(die_names)}"
+            f"[Llama] {len(self._pipelines)} die(s) ready: {', '.join(die_names)}"
         )
 
-    def _process_sample(self, sample_idx: int, model: Any) -> Tuple[str, np.ndarray, int]:
-        """Run inference on a single sample using the given model.
+    def _process_sample(
+        self, sample_idx: int, pipe: Any,
+    ) -> Tuple[str, np.ndarray, int]:
+        """Run inference on a single sample using the given pipeline.
 
-        Left-pads inputs to ``_static_seq_len`` so that every forward call
-        uses the same shape the model was compiled with (the device only
-        supports dynamic batch, all other dims must be static).
+        Uses text-based generation: prompt text → LLMPipeline → generated text.
+        Token IDs are obtained by re-encoding the generated text (needed for
+        LoadGen QuerySampleResponse).
 
         Returns:
-            (decoded_text, output_token_ids, n_tokens) — generated text,
-            raw token IDs (for QuerySampleResponse), and token count.
+            (decoded_text, output_token_ids, n_tokens)
         """
-        features = self.qsl.get_features(sample_idx)
-        input_ids = features["input_ids"]
-        attention_mask = features["attention_mask"]
+        prompt_text = self.qsl.get_input_text(sample_idx)
 
-        if isinstance(input_ids, np.ndarray):
-            input_ids = torch.from_numpy(input_ids).long()
-        if isinstance(attention_mask, np.ndarray):
-            attention_mask = torch.from_numpy(attention_mask).long()
+        result = pipe.generate(prompt_text, self._gen_config)
 
-        if input_ids.dim() == 1:
-            input_ids = input_ids.unsqueeze(0)
-        if attention_mask.dim() == 1:
-            attention_mask = attention_mask.unsqueeze(0)
+        # LLMPipeline.generate(str, ...) returns the generated text
+        if isinstance(result, str):
+            text = result
+        elif hasattr(result, "texts"):
+            text = result.texts[0] if result.texts else ""
+        else:
+            text = str(result)
 
-        # Left-pad to static sequence length (tokenizer already uses left padding)
-        seq_len = input_ids.shape[-1]
-        if seq_len < self._static_seq_len:
-            pad_len = self._static_seq_len - seq_len
-            input_ids = torch.nn.functional.pad(
-                input_ids, (pad_len, 0), value=self._pad_token_id,
-            )
-            attention_mask = torch.nn.functional.pad(
-                attention_mask, (pad_len, 0), value=0,
-            )
+        # Encode generated text → int64 token IDs for LoadGen response
+        output_tokens = self._tokenizer.encode(text, add_special_tokens=False)
+        output_ids = np.array(output_tokens, dtype=np.int64)
+        n_tokens = len(output_ids)
 
-        input_len = input_ids.shape[-1]  # == self._static_seq_len
-
-        with torch.no_grad():
-            generated_ids = model.generate(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                max_new_tokens=self.max_new_tokens,
-                min_new_tokens=1,
-                do_sample=False,  # Greedy decoding per MLPerf spec
-                num_beams=1,
-            )
-
-        # Extract only the newly generated tokens (exclude padded input)
-        new_token_ids = generated_ids[0, input_len:]
-        n_tokens = len(new_token_ids)
-        text = self._tokenizer.decode(new_token_ids, skip_special_tokens=True)
-        output_ids = new_token_ids.cpu().numpy()
         return text, output_ids, n_tokens
 
     def issue_queries(self, query_samples: List[Any]) -> None:
@@ -300,7 +248,7 @@ class LlamaMultiDieSUT:
 
     def _issue_queries_offline(self, query_samples: List[Any]) -> None:
         total = len(query_samples)
-        num_dies = len(self._models)
+        num_dies = len(self._pipelines)
         self._start_time = time.time()
         self._sample_count = 0
 
@@ -321,9 +269,9 @@ class LlamaMultiDieSUT:
         results_lock = threading.Lock()
 
         def _die_worker(die_idx: int, batch: List[Tuple[Any, int]]) -> None:
-            _, model = self._models[die_idx]
+            _, pipe = self._pipelines[die_idx]
             for sample, sample_idx in batch:
-                text, output_ids, n_tokens = self._process_sample(sample_idx, model)
+                text, output_ids, n_tokens = self._process_sample(sample_idx, pipe)
                 with self._predictions_lock:
                     if self._store_predictions:
                         self._predictions[sample_idx] = text
@@ -365,10 +313,10 @@ class LlamaMultiDieSUT:
         responses = []
         response_arrays = []  # prevent GC before QuerySamplesComplete
 
-        _, model = self._models[0]
+        _, pipe = self._pipelines[0]
         for sample in query_samples:
             sample_idx = sample.index
-            text, output_ids, n_tokens = self._process_sample(sample_idx, model)
+            text, output_ids, n_tokens = self._process_sample(sample_idx, pipe)
 
             if self._store_predictions:
                 self._predictions[sample_idx] = text
@@ -387,11 +335,11 @@ class LlamaMultiDieSUT:
         for sample in query_samples:
             sample_idx = sample.index
 
-            with self._model_index_lock:
-                _name, model = self._models[self._model_index]
-                self._model_index = (self._model_index + 1) % len(self._models)
+            with self._pipe_index_lock:
+                _name, pipe = self._pipelines[self._pipe_index]
+                self._pipe_index = (self._pipe_index + 1) % len(self._pipelines)
 
-            text, output_ids, n_tokens = self._process_sample(sample_idx, model)
+            text, output_ids, n_tokens = self._process_sample(sample_idx, pipe)
 
             if self._store_predictions:
                 with self._predictions_lock:
@@ -441,23 +389,19 @@ class LlamaMultiDieSUT:
             self._predictions.clear()
         self._query_count = 0
         self._sample_count = 0
-        with self._model_index_lock:
-            self._model_index = 0
+        with self._pipe_index_lock:
+            self._pipe_index = 0
 
     def warmup(self, num_iterations: int = 3) -> None:
-        """Warm up each die with dummy inputs matching the static shape."""
-        logger.info(f"[Llama] Warming up {len(self._models)} die(s)...")
-        dummy_input = torch.ones(1, self._static_seq_len, dtype=torch.long)
-        dummy_mask = torch.ones(1, self._static_seq_len, dtype=torch.long)
+        """Warm up each die with a short generation."""
+        logger.info(f"[Llama] Warming up {len(self._pipelines)} die(s)...")
 
-        for die_name, model in self._models:
+        warmup_config = ov_genai.GenerationConfig()
+        warmup_config.max_new_tokens = 1
+        warmup_config.min_new_tokens = 1
+
+        for die_name, pipe in self._pipelines:
             for _ in range(num_iterations):
-                with torch.no_grad():
-                    model.generate(
-                        input_ids=dummy_input,
-                        attention_mask=dummy_mask,
-                        max_new_tokens=1,
-                        do_sample=False,
-                    )
+                pipe.generate("Hello", warmup_config)
             logger.info(f"  {die_name}: warmed up")
         logger.info("[Llama] Warmup complete")
