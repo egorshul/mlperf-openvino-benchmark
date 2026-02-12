@@ -169,19 +169,15 @@ class LlamaMultiDieSUT:
         if self._tokenizer.pad_token is None:
             self._tokenizer.pad_token = self._tokenizer.eos_token
 
-        # Determine die list
-        if "," in target_device:
-            device_dies = [p.strip() for p in target_device.split(",")]
-        elif re.match(r"^.+\.\d+$", target_device):
-            device_dies = [target_device]
-        else:
-            device_dies = self._discover_device_dies(target_device)
-
-        if not device_dies:
-            raise RuntimeError(
-                f"No dies discovered for device '{target_device}'. "
-                f"Check that the device is available."
-            )
+        # LLMPipeline requires the bare device prefix (e.g. "NPU", not "NPU.0").
+        # Internally GenAI uses exact match `device == "NPU"` to activate NPUW
+        # which handles static-shape compilation, KV-cache, and die distribution.
+        # Passing "NPU.0" bypasses NPUW and causes a compilation error.
+        device = self.config.openvino.get_device_prefix()
+        logger.info(
+            f"[Llama] Using device prefix '{device}' for LLMPipeline "
+            f"(NPUW handles die distribution internally)"
+        )
 
         # Build pipeline config for LLMPipeline (passed as dict, 3rd positional arg)
         # MAX_PROMPT_LEN and MIN_RESPONSE_LEN define the static shapes for NPU.
@@ -205,21 +201,17 @@ class LlamaMultiDieSUT:
         self._gen_config.max_new_tokens = self.max_new_tokens
         self._gen_config.min_new_tokens = 1
 
-        for die in device_dies:
-            logger.info(
-                f"[Llama] Creating LLMPipeline for {die} "
-                f"(MAX_PROMPT_LEN={max_prompt_len}, "
-                f"MIN_RESPONSE_LEN={self.max_new_tokens}) ..."
-            )
-            pipe = ov_genai.LLMPipeline(
-                str(self.model_path), die, pipeline_config,
-            )
-            self._pipelines.append((die, pipe))
-
-        die_names = [name for name, _ in self._pipelines]
         logger.info(
-            f"[Llama] {len(self._pipelines)} die(s) ready: {', '.join(die_names)}"
+            f"[Llama] Creating LLMPipeline on {device} "
+            f"(MAX_PROMPT_LEN={max_prompt_len}, "
+            f"MIN_RESPONSE_LEN={self.max_new_tokens}) ..."
         )
+        pipe = ov_genai.LLMPipeline(
+            str(self.model_path), device, pipeline_config,
+        )
+        self._pipelines = [(device, pipe)]
+
+        logger.info(f"[Llama] LLMPipeline ready on {device}")
 
     def _process_sample(
         self, sample_idx: int, pipe: Any,
