@@ -193,6 +193,8 @@ class LlamaMultiDieSUT:
                     for key, value in self.config.openvino.device_properties.items():
                         ov_config[key] = value
 
+        logger.info(f"[Llama] Device config for LLMPipeline: {ov_config}")
+
         # Generation config -- greedy decoding per MLPerf spec
         self._gen_config = ov_genai.GenerationConfig()
         self._gen_config.max_new_tokens = self.max_new_tokens
