@@ -183,11 +183,13 @@ class LlamaMultiDieSUT:
                 f"Check that the device is available."
             )
 
-        # Build device config for LLMPipeline
+        # Build device config for LLMPipeline.
+        # NOTE: CACHE_DIR is intentionally NOT passed here — LLMPipeline
+        # on some accelerators fails at the cache export phase
+        # ("Export error … Cannot get program!").  The working reference
+        # script does not use model caching either.
         ov_config: Dict[str, Any] = {}
         if hasattr(self.config, "openvino"):
-            if self.config.openvino.cache_dir:
-                ov_config["CACHE_DIR"] = self.config.openvino.cache_dir
             if hasattr(self.config.openvino, "device_properties"):
                 if self.config.openvino.device_properties:
                     for key, value in self.config.openvino.device_properties.items():
