@@ -247,10 +247,6 @@ class LlamaMultiDieSUT:
     ) -> Tuple[str, np.ndarray, int]:
         """Run inference on a single sample using the given pipeline.
 
-        Uses text-based generation: prompt text -> LLMPipeline -> generated text.
-        Token IDs are obtained by re-encoding the generated text (needed for
-        LoadGen QuerySampleResponse).
-
         Returns:
             (decoded_text, output_token_ids, n_tokens)
         """
@@ -258,17 +254,30 @@ class LlamaMultiDieSUT:
 
         result = pipe.generate(prompt_text, self._gen_config)
 
-        if isinstance(result, str):
+        # Extract actual generated token IDs from GenerationResult
+        # (available with SchedulerConfig / continuous batching).
+        # This gives accurate n_tokens for LoadGen compliance.
+        output_ids = None
+        if hasattr(result, "m_generation_ids") and result.m_generation_ids:
+            output_ids = np.array(result.m_generation_ids, dtype=np.int64)
+
+        if output_ids is not None:
+            # Decode text from actual token IDs — consistent with
+            # how evaluation.py reconstructs text from LoadGen log.
+            text = self._tokenizer.decode(output_ids, skip_special_tokens=True)
+        elif isinstance(result, str):
             text = result
-        elif hasattr(result, "texts"):
-            text = result.texts[0] if result.texts else ""
+        elif hasattr(result, "texts") and result.texts:
+            text = result.texts[0]
         else:
             text = str(result)
 
-        output_tokens = self._tokenizer.encode(text, add_special_tokens=False)
-        output_ids = np.array(output_tokens, dtype=np.int64)
-        n_tokens = len(output_ids)
+        # Fallback: re-encode text if token IDs were not available
+        if output_ids is None:
+            tokens = self._tokenizer.encode(text, add_special_tokens=False)
+            output_ids = np.array(tokens, dtype=np.int64)
 
+        n_tokens = len(output_ids)
         return text, output_ids, n_tokens
 
     def issue_queries(self, query_samples: List[Any]) -> None:
