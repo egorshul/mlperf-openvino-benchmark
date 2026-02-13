@@ -12,6 +12,7 @@ Follows the MLCommons Inference v5.1 reference:
 """
 
 import array
+import gc
 import logging
 import re
 import sys
@@ -137,6 +138,17 @@ class LlamaMultiDieSUT:
 
         self._setup_pipelines()
 
+    @staticmethod
+    def _get_available_memory_gb() -> float:
+        try:
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemAvailable:"):
+                        return int(line.split()[1]) / (1024 * 1024)
+        except Exception:
+            pass
+        return -1.0
+
     def _discover_device_dies(self, device: str) -> List[str]:
         import openvino as ov
 
@@ -199,11 +211,25 @@ class LlamaMultiDieSUT:
 
         scheduler_config = ov_genai.SchedulerConfig()
         scheduler_config.max_num_seqs = 1
-        scheduler_config.cache_size = 2
+        scheduler_config.cache_size = 1
         scheduler_config.dynamic_split_fuse = True
 
-        for die in device_dies:
-            logger.info(f"[Llama] Creating LLMPipeline for {die} ...")
+        for i, die in enumerate(device_dies):
+            if i > 0:
+                # Free temporary compilation buffers from previous pipeline
+                gc.collect()
+                try:
+                    import ctypes
+                    libc = ctypes.CDLL("libc.so.6")
+                    libc.malloc_trim(0)
+                except Exception:
+                    pass
+
+            avail_gb = self._get_available_memory_gb()
+            logger.info(
+                f"[Llama] Creating LLMPipeline for {die} "
+                f"(available RAM: {avail_gb:.1f} GB) ..."
+            )
             pipe = ov_genai.LLMPipeline(
                 str(self.model_path), die,
                 scheduler_config=scheduler_config,
