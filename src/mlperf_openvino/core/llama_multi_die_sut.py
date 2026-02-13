@@ -199,6 +199,8 @@ class LlamaMultiDieSUT:
 
         scheduler_config = ov_genai.SchedulerConfig()
         scheduler_config.max_num_seqs = 1
+        scheduler_config.cache_size = 4
+        scheduler_config.dynamic_split_fuse = True
 
         for die in device_dies:
             logger.info(f"[Llama] Creating LLMPipeline for {die} ...")
