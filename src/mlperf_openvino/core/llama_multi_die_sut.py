@@ -198,6 +198,7 @@ class LlamaMultiDieSUT:
         self._gen_config.min_new_tokens = 1
 
         scheduler_config = ov_genai.SchedulerConfig()
+        scheduler_config.max_num_seqs = 1
 
         for die in device_dies:
             logger.info(f"[Llama] Creating LLMPipeline for {die} ...")
