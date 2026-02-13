@@ -157,7 +157,6 @@ class LlamaMultiDieSUT:
                 "LlamaMultiDieSUT requires an accelerator device in config"
             )
 
-        # Load HF tokenizer (for encoding generated text -> token IDs)
         try:
             self._tokenizer = AutoTokenizer.from_pretrained(str(self.model_path))
         except Exception:
@@ -169,7 +168,6 @@ class LlamaMultiDieSUT:
         if self._tokenizer.pad_token is None:
             self._tokenizer.pad_token = self._tokenizer.eos_token
 
-        # Determine die list
         if "," in target_device:
             device_dies = [p.strip() for p in target_device.split(",")]
         elif re.match(r"^.+\.\d+$", target_device):
@@ -183,11 +181,8 @@ class LlamaMultiDieSUT:
                 f"Check that the device is available."
             )
 
-        # Build device config for LLMPipeline.
-        # NOTE: CACHE_DIR is intentionally NOT passed here — LLMPipeline
-        # on some accelerators fails at the cache export phase
-        # ("Export error … Cannot get program!").  The working reference
-        # script does not use model caching either.
+        # Device properties for LLMPipeline (CACHE_DIR excluded — not
+        # supported by all accelerator backends).
         ov_config: Dict[str, Any] = {}
         if hasattr(self.config, "openvino"):
             if hasattr(self.config.openvino, "device_properties"):
@@ -195,14 +190,13 @@ class LlamaMultiDieSUT:
                     for key, value in self.config.openvino.device_properties.items():
                         ov_config[key] = value
 
-        logger.info(f"[Llama] Device config for LLMPipeline: {ov_config}")
+        logger.debug(f"[Llama] Device config: {ov_config}")
 
-        # Generation config -- greedy decoding per MLPerf spec
+        # Greedy decoding per MLPerf spec
         self._gen_config = ov_genai.GenerationConfig()
         self._gen_config.max_new_tokens = self.max_new_tokens
         self._gen_config.min_new_tokens = 1
 
-        # SchedulerConfig is required for LLMPipeline on accelerators
         scheduler_config = ov_genai.SchedulerConfig()
 
         for die in device_dies:
@@ -235,7 +229,6 @@ class LlamaMultiDieSUT:
 
         result = pipe.generate(prompt_text, self._gen_config)
 
-        # LLMPipeline.generate(str, ...) returns the generated text
         if isinstance(result, str):
             text = result
         elif hasattr(result, "texts"):
@@ -243,7 +236,6 @@ class LlamaMultiDieSUT:
         else:
             text = str(result)
 
-        # Encode generated text -> int64 token IDs for LoadGen response
         output_tokens = self._tokenizer.encode(text, add_special_tokens=False)
         output_ids = np.array(output_tokens, dtype=np.int64)
         n_tokens = len(output_ids)
