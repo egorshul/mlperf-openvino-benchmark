@@ -165,10 +165,14 @@ class LlamaSUT:
         self._gen_config.max_new_tokens = self.max_new_tokens
         self._gen_config.min_new_tokens = 1
 
-        # No SchedulerConfig for single-device CPU/GPU — avoids
-        # continuous batching overhead and large KV-cache pre-allocation.
+        scheduler_config = ov_genai.SchedulerConfig()
+        scheduler_config.max_num_seqs = 1
+        scheduler_config.cache_size = 1
+        scheduler_config.dynamic_split_fuse = True
+
         self._pipeline = ov_genai.LLMPipeline(
             str(self.model_path), device,
+            scheduler_config=scheduler_config,
             **ov_config,
         )
 
