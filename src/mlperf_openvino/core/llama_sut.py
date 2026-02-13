@@ -91,6 +91,17 @@ class LlamaSUT:
       - n_tokens reported per response (use_token_latencies=1)
     """
 
+    @staticmethod
+    def _get_available_memory_gb() -> float:
+        try:
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemAvailable:"):
+                        return int(line.split()[1]) / (1024 * 1024)
+        except Exception:
+            pass
+        return -1.0
+
     def __init__(
         self,
         config: BenchmarkConfig,
@@ -143,21 +154,21 @@ class LlamaSUT:
                     self.config.openvino.num_threads
                 )
 
-        logger.info(f"[Llama] Loading model from {self.model_path} on {device}...")
+        avail_gb = self._get_available_memory_gb()
+        logger.info(
+            f"[Llama] Loading model from {self.model_path} on {device} "
+            f"(available RAM: {avail_gb:.1f} GB)..."
+        )
 
         # Greedy decoding per MLPerf spec
         self._gen_config = ov_genai.GenerationConfig()
         self._gen_config.max_new_tokens = self.max_new_tokens
         self._gen_config.min_new_tokens = 1
 
-        scheduler_config = ov_genai.SchedulerConfig()
-        scheduler_config.max_num_seqs = 1
-        scheduler_config.cache_size = 1
-        scheduler_config.dynamic_split_fuse = True
-
+        # No SchedulerConfig for single-device CPU/GPU — avoids
+        # continuous batching overhead and large KV-cache pre-allocation.
         self._pipeline = ov_genai.LLMPipeline(
             str(self.model_path), device,
-            scheduler_config=scheduler_config,
             **ov_config,
         )
 
@@ -172,7 +183,12 @@ class LlamaSUT:
         if self._tokenizer.pad_token is None:
             self._tokenizer.pad_token = self._tokenizer.eos_token
 
-        logger.info(f"[Llama] Model loaded on {device}")
+        avail_after = self._get_available_memory_gb()
+        logger.info(
+            f"[Llama] Model loaded on {device} "
+            f"(available RAM: {avail_after:.1f} GB, "
+            f"used: {avail_gb - avail_after:.1f} GB)"
+        )
 
     def _process_sample(self, sample_idx: int) -> tuple:
         """Run inference on a single sample.
