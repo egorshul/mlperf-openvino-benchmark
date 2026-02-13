@@ -278,11 +278,11 @@ class CnnDailyMailDataset(BaseDataset):
         - gen_len = sum of prediction character lengths
         """
         try:
-            import evaluate
+            from rouge_score import rouge_scorer
         except ImportError:
             raise ImportError(
-                "evaluate is required for LLM accuracy. "
-                "Install with: pip install evaluate rouge-score"
+                "rouge-score is required for LLM accuracy. "
+                "Install with: pip install rouge-score"
             )
 
         try:
@@ -295,8 +295,6 @@ class CnnDailyMailDataset(BaseDataset):
             except Exception:
                 pass
 
-        # Postprocess text: sentence-tokenize and join with newlines
-        # This matches the MLCommons reference postprocess_text()
         def _postprocess(texts: List[str]) -> List[str]:
             processed = []
             for text in texts:
@@ -313,21 +311,23 @@ class CnnDailyMailDataset(BaseDataset):
         preds = _postprocess(predictions)
         refs = _postprocess(labels)
 
-        metric = evaluate.load("rouge")
-        result = metric.compute(
-            predictions=preds,
-            references=refs,
+        scorer = rouge_scorer.RougeScorer(
+            ["rouge1", "rouge2", "rougeL", "rougeLsum"],
             use_stemmer=True,
-            use_aggregator=False,
         )
 
         num_samples = len(predictions)
 
-        # Per-sample scores → means (scaled to percentage)
-        rouge1_scores = [s * 100 for s in result["rouge1"]]
-        rouge2_scores = [s * 100 for s in result["rouge2"]]
-        rougeL_scores = [s * 100 for s in result["rougeL"]]
-        rougeLsum_scores = [s * 100 for s in result["rougeLsum"]]
+        rouge1_scores = []
+        rouge2_scores = []
+        rougeL_scores = []
+        rougeLsum_scores = []
+        for pred, ref in zip(preds, refs):
+            scores = scorer.score(ref, pred)
+            rouge1_scores.append(scores["rouge1"].fmeasure * 100)
+            rouge2_scores.append(scores["rouge2"].fmeasure * 100)
+            rougeL_scores.append(scores["rougeL"].fmeasure * 100)
+            rougeLsum_scores.append(scores["rougeLsum"].fmeasure * 100)
 
         avg_rouge1 = sum(rouge1_scores) / num_samples if num_samples > 0 else 0.0
         avg_rouge2 = sum(rouge2_scores) / num_samples if num_samples > 0 else 0.0
