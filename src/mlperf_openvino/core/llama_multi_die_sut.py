@@ -198,9 +198,16 @@ class LlamaMultiDieSUT:
         self._gen_config.max_new_tokens = self.max_new_tokens
         self._gen_config.min_new_tokens = 1
 
+        # SchedulerConfig is required for LLMPipeline on accelerators
+        scheduler_config = ov_genai.SchedulerConfig()
+
         for die in device_dies:
             logger.info(f"[Llama] Creating LLMPipeline for {die} ...")
-            pipe = ov_genai.LLMPipeline(str(self.model_path), die, **ov_config)
+            pipe = ov_genai.LLMPipeline(
+                str(self.model_path), die,
+                scheduler_config=scheduler_config,
+                **ov_config,
+            )
             self._pipelines.append((die, pipe))
 
         die_names = [name for name, _ in self._pipelines]
