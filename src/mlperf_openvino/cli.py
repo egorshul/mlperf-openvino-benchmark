@@ -329,10 +329,7 @@ def _print_dataset_help(model: str) -> None:
               help='Batch sizes for RetinaNet (comma-separated, default: 1,2,4,8)')
 @click.option('--hf-token', type=str, default=None, envvar='HF_TOKEN',
               help='HuggingFace access token (for gated models like Meta-Llama). Also reads HF_TOKEN env var.')
-@click.option('--stateful/--no-stateful', default=False,
-              help='Llama export: merge KV-cache into OpenVINO state variables (--stateful) '
-                   'or keep past_key_values as explicit graph I/O (--no-stateful, default).')
-def download_model_cmd(model: str, output_dir: str, format: str, batch_sizes: str, hf_token: Optional[str], stateful: bool):
+def download_model_cmd(model: str, output_dir: str, format: str, batch_sizes: str, hf_token: Optional[str]):
     """Download model files."""
     click.echo(f"Downloading {model} model...")
 
@@ -386,7 +383,6 @@ def download_model_cmd(model: str, output_dir: str, format: str, batch_sizes: st
                 str(output_path),
                 export_to_openvino=True,
                 hf_token=hf_token,
-                stateful=stateful,
             )
             click.echo(f"Model downloaded to: {paths['model_path']}")
         else:

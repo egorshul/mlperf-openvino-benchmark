@@ -1,18 +1,11 @@
-"""Llama multi-die SUT for accelerator inference.
+"""Llama multi-die SUT for accelerator inference (NPU/VPU/XPU).
 
-Uses the OpenVINO Core API directly so that it works with **any**
-accelerator device name (not just ``"NPU"``).  The model IR is read
-once, reshaped to fully-static dimensions, and compiled separately
-for each die.  Text generation is a manual greedy loop over the
-stateful (KV-cache) model.
+Uses openvino_genai.LLMPipeline which handles static-shape compilation,
+KV-cache management, and prefill/decode switching internally — required
+for devices that only support dynamic batch dimension.
 
-Static shapes used (the only "dynamic" axis — attention-mask
-sequence length — is pre-allocated to the maximum context length):
-
-    input_ids      : [1, 1]
-    position_ids   : [1, 1]
-    attention_mask  : [1, max_prompt_len + max_new_tokens]
-    beam_idx       : [1]
+Distributes text generation across multiple accelerator dies;
+samples are dispatched round-robin across dies.
 
 Follows the MLCommons Inference v5.1 reference:
   https://github.com/mlcommons/inference/tree/master/language/llama3.1-8b
@@ -25,17 +18,9 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Tuple, Union
 
 import numpy as np
-
-try:
-    import openvino as ov
-
-    OV_AVAILABLE = True
-except ImportError:
-    OV_AVAILABLE = False
-    ov = None
 
 try:
     import mlperf_loadgen as lg
@@ -45,23 +30,19 @@ except ImportError:
     LOADGEN_AVAILABLE = False
     lg = None
 
+try:
+    import openvino_genai as ov_genai
+
+    GENAI_AVAILABLE = True
+except ImportError:
+    GENAI_AVAILABLE = False
+    ov_genai = None
+
 from .config import BenchmarkConfig, Scenario
 from ..datasets.cnn_dailymail import CnnDailyMailQSL
 
 logger = logging.getLogger(__name__)
 
-# OpenVINO element-type → numpy dtype
-_OV_TO_NP = {}
-if OV_AVAILABLE:
-    _OV_TO_NP = {
-        ov.Type.i32: np.int32,
-        ov.Type.i64: np.int64,
-        ov.Type.f32: np.float32,
-        ov.Type.f16: np.float16,
-    }
-
-
-# ── helpers ────────────────────────────────────────────────────────────
 
 def _fmt_time(seconds: float) -> str:
     if seconds < 60:
@@ -73,23 +54,25 @@ def _print_progress(completed: int, total: int, start_time: float) -> None:
     elapsed = time.time() - start_time
     rate = completed / elapsed if elapsed > 0 else 0.0
     if completed >= total:
-        line = (
-            f"\r[Inference] {completed}/{total} | "
-            f"{rate:.2f} samples/s | {_fmt_time(elapsed)}"
-        )
+        line = f"\r[Inference] {completed}/{total} | {rate:.2f} samples/s | {_fmt_time(elapsed)}"
         print(line, file=sys.stderr, flush=True)
         print(file=sys.stderr)
     else:
         eta = (total - completed) / rate if rate > 0 else 0.0
-        line = (
-            f"\r[Inference] {completed}/{total} | "
-            f"{rate:.2f} samples/s | ETA {_fmt_time(eta)}"
-        )
+        line = f"\r[Inference] {completed}/{total} | {rate:.2f} samples/s | ETA {_fmt_time(eta)}"
         print(line, end="", file=sys.stderr, flush=True)
 
 
 def _make_response(sample_id: int, token_ids: np.ndarray, n_tokens: int):
-    """Build a QuerySampleResponse with int64 token IDs."""
+    """Build a QuerySampleResponse with int64 token IDs.
+
+    The data is stored as int64 bytes so that the official MLCommons
+    evaluation.py can parse it via np.frombuffer(..., np.int64).
+
+    Returns:
+        (response, response_array) — caller must keep response_array alive
+        until QuerySamplesComplete processes the response buffer.
+    """
     token_bytes = token_ids.astype(np.int64).tobytes()
     response_array = array.array("B", token_bytes)
     bi = response_array.buffer_info()
@@ -100,36 +83,17 @@ def _make_response(sample_id: int, token_ids: np.ndarray, n_tokens: int):
     return resp, response_array
 
 
-def _find_model_xml(model_dir: Path) -> Path:
-    """Locate the OpenVINO IR ``.xml`` file inside *model_dir*."""
-    for name in ("openvino_model.xml", "model.xml"):
-        p = model_dir / name
-        if p.exists():
-            return p
-    raise FileNotFoundError(
-        f"No OpenVINO IR found in {model_dir}. "
-        "Expected openvino_model.xml or model.xml."
-    )
-
-
-def _np_dtype(ov_type) -> np.dtype:
-    """Map an ``ov.Type`` to a numpy dtype (fallback: int64)."""
-    return _OV_TO_NP.get(ov_type, np.int64)
-
-
-# ── SUT ────────────────────────────────────────────────────────────────
-
 class LlamaMultiDieSUT:
-    """Llama multi-die SUT — OpenVINO Core API with manual greedy generation.
+    """Llama multi-die SUT using OpenVINO GenAI (LLMPipeline).
 
-    Works with any accelerator device name.  Each die gets its own
-    ``CompiledModel`` / ``InferRequest``; samples are dispatched
-    round-robin across dies in Offline mode.
+    Per die: an LLMPipeline is created which handles model compilation
+    with static shapes, KV-cache management, and token generation.
+    Offline mode distributes samples across dies in parallel via round-robin.
 
     Per MLPerf v5.1 Llama 3.1 8B spec:
       - Task: text summarization (CNN-DailyMail)
       - max_new_tokens: 128
-      - Greedy decoding
+      - Greedy decoding (do_sample=False)
       - n_tokens reported per response (use_token_latencies=1)
     """
 
@@ -141,10 +105,13 @@ class LlamaMultiDieSUT:
         scenario: Scenario = Scenario.OFFLINE,
         max_new_tokens: int = 128,
     ):
-        if not OV_AVAILABLE:
-            raise ImportError("openvino is required for LlamaMultiDieSUT")
         if not LOADGEN_AVAILABLE:
             raise ImportError("MLPerf LoadGen is not installed")
+        if not GENAI_AVAILABLE:
+            raise ImportError(
+                "openvino-genai is required for LlamaMultiDieSUT. "
+                "Install with: pip install openvino-genai"
+            )
 
         self.config = config
         self.model_path = Path(model_path)
@@ -163,235 +130,114 @@ class LlamaMultiDieSUT:
         self._sut_handle = None
         self._qsl_handle = None
 
-        # Per-die inference contexts: (die_name, infer_request)
-        self._dies: List[Tuple[str, Any]] = []
-        self._die_index = 0
-        self._die_index_lock = threading.Lock()
-
+        self._pipelines: List[Tuple[str, Any]] = []
+        self._pipe_index = 0
+        self._pipe_index_lock = threading.Lock()
         self._tokenizer = None
-        self._eos_token_id: Optional[int] = None
-        self._max_context_len = 0
-        # Maps logical name → actual IR input node name
-        self._input_map: Dict[str, str] = {}
-        # Maps logical name → numpy dtype for that input
-        self._input_dtypes: Dict[str, np.dtype] = {}
 
-        self._setup()
+        self._setup_pipelines()
 
-    # ── discovery ──────────────────────────────────────────────────
+    def _discover_device_dies(self, device: str) -> List[str]:
+        import openvino as ov
 
-    @staticmethod
-    def _discover_device_dies(device: str) -> List[str]:
         core = ov.Core()
         pattern = re.compile(rf"^{re.escape(device)}\.(\d+)$")
         return sorted(d for d in core.available_devices if pattern.match(d))
 
-    # ── setup ──────────────────────────────────────────────────────
-
-    def _setup(self) -> None:
+    def _setup_pipelines(self) -> None:
         from transformers import AutoTokenizer
 
-        # ── tokenizer ──────────────────────────────────────────────
-        try:
-            self._tokenizer = AutoTokenizer.from_pretrained(
-                str(self.model_path)
+        target_device = (
+            self.config.openvino.device
+            if hasattr(self.config, "openvino")
+            else None
+        )
+        if not target_device:
+            raise RuntimeError(
+                "LlamaMultiDieSUT requires an accelerator device in config"
             )
+
+        # Load HF tokenizer (for encoding generated text -> token IDs)
+        try:
+            self._tokenizer = AutoTokenizer.from_pretrained(str(self.model_path))
         except Exception:
+            logger.debug("Loading tokenizer from meta-llama/Meta-Llama-3.1-8B-Instruct")
             self._tokenizer = AutoTokenizer.from_pretrained(
                 "meta-llama/Meta-Llama-3.1-8B-Instruct"
             )
+
         if self._tokenizer.pad_token is None:
             self._tokenizer.pad_token = self._tokenizer.eos_token
-        self._eos_token_id = self._tokenizer.eos_token_id
 
-        # ── read & reshape model ───────────────────────────────────
-        core = ov.Core()
-        model_xml = _find_model_xml(self.model_path)
-        logger.info(f"[Llama] Reading model from {model_xml}")
-        model = core.read_model(str(model_xml))
+        # Determine die list
+        if "," in target_device:
+            device_dies = [p.strip() for p in target_device.split(",")]
+        elif re.match(r"^.+\.\d+$", target_device):
+            device_dies = [target_device]
+        else:
+            device_dies = self._discover_device_dies(target_device)
 
-        max_prompt_len = self.qsl.get_max_input_length()
-        self._max_context_len = max_prompt_len + self.max_new_tokens
-        logger.info(
-            f"[Llama] max_prompt_len={max_prompt_len}, "
-            f"max_new_tokens={self.max_new_tokens}, "
-            f"max_context_len={self._max_context_len}"
-        )
-
-        has_beam_idx = False
-        has_past_kv = False
-
-        new_shapes: Dict[str, list] = {}
-        for inp in model.inputs:
-            names = set(inp.get_names())
-            name = inp.get_any_name()
-            dtype = _np_dtype(inp.get_element_type())
-
-            if any("input_ids" in n for n in names):
-                self._input_map["input_ids"] = name
-                self._input_dtypes["input_ids"] = dtype
-                new_shapes[name] = [1, 1]
-            elif any("attention_mask" in n for n in names):
-                self._input_map["attention_mask"] = name
-                self._input_dtypes["attention_mask"] = dtype
-                new_shapes[name] = [1, self._max_context_len]
-            elif any("position_ids" in n for n in names):
-                self._input_map["position_ids"] = name
-                self._input_dtypes["position_ids"] = dtype
-                new_shapes[name] = [1, 1]
-            elif any("beam_idx" in n for n in names):
-                has_beam_idx = True
-                self._input_map["beam_idx"] = name
-                self._input_dtypes["beam_idx"] = dtype
-                new_shapes[name] = [1]
-            elif any("past_key_values" in n for n in names):
-                has_past_kv = True
-                # collapse dynamic dims to 1
-                shape = inp.get_partial_shape()
-                static = []
-                for dim in shape:
-                    static.append(dim.get_length() if dim.is_static else 1)
-                new_shapes[name] = static
-            else:
-                # Unknown input — make every dim static (keep static dims,
-                # collapse dynamic dims to 1).
-                shape = inp.get_partial_shape()
-                static = []
-                for dim in shape:
-                    static.append(dim.get_length() if dim.is_static else 1)
-                new_shapes[name] = static
-
-        if has_past_kv and not has_beam_idx:
-            raise ValueError(
-                "Non-stateful with-past model detected (explicit past_key_values "
-                "inputs).  The multi-die SUT requires a stateful model whose "
-                "KV-cache is managed via OpenVINO state variables.  "
-                "Re-export with --stateful, or use the single-device LlamaSUT "
-                "(CPU/GPU) which handles non-stateful models via OVModelForCausalLM."
+        if not device_dies:
+            raise RuntimeError(
+                f"No dies discovered for device '{target_device}'. "
+                f"Check that the device is available."
             )
 
-        logger.info(f"[Llama] Reshaping model to static shapes: {new_shapes}")
-        model.reshape(new_shapes)
+        # Build device config for LLMPipeline
+        ov_config: Dict[str, Any] = {}
+        if hasattr(self.config, "openvino"):
+            if self.config.openvino.cache_dir:
+                ov_config["CACHE_DIR"] = self.config.openvino.cache_dir
+            if hasattr(self.config.openvino, "device_properties"):
+                if self.config.openvino.device_properties:
+                    for key, value in self.config.openvino.device_properties.items():
+                        ov_config[key] = value
 
-        # ── die discovery ──────────────────────────────────────────
-        target_device = self.config.openvino.device
-        if "," in target_device:
-            dies = [p.strip() for p in target_device.split(",")]
-        elif re.match(r"^.+\.\d+$", target_device):
-            dies = [target_device]
-        else:
-            dies = self._discover_device_dies(target_device)
-            if not dies:
-                dies = [target_device]
+        # Generation config -- greedy decoding per MLPerf spec
+        self._gen_config = ov_genai.GenerationConfig()
+        self._gen_config.max_new_tokens = self.max_new_tokens
+        self._gen_config.min_new_tokens = 1
 
-        # ── compile per die ────────────────────────────────────────
-        compile_props: Dict[str, Any] = {}
-        if self.config.openvino.cache_dir:
-            compile_props["CACHE_DIR"] = self.config.openvino.cache_dir
-        if hasattr(self.config.openvino, "device_properties"):
-            if self.config.openvino.device_properties:
-                compile_props.update(self.config.openvino.device_properties)
+        for die in device_dies:
+            logger.info(f"[Llama] Creating LLMPipeline for {die} ...")
+            pipe = ov_genai.LLMPipeline(str(self.model_path), die, **ov_config)
+            self._pipelines.append((die, pipe))
 
-        for die in dies:
-            logger.info(f"[Llama] Compiling for {die} ...")
-            compiled = core.compile_model(model, die, compile_props)
-            req = compiled.create_infer_request()
-            self._dies.append((die, req))
-
-        die_names = [n for n, _ in self._dies]
+        die_names = [name for name, _ in self._pipelines]
         logger.info(
-            f"[Llama] {len(self._dies)} die(s) ready: {', '.join(die_names)}"
+            f"[Llama] {len(self._pipelines)} die(s) ready: {', '.join(die_names)}"
         )
-
-    # ── greedy generation ──────────────────────────────────────────
-
-    def _generate_greedy(
-        self,
-        token_ids: List[int],
-        infer_req: Any,
-    ) -> List[int]:
-        """Token-by-token greedy generation on a stateful OV model.
-
-        Args:
-            token_ids: prompt token IDs (flat list).
-            infer_req: an ``ov.InferRequest`` with KV-cache states.
-
-        Returns:
-            List of **newly generated** token IDs (excluding the prompt).
-        """
-        infer_req.reset_state()
-
-        prompt_len = len(token_ids)
-        ids_dtype = self._input_dtypes.get("input_ids", np.int64)
-        mask_dtype = self._input_dtypes.get("attention_mask", np.int64)
-        pos_dtype = self._input_dtypes.get("position_ids", np.int64)
-        beam_dtype = self._input_dtypes.get("beam_idx", np.int32)
-
-        attention_mask = np.zeros(
-            (1, self._max_context_len), dtype=mask_dtype,
-        )
-
-        def _infer_token(token: int, pos: int) -> np.ndarray:
-            attention_mask[0, pos] = 1
-            inputs = {
-                self._input_map["input_ids"]: np.array(
-                    [[token]], dtype=ids_dtype,
-                ),
-                self._input_map["attention_mask"]: attention_mask,
-                self._input_map["position_ids"]: np.array(
-                    [[pos]], dtype=pos_dtype,
-                ),
-            }
-            if "beam_idx" in self._input_map:
-                inputs[self._input_map["beam_idx"]] = np.array(
-                    [0], dtype=beam_dtype,
-                )
-            infer_req.infer(inputs)
-            return infer_req.get_output_tensor(0).data  # logits
-
-        # ── prefill (one token at a time) ──────────────────────────
-        for pos in range(prompt_len):
-            logits = _infer_token(token_ids[pos], pos)
-
-        # First generated token
-        next_token = int(np.argmax(logits[0, 0, :]))
-        if next_token == self._eos_token_id:
-            return []
-
-        generated: List[int] = [next_token]
-
-        # ── decode ─────────────────────────────────────────────────
-        for step in range(1, self.max_new_tokens):
-            pos = prompt_len + step - 1
-            logits = _infer_token(next_token, pos)
-
-            next_token = int(np.argmax(logits[0, 0, :]))
-            if next_token == self._eos_token_id:
-                break
-            generated.append(next_token)
-
-        return generated
-
-    # ── sample processing ──────────────────────────────────────────
 
     def _process_sample(
-        self,
-        sample_idx: int,
-        infer_req: Any,
+        self, sample_idx: int, pipe: Any,
     ) -> Tuple[str, np.ndarray, int]:
-        features = self.qsl.get_features(sample_idx)
-        input_ids = features["input_ids"]
-        if isinstance(input_ids, np.ndarray):
-            input_ids = input_ids.reshape(-1).tolist()
+        """Run inference on a single sample using the given pipeline.
 
-        gen_ids = self._generate_greedy(input_ids, infer_req)
+        Uses text-based generation: prompt text -> LLMPipeline -> generated text.
+        Token IDs are obtained by re-encoding the generated text (needed for
+        LoadGen QuerySampleResponse).
 
-        text = self._tokenizer.decode(gen_ids, skip_special_tokens=True)
-        output_ids = np.array(gen_ids, dtype=np.int64)
-        n_tokens = len(gen_ids)
+        Returns:
+            (decoded_text, output_token_ids, n_tokens)
+        """
+        prompt_text = self.qsl.get_input_text(sample_idx)
+
+        result = pipe.generate(prompt_text, self._gen_config)
+
+        # LLMPipeline.generate(str, ...) returns the generated text
+        if isinstance(result, str):
+            text = result
+        elif hasattr(result, "texts"):
+            text = result.texts[0] if result.texts else ""
+        else:
+            text = str(result)
+
+        # Encode generated text -> int64 token IDs for LoadGen response
+        output_tokens = self._tokenizer.encode(text, add_special_tokens=False)
+        output_ids = np.array(output_tokens, dtype=np.int64)
+        n_tokens = len(output_ids)
+
         return text, output_ids, n_tokens
-
-    # ── LoadGen callbacks ──────────────────────────────────────────
 
     def issue_queries(self, query_samples: List[Any]) -> None:
         self._query_count += len(query_samples)
@@ -402,7 +248,7 @@ class LlamaMultiDieSUT:
 
     def _issue_queries_offline(self, query_samples: List[Any]) -> None:
         total = len(query_samples)
-        num_dies = len(self._dies)
+        num_dies = len(self._pipelines)
         self._start_time = time.time()
         self._sample_count = 0
 
@@ -412,11 +258,10 @@ class LlamaMultiDieSUT:
             self._issue_queries_offline_sequential(query_samples)
             return
 
+        # Round-robin distribution across dies
         from concurrent.futures import ThreadPoolExecutor
 
-        die_batches: List[List[Tuple[Any, int]]] = [
-            [] for _ in range(num_dies)
-        ]
+        die_batches: List[List[Tuple[Any, int]]] = [[] for _ in range(num_dies)]
         for i, sample in enumerate(query_samples):
             die_batches[i % num_dies].append((sample, sample.index))
 
@@ -424,20 +269,16 @@ class LlamaMultiDieSUT:
         results_lock = threading.Lock()
 
         def _die_worker(die_idx: int, batch: List[Tuple[Any, int]]) -> None:
-            _, req = self._dies[die_idx]
+            _, pipe = self._pipelines[die_idx]
             for sample, sample_idx in batch:
-                text, output_ids, n_tokens = self._process_sample(
-                    sample_idx, req,
-                )
+                text, output_ids, n_tokens = self._process_sample(sample_idx, pipe)
                 with self._predictions_lock:
                     if self._store_predictions:
                         self._predictions[sample_idx] = text
                 with self._count_lock:
                     self._sample_count += 1
                 with results_lock:
-                    all_results.append(
-                        (sample, sample_idx, text, output_ids, n_tokens)
-                    )
+                    all_results.append((sample, sample_idx, text, output_ids, n_tokens))
 
         with ThreadPoolExecutor(max_workers=num_dies) as pool:
             futures = [
@@ -455,73 +296,68 @@ class LlamaMultiDieSUT:
                 time.sleep(0.5)
 
             for f in futures:
-                f.result()
+                f.result()  # raise exceptions from workers
 
         _print_progress(total, total, self._start_time)
 
         responses = []
-        response_arrays = []
-        for sample, _idx, _text, output_ids, n_tokens in sorted(
-            all_results, key=lambda r: r[1],
-        ):
-            resp, arr = _make_response(sample.id, output_ids, n_tokens)
+        response_arrays = []  # prevent GC before QuerySamplesComplete
+        for sample, _idx, _text, output_ids, n_tokens in sorted(all_results, key=lambda r: r[1]):
+            resp, resp_arr = _make_response(sample.id, output_ids, n_tokens)
             responses.append(resp)
-            response_arrays.append(arr)
+            response_arrays.append(resp_arr)
         lg.QuerySamplesComplete(responses)
 
-    def _issue_queries_offline_sequential(
-        self, query_samples: List[Any],
-    ) -> None:
+    def _issue_queries_offline_sequential(self, query_samples: List[Any]) -> None:
         total = len(query_samples)
         responses = []
-        response_arrays = []
+        response_arrays = []  # prevent GC before QuerySamplesComplete
 
-        _, req = self._dies[0]
+        _, pipe = self._pipelines[0]
         for sample in query_samples:
             sample_idx = sample.index
-            text, output_ids, n_tokens = self._process_sample(
-                sample_idx, req,
-            )
+            text, output_ids, n_tokens = self._process_sample(sample_idx, pipe)
+
             if self._store_predictions:
                 self._predictions[sample_idx] = text
             self._sample_count += 1
 
-            resp, arr = _make_response(sample.id, output_ids, n_tokens)
+            resp, resp_arr = _make_response(sample.id, output_ids, n_tokens)
             responses.append(resp)
-            response_arrays.append(arr)
+            response_arrays.append(resp_arr)
             _print_progress(self._sample_count, total, self._start_time)
 
         _print_progress(total, total, self._start_time)
         lg.QuerySamplesComplete(responses)
 
     def _issue_queries_server(self, query_samples: List[Any]) -> None:
+        """Server mode: respond per query with TTFT via FirstTokenComplete."""
         for sample in query_samples:
             sample_idx = sample.index
 
-            with self._die_index_lock:
-                _name, req = self._dies[self._die_index]
-                self._die_index = (self._die_index + 1) % len(self._dies)
+            with self._pipe_index_lock:
+                _name, pipe = self._pipelines[self._pipe_index]
+                self._pipe_index = (self._pipe_index + 1) % len(self._pipelines)
 
-            text, output_ids, n_tokens = self._process_sample(
-                sample_idx, req,
-            )
+            text, output_ids, n_tokens = self._process_sample(sample_idx, pipe)
+
             if self._store_predictions:
                 with self._predictions_lock:
                     self._predictions[sample_idx] = text
             self._sample_count += 1
 
-            resp, arr = _make_response(sample.id, output_ids, n_tokens)
+            resp, resp_arr = _make_response(sample.id, output_ids, n_tokens)
+
             try:
                 lg.FirstTokenComplete([resp])
             except (AttributeError, TypeError):
                 pass
+
             lg.QuerySamplesComplete([resp])
-            del arr
+            del resp_arr  # safe to release after QuerySamplesComplete
 
     def flush_queries(self) -> None:
         pass
-
-    # ── LoadGen handles ────────────────────────────────────────────
 
     def get_sut(self) -> Any:
         if self._sut_handle is None:
@@ -541,8 +377,6 @@ class LlamaMultiDieSUT:
             )
         return self._qsl_handle
 
-    # ── state ──────────────────────────────────────────────────────
-
     def get_predictions(self) -> Dict[int, str]:
         with self._predictions_lock:
             return self._predictions.copy()
@@ -555,16 +389,19 @@ class LlamaMultiDieSUT:
             self._predictions.clear()
         self._query_count = 0
         self._sample_count = 0
-        with self._die_index_lock:
-            self._die_index = 0
+        with self._pipe_index_lock:
+            self._pipe_index = 0
 
-    def warmup(self, num_iterations: int = 2) -> None:
+    def warmup(self, num_iterations: int = 3) -> None:
         """Warm up each die with a short generation."""
-        logger.info(f"[Llama] Warming up {len(self._dies)} die(s)...")
-        # Minimal prompt: one token
-        dummy_ids = [self._tokenizer.bos_token_id or 1]
-        for die_name, req in self._dies:
+        logger.info(f"[Llama] Warming up {len(self._pipelines)} die(s)...")
+
+        warmup_config = ov_genai.GenerationConfig()
+        warmup_config.max_new_tokens = 1
+        warmup_config.min_new_tokens = 1
+
+        for die_name, pipe in self._pipelines:
             for _ in range(num_iterations):
-                self._generate_greedy(dummy_ids, req)
+                pipe.generate("Hello", warmup_config)
             logger.info(f"  {die_name}: warmed up")
         logger.info("[Llama] Warmup complete")
