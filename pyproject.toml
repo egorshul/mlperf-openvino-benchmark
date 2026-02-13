@@ -59,9 +59,7 @@ sdxl = [
     "scipy>=1.10.0",
 ]
 llama = [
-    "optimum-intel>=1.16.0",
     "transformers>=4.40.0",
-    "torch>=2.0.0",
     "datasets>=2.14.0",
     "rouge-score>=0.1.2",
     "nltk>=3.8.0",

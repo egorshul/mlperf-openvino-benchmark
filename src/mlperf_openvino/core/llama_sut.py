@@ -1,7 +1,7 @@
-"""Llama SUT for single-device (CPU/GPU) inference using Optimum-Intel.
+"""Llama SUT for single-device (CPU/GPU) inference using OpenVINO GenAI.
 
-Uses OVModelForCausalLM from optimum-intel for OpenVINO-accelerated
-autoregressive text generation with KV-cache support.
+Uses openvino_genai.LLMPipeline for OpenVINO-accelerated autoregressive
+text generation with KV-cache support. No optimum-intel dependency.
 
 Follows the MLCommons Inference v5.1 reference:
   https://github.com/mlcommons/inference/tree/master/language/llama3.1-8b
@@ -25,20 +25,12 @@ except ImportError:
     lg = None
 
 try:
-    from optimum.intel.openvino import OVModelForCausalLM
+    import openvino_genai as ov_genai
 
-    OPTIMUM_CAUSAL_LM_AVAILABLE = True
+    GENAI_AVAILABLE = True
 except ImportError:
-    OPTIMUM_CAUSAL_LM_AVAILABLE = False
-    OVModelForCausalLM = None
-
-try:
-    import torch
-
-    TORCH_AVAILABLE = True
-except ImportError:
-    TORCH_AVAILABLE = False
-    torch = None
+    GENAI_AVAILABLE = False
+    ov_genai = None
 
 from .config import BenchmarkConfig, Scenario
 from ..datasets.cnn_dailymail import CnnDailyMailQSL
@@ -89,8 +81,8 @@ def _make_response(sample_id: int, token_ids: np.ndarray, n_tokens: int):
 class LlamaSUT:
     """Llama SUT for single-device inference (CPU/GPU).
 
-    Uses Optimum-Intel OVModelForCausalLM for OpenVINO-optimized
-    autoregressive generation with stateful KV-cache.
+    Uses openvino_genai.LLMPipeline for OpenVINO-optimized autoregressive
+    generation with KV-cache management.
 
     Per MLPerf v5.1 Llama 3.1 8B spec:
       - Task: text summarization (CNN-DailyMail)
@@ -109,13 +101,11 @@ class LlamaSUT:
     ):
         if not LOADGEN_AVAILABLE:
             raise ImportError("MLPerf LoadGen is not installed")
-        if not OPTIMUM_CAUSAL_LM_AVAILABLE:
+        if not GENAI_AVAILABLE:
             raise ImportError(
-                "optimum-intel is required for LlamaSUT. "
-                "Install with: pip install optimum[openvino]"
+                "openvino-genai is required for LlamaSUT. "
+                "Install with: pip install openvino-genai"
             )
-        if not TORCH_AVAILABLE:
-            raise ImportError("torch is required for LlamaSUT")
 
         self.config = config
         self.model_path = Path(model_path)
@@ -132,7 +122,7 @@ class LlamaSUT:
         self._sut_handle = None
         self._qsl_handle = None
 
-        self._model = None
+        self._pipeline = None
         self._tokenizer = None
 
         self._setup_model()
@@ -155,11 +145,20 @@ class LlamaSUT:
 
         logger.info(f"[Llama] Loading model from {self.model_path} on {device}...")
 
-        self._model = OVModelForCausalLM.from_pretrained(
-            str(self.model_path),
-            device=device,
-            ov_config=ov_config,
-            compile=True,
+        # Greedy decoding per MLPerf spec
+        self._gen_config = ov_genai.GenerationConfig()
+        self._gen_config.max_new_tokens = self.max_new_tokens
+        self._gen_config.min_new_tokens = 1
+
+        scheduler_config = ov_genai.SchedulerConfig()
+        scheduler_config.max_num_seqs = 1
+        scheduler_config.cache_size = 1
+        scheduler_config.dynamic_split_fuse = True
+
+        self._pipeline = ov_genai.LLMPipeline(
+            str(self.model_path), device,
+            scheduler_config=scheduler_config,
+            **ov_config,
         )
 
         try:
@@ -173,55 +172,33 @@ class LlamaSUT:
         if self._tokenizer.pad_token is None:
             self._tokenizer.pad_token = self._tokenizer.eos_token
 
-        # Clean up generation_config to suppress noisy per-call warnings:
-        # - temperature/top_p are flagged as "not valid" when do_sample=False
-        # - pad_token_id triggers "Setting pad_token_id to eos_token_id" warning
-        gen_cfg = self._model.generation_config
-        gen_cfg.temperature = None
-        gen_cfg.top_p = None
-        if gen_cfg.pad_token_id is None:
-            gen_cfg.pad_token_id = self._tokenizer.pad_token_id
-
         logger.info(f"[Llama] Model loaded on {device}")
 
     def _process_sample(self, sample_idx: int) -> tuple:
         """Run inference on a single sample.
 
+        Uses text-based generation: prompt text -> LLMPipeline -> generated text.
+        Token IDs are obtained by re-encoding the generated text (needed for
+        LoadGen QuerySampleResponse).
+
         Returns:
-            (decoded_text, output_token_ids, n_tokens) — generated text,
-            raw token IDs (for QuerySampleResponse), and token count.
+            (decoded_text, output_token_ids, n_tokens)
         """
-        features = self.qsl.get_features(sample_idx)
-        input_ids = features["input_ids"]
-        attention_mask = features["attention_mask"]
+        prompt_text = self.qsl.get_input_text(sample_idx)
 
-        if isinstance(input_ids, np.ndarray):
-            input_ids = torch.from_numpy(input_ids).long()
-        if isinstance(attention_mask, np.ndarray):
-            attention_mask = torch.from_numpy(attention_mask).long()
+        result = self._pipeline.generate(prompt_text, self._gen_config)
 
-        if input_ids.dim() == 1:
-            input_ids = input_ids.unsqueeze(0)
-        if attention_mask.dim() == 1:
-            attention_mask = attention_mask.unsqueeze(0)
+        if isinstance(result, str):
+            text = result
+        elif hasattr(result, "texts"):
+            text = result.texts[0] if result.texts else ""
+        else:
+            text = str(result)
 
-        input_len = input_ids.shape[-1]
+        output_tokens = self._tokenizer.encode(text, add_special_tokens=False)
+        output_ids = np.array(output_tokens, dtype=np.int64)
+        n_tokens = len(output_ids)
 
-        with torch.no_grad():
-            generated_ids = self._model.generate(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                max_new_tokens=self.max_new_tokens,
-                min_new_tokens=1,
-                do_sample=False,  # Greedy decoding per MLPerf spec
-                num_beams=1,
-            )
-
-        # Extract only the newly generated tokens (exclude input prompt)
-        new_token_ids = generated_ids[0, input_len:]
-        n_tokens = len(new_token_ids)
-        text = self._tokenizer.decode(new_token_ids, skip_special_tokens=True)
-        output_ids = new_token_ids.cpu().numpy()
         return text, output_ids, n_tokens
 
     def issue_queries(self, query_samples: List[Any]) -> None:
@@ -272,9 +249,6 @@ class LlamaSUT:
 
             resp, resp_arr = _make_response(sample.id, output_ids, n_tokens)
 
-            # Report first-token latency (TTFT) per MLPerf LLM spec.
-            # With non-streaming OVModelForCausalLM.generate(), TTFT equals
-            # total generation time — streaming would improve this.
             try:
                 lg.FirstTokenComplete([resp])
             except (AttributeError, TypeError):
@@ -316,17 +290,13 @@ class LlamaSUT:
         self._sample_count = 0
 
     def warmup(self, num_iterations: int = 5) -> None:
-        """Warm up the model with dummy inputs."""
+        """Warm up the model with a short generation."""
         logger.info(f"[Llama] Warming up ({num_iterations} iterations)...")
-        dummy_input = torch.ones(1, 32, dtype=torch.long)
-        dummy_mask = torch.ones(1, 32, dtype=torch.long)
+
+        warmup_config = ov_genai.GenerationConfig()
+        warmup_config.max_new_tokens = 1
+        warmup_config.min_new_tokens = 1
 
         for _ in range(num_iterations):
-            with torch.no_grad():
-                self._model.generate(
-                    input_ids=dummy_input,
-                    attention_mask=dummy_mask,
-                    max_new_tokens=1,
-                    do_sample=False,
-                )
+            self._pipeline.generate("Hello", warmup_config)
         logger.info("[Llama] Warmup complete")
