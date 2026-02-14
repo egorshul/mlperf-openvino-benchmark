@@ -265,12 +265,11 @@ class LlamaSUT:
             return [self._parse_generation_result(result)]
 
         try:
-            gen_configs = [self._gen_config] * len(prompts)
-            results = self._pipeline.generate(prompts, gen_configs)
+            results = self._pipeline.generate(prompts, self._gen_config)
             return [self._parse_generation_result(r) for r in results]
-        except (TypeError, ValueError):
-            # Fallback: sequential if batch API not supported
-            logger.debug("Batch generate() not supported, falling back to sequential")
+        except Exception as exc:
+            # Fallback: sequential if batch API not supported or fails
+            logger.debug("Batch generate() failed (%s), falling back to sequential", exc)
             return [self._process_sample(idx) for idx in sample_indices]
 
     # ------------------------------------------------------------------
