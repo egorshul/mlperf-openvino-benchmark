@@ -10,6 +10,35 @@ from urllib.error import URLError
 logger = logging.getLogger(__name__)
 
 
+def _resolve_hf_token(token: Optional[str] = None) -> Optional[str]:
+    """Resolve HuggingFace authentication token.
+
+    Checks (in order):
+    1. Explicitly passed token argument
+    2. HF_TOKEN environment variable
+    3. HUGGING_FACE_HUB_TOKEN environment variable (legacy)
+    4. Cached token from `huggingface-cli login`
+
+    Returns None if no token is found.
+    """
+    if token:
+        return token
+
+    env_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    if env_token:
+        return env_token
+
+    try:
+        from huggingface_hub import HfFolder
+        cached = HfFolder.get_token()
+        if cached:
+            return cached
+    except Exception:
+        pass
+
+    return None
+
+
 MODEL_REGISTRY: Dict[str, Dict] = {
     "resnet50": {
         "onnx": {
@@ -56,6 +85,13 @@ MODEL_REGISTRY: Dict[str, Dict] = {
             "filename": "stable-diffusion-xl-base-1.0",
         },
         "description": "Stable Diffusion XL 1.0 for text-to-image generation",
+    },
+    "llama3.1-8b": {
+        "huggingface": {
+            "model_id": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "filename": "Llama-3.1-8B-Instruct",
+        },
+        "description": "Meta Llama 3.1 8B Instruct for text generation (MLPerf v5.1)",
     },
 }
 
@@ -606,6 +642,168 @@ def download_retinanet_model(
         logger.info(f"  Batch {bs}: {path}")
 
     return result
+
+
+def download_llama_model(
+    output_dir: str,
+    model_id: str = "meta-llama/Meta-Llama-3.1-8B-Instruct",
+    export_to_openvino: bool = True,
+    weight_format: str = "int8",
+    hf_token: Optional[str] = None,
+) -> Dict[str, str]:
+    """Download and export Llama model to OpenVINO IR format.
+
+    Uses optimum-intel OVModelForCausalLM to export the model from
+    HuggingFace to OpenVINO IR, with optional weight compression via NNCF.
+
+    Args:
+        output_dir: Directory to save the exported model.
+        model_id: HuggingFace model ID.
+        export_to_openvino: If True, export to OpenVINO IR (recommended).
+        weight_format: Weight format for compression: "fp32", "fp16", "int8", "int4".
+        hf_token: HuggingFace access token (for gated models like Meta-Llama).
+
+    Returns:
+        Dict with model_path and metadata.
+    """
+    token = _resolve_hf_token(hf_token)
+    if not token:
+        logger.warning(
+            "No HuggingFace token found. Meta-Llama models are gated and require authentication. "
+            "Set HF_TOKEN env var or run: huggingface-cli login"
+        )
+
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    model_name = model_id.split("/")[-1]
+
+    if export_to_openvino:
+        return _export_llama_to_openvino(output_dir, model_id, weight_format, token=token)
+    else:
+        return _download_llama_from_hf(output_dir, model_id, token=token)
+
+
+def _download_llama_from_hf(
+    output_dir: str, model_id: str, token: Optional[str] = None
+) -> Dict[str, str]:
+    """Download Llama model from HuggingFace (safetensors/PyTorch format)."""
+    try:
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+    except ImportError:
+        raise ImportError(
+            "transformers is required for Llama download. "
+            "Install with: pip install transformers"
+        )
+
+    _configure_hf_download()
+
+    logger.info(f"Downloading Llama model: {model_id}")
+
+    output_path = Path(output_dir)
+    model_name = model_id.split("/")[-1]
+    model_path = output_path / model_name
+
+    if model_path.exists():
+        config_file = model_path / "config.json"
+        if config_file.exists():
+            logger.info(f"Model already exists at {model_path}")
+            return {"model_path": str(model_path)}
+
+    def do_download():
+        return AutoModelForCausalLM.from_pretrained(
+            model_id,
+            use_safetensors=True,
+            token=token,
+        )
+
+    model = _download_with_retry(do_download, max_retries=3)
+    tokenizer = AutoTokenizer.from_pretrained(model_id, token=token)
+
+    model.save_pretrained(str(model_path))
+    tokenizer.save_pretrained(str(model_path))
+
+    logger.info(f"Model saved to {model_path}")
+    return {"model_path": str(model_path)}
+
+
+def _export_llama_to_openvino(
+    output_dir: str,
+    model_id: str,
+    weight_format: str = "int8",
+    token: Optional[str] = None,
+) -> Dict[str, str]:
+    """Export Llama model to OpenVINO IR using optimum-intel.
+
+    Uses OVModelForCausalLM.from_pretrained(export=True) for conversion,
+    with NNCF weight compression for INT8/INT4 formats.
+    """
+    try:
+        from optimum.intel.openvino import OVModelForCausalLM
+        from transformers import AutoTokenizer
+    except ImportError:
+        raise ImportError(
+            "optimum-intel is required for Llama export. "
+            "Install with: pip install optimum[openvino] nncf"
+        )
+
+    _configure_hf_download()
+
+    output_path = Path(output_dir)
+    model_name = model_id.split("/")[-1]
+    ov_model_path = output_path / f"{model_name}-openvino-{weight_format}"
+
+    # Check if already exported
+    if ov_model_path.exists():
+        config_file = ov_model_path / "config.json"
+        xml_files = list(ov_model_path.glob("*.xml"))
+        if config_file.exists() and xml_files:
+            logger.info(f"OpenVINO model already exists at {ov_model_path}")
+            return {"model_path": str(ov_model_path)}
+
+    logger.info(f"Exporting {model_id} to OpenVINO IR (weight_format={weight_format})...")
+    logger.info("This may take a long time for large models...")
+
+    # Build quantization config for INT8/INT4
+    ov_export_kwargs: Dict[str, Any] = {
+        "export": True,
+        "compile": False,
+        "token": token,
+    }
+
+    if weight_format in ("int8", "int4"):
+        try:
+            from optimum.intel import OVWeightQuantizationConfig
+
+            ov_export_kwargs["quantization_config"] = OVWeightQuantizationConfig(
+                bits=8 if weight_format == "int8" else 4,
+                sym=True if weight_format == "int4" else False,
+            )
+            logger.info(f"Using NNCF weight-only compression: {weight_format}")
+        except ImportError:
+            logger.warning(
+                "NNCF not available for weight compression. "
+                "Exporting with FP16 weights instead. "
+                "Install with: pip install nncf"
+            )
+            weight_format = "fp16"
+
+    def do_export():
+        return OVModelForCausalLM.from_pretrained(
+            model_id,
+            **ov_export_kwargs,
+        )
+
+    model = _download_with_retry(do_export, max_retries=3)
+    model.save_pretrained(str(ov_model_path))
+
+    # Save tokenizer alongside the model
+    tokenizer = AutoTokenizer.from_pretrained(model_id, token=token)
+    tokenizer.save_pretrained(str(ov_model_path))
+
+    logger.info(f"OpenVINO model saved to {ov_model_path}")
+
+    return {"model_path": str(ov_model_path)}
 
 
 def get_retinanet_model_path(

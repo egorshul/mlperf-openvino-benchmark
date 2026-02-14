@@ -36,6 +36,8 @@ class SUTFactory:
             return SUTFactory._create_whisper_sut(config, qsl, encoder_path, decoder_path)
         elif model_type == ModelType.SDXL:
             return SUTFactory._create_sdxl_sut(config, qsl, model_path)
+        elif model_type == ModelType.LLAMA3_1_8B:
+            return SUTFactory._create_llama_sut(config, qsl, model_path)
         else:
             raise ValueError(f"Multi-die SUT not supported for model type: {model_type}")
 
@@ -237,6 +239,27 @@ class SUTFactory:
         from .sdxl_multi_die_sut import SDXLMultiDieSUT
         logger.info(f"Using SDXL Python multi-die SUT on {config.openvino.device}")
         return SDXLMultiDieSUT(
+            config=config,
+            model_path=model_path,
+            qsl=qsl,
+            scenario=config.scenario,
+        )
+
+    @staticmethod
+    def _create_llama_sut(
+        config: BenchmarkConfig,
+        qsl: QuerySampleLibrary,
+        model_path: Optional[str],
+    ) -> Any:
+        """Create Llama multi-die SUT (Python only, no C++ implementation)."""
+        if not model_path:
+            raise ValueError(
+                "Llama multi-die SUT requires model_path"
+            )
+
+        from .llama_multi_die_sut import LlamaMultiDieSUT
+        logger.info(f"Using Llama Python multi-die SUT on {config.openvino.device}")
+        return LlamaMultiDieSUT(
             config=config,
             model_path=model_path,
             qsl=qsl,

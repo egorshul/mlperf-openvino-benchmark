@@ -32,6 +32,7 @@ class ModelType(Enum):
     WHISPER = "whisper"
     SDXL = "sdxl"
     SSD_RESNET34 = "ssd-resnet34"
+    LLAMA3_1_8B = "llama3.1-8b"
 
 
 SUPPORTED_SCENARIOS: Dict[ModelType, List["Scenario"]] = {
@@ -41,6 +42,7 @@ SUPPORTED_SCENARIOS: Dict[ModelType, List["Scenario"]] = {
     ModelType.WHISPER: [Scenario.OFFLINE],
     ModelType.SDXL: [Scenario.OFFLINE, Scenario.SERVER],
     ModelType.SSD_RESNET34: [Scenario.OFFLINE, Scenario.SERVER],
+    ModelType.LLAMA3_1_8B: [Scenario.OFFLINE, Scenario.SERVER],
 }
 
 
@@ -564,6 +566,53 @@ class BenchmarkConfig:
             dataset=DatasetConfig(
                 name="coco2014",
                 path="./data/coco2014",
+            ),
+        )
+
+    @classmethod
+    def default_llama3_1_8b(cls) -> "BenchmarkConfig":
+        """Create default Llama 3.1 8B configuration per MLPerf Inference v5.1.
+
+        Task: text summarization (CNN-DailyMail)
+        Dataset: 13,368 samples (datacenter) / 5,000 (edge)
+        max_new_tokens: 128, model_max_length: 8000
+        Accuracy: ROUGE-1/2/L/Lsum (99% threshold) + gen_len (90% threshold)
+        """
+        return cls(
+            model=ModelConfig(
+                name="Llama-3.1-8B",
+                task="text_generation",
+                model_type=ModelType.LLAMA3_1_8B,
+                input_shape=[1, 8000],  # (batch, model_max_length per reference)
+                input_name="input_ids",
+                output_name="logits",
+                data_format="NC",
+                dtype="FP16",
+                accuracy_target=0.0,
+                accuracy_threshold=0.99,
+                accuracy_metrics={
+                    "rouge1": 38.7792,
+                    "rouge2": 15.9075,
+                    "rougeL": 24.4957,
+                    "rougeLsum": 35.793,
+                    "gen_len": 8167644,  # FP32 reference, checked at 90% threshold
+                },
+                preprocessing=PreprocessingConfig(),  # Not used for text
+                offline=ScenarioConfig(
+                    min_duration_ms=600000,  # MLPerf official: 10 minutes
+                    min_query_count=13368,
+                    samples_per_query=1,
+                ),
+                server=ScenarioConfig(
+                    min_duration_ms=600000,  # MLPerf official: 10 minutes
+                    min_query_count=270336,  # MLPerf constants.py min-queries Server
+                    target_latency_ns=20000000000,  # 20s TTFT per constants.py
+                    target_qps=1.0,
+                ),
+            ),
+            dataset=DatasetConfig(
+                name="cnn-dailymail",
+                path="./data/cnn-dailymail",
             ),
         )
 

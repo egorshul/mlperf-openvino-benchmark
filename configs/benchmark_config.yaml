@@ -266,6 +266,54 @@ models:
       target_qps: 10.0  # Lower QPS due to high latency
       min_duration_ms: 600000  # 10 minutes (MLPerf v5.1 official requirement)
 
+  llama3.1-8b:
+    name: "Llama-3.1-8B"
+    task: "text_generation"
+    dataset: "cnn-dailymail"
+    input_shape: [1, 8000]  # (batch, model_max_length per MLCommons reference)
+    input_name: "input_ids"
+    output_name: "logits"
+    data_format: "NC"
+    dtype: "FP16"
+
+    # Generation parameters (MLCommons Inference v5.1 reference)
+    # Task: text summarization (CNN-DailyMail)
+    generation:
+      max_new_tokens: 128    # Summarization output is short
+      min_new_tokens: 1
+      do_sample: false       # Greedy decoding per MLPerf spec
+      num_beams: 1
+
+    # MLPerf v5.1 accuracy targets (ROUGE fmeasure * 100)
+    # Reference values from FP32 baseline; 99% threshold applied
+    accuracy_target: 0.0     # Composite - individual ROUGE thresholds below
+    accuracy_threshold: 0.99
+
+    accuracy_metrics:
+      rouge1: 38.7792        # FP32 reference (99% = 38.3914)
+      rouge2: 15.9075        # FP32 reference (99% = 15.7484)
+      rougeL: 24.4957        # FP32 reference (99% = 24.2507)
+      rougeLsum: 35.793      # FP32 reference (99% = 35.4351)
+      gen_len: 8167644       # FP32 reference gen_len (sum of char lengths, 90% threshold)
+
+    sources:
+      huggingface_model_id: "meta-llama/Meta-Llama-3.1-8B-Instruct"
+
+    # MLPerf LoadGen settings (from mlperf.conf)
+    performance_sample_count: 13368    # = total CNN-DailyMail eval samples
+    use_token_latencies: true          # Required for LLM benchmarks
+
+    offline:
+      min_duration_ms: 600000          # 10 minutes (MLPerf v5.1)
+      min_query_count: 13368
+      samples_per_query: 1
+
+    server:
+      target_latency_ns: 20000000000   # 20s TTFT per MLPerf constants.py
+      target_qps: 1.0
+      min_duration_ms: 600000          # 10 minutes (MLPerf v5.1)
+      min_query_count: 270336          # MLPerf constants.py min-queries Server
+
 # OpenVINO specific settings
 openvino:
   device: "CPU"
@@ -337,6 +385,11 @@ datasets:
     prompts_file: "coco-1024.tsv"
     captions_file: "annotations/captions_val2014.json"
     images_dir: "coco-1024"  # Optional reference images for FID
+
+  cnn-dailymail:
+    path: "./data/cnn-dailymail"
+    eval_file: "cnn_eval.json"          # 13,368 samples (datacenter)
+    edge_file: "sample_cnn_eval_5000.json"  # 5,000 samples (edge)
 
 # Output settings
 output:
