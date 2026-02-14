@@ -628,6 +628,10 @@ class BenchmarkRunner:
         if qsl_handle is not None:
             lg.DestroyQSL(qsl_handle)
 
+        # Clean up multiprocessing workers (LlamaMultiDieSUT)
+        if hasattr(self.sut, "shutdown"):
+            self.sut.shutdown()
+
         return self._results
 
     def _save_mlperf_accuracy_log(self) -> None:
