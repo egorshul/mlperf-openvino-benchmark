@@ -1,7 +1,9 @@
 """Llama SUT for single-device (CPU/GPU) inference using OpenVINO GenAI.
 
 Uses openvino_genai.LLMPipeline for OpenVINO-accelerated autoregressive
-text generation with KV-cache support. No optimum-intel dependency.
+text generation with KV-cache support.  Continuous batching is enabled
+(default max_num_seqs=256) so the scheduler can interleave multiple
+sequences for higher throughput.  No optimum-intel dependency.
 
 Follows the MLCommons Inference v5.1 reference:
   https://github.com/mlcommons/inference/tree/master/language/llama3.1-8b
@@ -12,7 +14,7 @@ import logging
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Tuple, Union
 
 import numpy as np
 
@@ -37,6 +39,11 @@ from ..datasets.cnn_dailymail import CnnDailyMailQSL
 
 logger = logging.getLogger(__name__)
 
+# Prompts sent per generate() call.  The continuous-batching scheduler
+# processes up to max_num_seqs concurrently and queues the rest, so the
+# chunk can be larger than max_num_seqs.  Chunking gives progress updates.
+_CB_CHUNK_SIZE = 64
+
 
 def _fmt_time(seconds: float) -> str:
     if seconds < 60:
@@ -45,13 +52,15 @@ def _fmt_time(seconds: float) -> str:
 
 
 def _print_progress(completed: int, total: int, start_time: float) -> None:
-    elapsed = time.time() - start_time
-    rate = completed / elapsed if elapsed > 0 else 0.0
     if completed >= total:
+        elapsed = time.time() - start_time
+        rate = completed / elapsed if elapsed > 0 else 0.0
         line = f"\r[Inference] {completed}/{total} | {rate:.2f} samples/s | {_fmt_time(elapsed)}"
         print(line, file=sys.stderr, flush=True)
         print(file=sys.stderr)
     else:
+        elapsed = time.time() - start_time
+        rate = completed / elapsed if elapsed > 0 else 0.0
         eta = (total - completed) / rate if rate > 0 else 0.0
         line = f"\r[Inference] {completed}/{total} | {rate:.2f} samples/s | ETA {_fmt_time(eta)}"
         print(line, end="", file=sys.stderr, flush=True)
@@ -82,7 +91,8 @@ class LlamaSUT:
     """Llama SUT for single-device inference (CPU/GPU).
 
     Uses openvino_genai.LLMPipeline for OpenVINO-optimized autoregressive
-    generation with KV-cache management.
+    generation with KV-cache management.  Continuous batching is enabled
+    so the scheduler can interleave multiple sequences per generate() call.
 
     Per MLPerf v5.1 Llama 3.1 8B spec:
       - Task: text summarization (CNN-DailyMail)
@@ -165,9 +175,10 @@ class LlamaSUT:
         self._gen_config.max_new_tokens = self.max_new_tokens
         self._gen_config.min_new_tokens = 1
 
+        # Continuous-batching scheduler.
+        # Default max_num_seqs=256 allows the scheduler to interleave
+        # multiple sequences per generate() call — critical for throughput.
         scheduler_config = ov_genai.SchedulerConfig()
-        scheduler_config.max_num_seqs = 1
-        scheduler_config.cache_size = 1
         scheduler_config.dynamic_split_fuse = True
 
         self._pipeline = ov_genai.LLMPipeline(
@@ -194,41 +205,77 @@ class LlamaSUT:
             f"used: {avail_gb - avail_after:.1f} GB)"
         )
 
-    def _process_sample(self, sample_idx: int) -> tuple:
-        """Run inference on a single sample.
+    # ------------------------------------------------------------------
+    # Result parsing
+    # ------------------------------------------------------------------
 
-        Returns:
-            (decoded_text, output_token_ids, n_tokens)
-        """
-        prompt_text = self.qsl.get_input_text(sample_idx)
-
-        result = self._pipeline.generate(prompt_text, self._gen_config)
-
-        # Extract actual generated token IDs from GenerationResult
-        # (available with SchedulerConfig / continuous batching).
-        # This gives accurate n_tokens for LoadGen compliance.
+    def _parse_generation_result(
+        self, gen_result: Any,
+    ) -> Tuple[str, np.ndarray, int]:
+        """Parse a single GenerationResult into (text, token_ids, n_tokens)."""
         output_ids = None
-        if hasattr(result, "m_generation_ids") and result.m_generation_ids:
-            output_ids = np.array(result.m_generation_ids, dtype=np.int64)
+        if hasattr(gen_result, "m_generation_ids") and gen_result.m_generation_ids:
+            output_ids = np.array(gen_result.m_generation_ids, dtype=np.int64)
 
         if output_ids is not None:
-            # Decode text from actual token IDs — consistent with
-            # how evaluation.py reconstructs text from LoadGen log.
             text = self._tokenizer.decode(output_ids, skip_special_tokens=True)
-        elif isinstance(result, str):
-            text = result
-        elif hasattr(result, "texts") and result.texts:
-            text = result.texts[0]
+        elif isinstance(gen_result, str):
+            text = gen_result
+        elif hasattr(gen_result, "texts") and gen_result.texts:
+            text = gen_result.texts[0]
         else:
-            text = str(result)
+            text = str(gen_result)
 
-        # Fallback: re-encode text if token IDs were not available
         if output_ids is None:
             tokens = self._tokenizer.encode(text, add_special_tokens=False)
             output_ids = np.array(tokens, dtype=np.int64)
 
         n_tokens = len(output_ids)
         return text, output_ids, n_tokens
+
+    # ------------------------------------------------------------------
+    # Inference: single-sample & batch
+    # ------------------------------------------------------------------
+
+    def _process_sample(self, sample_idx: int) -> Tuple[str, np.ndarray, int]:
+        """Run inference on a single sample (used by Server mode)."""
+        prompt_text = self.qsl.get_input_text(sample_idx)
+        result = self._pipeline.generate(prompt_text, self._gen_config)
+        return self._parse_generation_result(result)
+
+    def _process_batch(
+        self, sample_indices: List[int],
+    ) -> List[Tuple[str, np.ndarray, int]]:
+        """Batch generation with continuous batching.
+
+        Sends multiple prompts to a single LLMPipeline.generate() call so
+        the scheduler can interleave prefill/decode across sequences —
+        much higher throughput than sequential per-sample calls.
+
+        Falls back to sequential generation if the batch API is
+        unavailable (older openvino-genai versions).
+        """
+        if not sample_indices:
+            return []
+
+        prompts = [self.qsl.get_input_text(idx) for idx in sample_indices]
+
+        if len(prompts) == 1:
+            result = self._pipeline.generate(prompts[0], self._gen_config)
+            return [self._parse_generation_result(result)]
+
+        try:
+            gen_configs = [self._gen_config] * len(prompts)
+            results = self._pipeline.generate(prompts, gen_configs)
+            return [self._parse_generation_result(r) for r in results]
+        except (TypeError, ValueError):
+            # Fallback: sequential if batch API not supported
+            logger.debug("Batch generate() not supported, falling back to sequential")
+            return [self._process_sample(idx) for idx in sample_indices]
+
+    # ------------------------------------------------------------------
+    # LoadGen query dispatch
+    # ------------------------------------------------------------------
 
     def issue_queries(self, query_samples: List[Any]) -> None:
         self._query_count += len(query_samples)
@@ -243,23 +290,29 @@ class LlamaSUT:
         self._sample_count = 0
 
         device = self.config.openvino.device if hasattr(self.config, "openvino") else "CPU"
-        logger.info(f"[Offline] Processing {total} samples on {device}")
+        logger.info(
+            f"[Offline] Processing {total} samples on {device}, "
+            f"continuous batching (chunk={_CB_CHUNK_SIZE})"
+        )
 
         responses = []
         response_arrays = []  # prevent GC before QuerySamplesComplete
 
-        for sample in query_samples:
-            sample_idx = sample.index
-            text, output_ids, n_tokens = self._process_sample(sample_idx)
+        for chunk_start in range(0, total, _CB_CHUNK_SIZE):
+            chunk = query_samples[chunk_start:chunk_start + _CB_CHUNK_SIZE]
+            indices = [s.index for s in chunk]
 
-            if self._store_predictions:
-                self._predictions[sample_idx] = text
+            batch_results = self._process_batch(indices)
 
-            self._sample_count += 1
+            for sample, (text, output_ids, n_tokens) in zip(chunk, batch_results):
+                if self._store_predictions:
+                    self._predictions[sample.index] = text
+                self._sample_count += 1
 
-            resp, resp_arr = _make_response(sample.id, output_ids, n_tokens)
-            responses.append(resp)
-            response_arrays.append(resp_arr)
+                resp, resp_arr = _make_response(sample.id, output_ids, n_tokens)
+                responses.append(resp)
+                response_arrays.append(resp_arr)
+
             _print_progress(self._sample_count, total, self._start_time)
 
         _print_progress(total, total, self._start_time)

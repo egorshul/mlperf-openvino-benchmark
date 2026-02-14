@@ -5,7 +5,8 @@ KV-cache management, and prefill/decode switching internally — required
 for devices that only support dynamic batch dimension.
 
 Distributes text generation across multiple accelerator dies;
-samples are dispatched round-robin across dies.
+samples are dispatched round-robin across dies.  Each die uses
+continuous batching (batch generate) for higher throughput.
 
 Follows the MLCommons Inference v5.1 reference:
   https://github.com/mlcommons/inference/tree/master/language/llama3.1-8b
@@ -43,6 +44,11 @@ from .config import BenchmarkConfig, Scenario
 from ..datasets.cnn_dailymail import CnnDailyMailQSL
 
 logger = logging.getLogger(__name__)
+
+# Prompts sent per generate() call.  The continuous-batching scheduler
+# processes up to max_num_seqs concurrently and queues the rest, so the
+# chunk can be larger than max_num_seqs.  Chunking gives progress updates.
+_CB_CHUNK_SIZE = 64
 
 
 def _fmt_time(seconds: float) -> str:
@@ -89,7 +95,8 @@ class LlamaMultiDieSUT:
 
     Per die: an LLMPipeline is created which handles model compilation
     with static shapes, KV-cache management, and token generation.
-    Offline mode distributes samples across dies in parallel via round-robin.
+    Offline mode distributes samples across dies in parallel via round-robin
+    and uses batch generate() with continuous batching per die.
 
     Per MLPerf v5.1 Llama 3.1 8B spec:
       - Task: text summarization (CNN-DailyMail)
@@ -209,9 +216,11 @@ class LlamaMultiDieSUT:
         self._gen_config.max_new_tokens = self.max_new_tokens
         self._gen_config.min_new_tokens = 1
 
+        # Continuous-batching scheduler.
+        # Default max_num_seqs=256 allows the scheduler to interleave
+        # multiple sequences on a single die — critical for throughput.
+        # Previous max_num_seqs=1 serialised everything to one-at-a-time.
         scheduler_config = ov_genai.SchedulerConfig()
-        scheduler_config.max_num_seqs = 1
-        scheduler_config.cache_size = 1
         scheduler_config.dynamic_split_fuse = True
 
         for i, die in enumerate(device_dies):
@@ -242,43 +251,79 @@ class LlamaMultiDieSUT:
             f"[Llama] {len(self._pipelines)} die(s) ready: {', '.join(die_names)}"
         )
 
-    def _process_sample(
-        self, sample_idx: int, pipe: Any,
+    # ------------------------------------------------------------------
+    # Result parsing
+    # ------------------------------------------------------------------
+
+    def _parse_generation_result(
+        self, gen_result: Any,
     ) -> Tuple[str, np.ndarray, int]:
-        """Run inference on a single sample using the given pipeline.
-
-        Returns:
-            (decoded_text, output_token_ids, n_tokens)
-        """
-        prompt_text = self.qsl.get_input_text(sample_idx)
-
-        result = pipe.generate(prompt_text, self._gen_config)
-
-        # Extract actual generated token IDs from GenerationResult
-        # (available with SchedulerConfig / continuous batching).
-        # This gives accurate n_tokens for LoadGen compliance.
+        """Parse a single GenerationResult into (text, token_ids, n_tokens)."""
         output_ids = None
-        if hasattr(result, "m_generation_ids") and result.m_generation_ids:
-            output_ids = np.array(result.m_generation_ids, dtype=np.int64)
+        if hasattr(gen_result, "m_generation_ids") and gen_result.m_generation_ids:
+            output_ids = np.array(gen_result.m_generation_ids, dtype=np.int64)
 
         if output_ids is not None:
-            # Decode text from actual token IDs — consistent with
-            # how evaluation.py reconstructs text from LoadGen log.
             text = self._tokenizer.decode(output_ids, skip_special_tokens=True)
-        elif isinstance(result, str):
-            text = result
-        elif hasattr(result, "texts") and result.texts:
-            text = result.texts[0]
+        elif isinstance(gen_result, str):
+            text = gen_result
+        elif hasattr(gen_result, "texts") and gen_result.texts:
+            text = gen_result.texts[0]
         else:
-            text = str(result)
+            text = str(gen_result)
 
-        # Fallback: re-encode text if token IDs were not available
         if output_ids is None:
             tokens = self._tokenizer.encode(text, add_special_tokens=False)
             output_ids = np.array(tokens, dtype=np.int64)
 
         n_tokens = len(output_ids)
         return text, output_ids, n_tokens
+
+    # ------------------------------------------------------------------
+    # Inference: single-sample & batch
+    # ------------------------------------------------------------------
+
+    def _process_sample(
+        self, sample_idx: int, pipe: Any,
+    ) -> Tuple[str, np.ndarray, int]:
+        """Run inference on a single sample (used by Server mode)."""
+        prompt_text = self.qsl.get_input_text(sample_idx)
+        result = pipe.generate(prompt_text, self._gen_config)
+        return self._parse_generation_result(result)
+
+    def _process_batch(
+        self, sample_indices: List[int], pipe: Any,
+    ) -> List[Tuple[str, np.ndarray, int]]:
+        """Batch generation with continuous batching.
+
+        Sends multiple prompts to a single LLMPipeline.generate() call so
+        the scheduler can interleave prefill/decode across sequences —
+        much higher throughput than sequential per-sample calls.
+
+        Falls back to sequential generation if the batch API is
+        unavailable (older openvino-genai versions).
+        """
+        if not sample_indices:
+            return []
+
+        prompts = [self.qsl.get_input_text(idx) for idx in sample_indices]
+
+        if len(prompts) == 1:
+            result = pipe.generate(prompts[0], self._gen_config)
+            return [self._parse_generation_result(result)]
+
+        try:
+            gen_configs = [self._gen_config] * len(prompts)
+            results = pipe.generate(prompts, gen_configs)
+            return [self._parse_generation_result(r) for r in results]
+        except (TypeError, ValueError):
+            # Fallback: sequential if batch API not supported
+            logger.debug("Batch generate() not supported, falling back to sequential")
+            return [self._process_sample(idx, pipe) for idx in sample_indices]
+
+    # ------------------------------------------------------------------
+    # LoadGen query dispatch
+    # ------------------------------------------------------------------
 
     def issue_queries(self, query_samples: List[Any]) -> None:
         self._query_count += len(query_samples)
@@ -293,7 +338,10 @@ class LlamaMultiDieSUT:
         self._start_time = time.time()
         self._sample_count = 0
 
-        logger.info(f"[Offline] {total} samples, {num_dies} die(s)")
+        logger.info(
+            f"[Offline] {total} samples, {num_dies} die(s), "
+            f"continuous batching (chunk={_CB_CHUNK_SIZE})"
+        )
 
         if num_dies <= 1:
             self._issue_queries_offline_sequential(query_samples)
@@ -311,15 +359,29 @@ class LlamaMultiDieSUT:
 
         def _die_worker(die_idx: int, batch: List[Tuple[Any, int]]) -> None:
             _, pipe = self._pipelines[die_idx]
-            for sample, sample_idx in batch:
-                text, output_ids, n_tokens = self._process_sample(sample_idx, pipe)
-                with self._predictions_lock:
+            local_results: List[Tuple[Any, int, str, np.ndarray, int]] = []
+
+            for chunk_start in range(0, len(batch), _CB_CHUNK_SIZE):
+                chunk = batch[chunk_start:chunk_start + _CB_CHUNK_SIZE]
+                indices = [si for _, si in chunk]
+
+                batch_results = self._process_batch(indices, pipe)
+
+                for (sample, sample_idx), (text, output_ids, n_tokens) in zip(
+                    chunk, batch_results
+                ):
+                    local_results.append(
+                        (sample, sample_idx, text, output_ids, n_tokens)
+                    )
                     if self._store_predictions:
-                        self._predictions[sample_idx] = text
+                        with self._predictions_lock:
+                            self._predictions[sample_idx] = text
+
                 with self._count_lock:
-                    self._sample_count += 1
-                with results_lock:
-                    all_results.append((sample, sample_idx, text, output_ids, n_tokens))
+                    self._sample_count += len(chunk)
+
+            with results_lock:
+                all_results.extend(local_results)
 
         with ThreadPoolExecutor(max_workers=num_dies) as pool:
             futures = [
@@ -350,22 +412,28 @@ class LlamaMultiDieSUT:
         lg.QuerySamplesComplete(responses)
 
     def _issue_queries_offline_sequential(self, query_samples: List[Any]) -> None:
+        """Single-die offline path — still uses batch generate()."""
         total = len(query_samples)
         responses = []
         response_arrays = []  # prevent GC before QuerySamplesComplete
 
         _, pipe = self._pipelines[0]
-        for sample in query_samples:
-            sample_idx = sample.index
-            text, output_ids, n_tokens = self._process_sample(sample_idx, pipe)
 
-            if self._store_predictions:
-                self._predictions[sample_idx] = text
-            self._sample_count += 1
+        for chunk_start in range(0, total, _CB_CHUNK_SIZE):
+            chunk = query_samples[chunk_start:chunk_start + _CB_CHUNK_SIZE]
+            indices = [s.index for s in chunk]
 
-            resp, resp_arr = _make_response(sample.id, output_ids, n_tokens)
-            responses.append(resp)
-            response_arrays.append(resp_arr)
+            batch_results = self._process_batch(indices, pipe)
+
+            for sample, (text, output_ids, n_tokens) in zip(chunk, batch_results):
+                if self._store_predictions:
+                    self._predictions[sample.index] = text
+                self._sample_count += 1
+
+                resp, resp_arr = _make_response(sample.id, output_ids, n_tokens)
+                responses.append(resp)
+                response_arrays.append(resp_arr)
+
             _print_progress(self._sample_count, total, self._start_time)
 
         _print_progress(total, total, self._start_time)
