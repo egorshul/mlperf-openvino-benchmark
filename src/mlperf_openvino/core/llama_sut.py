@@ -1,14 +1,3 @@
-"""Llama SUT for single-device (CPU/GPU) inference using OpenVINO GenAI.
-
-Uses openvino_genai.LLMPipeline for OpenVINO-accelerated autoregressive
-text generation with KV-cache support.  Continuous batching is enabled
-(default max_num_seqs=256) so the scheduler can interleave multiple
-sequences for higher throughput.  No optimum-intel dependency.
-
-Follows the MLCommons Inference v5.1 reference:
-  https://github.com/mlcommons/inference/tree/master/language/llama3.1-8b
-"""
-
 import array
 import logging
 import sys
@@ -20,7 +9,6 @@ import numpy as np
 
 try:
     import mlperf_loadgen as lg
-
     LOADGEN_AVAILABLE = True
 except ImportError:
     LOADGEN_AVAILABLE = False
@@ -28,7 +16,6 @@ except ImportError:
 
 try:
     import openvino_genai as ov_genai
-
     GENAI_AVAILABLE = True
 except ImportError:
     GENAI_AVAILABLE = False
@@ -39,9 +26,6 @@ from ..datasets.cnn_dailymail import CnnDailyMailQSL
 
 logger = logging.getLogger(__name__)
 
-# Prompts sent per generate() call.  The continuous-batching scheduler
-# processes up to max_num_seqs concurrently and queues the rest, so the
-# chunk can be larger than max_num_seqs.  Chunking gives progress updates.
 _CB_CHUNK_SIZE = 64
 
 
@@ -52,54 +36,30 @@ def _fmt_time(seconds: float) -> str:
 
 
 def _print_progress(completed: int, total: int, start_time: float) -> None:
+    elapsed = time.time() - start_time
+    rate = completed / elapsed if elapsed > 0 else 0.0
     if completed >= total:
-        elapsed = time.time() - start_time
-        rate = completed / elapsed if elapsed > 0 else 0.0
         line = f"\r[Inference] {completed}/{total} | {rate:.2f} samples/s | {_fmt_time(elapsed)}"
         print(line, file=sys.stderr, flush=True)
         print(file=sys.stderr)
     else:
-        elapsed = time.time() - start_time
-        rate = completed / elapsed if elapsed > 0 else 0.0
         eta = (total - completed) / rate if rate > 0 else 0.0
         line = f"\r[Inference] {completed}/{total} | {rate:.2f} samples/s | ETA {_fmt_time(eta)}"
         print(line, end="", file=sys.stderr, flush=True)
 
 
 def _make_response(sample_id: int, token_ids: np.ndarray, n_tokens: int):
-    """Build a QuerySampleResponse with int64 token IDs.
-
-    The data is stored as int64 bytes so that the official MLCommons
-    evaluation.py can parse it via np.frombuffer(..., np.int64).
-
-    Returns:
-        (response, response_array) — caller must keep response_array alive
-        until QuerySamplesComplete processes the response buffer.
-    """
-    token_bytes = token_ids.astype(np.int64).tobytes()
+    token_bytes = token_ids.astype(np.int32).tobytes()
     response_array = array.array("B", token_bytes)
     bi = response_array.buffer_info()
     try:
         resp = lg.QuerySampleResponse(sample_id, bi[0], bi[1], n_tokens)
     except TypeError:
-        # Older LoadGen versions without n_tokens parameter
         resp = lg.QuerySampleResponse(sample_id, bi[0], bi[1])
     return resp, response_array
 
 
 class LlamaSUT:
-    """Llama SUT for single-device inference (CPU/GPU).
-
-    Uses openvino_genai.LLMPipeline for OpenVINO-optimized autoregressive
-    generation with KV-cache management.  Continuous batching is enabled
-    so the scheduler can interleave multiple sequences per generate() call.
-
-    Per MLPerf v5.1 Llama 3.1 8B spec:
-      - Task: text summarization (CNN-DailyMail)
-      - max_new_tokens: 128
-      - Greedy decoding (do_sample=False)
-      - n_tokens reported per response (use_token_latencies=1)
-    """
 
     @staticmethod
     def _get_available_memory_gb() -> float:
@@ -170,14 +130,10 @@ class LlamaSUT:
             f"(available RAM: {avail_gb:.1f} GB)..."
         )
 
-        # Greedy decoding per MLPerf spec
         self._gen_config = ov_genai.GenerationConfig()
         self._gen_config.max_new_tokens = self.max_new_tokens
         self._gen_config.min_new_tokens = 1
 
-        # Continuous-batching scheduler.
-        # Default max_num_seqs=256 allows the scheduler to interleave
-        # multiple sequences per generate() call — critical for throughput.
         scheduler_config = ov_genai.SchedulerConfig()
         scheduler_config.dynamic_split_fuse = True
 
@@ -190,7 +146,6 @@ class LlamaSUT:
         try:
             self._tokenizer = AutoTokenizer.from_pretrained(str(self.model_path))
         except Exception:
-            logger.debug("Loading tokenizer from meta-llama/Meta-Llama-3.1-8B-Instruct")
             self._tokenizer = AutoTokenizer.from_pretrained(
                 "meta-llama/Meta-Llama-3.1-8B-Instruct"
             )
@@ -205,17 +160,12 @@ class LlamaSUT:
             f"used: {avail_gb - avail_after:.1f} GB)"
         )
 
-    # ------------------------------------------------------------------
-    # Result parsing
-    # ------------------------------------------------------------------
-
     def _parse_generation_result(
         self, gen_result: Any,
     ) -> Tuple[str, np.ndarray, int]:
-        """Parse a single GenerationResult into (text, token_ids, n_tokens)."""
         output_ids = None
         if hasattr(gen_result, "m_generation_ids") and gen_result.m_generation_ids:
-            output_ids = np.array(gen_result.m_generation_ids, dtype=np.int64)
+            output_ids = np.array(gen_result.m_generation_ids, dtype=np.int32)
 
         if output_ids is not None:
             text = self._tokenizer.decode(output_ids, skip_special_tokens=True)
@@ -228,17 +178,11 @@ class LlamaSUT:
 
         if output_ids is None:
             tokens = self._tokenizer.encode(text, add_special_tokens=False)
-            output_ids = np.array(tokens, dtype=np.int64)
+            output_ids = np.array(tokens, dtype=np.int32)
 
-        n_tokens = len(output_ids)
-        return text, output_ids, n_tokens
-
-    # ------------------------------------------------------------------
-    # Inference: single-sample & batch
-    # ------------------------------------------------------------------
+        return text, output_ids, len(output_ids)
 
     def _process_sample(self, sample_idx: int) -> Tuple[str, np.ndarray, int]:
-        """Run inference on a single sample (used by Server mode)."""
         prompt_text = self.qsl.get_input_text(sample_idx)
         result = self._pipeline.generate(prompt_text, self._gen_config)
         return self._parse_generation_result(result)
@@ -246,15 +190,6 @@ class LlamaSUT:
     def _process_batch(
         self, sample_indices: List[int],
     ) -> List[Tuple[str, np.ndarray, int]]:
-        """Batch generation with continuous batching.
-
-        Sends multiple prompts to a single LLMPipeline.generate() call so
-        the scheduler can interleave prefill/decode across sequences —
-        much higher throughput than sequential per-sample calls.
-
-        Falls back to sequential generation if the batch API is
-        unavailable (older openvino-genai versions).
-        """
         if not sample_indices:
             return []
 
@@ -267,14 +202,8 @@ class LlamaSUT:
         try:
             results = self._pipeline.generate(prompts, self._gen_config)
             return [self._parse_generation_result(r) for r in results]
-        except Exception as exc:
-            # Fallback: sequential if batch API not supported or fails
-            logger.debug("Batch generate() failed (%s), falling back to sequential", exc)
+        except Exception:
             return [self._process_sample(idx) for idx in sample_indices]
-
-    # ------------------------------------------------------------------
-    # LoadGen query dispatch
-    # ------------------------------------------------------------------
 
     def issue_queries(self, query_samples: List[Any]) -> None:
         self._query_count += len(query_samples)
@@ -295,7 +224,7 @@ class LlamaSUT:
         )
 
         responses = []
-        response_arrays = []  # prevent GC before QuerySamplesComplete
+        response_arrays = []
 
         for chunk_start in range(0, total, _CB_CHUNK_SIZE):
             chunk = query_samples[chunk_start:chunk_start + _CB_CHUNK_SIZE]
@@ -318,7 +247,6 @@ class LlamaSUT:
         lg.QuerySamplesComplete(responses)
 
     def _issue_queries_server(self, query_samples: List[Any]) -> None:
-        """Server mode: respond per query, report FirstTokenComplete for TTFT."""
         for sample in query_samples:
             sample_idx = sample.index
             text, output_ids, n_tokens = self._process_sample(sample_idx)
@@ -333,10 +261,10 @@ class LlamaSUT:
             try:
                 lg.FirstTokenComplete([resp])
             except (AttributeError, TypeError):
-                pass  # Older LoadGen without FirstTokenComplete
+                pass
 
             lg.QuerySamplesComplete([resp])
-            del resp_arr  # safe to release after QuerySamplesComplete
+            del resp_arr
 
     def flush_queries(self) -> None:
         pass
@@ -371,7 +299,6 @@ class LlamaSUT:
         self._sample_count = 0
 
     def warmup(self, num_iterations: int = 5) -> None:
-        """Warm up the model with a short generation."""
         logger.info(f"[Llama] Warming up ({num_iterations} iterations)...")
 
         warmup_config = ov_genai.GenerationConfig()

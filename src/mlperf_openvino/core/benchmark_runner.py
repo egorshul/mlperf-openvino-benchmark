@@ -628,7 +628,6 @@ class BenchmarkRunner:
         if qsl_handle is not None:
             lg.DestroyQSL(qsl_handle)
 
-        # Clean up multiprocessing workers (LlamaMultiDieSUT)
         if hasattr(self.sut, "shutdown"):
             self.sut.shutdown()
 

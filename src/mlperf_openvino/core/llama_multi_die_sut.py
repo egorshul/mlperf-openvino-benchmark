@@ -1,21 +1,3 @@
-"""Llama multi-die SUT for accelerator inference (NPU/VPU/XPU).
-
-Uses openvino_genai.LLMPipeline on each die in a **separate process**
-to bypass Python's GIL — the only way to get true parallel generation
-on multiple accelerator dies.
-
-Each worker process:
-  1. Loads its own LLMPipeline on the assigned die
-  2. Warms up
-  3. Processes samples received via multiprocessing.Queue
-  4. Returns results (text + token IDs) via output Queue
-
-The main process distributes samples round-robin and collects results.
-
-Follows the MLCommons Inference v5.1 reference:
-  https://github.com/mlcommons/inference/tree/master/language/llama3.1-8b
-"""
-
 import array
 import gc
 import logging
@@ -26,13 +8,12 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Tuple, Union
 
 import numpy as np
 
 try:
     import mlperf_loadgen as lg
-
     LOADGEN_AVAILABLE = True
 except ImportError:
     LOADGEN_AVAILABLE = False
@@ -40,7 +21,6 @@ except ImportError:
 
 try:
     import openvino_genai as ov_genai
-
     GENAI_AVAILABLE = True
 except ImportError:
     GENAI_AVAILABLE = False
@@ -52,32 +32,19 @@ from ..datasets.cnn_dailymail import CnnDailyMailQSL
 logger = logging.getLogger(__name__)
 
 
-# ======================================================================
-# Worker process — runs on a single die, fully independent of main GIL
-# ======================================================================
-
 def _die_worker_fn(
     die_name: str,
     model_path: str,
     ov_config: Dict[str, Any],
     max_new_tokens: int,
     tokenizer_path: str,
-    input_queue,   # multiprocessing.Queue — receives work items
-    output_queue,  # multiprocessing.Queue — sends results
-    ready_event,   # multiprocessing.Event — set when init done
+    input_queue,
+    output_queue,
+    ready_event,
 ) -> None:
-    """Load model on *die_name* and process samples until shutdown.
-
-    Protocol:
-      input_queue  receives (sample_idx, sample_id, prompt_text)
-                   or None as shutdown sentinel.
-      output_queue sends   (sample_idx, sample_id, text,
-                            token_ids_bytes, n_tokens).
-    """
     import openvino_genai as _ov_genai
     from transformers import AutoTokenizer
 
-    # ---- scheduler (NPU-safe: one sequence at a time) ----
     scheduler_config = _ov_genai.SchedulerConfig()
     scheduler_config.max_num_seqs = 1
     scheduler_config.cache_size = 1
@@ -89,7 +56,6 @@ def _die_worker_fn(
         **ov_config,
     )
 
-    # ---- tokenizer ----
     try:
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     except Exception:
@@ -99,12 +65,10 @@ def _die_worker_fn(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # ---- generation config ----
     gen_config = _ov_genai.GenerationConfig()
     gen_config.max_new_tokens = max_new_tokens
     gen_config.min_new_tokens = 1
 
-    # ---- warmup ----
     warmup_cfg = _ov_genai.GenerationConfig()
     warmup_cfg.max_new_tokens = 1
     warmup_cfg.min_new_tokens = 1
@@ -113,19 +77,17 @@ def _die_worker_fn(
 
     ready_event.set()
 
-    # ---- main loop ----
     while True:
         item = input_queue.get()
         if item is None:
             break
 
-        sample_idx, sample_id, prompt_text = item
+        item_idx, sample_id, prompt_text = item
         result = pipe.generate(prompt_text, gen_config)
 
-        # parse GenerationResult
         output_ids = None
         if hasattr(result, "m_generation_ids") and result.m_generation_ids:
-            output_ids = np.array(result.m_generation_ids, dtype=np.int64)
+            output_ids = np.array(result.m_generation_ids, dtype=np.int32)
 
         if output_ids is not None:
             text = tokenizer.decode(output_ids, skip_special_tokens=True)
@@ -138,18 +100,14 @@ def _die_worker_fn(
 
         if output_ids is None:
             tokens = tokenizer.encode(text, add_special_tokens=False)
-            output_ids = np.array(tokens, dtype=np.int64)
+            output_ids = np.array(tokens, dtype=np.int32)
 
         n_tokens = len(output_ids)
         output_queue.put((
-            sample_idx, sample_id, text,
+            item_idx, sample_id, text,
             output_ids.tobytes(), n_tokens,
         ))
 
-
-# ======================================================================
-# Helper functions (main process)
-# ======================================================================
 
 def _fmt_time(seconds: float) -> str:
     if seconds < 60:
@@ -171,8 +129,7 @@ def _print_progress(completed: int, total: int, start_time: float) -> None:
 
 
 def _make_response(sample_id: int, token_ids: np.ndarray, n_tokens: int):
-    """Build a QuerySampleResponse with int64 token IDs."""
-    token_bytes = token_ids.astype(np.int64).tobytes()
+    token_bytes = token_ids.astype(np.int32).tobytes()
     response_array = array.array("B", token_bytes)
     bi = response_array.buffer_info()
     try:
@@ -182,22 +139,7 @@ def _make_response(sample_id: int, token_ids: np.ndarray, n_tokens: int):
     return resp, response_array
 
 
-# ======================================================================
-# SUT class
-# ======================================================================
-
 class LlamaMultiDieSUT:
-    """Llama multi-die SUT using **multiprocessing** for true parallelism.
-
-    Offline mode: each die runs in a separate OS process (bypasses GIL).
-    Server mode / single-die: in-process pipeline (no multiprocessing).
-
-    Per MLPerf v5.1 Llama 3.1 8B spec:
-      - Task: text summarization (CNN-DailyMail)
-      - max_new_tokens: 128
-      - Greedy decoding (do_sample=False)
-      - n_tokens reported per response (use_token_latencies=1)
-    """
 
     def __init__(
         self,
@@ -230,10 +172,7 @@ class LlamaMultiDieSUT:
         self._sut_handle = None
         self._qsl_handle = None
 
-        # Multiprocessing workers (Offline, multi-die)
-        self._workers: List[Tuple[str, multiprocessing.Process,
-                                  Any, Any]] = []
-        # In-process pipelines (Server / single-die fallback)
+        self._workers: List[Tuple[str, multiprocessing.Process, Any, Any]] = []
         self._pipelines: List[Tuple[str, Any]] = []
         self._pipe_index = 0
         self._pipe_index_lock = threading.Lock()
@@ -241,10 +180,6 @@ class LlamaMultiDieSUT:
         self._tokenizer = None
 
         self._setup()
-
-    # ------------------------------------------------------------------
-    # Setup
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _get_available_memory_gb() -> float:
@@ -276,7 +211,6 @@ class LlamaMultiDieSUT:
                 "LlamaMultiDieSUT requires an accelerator device in config"
             )
 
-        # Tokenizer (main process — for predictions / server mode)
         try:
             self._tokenizer = AutoTokenizer.from_pretrained(
                 str(self.model_path)
@@ -288,7 +222,6 @@ class LlamaMultiDieSUT:
         if self._tokenizer.pad_token is None:
             self._tokenizer.pad_token = self._tokenizer.eos_token
 
-        # Discover dies
         if "," in target_device:
             device_dies = [p.strip() for p in target_device.split(",")]
         elif re.match(r"^.+\.\d+$", target_device):
@@ -302,7 +235,6 @@ class LlamaMultiDieSUT:
                 f"Check that the device is available."
             )
 
-        # Device properties
         ov_config: Dict[str, Any] = {}
         if hasattr(self.config, "openvino"):
             if hasattr(self.config.openvino, "device_properties"):
@@ -310,7 +242,6 @@ class LlamaMultiDieSUT:
                     for k, v in self.config.openvino.device_properties.items():
                         ov_config[k] = v
 
-        # Choose execution strategy
         if self.scenario == Scenario.OFFLINE and len(device_dies) > 1:
             self._setup_workers(device_dies, ov_config)
         else:
@@ -319,15 +250,13 @@ class LlamaMultiDieSUT:
     def _setup_workers(
         self, device_dies: List[str], ov_config: Dict[str, Any],
     ) -> None:
-        """Spawn one worker process per die (Offline, multi-die)."""
         ctx = multiprocessing.get_context("spawn")
 
         logger.info(
             f"[Llama] Spawning {len(device_dies)} worker process(es)..."
         )
 
-        pending: List[Tuple[str, multiprocessing.Process,
-                            Any, Any, Any]] = []
+        pending: List[Tuple[str, multiprocessing.Process, Any, Any, Any]] = []
 
         for die_name in device_dies:
             input_q = ctx.Queue()
@@ -347,7 +276,6 @@ class LlamaMultiDieSUT:
             pending.append((die_name, p, input_q, output_q, ready))
             logger.info(f"  {die_name}: spawned (pid={p.pid})")
 
-        # Wait for all workers to finish loading + warmup
         for die_name, p, input_q, output_q, ready in pending:
             if not ready.wait(timeout=600):
                 raise RuntimeError(
@@ -363,7 +291,6 @@ class LlamaMultiDieSUT:
     def _setup_pipelines_inprocess(
         self, device_dies: List[str], ov_config: Dict[str, Any],
     ) -> None:
-        """Load LLMPipelines in the main process (Server / single-die)."""
         self._gen_config = ov_genai.GenerationConfig()
         self._gen_config.max_new_tokens = self.max_new_tokens
         self._gen_config.min_new_tokens = 1
@@ -401,16 +328,12 @@ class LlamaMultiDieSUT:
             f"{', '.join(die_names)}"
         )
 
-    # ------------------------------------------------------------------
-    # Result parsing (in-process path)
-    # ------------------------------------------------------------------
-
     def _parse_generation_result(
         self, gen_result: Any,
     ) -> Tuple[str, np.ndarray, int]:
         output_ids = None
         if hasattr(gen_result, "m_generation_ids") and gen_result.m_generation_ids:
-            output_ids = np.array(gen_result.m_generation_ids, dtype=np.int64)
+            output_ids = np.array(gen_result.m_generation_ids, dtype=np.int32)
 
         if output_ids is not None:
             text = self._tokenizer.decode(output_ids, skip_special_tokens=True)
@@ -423,7 +346,7 @@ class LlamaMultiDieSUT:
 
         if output_ids is None:
             tokens = self._tokenizer.encode(text, add_special_tokens=False)
-            output_ids = np.array(tokens, dtype=np.int64)
+            output_ids = np.array(tokens, dtype=np.int32)
 
         return text, output_ids, len(output_ids)
 
@@ -434,10 +357,6 @@ class LlamaMultiDieSUT:
         result = pipe.generate(prompt_text, self._gen_config)
         return self._parse_generation_result(result)
 
-    # ------------------------------------------------------------------
-    # LoadGen dispatch
-    # ------------------------------------------------------------------
-
     def issue_queries(self, query_samples: List[Any]) -> None:
         self._query_count += len(query_samples)
         if self.scenario == Scenario.OFFLINE:
@@ -445,49 +364,41 @@ class LlamaMultiDieSUT:
         else:
             self._issue_queries_server(query_samples)
 
-    # ---- Offline ----
-
     def _issue_queries_offline(self, query_samples: List[Any]) -> None:
         total = len(query_samples)
         self._start_time = time.time()
         self._sample_count = 0
 
         if self._workers:
-            n = len(self._workers)
             logger.info(
-                f"[Offline] {total} samples, {n} worker process(es)"
+                f"[Offline] {total} samples, {len(self._workers)} worker process(es)"
             )
             self._issue_offline_multiprocess(query_samples)
         else:
-            n = len(self._pipelines)
-            logger.info(f"[Offline] {total} samples, {n} die(s) (in-process)")
+            logger.info(
+                f"[Offline] {total} samples, {len(self._pipelines)} die(s) (in-process)"
+            )
             self._issue_offline_sequential(query_samples)
 
     def _issue_offline_multiprocess(self, query_samples: List[Any]) -> None:
-        """True parallel execution: each die in its own OS process."""
         total = len(query_samples)
         num_workers = len(self._workers)
 
-        # Distribute samples round-robin to worker input queues
         for i, sample in enumerate(query_samples):
             worker_idx = i % num_workers
             prompt = self.qsl.get_input_text(sample.index)
             _, _, input_q, _ = self._workers[worker_idx]
-            input_q.put((sample.index, sample.id, prompt))
+            input_q.put((i, sample.id, prompt))
 
-        # Collect results from all workers
         collected: Dict[int, Tuple] = {}
 
         while len(collected) < total:
-            # Check workers alive
             for die_name, p, _, _ in self._workers:
                 if not p.is_alive():
                     raise RuntimeError(
-                        f"Worker {die_name} died "
-                        f"(exit code {p.exitcode})"
+                        f"Worker {die_name} died (exit code {p.exitcode})"
                     )
 
-            # Drain output queues
             for _, _, _, output_q in self._workers:
                 try:
                     while True:
@@ -504,16 +415,14 @@ class LlamaMultiDieSUT:
 
         _print_progress(total, total, self._start_time)
 
-        # Build LoadGen responses (in query order)
         responses = []
         response_arrays = []
-        for sample in query_samples:
-            si = sample.index
-            _, _, text, token_bytes, n_tokens = collected[si]
-            output_ids = np.frombuffer(token_bytes, dtype=np.int64).copy()
+        for i, sample in enumerate(query_samples):
+            _, _, text, token_bytes, n_tokens = collected[i]
+            output_ids = np.frombuffer(token_bytes, dtype=np.int32).copy()
 
             if self._store_predictions:
-                self._predictions[si] = text
+                self._predictions[sample.index] = text
 
             resp, resp_arr = _make_response(sample.id, output_ids, n_tokens)
             responses.append(resp)
@@ -522,20 +431,18 @@ class LlamaMultiDieSUT:
         lg.QuerySamplesComplete(responses)
 
     def _issue_offline_sequential(self, query_samples: List[Any]) -> None:
-        """Single-die or in-process fallback."""
         total = len(query_samples)
         responses = []
         response_arrays = []
 
         _, pipe = self._pipelines[0]
         for sample in query_samples:
-            sample_idx = sample.index
             text, output_ids, n_tokens = self._process_sample(
-                sample_idx, pipe
+                sample.index, pipe
             )
 
             if self._store_predictions:
-                self._predictions[sample_idx] = text
+                self._predictions[sample.index] = text
             self._sample_count += 1
 
             resp, resp_arr = _make_response(sample.id, output_ids, n_tokens)
@@ -545,8 +452,6 @@ class LlamaMultiDieSUT:
 
         _print_progress(total, total, self._start_time)
         lg.QuerySamplesComplete(responses)
-
-    # ---- Server ----
 
     def _issue_queries_server(self, query_samples: List[Any]) -> None:
         for sample in query_samples:
@@ -576,10 +481,6 @@ class LlamaMultiDieSUT:
             lg.QuerySamplesComplete([resp])
             del resp_arr
 
-    # ------------------------------------------------------------------
-    # LoadGen handles
-    # ------------------------------------------------------------------
-
     def flush_queries(self) -> None:
         pass
 
@@ -601,10 +502,6 @@ class LlamaMultiDieSUT:
             )
         return self._qsl_handle
 
-    # ------------------------------------------------------------------
-    # Predictions / state
-    # ------------------------------------------------------------------
-
     def get_predictions(self) -> Dict[int, str]:
         return self._predictions.copy()
 
@@ -618,13 +515,8 @@ class LlamaMultiDieSUT:
         with self._pipe_index_lock:
             self._pipe_index = 0
 
-    # ------------------------------------------------------------------
-    # Warmup / shutdown
-    # ------------------------------------------------------------------
-
     def warmup(self, num_iterations: int = 3) -> None:
         if self._workers:
-            # Workers warm up during _setup_workers; nothing to do here.
             logger.info(
                 f"[Llama] {len(self._workers)} worker(s) already "
                 f"warmed up during init"
@@ -644,7 +536,6 @@ class LlamaMultiDieSUT:
         logger.info("[Llama] Warmup complete")
 
     def shutdown(self) -> None:
-        """Stop worker processes (call at end of benchmark)."""
         for _, p, input_q, _ in self._workers:
             try:
                 input_q.put_nowait(None)
