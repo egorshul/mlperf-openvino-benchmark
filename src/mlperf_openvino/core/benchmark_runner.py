@@ -51,13 +51,14 @@ class BenchmarkRunner:
         model_type = self.config.model.model_type
         is_sdxl = model_type == ModelType.SDXL
         is_whisper = model_type == ModelType.WHISPER
+        is_llama = model_type == ModelType.LLAMA3_1_8B
         is_accelerator = self.config.openvino.is_accelerator_device()
         uses_cpp_multi_die_sut = (
             model_type in (ModelType.RESNET50, ModelType.BERT, ModelType.RETINANET, ModelType.SSD_RESNET34)
             and is_accelerator
         )
 
-        if is_sdxl:
+        if is_sdxl or is_llama:
             self.backend = None
         elif is_whisper:
             model_path = Path(self.config.model.model_path) if self.config.model.model_path else None
@@ -75,6 +76,8 @@ class BenchmarkRunner:
             self._setup_sdxl()
         elif is_whisper:
             self._setup_whisper()
+        elif is_llama:
+            self._setup_llama3_1_8b()
         elif model_type == ModelType.RESNET50:
             self._setup_resnet50()
         elif model_type == ModelType.BERT:
@@ -441,6 +444,42 @@ class BenchmarkRunner:
         )
         logger.info("SDXL: Using manual pipeline (SDXLManualSUT)")
 
+    def _setup_llama3_1_8b(self) -> None:
+        """Set up Llama 3.1 8B benchmark (CNN-DailyMail summarization)."""
+        from ..datasets.cnn_dailymail import CnnDailyMailQSL
+
+        self.qsl = CnnDailyMailQSL(
+            data_path=self.config.dataset.path,
+            model_name="meta-llama/Meta-Llama-3.1-8B-Instruct",
+            count=self.config.dataset.num_samples if self.config.dataset.num_samples > 0 else None,
+            performance_sample_count=13368,
+            max_seq_length=8000,
+        )
+        self.qsl.load()
+
+        model_path = Path(self.config.model.model_path)
+
+        if self.config.openvino.is_accelerator_device():
+            from .llama_multi_die_sut import LlamaMultiDieSUT
+            logger.info(f"Using Llama multi-die SUT on {self.config.openvino.device}")
+            self.sut = LlamaMultiDieSUT(
+                config=self.config,
+                model_path=model_path,
+                qsl=self.qsl,
+                scenario=self.config.scenario,
+                max_new_tokens=128,
+            )
+        else:
+            from .llama_sut import LlamaSUT
+            logger.info(f"Using Llama SUT on {self.config.openvino.device}")
+            self.sut = LlamaSUT(
+                config=self.config,
+                model_path=model_path,
+                qsl=self.qsl,
+                scenario=self.config.scenario,
+                max_new_tokens=128,
+            )
+
     def _get_test_settings(self) -> "lg.TestSettings":
         """Create LoadGen test settings."""
         settings = lg.TestSettings()
@@ -492,6 +531,13 @@ class BenchmarkRunner:
             settings.schedule_rng_seed = scenario_config.schedule_rng_seed
 
         logger.info(f"LoadGen settings: min_duration={scenario_config.min_duration_ms/1000:.0f}s, min_query_count={scenario_config.min_query_count}")
+
+        if self.config.model.model_type == ModelType.LLAMA3_1_8B:
+            try:
+                settings.use_token_latencies = True
+                logger.info("Token latencies enabled (LLM benchmark)")
+            except AttributeError:
+                logger.warning("LoadGen does not support use_token_latencies (upgrade to >= 4.0)")
 
         if self.config.scenario == Scenario.OFFLINE:
             expected_qps = scenario_config.target_qps if scenario_config.target_qps > 0 else 1000.0
@@ -581,6 +627,9 @@ class BenchmarkRunner:
         if qsl_handle is not None:
             lg.DestroyQSL(qsl_handle)
 
+        if hasattr(self.sut, "shutdown"):
+            self.sut.shutdown()
+
         return self._results
 
     def _save_mlperf_accuracy_log(self) -> None:
@@ -606,6 +655,9 @@ class BenchmarkRunner:
         elif model_type == ModelType.SDXL:
             primary_metric = "clip_score"
             metric_value = self._accuracy_results.get("clip_score", 0.0)
+        elif model_type == ModelType.LLAMA3_1_8B:
+            primary_metric = "rougeL"
+            metric_value = self._accuracy_results.get("rougeL", 0.0)
         else:
             primary_metric = "accuracy"
             metric_value = 0.0
@@ -649,6 +701,8 @@ class BenchmarkRunner:
             self._compute_whisper_accuracy()
         elif model_type == ModelType.SDXL:
             self._compute_sdxl_accuracy()
+        elif model_type == ModelType.LLAMA3_1_8B:
+            self._compute_llama_accuracy()
 
     def _compute_resnet50_accuracy(self) -> None:
         """Compute ResNet50 accuracy (Top-1)."""
@@ -758,6 +812,47 @@ class BenchmarkRunner:
             if not fid_valid:
                 logger.warning(f"  FID Score {fid_score:.4f} not in [{fid_min}, {fid_max}]")
 
+    def _compute_llama_accuracy(self) -> None:
+        """Compute Llama accuracy (ROUGE scores per MLCommons specification)."""
+        predictions = self.sut.get_predictions()
+
+        if not predictions:
+            logger.error("No predictions found!")
+            self._accuracy_results = {
+                "rouge1": 0.0,
+                "rouge2": 0.0,
+                "rougeL": 0.0,
+                "rougeLsum": 0.0,
+                "tokens_per_sample": 0.0,
+                "num_samples": 0,
+            }
+            return
+
+        pred_texts = []
+        ground_truth = []
+
+        for sample_idx in sorted(predictions.keys()):
+            pred = predictions[sample_idx]
+            if isinstance(pred, str):
+                pred_texts.append(pred)
+            else:
+                pred_texts.append("")
+
+            ground_truth.append(self.qsl.get_label(sample_idx))
+
+        self._accuracy_results = self.qsl.dataset.compute_accuracy(
+            pred_texts, ground_truth
+        )
+
+        logger.info(f"ROUGE-1: {self._accuracy_results.get('rouge1', 0):.4f}")
+        logger.info(f"ROUGE-2: {self._accuracy_results.get('rouge2', 0):.4f}")
+        logger.info(f"ROUGE-L: {self._accuracy_results.get('rougeL', 0):.4f}")
+        logger.info(f"ROUGE-Lsum: {self._accuracy_results.get('rougeLsum', 0):.4f}")
+        logger.info(f"gen_len: {self._accuracy_results.get('gen_len', 0)}")
+        logger.info(
+            f"Tokens/sample: {self._accuracy_results.get('tokens_per_sample', 0):.2f}"
+        )
+
     def save_results(self, output_path: Optional[str] = None) -> str:
         """Save benchmark results to file."""
         if output_path is None:
@@ -829,5 +924,32 @@ class BenchmarkRunner:
             fid_status = "PASS" if fid_min <= fid <= fid_max else "FAIL"
             print(f"CLIP: {clip:.4f} [{clip_status}]")
             print(f"FID: {fid:.4f} [{fid_status}]")
+        elif model_type == 'llama3.1-8b':
+            rouge1 = acc.get('rouge1', 0)
+            rouge2 = acc.get('rouge2', 0)
+            rougeL = acc.get('rougeL', 0)
+            rougeLsum = acc.get('rougeLsum', 0)
+            tokens = acc.get('tokens_per_sample', 0)
+            gen_len = acc.get('gen_len', 0)
+            num_samples = acc.get('num_samples', 0)
+            metrics_cfg = self.config.model.accuracy_metrics
+            ref_r1 = metrics_cfg.get('rouge1', 38.7792)
+            ref_r2 = metrics_cfg.get('rouge2', 15.9075)
+            ref_rL = metrics_cfg.get('rougeL', 24.4957)
+            ref_rLsum = metrics_cfg.get('rougeLsum', 35.793)
+            ref_gen_len = metrics_cfg.get('gen_len', 8167644)
+            r1_status = "PASS" if rouge1 >= ref_r1 * 0.99 else "FAIL"
+            r2_status = "PASS" if rouge2 >= ref_r2 * 0.99 else "FAIL"
+            rL_status = "PASS" if rougeL >= ref_rL * 0.99 else "FAIL"
+            rLsum_status = "PASS" if rougeLsum >= ref_rLsum * 0.99 else "FAIL"
+            gen_len_lower = ref_gen_len * 0.90
+            gen_len_upper = ref_gen_len * 1.10
+            gen_len_status = "PASS" if gen_len_lower <= gen_len <= gen_len_upper else "FAIL"
+            print(f"ROUGE-1: {rouge1:.4f} (ref: {ref_r1:.4f}) [{r1_status}]")
+            print(f"ROUGE-2: {rouge2:.4f} (ref: {ref_r2:.4f}) [{r2_status}]")
+            print(f"ROUGE-L: {rougeL:.4f} (ref: {ref_rL:.4f}) [{rL_status}]")
+            print(f"ROUGE-Lsum: {rougeLsum:.4f} (ref: {ref_rLsum:.4f}) [{rLsum_status}]")
+            print(f"gen_len: {gen_len} (ref: {ref_gen_len}, range: {int(gen_len_lower)}-{int(gen_len_upper)}) [{gen_len_status}]")
+            print(f"Tokens/sample: {tokens:.2f} | Samples: {num_samples}")
 
         print("="*50 + "\n")

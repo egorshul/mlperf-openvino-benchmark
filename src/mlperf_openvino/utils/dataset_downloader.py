@@ -136,6 +136,17 @@ DATASET_REGISTRY: Dict[str, Dict] = {
         "num_samples": 5000,  # MLPerf uses 5000 samples
         "note": "For MLPerf SDXL benchmark (closed division)",
     },
+    "cnn-dailymail": {
+        "description": "CNN-DailyMail v3.0.0 for MLPerf LLM benchmark (Llama 3.1 8B summarization)",
+        "huggingface": {
+            "dataset_id": "cnn_dailymail",
+            "version": "3.0.0",
+        },
+        "num_samples_datacenter": 13368,
+        "num_samples_edge": 5000,
+        "eval_file": "cnn_eval.json",
+        "note": "MLCommons Inference v5.1 — text summarization task for Llama 3.1 8B",
+    },
     "coco2017": {
         "description": "COCO 2017 validation set for SSD-ResNet34 Object Detection",
         "images": {
@@ -1384,11 +1395,138 @@ def download_coco2014(
     }
 
 
+def download_cnn_dailymail(
+    output_dir: str,
+    model_name: str = "meta-llama/Meta-Llama-3.1-8B-Instruct",
+    force: bool = False,
+    hf_token: Optional[str] = None,
+) -> Dict[str, str]:
+    """Download and process CNN-DailyMail for MLPerf Llama 3.1 8B benchmark.
+
+    Follows the MLCommons Inference v5.1 reference (download_cnndm.py) exactly:
+    1. Downloads cnn_dailymail v3.0.0 validation split from HuggingFace
+    2. Applies instruction template (plain text, NOT chat template)
+    3. Pre-tokenizes inputs with tokenizer.encode() (adds BOS implicitly)
+    4. NO token length filtering — all samples included (closed division)
+    5. Saves as JSON with fields: instruction, input, tok_input, output
+
+    Datacenter: 13,368 samples | Edge: 5,000 samples (shuffle seed=42)
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    data_dir = output_path / "cnn-dailymail"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    eval_file = data_dir / "cnn_eval.json"
+
+    if eval_file.exists() and not force:
+        import json
+
+        with open(eval_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        actual_count = len(data) if isinstance(data, list) else 0
+        logger.info(f"CNN-DailyMail dataset already exists: {actual_count} samples at {eval_file}")
+        return {
+            "data_path": str(data_dir),
+            "eval_file": str(eval_file),
+            "num_samples": actual_count,
+        }
+
+    logger.info("Downloading CNN-DailyMail v3.0.0 for MLPerf Llama 3.1 8B benchmark...")
+    logger.info(f"Tokenizer model: {model_name}")
+
+    try:
+        from datasets import load_dataset
+        from transformers import AutoTokenizer
+    except ImportError:
+        raise ImportError(
+            "datasets and transformers are required for CNN-DailyMail download. "
+            "Install with: pip install datasets transformers"
+        )
+
+    logger.info("Loading cnn_dailymail v3.0.0 from HuggingFace...")
+    dataset = load_dataset("cnn_dailymail", "3.0.0", split="validation")
+
+    from .model_downloader import _resolve_hf_token
+    token = _resolve_hf_token(hf_token)
+    if not token:
+        logger.warning(
+            "No HuggingFace token found. Meta-Llama tokenizer requires authentication. "
+            "Set HF_TOKEN env var or run: huggingface-cli login"
+        )
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False, token=token)
+    tokenizer.padding_side = "left"
+    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.model_max_length = 8000
+
+    INSTRUCTION_TEMPLATE = (
+        "Summarize the following news article in 128 tokens. "
+        "Please output the summary only, without any other text.\n\n"
+        "Article:\n{input}\n\nSummary:"
+    )
+
+    logger.info("Processing articles with MLCommons instruction template...")
+    processed = []
+    for i, entry in enumerate(dataset):
+        article = entry.get("article", "")
+        highlights = entry.get("highlights", "")
+
+        if not article or not highlights:
+            continue
+
+        formatted_prompt = INSTRUCTION_TEMPLATE.format(input=article)
+        tok_input = tokenizer.encode(formatted_prompt)
+
+        processed.append({
+            "instruction": {"llama": INSTRUCTION_TEMPLATE},
+            "input": article,
+            "tok_input": tok_input,
+            "output": highlights,
+        })
+
+        if (i + 1) % 5000 == 0:
+            logger.info(f"Processed {i + 1}/{len(dataset)}, total: {len(processed)}")
+
+    logger.info(f"Total samples: {len(processed)} (no filtering, closed division)")
+
+    import json
+    import random
+
+    with open(eval_file, "w", encoding="utf-8") as f:
+        json.dump(processed, f, ensure_ascii=False)
+    logger.info(f"Datacenter eval set: {len(processed)} samples -> {eval_file}")
+
+    random.seed(42)
+    n_edge = min(5000, len(processed))
+    edge_indices = random.sample(range(len(processed)), n_edge)
+    edge_samples = [processed[i] for i in sorted(edge_indices)]
+    edge_file = data_dir / "sample_cnn_eval_5000.json"
+    with open(edge_file, "w", encoding="utf-8") as f:
+        json.dump(edge_samples, f, ensure_ascii=False)
+    logger.info(f"Edge eval set: {len(edge_samples)} samples -> {edge_file}")
+
+    calib_indices = random.sample(range(len(processed)), min(1000, len(processed)))
+    calib_samples = [processed[i] for i in sorted(calib_indices)]
+    calib_file = data_dir / "cnn_dailymail_calibration.json"
+    with open(calib_file, "w", encoding="utf-8") as f:
+        json.dump(calib_samples, f, ensure_ascii=False)
+    logger.info(f"Calibration set: {len(calib_samples)} samples -> {calib_file}")
+
+    return {
+        "data_path": str(data_dir),
+        "eval_file": str(eval_file),
+        "num_samples": len(processed),
+    }
+
+
 def download_dataset(
     dataset_name: str,
     output_dir: str,
     subset: Optional[str] = None,
-    force: bool = False
+    force: bool = False,
+    hf_token: Optional[str] = None,
 ) -> Dict[str, str]:
     if dataset_name == "imagenet":
         return download_imagenet(output_dir, force)
@@ -1402,6 +1540,8 @@ def download_dataset(
         return download_whisper_mlperf(output_dir)
     elif dataset_name == "coco2014":
         return download_coco2014(output_dir, force)
+    elif dataset_name == "cnn-dailymail":
+        return download_cnn_dailymail(output_dir, force=force, hf_token=hf_token)
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
@@ -1525,6 +1665,7 @@ def list_available_datasets() -> Dict[str, str]:
         "librispeech": DATASET_REGISTRY["librispeech"]["description"],
         "coco2014": DATASET_REGISTRY["coco2014"]["description"],
         "coco2017": DATASET_REGISTRY["coco2017"]["description"],
+        "cnn-dailymail": DATASET_REGISTRY["cnn-dailymail"]["description"],
     }
 
 

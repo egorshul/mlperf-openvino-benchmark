@@ -37,12 +37,14 @@ def get_default_config(model: str) -> BenchmarkConfig:
         return BenchmarkConfig.default_sdxl()
     elif model == 'ssd-resnet34':
         return BenchmarkConfig.default_ssd_resnet34()
+    elif model == 'llama3.1-8b':
+        return BenchmarkConfig.default_llama3_1_8b()
     else:
         return BenchmarkConfig.default_resnet50()
 
 
 @main.command()
-@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl', 'ssd-resnet34']),
+@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl', 'ssd-resnet34', 'llama3.1-8b']),
               default='resnet50', help='Model to benchmark')
 @click.option('--scenario', '-s', type=click.Choice(['Offline', 'Server']),
               default='Offline', help='Test scenario')
@@ -157,7 +159,7 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
             actual_hint = None
         elif scenario == 'Offline':
             actual_hint = 'THROUGHPUT'
-            if batch_size is None and model not in ('sdxl', 'ssd-resnet34'):
+            if batch_size is None and model not in ('sdxl', 'ssd-resnet34', 'llama3.1-8b'):
                 batch_size = 32
         else:
             actual_hint = 'THROUGHPUT'
@@ -165,7 +167,7 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         actual_hint = performance_hint
 
     if batch_size is None:
-        batch_size = 1 if model == 'sdxl' else 0
+        batch_size = 1 if model in ('sdxl', 'llama3.1-8b') else 0
 
     benchmark_config.openvino.num_streams = num_streams
     benchmark_config.openvino.batch_size = batch_size
@@ -311,10 +313,13 @@ def _print_dataset_help(model: str) -> None:
     elif model == 'sdxl':
         click.echo("Please download the COCO 2014 captions dataset.")
         click.echo("Run: mlperf-ov download-dataset --dataset coco2014")
+    elif model == 'llama3.1-8b':
+        click.echo("Please download the CNN-DailyMail dataset.")
+        click.echo("Run: mlperf-ov download-dataset --dataset cnn-dailymail")
 
 
 @main.command('download-model')
-@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl', 'ssd-resnet34']),
+@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl', 'ssd-resnet34', 'llama3.1-8b']),
               default='resnet50', help='Model to download')
 @click.option('--output-dir', '-o', type=click.Path(),
               default='./models', help='Output directory')
@@ -322,7 +327,9 @@ def _print_dataset_help(model: str) -> None:
               default='onnx', help='Model format')
 @click.option('--batch-sizes', type=str, default='1,2,4,8',
               help='Batch sizes for RetinaNet (comma-separated, default: 1,2,4,8)')
-def download_model_cmd(model: str, output_dir: str, format: str, batch_sizes: str):
+@click.option('--hf-token', type=str, default=None, envvar='HF_TOKEN',
+              help='HuggingFace access token (for gated models like Meta-Llama). Also reads HF_TOKEN env var.')
+def download_model_cmd(model: str, output_dir: str, format: str, batch_sizes: str, hf_token: Optional[str]):
     """Download model files."""
     click.echo(f"Downloading {model} model...")
 
@@ -345,6 +352,10 @@ def download_model_cmd(model: str, output_dir: str, format: str, batch_sizes: st
                 click.echo(f"  Decoder: {paths['decoder_path']}")
             if 'decoder_with_past_path' in paths:
                 click.echo(f"  Decoder with KV-cache: {paths['decoder_with_past_path']}")
+            if 'tokenizer_path' in paths:
+                click.echo(f"  Tokenizer: {paths['tokenizer_path']}")
+            if 'detokenizer_path' in paths:
+                click.echo(f"  Detokenizer: {paths['detokenizer_path']}")
         elif model == 'sdxl':
             from .utils.model_downloader import download_sdxl_model
             if format != 'openvino':
@@ -368,6 +379,16 @@ def download_model_cmd(model: str, output_dir: str, format: str, batch_sizes: st
                 click.echo("OpenVINO IR models:")
                 for bs, path in sorted(paths['batch_models'].items()):
                     click.echo(f"  Batch size {bs}: {path}")
+        elif model == 'llama3.1-8b':
+            from .utils.model_downloader import download_llama_model
+            if format != 'openvino':
+                click.echo("  Note: Llama requires OpenVINO format, using --format openvino")
+            paths = download_llama_model(
+                str(output_path),
+                export_to_openvino=True,
+                hf_token=hf_token,
+            )
+            click.echo(f"Model downloaded to: {paths['model_path']}")
         else:
             model_path = download_model(model, str(output_path), format)
             click.echo(f"Model downloaded to: {model_path}")
@@ -433,10 +454,11 @@ def info():
     click.echo("  - RetinaNet (Object Detection)")
     click.echo("  - Whisper (Speech Recognition)")
     click.echo("  - SDXL (Text-to-Image Generation)")
+    click.echo("  - Llama 3.1 8B (Text Generation)")
 
 
 @main.command('download-dataset')
-@click.option('--dataset', '-d', type=click.Choice(['imagenet', 'librispeech', 'squad', 'openimages', 'coco2014', 'coco2017']),
+@click.option('--dataset', '-d', type=click.Choice(['imagenet', 'librispeech', 'squad', 'openimages', 'coco2014', 'coco2017', 'cnn-dailymail']),
               required=True, help='Dataset to download')
 @click.option('--output-dir', '-o', type=click.Path(),
               default='./data', help='Output directory')
@@ -447,8 +469,11 @@ def info():
 @click.option('--with-images', is_flag=True,
               help='Download reference images (COCO 2014 only, ~6GB, required for FID computation)')
 @click.option('--force', is_flag=True, help='Force re-download')
+@click.option('--hf-token', type=str, default=None, envvar='HF_TOKEN',
+              help='HuggingFace access token (for CNN-DailyMail tokenizer). Also reads HF_TOKEN env var.')
 def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str],
-                         count: Optional[int], with_images: bool, force: bool):
+                         count: Optional[int], with_images: bool, force: bool,
+                         hf_token: Optional[str]):
     """Download dataset files."""
     from .utils.dataset_downloader import download_dataset, get_dataset_info
 
@@ -480,7 +505,7 @@ def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str],
             from .utils.dataset_downloader import download_coco2014
             paths = download_coco2014(output_dir, force=force, download_images=with_images)
         else:
-            paths = download_dataset(dataset, output_dir, subset, force)
+            paths = download_dataset(dataset, output_dir, subset, force, hf_token=hf_token)
 
         click.echo("\nDataset downloaded successfully!")
         click.echo(f"  Path: {paths.get('data_path', 'N/A')}")
@@ -498,16 +523,18 @@ def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str],
 
 
 @main.command('setup')
-@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl', 'ssd-resnet34']),
+@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl', 'ssd-resnet34', 'llama3.1-8b']),
               required=True, help='Model to set up')
 @click.option('--output-dir', '-o', type=click.Path(),
               default='.', help='Base output directory')
 @click.option('--format', '-f', type=click.Choice(['onnx', 'openvino']),
               default='onnx', help='Model format')
-def setup_cmd(model: str, output_dir: str, format: str):
+@click.option('--hf-token', type=str, default=None, envvar='HF_TOKEN',
+              help='HuggingFace access token (for gated models like Meta-Llama). Also reads HF_TOKEN env var.')
+def setup_cmd(model: str, output_dir: str, format: str, hf_token: Optional[str]):
     """Download both model and dataset for a benchmark."""
     from .utils.model_downloader import download_model, download_whisper_model, download_sdxl_model
-    from .utils.model_downloader import download_retinanet_model
+    from .utils.model_downloader import download_retinanet_model, download_llama_model
     from .utils.dataset_downloader import download_dataset
 
     output_path = Path(output_dir)
@@ -550,6 +577,15 @@ def setup_cmd(model: str, output_dir: str, format: str):
                 click.echo("  OpenVINO IR models:")
                 for bs, path in sorted(model_paths['batch_models'].items()):
                     click.echo(f"    Batch size {bs}: {path}")
+        elif model == 'llama3.1-8b':
+            if format != 'openvino':
+                click.echo("  Note: Llama requires OpenVINO format, using --format openvino")
+            model_paths = download_llama_model(
+                str(models_dir),
+                export_to_openvino=True,
+                hf_token=hf_token,
+            )
+            model_path = model_paths['model_path']
         else:
             model_path = download_model(model, str(models_dir), format)
         click.echo(f"  Model: {model_path}\n")
@@ -573,6 +609,9 @@ def setup_cmd(model: str, output_dir: str, format: str):
             dataset_paths = download_coco2017(str(data_dir))
         elif model == 'sdxl':
             dataset_paths = download_dataset('coco2014', str(data_dir))
+        elif model == 'llama3.1-8b':
+            from .utils.dataset_downloader import download_cnn_dailymail
+            dataset_paths = download_cnn_dailymail(str(data_dir), hf_token=hf_token)
 
         click.echo(f"  Dataset: {dataset_paths.get('data_path', 'N/A')}\n")
     except Exception as e:
@@ -653,6 +692,15 @@ def list_models():
             'dataset': 'COCO 2014',
             'metric': 'CLIP Score / FID',
             'target': '31.69-31.81 / 23.01-23.95',
+        },
+        {
+            'name': 'Llama 3.1 8B',
+            'id': 'llama3.1-8b',
+            'type': ModelType.LLAMA3_1_8B,
+            'task': 'Text Generation',
+            'dataset': 'CNN-DailyMail v3.0.0',
+            'metric': 'ROUGE-1/2/L/Lsum',
+            'target': '38.7792 / 15.9075 / 24.4957 / 35.793',
         },
     ]
 
