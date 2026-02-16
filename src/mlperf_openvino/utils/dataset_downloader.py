@@ -1621,7 +1621,7 @@ def _process_open_orca_local(
         for c in s:
             allowed = c.isascii()
             allowed = allowed or (
-                c in ["\u2019", "\u2013", "\u201c", "\u201d", "\u2014"]
+                c in ["\u2018", "\u2013", "\u201c", "\u201d", "\u2014"]
             )
             if not allowed:
                 return False
