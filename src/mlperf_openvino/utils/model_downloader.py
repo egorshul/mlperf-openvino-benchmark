@@ -273,7 +273,6 @@ def _configure_hf_download() -> None:
         import os
 
         os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
-        # 30 minute timeout for large files
         os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "1800")
 
     except ImportError:
@@ -321,7 +320,6 @@ def _find_openvino_model(model_dir: Path, base_name: str) -> Optional[Path]:
         model_dir / f"{base_name}.xml",
     ]
 
-    # decoder_with_past may also be stored as a merged decoder
     if base_name == "decoder_with_past_model":
         candidates.extend([
             model_dir / "openvino_decoder_model_merged.xml",
@@ -335,13 +333,26 @@ def _find_openvino_model(model_dir: Path, base_name: str) -> Optional[Path]:
     return None
 
 
-def _export_whisper_tokenizer_to_openvino(
-    ov_model_path: Path, model_id: str
+def _convert_tokenizer_to_openvino(
+    ov_model_path: Path,
+    model_id: str,
+    token: Optional[str] = None,
 ) -> Dict[str, str]:
     """Convert HuggingFace tokenizer to OpenVINO tokenizer/detokenizer models.
 
-    Returns dict with tokenizer_path and detokenizer_path if successful,
-    empty dict otherwise.
+    This bypasses optimum-intel's ``maybe_convert_tokenizers()`` which fails
+    when the externally-provided openvino-tokenizers reports a non-PEP-440
+    version string (e.g. ``-1-85be884``).  Instead we call
+    ``openvino_tokenizers.convert_tokenizer`` directly.
+
+    Args:
+        ov_model_path: Directory containing the exported OpenVINO model.
+        model_id: HuggingFace model ID (e.g. "openai/whisper-large-v3").
+        token: Optional HuggingFace access token for gated models.
+
+    Returns:
+        Dict with tokenizer_path and detokenizer_path if successful,
+        empty dict otherwise.
     """
     result: Dict[str, str] = {}
 
@@ -367,9 +378,9 @@ def _export_whisper_tokenizer_to_openvino(
 
     logger.info("Converting tokenizer to OpenVINO format...")
 
-    # Use a fast (Rust-based) tokenizer — openvino-tokenizers does not
-    # support the slow Python-based WhisperTokenizer.
-    hf_tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
+    hf_tokenizer = AutoTokenizer.from_pretrained(
+        model_id, use_fast=True, token=token,
+    )
     if not getattr(hf_tokenizer, "is_fast", False):
         logger.warning(
             "Fast tokenizer not available for %s. "
@@ -424,7 +435,7 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
             decoder_with_past = _find_openvino_model(ov_model_path, "decoder_with_past_model")
             if decoder_with_past:
                 result["decoder_with_past_path"] = str(decoder_with_past)
-            tok_result = _export_whisper_tokenizer_to_openvino(ov_model_path, model_id)
+            tok_result = _convert_tokenizer_to_openvino(ov_model_path, model_id)
             result.update(tok_result)
             return result
         else:
@@ -435,17 +446,13 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
     import warnings
 
     with warnings.catch_warnings():
-        # Suppress torch.jit TracerWarnings (benign during ONNX/OpenVINO export)
         warnings.filterwarnings("ignore", message=".*Converting a tensor to a Python boolean.*")
         warnings.filterwarnings("ignore", message=".*Output nr.*does not match.*")
         warnings.filterwarnings("ignore", message=".*traced function does not match.*")
-        # Suppress CUDA not available warning
         warnings.filterwarnings("ignore", message=".*CUDA is not available.*")
-        # Suppress transformers config/processor warnings
         warnings.filterwarnings("ignore", message=".*use_fast.*")
         warnings.filterwarnings("ignore", message=".*loss_type.*")
         warnings.filterwarnings("ignore", message=".*Moving the following attributes.*generation config.*")
-        # Import TracerWarning to suppress by category if torch is available
         try:
             from torch.jit import TracerWarning
             warnings.filterwarnings("ignore", category=TracerWarning)
@@ -481,7 +488,7 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
     if decoder_with_past_path:
         result["decoder_with_past_path"] = str(decoder_with_past_path)
 
-    tok_result = _export_whisper_tokenizer_to_openvino(ov_model_path, model_id)
+    tok_result = _convert_tokenizer_to_openvino(ov_model_path, model_id)
     result.update(tok_result)
 
     return result
@@ -516,7 +523,6 @@ def export_whisper_encoder_only(
     encoder = model.get_encoder()
     encoder.eval()
 
-    # batch=1, n_mels=80, time=3000 (30 seconds)
     dummy_input = torch.randn(1, 80, 3000)
 
     logger.info(f"Exporting to {encoder_path}...")
@@ -704,7 +710,6 @@ def download_retinanet_model(
 
         model = core.read_model(str(onnx_path))
 
-        # RetinaNet input: [N, 3, 800, 800] - set N to static batch_size
         for input_node in model.inputs:
             input_shape = input_node.get_partial_shape()
             if input_shape.rank.get_length() == 4:
@@ -843,7 +848,12 @@ def _export_llama_to_openvino(
         xml_files = list(ov_model_path.glob("*.xml"))
         if config_file.exists() and xml_files:
             logger.info(f"OpenVINO model already exists at {ov_model_path}")
-            return {"model_path": str(ov_model_path)}
+            result = {"model_path": str(ov_model_path)}
+            tok_result = _convert_tokenizer_to_openvino(
+                ov_model_path, model_id, token=token,
+            )
+            result.update(tok_result)
+            return result
 
     logger.info(f"Exporting {model_id} to OpenVINO IR (weight_format={weight_format})...")
     logger.info("This may take a long time for large models...")
@@ -885,7 +895,12 @@ def _export_llama_to_openvino(
 
     logger.info(f"OpenVINO model saved to {ov_model_path}")
 
-    return {"model_path": str(ov_model_path)}
+    result = {"model_path": str(ov_model_path)}
+    tok_result = _convert_tokenizer_to_openvino(
+        ov_model_path, model_id, token=token,
+    )
+    result.update(tok_result)
+    return result
 
 
 def get_retinanet_model_path(

@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Optional
 
 import click
-import numpy as np
 
 from .core.config import BenchmarkConfig, Scenario, TestMode, ModelType, SUPPORTED_SCENARIOS
 from .core.benchmark_runner import BenchmarkRunner
@@ -205,7 +204,6 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         if explicit_batching:
             scenario_config.explicit_batching = True
             scenario_config.batch_timeout_us = batch_timeout_us if batch_timeout_us is not None else 2000
-            # Default to nireq_multiplier=6 for explicit batching if not overridden
             if nireq_multiplier is None:
                 scenario_config.nireq_multiplier = 6
             explicit_batch = batch_size if batch_size > 1 else 8
@@ -339,7 +337,6 @@ def download_model_cmd(model: str, output_dir: str, format: str, batch_sizes: st
     try:
         if model == 'whisper':
             from .utils.model_downloader import download_whisper_model
-            # Whisper always needs OpenVINO IR format for inference
             if format != 'openvino':
                 click.echo("  Note: Whisper requires OpenVINO format, using --format openvino")
             paths = download_whisper_model(
@@ -548,7 +545,6 @@ def setup_cmd(model: str, output_dir: str, format: str, hf_token: Optional[str])
     click.echo("Step 1: Downloading model...")
     try:
         if model == 'whisper':
-            # Whisper requires OpenVINO IR format (WhisperOptimumSUT needs .xml/.bin files)
             if format != 'openvino':
                 click.echo("  Note: Whisper requires OpenVINO format, using --format openvino")
             model_paths = download_whisper_model(
@@ -602,7 +598,6 @@ def setup_cmd(model: str, output_dir: str, format: str, hf_token: Optional[str])
         elif model == 'retinanet':
             dataset_paths = download_dataset('openimages', str(data_dir))
         elif model == 'whisper':
-            # MLPerf requires dev-clean + dev-other combined
             dataset_paths = download_dataset('librispeech', str(data_dir), 'mlperf')
         elif model == 'ssd-resnet34':
             from .utils.dataset_downloader import download_coco2017
@@ -718,6 +713,60 @@ def list_models():
     click.echo("  mlperf-ov setup --model <model_id>")
     click.echo("  mlperf-ov run --model <model_id> --mode both")
     click.echo("")
+
+
+@main.command('convert-tokenizer')
+@click.option('--model-path', '-p', type=click.Path(exists=True), required=True,
+              help='Path to exported OpenVINO model directory')
+@click.option('--model-id', '-m', type=str, default=None,
+              help='HuggingFace model ID (auto-detected from config.json if omitted)')
+@click.option('--hf-token', type=str, default=None, envvar='HF_TOKEN',
+              help='HuggingFace access token (for gated models). Also reads HF_TOKEN env var.')
+def convert_tokenizer_cmd(model_path: str, model_id: Optional[str], hf_token: Optional[str]):
+    """Convert HuggingFace tokenizer to OpenVINO format.
+
+    Use this after exporting a model with optimum-cli when the tokenizer
+    was not converted automatically (e.g. due to a non-standard
+    openvino-tokenizers version string).
+
+    \b
+    Examples:
+      mlperf-ov convert-tokenizer -p ./models/Llama-3.1-8B-Instruct-openvino-int8
+      mlperf-ov convert-tokenizer -p ./models/whisper-large-v3-openvino
+      mlperf-ov convert-tokenizer -p ./model-dir -m meta-llama/Meta-Llama-3.1-8B-Instruct --hf-token $HF_TOKEN
+    """
+    from pathlib import Path as _Path
+    from .utils.model_downloader import _convert_tokenizer_to_openvino, _resolve_hf_token
+
+    model_dir = _Path(model_path)
+
+    if model_id is None:
+        config_file = model_dir / "config.json"
+        if config_file.exists():
+            import json
+            with open(config_file) as f:
+                cfg = json.load(f)
+            model_id = cfg.get("_name_or_path")
+            if model_id:
+                click.echo(f"Auto-detected model ID: {model_id}")
+
+    if not model_id:
+        click.echo("Error: Could not detect model ID. Please specify --model-id.")
+        sys.exit(1)
+
+    token = _resolve_hf_token(hf_token)
+
+    click.echo(f"Converting tokenizer for: {model_id}")
+    click.echo(f"Model directory: {model_dir}")
+
+    result = _convert_tokenizer_to_openvino(model_dir, model_id, token=token)
+
+    if result.get("tokenizer_path"):
+        click.echo(f"Tokenizer:   {result['tokenizer_path']}")
+        click.echo(f"Detokenizer: {result['detokenizer_path']}")
+    else:
+        click.echo("Error: Tokenizer conversion failed. Check logs above.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
