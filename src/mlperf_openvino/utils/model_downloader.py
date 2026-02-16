@@ -883,29 +883,6 @@ def _export_llama_to_openvino(
     tokenizer = AutoTokenizer.from_pretrained(model_id, token=token)
     tokenizer.save_pretrained(str(ov_model_path))
 
-    # Convert HF tokenizer to OpenVINO tokenizer/detokenizer for openvino_genai
-    tokenizer_xml = ov_model_path / "openvino_tokenizer.xml"
-    detokenizer_xml = ov_model_path / "openvino_detokenizer.xml"
-    if not tokenizer_xml.exists() or not detokenizer_xml.exists():
-        try:
-            import openvino as ov
-            from openvino_tokenizers import convert_tokenizer
-
-            logger.info("Converting Llama tokenizer to OpenVINO format...")
-            hf_tokenizer = AutoTokenizer.from_pretrained(
-                model_id, use_fast=True, token=token
-            )
-            ov_tokenizer, ov_detokenizer = convert_tokenizer(
-                hf_tokenizer, with_detokenizer=True
-            )
-            ov.save_model(ov_tokenizer, str(tokenizer_xml))
-            ov.save_model(ov_detokenizer, str(detokenizer_xml))
-            logger.info(f"OpenVINO tokenizer saved to {tokenizer_xml}")
-        except ImportError as e:
-            logger.warning(f"Cannot convert tokenizer to OpenVINO ({e})")
-        except Exception as e:
-            logger.warning(f"Failed to convert tokenizer to OpenVINO: {e}")
-
     logger.info(f"OpenVINO model saved to {ov_model_path}")
 
     return {"model_path": str(ov_model_path)}
