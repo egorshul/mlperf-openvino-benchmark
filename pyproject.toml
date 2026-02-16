@@ -17,6 +17,8 @@ dependencies = [
     "pyyaml>=6.0",
     "click>=8.0.0",
     "psutil>=5.9.0",
+    "torch==2.4.1",
+    "torchvision==0.19.1",
     # openvino and openvino-genai are provided externally via
     # LD_LIBRARY_PATH / PYTHONPATH and must NOT be listed here —
     # pip would pull incompatible versions from PyPI.
@@ -33,9 +35,7 @@ dev = [
     "ruff>=0.1.0",
     "mypy>=1.0.0",
 ]
-resnet = [
-    "torchvision>=0.15.0",
-]
+resnet = []
 bert = [
     "transformers>=4.30.0",
 ]
@@ -44,7 +44,6 @@ retinanet = [
 ]
 whisper = [
     "transformers>=4.30.0",
-    "torch>=2.0.0",
     "soundfile>=0.12.0",
     "librosa>=0.10.0",
     "jiwer>=3.0.0",
@@ -58,8 +57,6 @@ sdxl = [
     "optimum-intel>=1.16.0,<=1.23.1",  # >=1.24 requires openvino>=2025.4
     "diffusers>=0.25.0",
     "transformers>=4.30.0",
-    "torch>=2.0.0",
-    "torchvision>=0.15.0",
     "pytorch-fid>=0.3.0",
     "open_clip_torch>=2.20.0",
     "scipy>=1.10.0",
