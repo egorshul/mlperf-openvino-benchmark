@@ -33,6 +33,7 @@ class ModelType(Enum):
     SDXL = "sdxl"
     SSD_RESNET34 = "ssd-resnet34"
     LLAMA3_1_8B = "llama3.1-8b"
+    LLAMA2_70B = "llama2-70b"
 
 
 SUPPORTED_SCENARIOS: Dict[ModelType, List["Scenario"]] = {
@@ -43,6 +44,7 @@ SUPPORTED_SCENARIOS: Dict[ModelType, List["Scenario"]] = {
     ModelType.SDXL: [Scenario.OFFLINE, Scenario.SERVER],
     ModelType.SSD_RESNET34: [Scenario.OFFLINE, Scenario.SERVER],
     ModelType.LLAMA3_1_8B: [Scenario.OFFLINE, Scenario.SERVER],
+    ModelType.LLAMA2_70B: [Scenario.OFFLINE, Scenario.SERVER],
 }
 
 
@@ -613,6 +615,52 @@ class BenchmarkConfig:
             dataset=DatasetConfig(
                 name="cnn-dailymail",
                 path="./data/cnn-dailymail",
+            ),
+        )
+
+    @classmethod
+    def default_llama2_70b(cls) -> "BenchmarkConfig":
+        """Create default Llama 2 70B configuration per MLPerf Inference.
+
+        Task: text generation (OpenOrca)
+        Dataset: 24,576 samples (datacenter)
+        max_new_tokens: 1024, max_seq_length: 1024
+        Accuracy: ROUGE-1/2/L (99% threshold) + tokens_per_sample (90%-110% window)
+        """
+        return cls(
+            model=ModelConfig(
+                name="Llama-2-70B",
+                task="text_generation",
+                model_type=ModelType.LLAMA2_70B,
+                input_shape=[1, 1024],  # (batch, max_seq_length per reference)
+                input_name="input_ids",
+                output_name="logits",
+                data_format="NC",
+                dtype="FP16",
+                accuracy_target=0.0,
+                accuracy_threshold=0.99,
+                accuracy_metrics={
+                    "rouge1": 44.4312,
+                    "rouge2": 22.0352,
+                    "rougeL": 28.6162,
+                    "tokens_per_sample": 294.45,
+                },
+                preprocessing=PreprocessingConfig(),  # Not used for text
+                offline=ScenarioConfig(
+                    min_duration_ms=600000,  # MLPerf official: 10 minutes
+                    min_query_count=24576,
+                    samples_per_query=1,
+                ),
+                server=ScenarioConfig(
+                    min_duration_ms=600000,  # MLPerf official: 10 minutes
+                    min_query_count=270336,  # MLPerf constants.py
+                    target_latency_ns=20000000000,  # 20s TTFT
+                    target_qps=1.0,
+                ),
+            ),
+            dataset=DatasetConfig(
+                name="open-orca",
+                path="./data/open-orca",
             ),
         )
 

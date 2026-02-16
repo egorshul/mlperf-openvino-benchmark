@@ -93,6 +93,13 @@ MODEL_REGISTRY: Dict[str, Dict] = {
         },
         "description": "Meta Llama 3.1 8B Instruct for text generation (MLPerf v5.1)",
     },
+    "llama2-70b": {
+        "huggingface": {
+            "model_id": "meta-llama/Llama-2-70b-chat-hf",
+            "filename": "Llama-2-70b-chat-hf",
+        },
+        "description": "Meta Llama 2 70B Chat for text generation (MLPerf Inference)",
+    },
 }
 
 
@@ -901,6 +908,44 @@ def _export_llama_to_openvino(
     )
     result.update(tok_result)
     return result
+
+
+def download_llama2_70b_model(
+    output_dir: str,
+    model_id: str = "meta-llama/Llama-2-70b-chat-hf",
+    export_to_openvino: bool = True,
+    weight_format: str = "int4",
+    hf_token: Optional[str] = None,
+) -> Dict[str, str]:
+    """Download and export Llama 2 70B model to OpenVINO IR format.
+
+    Uses the same export pipeline as Llama 3.1 8B but with Llama 2 70B defaults.
+    INT4 weight compression is recommended for 70B models to fit in memory.
+
+    Args:
+        output_dir: Directory to save the exported model.
+        model_id: HuggingFace model ID.
+        export_to_openvino: If True, export to OpenVINO IR (recommended).
+        weight_format: Weight format: "fp32", "fp16", "int8", "int4" (default: "int4").
+        hf_token: HuggingFace access token (for gated models like Meta-Llama).
+
+    Returns:
+        Dict with model_path and metadata.
+    """
+    token = _resolve_hf_token(hf_token)
+    if not token:
+        logger.warning(
+            "No HuggingFace token found. Meta-Llama models are gated and require authentication. "
+            "Set HF_TOKEN env var or run: huggingface-cli login"
+        )
+
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    if export_to_openvino:
+        return _export_llama_to_openvino(output_dir, model_id, weight_format, token=token)
+    else:
+        return _download_llama_from_hf(output_dir, model_id, token=token)
 
 
 def get_retinanet_model_path(

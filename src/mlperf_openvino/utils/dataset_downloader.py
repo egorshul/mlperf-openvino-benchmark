@@ -147,6 +147,17 @@ DATASET_REGISTRY: Dict[str, Dict] = {
         "eval_file": "cnn_eval.json",
         "note": "MLCommons Inference v5.1 — text summarization task for Llama 3.1 8B",
     },
+    "open-orca": {
+        "description": "OpenOrca GPT-4 subset for MLPerf LLM benchmark (Llama 2 70B)",
+        "huggingface": {
+            "dataset_id": "Open-Orca/OpenOrca",
+            "filename": "1M-GPT4-Augmented.parquet",
+        },
+        "num_samples": 24576,
+        "eval_file": "open_orca_gpt4_tokenized_llama.sampled_24576.pkl",
+        "calibration_file": "open_orca_gpt4_tokenized_llama.calibration_1000.pkl",
+        "note": "MLCommons Inference — text generation task for Llama 2 70B",
+    },
     "coco2017": {
         "description": "COCO 2017 validation set for SSD-ResNet34 Object Detection",
         "images": {
@@ -1521,6 +1532,199 @@ def download_cnn_dailymail(
     }
 
 
+def download_open_orca(
+    output_dir: str,
+    model_name: str = "meta-llama/Llama-2-70b-chat-hf",
+    force: bool = False,
+    hf_token: Optional[str] = None,
+) -> Dict[str, str]:
+    """Download and process OpenOrca for MLPerf Llama 2 70B benchmark.
+
+    Follows the MLCommons Inference reference (processorca.py) exactly:
+    1. Downloads Open-Orca/OpenOrca GPT-4 parquet from HuggingFace
+    2. Filters for ASCII-only characters, removes short responses
+    3. Tokenizes with Llama 2 tokenizer, filters to max 1024 tokens
+    4. Balanced sampling across 4 sub-datasets: COT, NIV, FLAN, T0
+    5. Saves as pickle with 24,576 samples (+ 1,000 calibration)
+
+    Datacenter: 24,576 samples
+    """
+    import pickle
+    import random
+
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    data_dir = output_path / "open-orca"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    eval_file = data_dir / "open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
+
+    if eval_file.exists() and not force:
+        logger.info(f"OpenOrca dataset already exists: {eval_file}")
+        with open(eval_file, "rb") as f:
+            data = pickle.load(f)
+        actual_count = len(data) if isinstance(data, list) else 0
+        return {
+            "data_path": str(data_dir),
+            "eval_file": str(eval_file),
+            "num_samples": actual_count,
+        }
+
+    logger.info("Downloading OpenOrca GPT-4 subset for MLPerf Llama 2 70B benchmark...")
+    logger.info(f"Tokenizer model: {model_name}")
+
+    try:
+        import pandas as pd
+        from transformers import AutoTokenizer
+    except ImportError:
+        raise ImportError(
+            "pandas and transformers are required for OpenOrca download. "
+            "Install with: pip install pandas transformers"
+        )
+
+    from .model_downloader import _resolve_hf_token
+    token = _resolve_hf_token(hf_token)
+    if not token:
+        logger.warning(
+            "No HuggingFace token found. Meta-Llama tokenizer requires authentication. "
+            "Set HF_TOKEN env var or run: huggingface-cli login"
+        )
+
+    # Download the parquet file from HuggingFace
+    logger.info("Loading Open-Orca/OpenOrca GPT-4 parquet from HuggingFace...")
+    try:
+        from datasets import load_dataset
+        dataset = load_dataset("Open-Orca/OpenOrca", data_files="1M-GPT4-Augmented.parquet", split="train")
+        df = dataset.to_pandas()
+    except Exception as e:
+        logger.error(f"Failed to load OpenOrca dataset: {e}")
+        raise
+
+    logger.info(f"Loaded {len(df)} raw samples")
+
+    # Load tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        model_max_length=2048,
+        padding_side="left",
+        use_fast=False,
+        token=token,
+    )
+    tokenizer.pad_token = tokenizer.eos_token
+
+    # --- MLCommons processorca.py filtering logic ---
+
+    # Known bad prompts from NIV and T0 subsets
+    NIV_BAD_PROMPTS = {
+        "In this task, you are given a text of the tweet. Your task is to classify the tweet into "
+        "two categories: 1) positive and 2) negative based on the content of the tweet.",
+    }
+    T0_BAD_PROMPTS: set = set()
+
+    def is_ascii(text: str) -> bool:
+        try:
+            text.encode("ascii")
+            return True
+        except UnicodeEncodeError:
+            return False
+
+    # Categorize samples by origin
+    origins = {"cot": [], "niv": [], "flan": [], "t0": []}
+
+    logger.info("Filtering and categorizing samples...")
+    for idx, row in df.iterrows():
+        system_prompt = str(row.get("system_prompt", ""))
+        question = str(row.get("question", ""))
+        response = str(row.get("response", ""))
+        orca_id = str(row.get("id", ""))
+
+        # Determine origin
+        origin_lower = orca_id.split(".")[0].lower() if "." in orca_id else orca_id.lower()
+        if "cot" in origin_lower:
+            origin = "cot"
+        elif "niv" in origin_lower:
+            origin = "niv"
+        elif "flan" in origin_lower:
+            origin = "flan"
+        elif "t0" in origin_lower:
+            origin = "t0"
+        else:
+            origin = "flan"  # default
+
+        # ASCII filter
+        if not is_ascii(question) or not is_ascii(response):
+            continue
+
+        # Short response filter (fewer than 2 words)
+        if len(response.split()) < 2:
+            continue
+
+        # Bad prompt filter
+        if origin == "niv" and system_prompt in NIV_BAD_PROMPTS:
+            continue
+        if origin == "t0" and system_prompt in T0_BAD_PROMPTS:
+            continue
+
+        # Build input text
+        if system_prompt:
+            input_text = f"{system_prompt}\n{question}"
+        else:
+            input_text = question
+
+        # Tokenize and check length
+        tok_input = tokenizer.encode(input_text)
+        tok_output = tokenizer.encode(response)
+
+        if len(tok_input) > 1024:
+            continue
+        if len(tok_output) < 3:
+            continue
+
+        origins[origin].append({
+            "input": input_text,
+            "output": response,
+            "tok_input": tok_input,
+            "tok_output": tok_output,
+        })
+
+    for origin, samples in origins.items():
+        logger.info(f"  {origin}: {len(samples)} samples after filtering")
+
+    # Balanced sampling: 24576 / 4 = 6144 per origin
+    random.seed(42)
+    n_per_origin = 24576 // 4
+    sampled = []
+    for origin in ["cot", "niv", "flan", "t0"]:
+        pool = origins[origin]
+        if len(pool) >= n_per_origin:
+            sampled.extend(random.sample(pool, n_per_origin))
+        else:
+            logger.warning(f"  {origin} has only {len(pool)} samples (need {n_per_origin}), using all")
+            sampled.extend(pool)
+
+    random.shuffle(sampled)
+    logger.info(f"Total balanced samples: {len(sampled)}")
+
+    # Save main evaluation pickle
+    with open(eval_file, "wb") as f:
+        pickle.dump(sampled, f)
+    logger.info(f"Evaluation set: {len(sampled)} samples -> {eval_file}")
+
+    # Save calibration subset (1000 samples)
+    calib_file = data_dir / "open_orca_gpt4_tokenized_llama.calibration_1000.pkl"
+    calib_samples = sampled[:1000]
+    with open(calib_file, "wb") as f:
+        pickle.dump(calib_samples, f)
+    logger.info(f"Calibration set: {len(calib_samples)} samples -> {calib_file}")
+
+    return {
+        "data_path": str(data_dir),
+        "eval_file": str(eval_file),
+        "num_samples": len(sampled),
+    }
+
+
 def download_dataset(
     dataset_name: str,
     output_dir: str,
@@ -1542,6 +1746,8 @@ def download_dataset(
         return download_coco2014(output_dir, force)
     elif dataset_name == "cnn-dailymail":
         return download_cnn_dailymail(output_dir, force=force, hf_token=hf_token)
+    elif dataset_name == "open-orca":
+        return download_open_orca(output_dir, force=force, hf_token=hf_token)
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
@@ -1666,6 +1872,7 @@ def list_available_datasets() -> Dict[str, str]:
         "coco2014": DATASET_REGISTRY["coco2014"]["description"],
         "coco2017": DATASET_REGISTRY["coco2017"]["description"],
         "cnn-dailymail": DATASET_REGISTRY["cnn-dailymail"]["description"],
+        "open-orca": DATASET_REGISTRY["open-orca"]["description"],
     }
 
 

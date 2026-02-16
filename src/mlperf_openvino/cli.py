@@ -38,12 +38,14 @@ def get_default_config(model: str) -> BenchmarkConfig:
         return BenchmarkConfig.default_ssd_resnet34()
     elif model == 'llama3.1-8b':
         return BenchmarkConfig.default_llama3_1_8b()
+    elif model == 'llama2-70b':
+        return BenchmarkConfig.default_llama2_70b()
     else:
         return BenchmarkConfig.default_resnet50()
 
 
 @main.command()
-@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl', 'ssd-resnet34', 'llama3.1-8b']),
+@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl', 'ssd-resnet34', 'llama3.1-8b', 'llama2-70b']),
               default='resnet50', help='Model to benchmark')
 @click.option('--scenario', '-s', type=click.Choice(['Offline', 'Server']),
               default='Offline', help='Test scenario')
@@ -158,7 +160,7 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
             actual_hint = None
         elif scenario == 'Offline':
             actual_hint = 'THROUGHPUT'
-            if batch_size is None and model not in ('sdxl', 'ssd-resnet34', 'llama3.1-8b'):
+            if batch_size is None and model not in ('sdxl', 'ssd-resnet34', 'llama3.1-8b', 'llama2-70b'):
                 batch_size = 32
         else:
             actual_hint = 'THROUGHPUT'
@@ -166,7 +168,7 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         actual_hint = performance_hint
 
     if batch_size is None:
-        batch_size = 1 if model in ('sdxl', 'llama3.1-8b') else 0
+        batch_size = 1 if model in ('sdxl', 'llama3.1-8b', 'llama2-70b') else 0
 
     benchmark_config.openvino.num_streams = num_streams
     benchmark_config.openvino.batch_size = batch_size
@@ -314,10 +316,13 @@ def _print_dataset_help(model: str) -> None:
     elif model == 'llama3.1-8b':
         click.echo("Please download the CNN-DailyMail dataset.")
         click.echo("Run: mlperf-ov download-dataset --dataset cnn-dailymail")
+    elif model == 'llama2-70b':
+        click.echo("Please download the OpenOrca dataset.")
+        click.echo("Run: mlperf-ov download-dataset --dataset open-orca")
 
 
 @main.command('download-model')
-@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl', 'ssd-resnet34', 'llama3.1-8b']),
+@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl', 'ssd-resnet34', 'llama3.1-8b', 'llama2-70b']),
               default='resnet50', help='Model to download')
 @click.option('--output-dir', '-o', type=click.Path(),
               default='./models', help='Output directory')
@@ -381,6 +386,16 @@ def download_model_cmd(model: str, output_dir: str, format: str, batch_sizes: st
             if format != 'openvino':
                 click.echo("  Note: Llama requires OpenVINO format, using --format openvino")
             paths = download_llama_model(
+                str(output_path),
+                export_to_openvino=True,
+                hf_token=hf_token,
+            )
+            click.echo(f"Model downloaded to: {paths['model_path']}")
+        elif model == 'llama2-70b':
+            from .utils.model_downloader import download_llama2_70b_model
+            if format != 'openvino':
+                click.echo("  Note: Llama 2 70B requires OpenVINO format, using --format openvino")
+            paths = download_llama2_70b_model(
                 str(output_path),
                 export_to_openvino=True,
                 hf_token=hf_token,
@@ -452,10 +467,11 @@ def info():
     click.echo("  - Whisper (Speech Recognition)")
     click.echo("  - SDXL (Text-to-Image Generation)")
     click.echo("  - Llama 3.1 8B (Text Generation)")
+    click.echo("  - Llama 2 70B (Text Generation)")
 
 
 @main.command('download-dataset')
-@click.option('--dataset', '-d', type=click.Choice(['imagenet', 'librispeech', 'squad', 'openimages', 'coco2014', 'coco2017', 'cnn-dailymail']),
+@click.option('--dataset', '-d', type=click.Choice(['imagenet', 'librispeech', 'squad', 'openimages', 'coco2014', 'coco2017', 'cnn-dailymail', 'open-orca']),
               required=True, help='Dataset to download')
 @click.option('--output-dir', '-o', type=click.Path(),
               default='./data', help='Output directory')
@@ -520,7 +536,7 @@ def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str],
 
 
 @main.command('setup')
-@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl', 'ssd-resnet34', 'llama3.1-8b']),
+@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl', 'ssd-resnet34', 'llama3.1-8b', 'llama2-70b']),
               required=True, help='Model to set up')
 @click.option('--output-dir', '-o', type=click.Path(),
               default='.', help='Base output directory')
@@ -531,7 +547,7 @@ def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str],
 def setup_cmd(model: str, output_dir: str, format: str, hf_token: Optional[str]):
     """Download both model and dataset for a benchmark."""
     from .utils.model_downloader import download_model, download_whisper_model, download_sdxl_model
-    from .utils.model_downloader import download_retinanet_model, download_llama_model
+    from .utils.model_downloader import download_retinanet_model, download_llama_model, download_llama2_70b_model
     from .utils.dataset_downloader import download_dataset
 
     output_path = Path(output_dir)
@@ -582,6 +598,15 @@ def setup_cmd(model: str, output_dir: str, format: str, hf_token: Optional[str])
                 hf_token=hf_token,
             )
             model_path = model_paths['model_path']
+        elif model == 'llama2-70b':
+            if format != 'openvino':
+                click.echo("  Note: Llama 2 70B requires OpenVINO format, using --format openvino")
+            model_paths = download_llama2_70b_model(
+                str(models_dir),
+                export_to_openvino=True,
+                hf_token=hf_token,
+            )
+            model_path = model_paths['model_path']
         else:
             model_path = download_model(model, str(models_dir), format)
         click.echo(f"  Model: {model_path}\n")
@@ -607,6 +632,9 @@ def setup_cmd(model: str, output_dir: str, format: str, hf_token: Optional[str])
         elif model == 'llama3.1-8b':
             from .utils.dataset_downloader import download_cnn_dailymail
             dataset_paths = download_cnn_dailymail(str(data_dir), hf_token=hf_token)
+        elif model == 'llama2-70b':
+            from .utils.dataset_downloader import download_open_orca
+            dataset_paths = download_open_orca(str(data_dir), hf_token=hf_token)
 
         click.echo(f"  Dataset: {dataset_paths.get('data_path', 'N/A')}\n")
     except Exception as e:
@@ -696,6 +724,15 @@ def list_models():
             'dataset': 'CNN-DailyMail v3.0.0',
             'metric': 'ROUGE-1/2/L/Lsum',
             'target': '38.7792 / 15.9075 / 24.4957 / 35.793',
+        },
+        {
+            'name': 'Llama 2 70B',
+            'id': 'llama2-70b',
+            'type': ModelType.LLAMA2_70B,
+            'task': 'Text Generation',
+            'dataset': 'OpenOrca (24,576 samples)',
+            'metric': 'ROUGE-1/2/L',
+            'target': '44.4312 / 22.0352 / 28.6162',
         },
     ]
 
