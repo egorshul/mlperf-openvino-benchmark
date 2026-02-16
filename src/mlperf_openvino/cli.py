@@ -352,6 +352,10 @@ def download_model_cmd(model: str, output_dir: str, format: str, batch_sizes: st
                 click.echo(f"  Decoder: {paths['decoder_path']}")
             if 'decoder_with_past_path' in paths:
                 click.echo(f"  Decoder with KV-cache: {paths['decoder_with_past_path']}")
+            if 'tokenizer_path' in paths:
+                click.echo(f"  Tokenizer: {paths['tokenizer_path']}")
+            if 'detokenizer_path' in paths:
+                click.echo(f"  Detokenizer: {paths['detokenizer_path']}")
         elif model == 'sdxl':
             from .utils.model_downloader import download_sdxl_model
             if format != 'openvino':

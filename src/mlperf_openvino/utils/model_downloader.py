@@ -335,6 +335,56 @@ def _find_openvino_model(model_dir: Path, base_name: str) -> Optional[Path]:
     return None
 
 
+def _export_whisper_tokenizer_to_openvino(
+    ov_model_path: Path, model_id: str
+) -> Dict[str, str]:
+    """Convert HuggingFace tokenizer to OpenVINO tokenizer/detokenizer models.
+
+    Returns dict with tokenizer_path and detokenizer_path if successful,
+    empty dict otherwise.
+    """
+    result: Dict[str, str] = {}
+
+    tokenizer_xml = ov_model_path / "openvino_tokenizer.xml"
+    detokenizer_xml = ov_model_path / "openvino_detokenizer.xml"
+
+    if tokenizer_xml.exists() and detokenizer_xml.exists():
+        logger.info("OpenVINO tokenizer/detokenizer already exist")
+        result["tokenizer_path"] = str(tokenizer_xml)
+        result["detokenizer_path"] = str(detokenizer_xml)
+        return result
+
+    try:
+        import openvino as ov
+        from openvino_tokenizers import convert_tokenizer
+        from transformers import WhisperTokenizer
+    except ImportError as e:
+        logger.warning(
+            f"Cannot convert tokenizer to OpenVINO ({e}). "
+            "Install with: pip install --no-deps openvino-tokenizers"
+        )
+        return result
+
+    logger.info("Converting tokenizer to OpenVINO format...")
+
+    hf_tokenizer = WhisperTokenizer.from_pretrained(model_id)
+
+    try:
+        ov_tokenizer, ov_detokenizer = convert_tokenizer(
+            hf_tokenizer, with_detokenizer=True
+        )
+        ov.save_model(ov_tokenizer, str(tokenizer_xml))
+        ov.save_model(ov_detokenizer, str(detokenizer_xml))
+        logger.info(f"Tokenizer saved to {tokenizer_xml}")
+        logger.info(f"Detokenizer saved to {detokenizer_xml}")
+        result["tokenizer_path"] = str(tokenizer_xml)
+        result["detokenizer_path"] = str(detokenizer_xml)
+    except Exception as e:
+        logger.warning(f"Failed to convert tokenizer to OpenVINO: {e}")
+
+    return result
+
+
 def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str]:
     try:
         from optimum.exporters.openvino import main_export
@@ -364,17 +414,39 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
             decoder_with_past = _find_openvino_model(ov_model_path, "decoder_with_past_model")
             if decoder_with_past:
                 result["decoder_with_past_path"] = str(decoder_with_past)
+            tok_result = _export_whisper_tokenizer_to_openvino(ov_model_path, model_id)
+            result.update(tok_result)
             return result
         else:
             shutil.rmtree(str(ov_model_path))
 
     logger.info(f"Exporting {model_id} to OpenVINO IR...")
 
-    main_export(
-        model_name_or_path=model_id,
-        output=str(ov_model_path),
-        task="automatic-speech-recognition-with-past",
-    )
+    import warnings
+
+    with warnings.catch_warnings():
+        # Suppress torch.jit TracerWarnings (benign during ONNX/OpenVINO export)
+        warnings.filterwarnings("ignore", message=".*Converting a tensor to a Python boolean.*")
+        warnings.filterwarnings("ignore", message=".*Output nr.*does not match.*")
+        warnings.filterwarnings("ignore", message=".*traced function does not match.*")
+        # Suppress CUDA not available warning
+        warnings.filterwarnings("ignore", message=".*CUDA is not available.*")
+        # Suppress transformers config/processor warnings
+        warnings.filterwarnings("ignore", message=".*use_fast.*")
+        warnings.filterwarnings("ignore", message=".*loss_type.*")
+        warnings.filterwarnings("ignore", message=".*Moving the following attributes.*generation config.*")
+        # Import TracerWarning to suppress by category if torch is available
+        try:
+            from torch.jit import TracerWarning
+            warnings.filterwarnings("ignore", category=TracerWarning)
+        except ImportError:
+            pass
+
+        main_export(
+            model_name_or_path=model_id,
+            output=str(ov_model_path),
+            task="automatic-speech-recognition-with-past",
+        )
 
     processor = WhisperProcessor.from_pretrained(model_id)
     processor.save_pretrained(str(ov_model_path))
@@ -398,6 +470,9 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
     }
     if decoder_with_past_path:
         result["decoder_with_past_path"] = str(decoder_with_past_path)
+
+    tok_result = _export_whisper_tokenizer_to_openvino(ov_model_path, model_id)
+    result.update(tok_result)
 
     return result
 
