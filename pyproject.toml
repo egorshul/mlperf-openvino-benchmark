@@ -19,9 +19,9 @@ dependencies = [
     "psutil>=5.9.0",
     "torch==2.4.1",
     "torchvision==0.19.1",
-    # openvino and openvino-genai are provided externally via
-    # LD_LIBRARY_PATH / PYTHONPATH and must NOT be listed here —
-    # pip would pull incompatible versions from PyPI.
+    # openvino, openvino-genai and openvino-tokenizers are provided
+    # externally via LD_LIBRARY_PATH / PYTHONPATH and must NOT be
+    # listed here — pip would pull incompatible versions from PyPI.
     "nncf>=2.19.0",
 ]
 
