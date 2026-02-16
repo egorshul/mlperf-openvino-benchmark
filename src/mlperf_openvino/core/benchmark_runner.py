@@ -532,7 +532,6 @@ class BenchmarkRunner:
 
         logger.info(f"LoadGen settings: min_duration={scenario_config.min_duration_ms/1000:.0f}s, min_query_count={scenario_config.min_query_count}")
 
-        # Enable token-level latency tracking for LLM benchmarks (required by MLPerf)
         if self.config.model.model_type == ModelType.LLAMA3_1_8B:
             try:
                 settings.use_token_latencies = True
@@ -933,7 +932,6 @@ class BenchmarkRunner:
             tokens = acc.get('tokens_per_sample', 0)
             gen_len = acc.get('gen_len', 0)
             num_samples = acc.get('num_samples', 0)
-            # MLPerf thresholds: 99% of FP32 reference for ROUGE, 90% for gen_len
             metrics_cfg = self.config.model.accuracy_metrics
             ref_r1 = metrics_cfg.get('rouge1', 38.7792)
             ref_r2 = metrics_cfg.get('rouge2', 15.9075)

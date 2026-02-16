@@ -1448,7 +1448,6 @@ def download_cnn_dailymail(
     logger.info("Loading cnn_dailymail v3.0.0 from HuggingFace...")
     dataset = load_dataset("cnn_dailymail", "3.0.0", split="validation")
 
-    # Resolve HF token for gated models (Meta-Llama)
     from .model_downloader import _resolve_hf_token
     token = _resolve_hf_token(hf_token)
     if not token:
@@ -1457,14 +1456,11 @@ def download_cnn_dailymail(
             "Set HF_TOKEN env var or run: huggingface-cli login"
         )
 
-    # Tokenizer setup matching reference download_cnndm.py exactly
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False, token=token)
     tokenizer.padding_side = "left"
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.model_max_length = 8000
 
-    # MLCommons reference instruction template (plain text, NOT chat template)
-    # BOS token is added implicitly by tokenizer.encode()
     INSTRUCTION_TEMPLATE = (
         "Summarize the following news article in 128 tokens. "
         "Please output the summary only, without any other text.\n\n"
@@ -1480,7 +1476,6 @@ def download_cnn_dailymail(
         if not article or not highlights:
             continue
 
-        # Format prompt and pre-tokenize (matches reference exactly)
         formatted_prompt = INSTRUCTION_TEMPLATE.format(input=article)
         tok_input = tokenizer.encode(formatted_prompt)
 
@@ -1496,7 +1491,6 @@ def download_cnn_dailymail(
 
     logger.info(f"Total samples: {len(processed)} (no filtering, closed division)")
 
-    # Save full eval set (datacenter)
     import json
     import random
 
@@ -1504,7 +1498,6 @@ def download_cnn_dailymail(
         json.dump(processed, f, ensure_ascii=False)
     logger.info(f"Datacenter eval set: {len(processed)} samples -> {eval_file}")
 
-    # Save edge subset (5000 samples) — matches reference: shuffle(seed=42) + take
     random.seed(42)
     n_edge = min(5000, len(processed))
     edge_indices = random.sample(range(len(processed)), n_edge)
@@ -1514,7 +1507,6 @@ def download_cnn_dailymail(
         json.dump(edge_samples, f, ensure_ascii=False)
     logger.info(f"Edge eval set: {len(edge_samples)} samples -> {edge_file}")
 
-    # Save calibration subset (for quantization)
     calib_indices = random.sample(range(len(processed)), min(1000, len(processed)))
     calib_samples = [processed[i] for i in sorted(calib_indices)]
     calib_file = data_dir / "cnn_dailymail_calibration.json"

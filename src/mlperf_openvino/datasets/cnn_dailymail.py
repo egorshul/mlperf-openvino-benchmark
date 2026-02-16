@@ -36,7 +36,6 @@ class CnnDailyMailDataset(BaseDataset):
     When tok_input is available, it is used directly (no re-tokenization).
     """
 
-    # MLCommons reference instruction template
     _INSTRUCTION_TEMPLATE = (
         "Summarize the following news article in 128 tokens. "
         "Please output the summary only, without any other text.\n\n"
@@ -79,7 +78,6 @@ class CnnDailyMailDataset(BaseDataset):
     def load(self) -> None:
         data_path = Path(self.data_path)
 
-        # MLCommons reference filenames (in order of priority)
         json_candidates = [
             data_path / "cnn_eval.json",
             data_path / "sample_cnn_eval_5000.json",
@@ -140,10 +138,7 @@ class CnnDailyMailDataset(BaseDataset):
                 raw_input = entry.get("input", "")
 
                 if tok_input is not None:
-                    # Reference format: input is raw article, tok_input has pre-tokenized IDs
-                    # Check if input looks like raw article (no instruction template)
                     if "instruction" in entry:
-                        # Full reference format — reconstruct formatted prompt for display
                         self._input_texts.append(
                             self._INSTRUCTION_TEMPLATE.format(input=str(raw_input))
                         )
@@ -151,7 +146,6 @@ class CnnDailyMailDataset(BaseDataset):
                         self._input_texts.append(str(raw_input))
                     self._tok_inputs.append(list(tok_input))
                 else:
-                    # Simple format: input is already the formatted prompt
                     self._input_texts.append(str(raw_input))
                     self._tok_inputs.append(None)
 
@@ -207,11 +201,9 @@ class CnnDailyMailDataset(BaseDataset):
         tok_input = self._tok_inputs[index] if index < len(self._tok_inputs) else None
 
         if tok_input is not None:
-            # Use pre-tokenized IDs from reference JSON (closed division)
             input_ids = np.array(tok_input, dtype=np.int64).reshape(1, -1)
             attention_mask = np.ones_like(input_ids)
         else:
-            # Fallback: tokenize formatted prompt text
             tokenizer = self._get_tokenizer()
             text = self._input_texts[index]
 
@@ -268,15 +260,7 @@ class CnnDailyMailDataset(BaseDataset):
     def compute_accuracy(
         self, predictions: List[str], labels: List[str]
     ) -> Dict[str, float]:
-        """Compute ROUGE scores per MLCommons Inference v5.1 specification.
-
-        Matches the reference evaluation.py for Llama 3.1 8B:
-        - Uses HuggingFace evaluate ROUGE metric (same as reference)
-        - NLTK sentence tokenization before scoring (required for rougeLsum)
-        - use_stemmer=True
-        - Computes rouge1, rouge2, rougeL, rougeLsum (all 4 required)
-        - gen_len = sum of prediction character lengths
-        """
+        """Compute ROUGE scores per MLCommons Inference v5.1 specification."""
         try:
             from rouge_score import rouge_scorer
         except ImportError:
@@ -334,7 +318,6 @@ class CnnDailyMailDataset(BaseDataset):
         avg_rougeL = sum(rougeL_scores) / num_samples if num_samples > 0 else 0.0
         avg_rougeLsum = sum(rougeLsum_scores) / num_samples if num_samples > 0 else 0.0
 
-        # gen_len: sum of prediction character lengths (matches reference)
         prediction_lens = [len(pred) for pred in preds]
         total_gen_len = sum(prediction_lens)
         avg_tokens = total_gen_len / num_samples if num_samples > 0 else 0.0

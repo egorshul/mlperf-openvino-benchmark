@@ -753,7 +753,6 @@ def _export_llama_to_openvino(
     model_name = model_id.split("/")[-1]
     ov_model_path = output_path / f"{model_name}-openvino-{weight_format}"
 
-    # Check if already exported
     if ov_model_path.exists():
         config_file = ov_model_path / "config.json"
         xml_files = list(ov_model_path.glob("*.xml"))
@@ -764,7 +763,6 @@ def _export_llama_to_openvino(
     logger.info(f"Exporting {model_id} to OpenVINO IR (weight_format={weight_format})...")
     logger.info("This may take a long time for large models...")
 
-    # Build quantization config for INT8/INT4
     ov_export_kwargs: Dict[str, Any] = {
         "export": True,
         "compile": False,
@@ -797,7 +795,6 @@ def _export_llama_to_openvino(
     model = _download_with_retry(do_export, max_retries=3)
     model.save_pretrained(str(ov_model_path))
 
-    # Save tokenizer alongside the model
     tokenizer = AutoTokenizer.from_pretrained(model_id, token=token)
     tokenizer.save_pretrained(str(ov_model_path))
 
