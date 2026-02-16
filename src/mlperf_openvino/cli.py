@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Optional
 
 import click
-import numpy as np
 
 from .core.config import BenchmarkConfig, Scenario, TestMode, ModelType, SUPPORTED_SCENARIOS
 from .core.benchmark_runner import BenchmarkRunner
@@ -205,7 +204,6 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         if explicit_batching:
             scenario_config.explicit_batching = True
             scenario_config.batch_timeout_us = batch_timeout_us if batch_timeout_us is not None else 2000
-            # Default to nireq_multiplier=6 for explicit batching if not overridden
             if nireq_multiplier is None:
                 scenario_config.nireq_multiplier = 6
             explicit_batch = batch_size if batch_size > 1 else 8
@@ -339,7 +337,6 @@ def download_model_cmd(model: str, output_dir: str, format: str, batch_sizes: st
     try:
         if model == 'whisper':
             from .utils.model_downloader import download_whisper_model
-            # Whisper always needs OpenVINO IR format for inference
             if format != 'openvino':
                 click.echo("  Note: Whisper requires OpenVINO format, using --format openvino")
             paths = download_whisper_model(
@@ -548,7 +545,6 @@ def setup_cmd(model: str, output_dir: str, format: str, hf_token: Optional[str])
     click.echo("Step 1: Downloading model...")
     try:
         if model == 'whisper':
-            # Whisper requires OpenVINO IR format (WhisperOptimumSUT needs .xml/.bin files)
             if format != 'openvino':
                 click.echo("  Note: Whisper requires OpenVINO format, using --format openvino")
             model_paths = download_whisper_model(
@@ -602,7 +598,6 @@ def setup_cmd(model: str, output_dir: str, format: str, hf_token: Optional[str])
         elif model == 'retinanet':
             dataset_paths = download_dataset('openimages', str(data_dir))
         elif model == 'whisper':
-            # MLPerf requires dev-clean + dev-other combined
             dataset_paths = download_dataset('librispeech', str(data_dir), 'mlperf')
         elif model == 'ssd-resnet34':
             from .utils.dataset_downloader import download_coco2017
@@ -745,7 +740,6 @@ def convert_tokenizer_cmd(model_path: str, model_id: Optional[str], hf_token: Op
 
     model_dir = _Path(model_path)
 
-    # Auto-detect model_id from config.json if not provided
     if model_id is None:
         config_file = model_dir / "config.json"
         if config_file.exists():
