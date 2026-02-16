@@ -22,8 +22,6 @@ dependencies = [
     # openvino and openvino-genai are provided externally via
     # LD_LIBRARY_PATH / PYTHONPATH and must NOT be listed here —
     # pip would pull incompatible versions from PyPI.
-    # If openvino-tokenizers is needed, install manually:
-    #   pip install --no-deps openvino-tokenizers==2025.2.0.0
     "nncf>=2.19.0",
 ]
 
@@ -48,6 +46,7 @@ whisper = [
     "librosa>=0.10.0",
     "jiwer>=3.0.0",
     "optimum-intel>=1.16.0,<=1.23.1",  # >=1.24 requires openvino>=2025.4
+    "openvino-tokenizers==2025.2.0.0",  # install with --no-deps if openvino is external
 ]
 ssd-resnet34 = [
     "pycocotools>=2.0.0",
