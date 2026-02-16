@@ -357,7 +357,7 @@ def _export_whisper_tokenizer_to_openvino(
     try:
         import openvino as ov
         from openvino_tokenizers import convert_tokenizer
-        from transformers import WhisperTokenizer
+        from transformers import AutoTokenizer
     except ImportError as e:
         logger.warning(
             f"Cannot convert tokenizer to OpenVINO ({e}). "
@@ -367,7 +367,17 @@ def _export_whisper_tokenizer_to_openvino(
 
     logger.info("Converting tokenizer to OpenVINO format...")
 
-    hf_tokenizer = WhisperTokenizer.from_pretrained(model_id)
+    # Use a fast (Rust-based) tokenizer — openvino-tokenizers does not
+    # support the slow Python-based WhisperTokenizer.
+    hf_tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
+    if not getattr(hf_tokenizer, "is_fast", False):
+        logger.warning(
+            "Fast tokenizer not available for %s. "
+            "OpenVINO tokenizer conversion requires a fast tokenizer. "
+            "Skipping tokenizer conversion.",
+            model_id,
+        )
+        return result
 
     try:
         ov_tokenizer, ov_detokenizer = convert_tokenizer(
