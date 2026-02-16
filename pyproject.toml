@@ -61,7 +61,7 @@ sdxl = [
 ]
 llama = [
     "transformers>=4.43,<4.52",  # openvino-tokenizers 2025.2 supports transformers<=4.51.3
-    "sentencepiece>=0.1.99",
+    "optimum-intel>=1.16.0,<=1.23.1",  # >=1.24 requires openvino>=2025.4
     "datasets>=2.14.0",
     "rouge-score>=0.1.2",
     "nltk>=3.8.0",

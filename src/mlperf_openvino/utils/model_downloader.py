@@ -335,13 +335,26 @@ def _find_openvino_model(model_dir: Path, base_name: str) -> Optional[Path]:
     return None
 
 
-def _export_whisper_tokenizer_to_openvino(
-    ov_model_path: Path, model_id: str
+def _convert_tokenizer_to_openvino(
+    ov_model_path: Path,
+    model_id: str,
+    token: Optional[str] = None,
 ) -> Dict[str, str]:
     """Convert HuggingFace tokenizer to OpenVINO tokenizer/detokenizer models.
 
-    Returns dict with tokenizer_path and detokenizer_path if successful,
-    empty dict otherwise.
+    This bypasses optimum-intel's ``maybe_convert_tokenizers()`` which fails
+    when the externally-provided openvino-tokenizers reports a non-PEP-440
+    version string (e.g. ``-1-85be884``).  Instead we call
+    ``openvino_tokenizers.convert_tokenizer`` directly.
+
+    Args:
+        ov_model_path: Directory containing the exported OpenVINO model.
+        model_id: HuggingFace model ID (e.g. "openai/whisper-large-v3").
+        token: Optional HuggingFace access token for gated models.
+
+    Returns:
+        Dict with tokenizer_path and detokenizer_path if successful,
+        empty dict otherwise.
     """
     result: Dict[str, str] = {}
 
@@ -369,7 +382,9 @@ def _export_whisper_tokenizer_to_openvino(
 
     # Use a fast (Rust-based) tokenizer — openvino-tokenizers does not
     # support the slow Python-based WhisperTokenizer.
-    hf_tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
+    hf_tokenizer = AutoTokenizer.from_pretrained(
+        model_id, use_fast=True, token=token,
+    )
     if not getattr(hf_tokenizer, "is_fast", False):
         logger.warning(
             "Fast tokenizer not available for %s. "
@@ -424,7 +439,7 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
             decoder_with_past = _find_openvino_model(ov_model_path, "decoder_with_past_model")
             if decoder_with_past:
                 result["decoder_with_past_path"] = str(decoder_with_past)
-            tok_result = _export_whisper_tokenizer_to_openvino(ov_model_path, model_id)
+            tok_result = _convert_tokenizer_to_openvino(ov_model_path, model_id)
             result.update(tok_result)
             return result
         else:
@@ -481,7 +496,7 @@ def _export_whisper_to_openvino(output_dir: str, model_id: str) -> Dict[str, str
     if decoder_with_past_path:
         result["decoder_with_past_path"] = str(decoder_with_past_path)
 
-    tok_result = _export_whisper_tokenizer_to_openvino(ov_model_path, model_id)
+    tok_result = _convert_tokenizer_to_openvino(ov_model_path, model_id)
     result.update(tok_result)
 
     return result
@@ -843,7 +858,12 @@ def _export_llama_to_openvino(
         xml_files = list(ov_model_path.glob("*.xml"))
         if config_file.exists() and xml_files:
             logger.info(f"OpenVINO model already exists at {ov_model_path}")
-            return {"model_path": str(ov_model_path)}
+            result = {"model_path": str(ov_model_path)}
+            tok_result = _convert_tokenizer_to_openvino(
+                ov_model_path, model_id, token=token,
+            )
+            result.update(tok_result)
+            return result
 
     logger.info(f"Exporting {model_id} to OpenVINO IR (weight_format={weight_format})...")
     logger.info("This may take a long time for large models...")
@@ -885,7 +905,12 @@ def _export_llama_to_openvino(
 
     logger.info(f"OpenVINO model saved to {ov_model_path}")
 
-    return {"model_path": str(ov_model_path)}
+    result = {"model_path": str(ov_model_path)}
+    tok_result = _convert_tokenizer_to_openvino(
+        ov_model_path, model_id, token=token,
+    )
+    result.update(tok_result)
+    return result
 
 
 def get_retinanet_model_path(
