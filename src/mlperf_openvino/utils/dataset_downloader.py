@@ -149,6 +149,12 @@ DATASET_REGISTRY: Dict[str, Dict] = {
     },
     "open-orca": {
         "description": "OpenOrca GPT-4 subset for MLPerf LLM benchmark (Llama 2 70B)",
+        "r2_url": "https://inference.mlcommons-storage.org/metadata/llama-2-70b-open-orca-dataset.uri",
+        "download_cmd": (
+            'bash <(curl -s https://raw.githubusercontent.com/mlcommons/r2-downloader/'
+            'refs/heads/main/mlc-r2-downloader.sh) -d {output_dir} '
+            'https://inference.mlcommons-storage.org/metadata/llama-2-70b-open-orca-dataset.uri'
+        ),
         "huggingface": {
             "dataset_id": "Open-Orca/OpenOrca",
             "filename": "1M-GPT4-Augmented.parquet",
@@ -1532,25 +1538,218 @@ def download_cnn_dailymail(
     }
 
 
+def _download_open_orca_r2(data_dir: Path) -> bool:
+    """Try downloading pre-processed OpenOrca from MLCommons R2 storage.
+
+    This provides the bit-exact dataset required for closed division compliance.
+    Returns True on success, False on failure (caller should fall back to local processing).
+    """
+    cmd = DATASET_REGISTRY["open-orca"]["download_cmd"].format(output_dir=data_dir)
+
+    logger.info("Downloading pre-processed OpenOrca from MLCommons R2 storage...")
+    logger.info("(This provides the exact dataset for closed division compliance)")
+    logger.info(f"Command: {cmd}")
+
+    try:
+        subprocess.run(cmd, shell=True, check=True)
+        # Verify the expected pickle file was downloaded
+        eval_file = data_dir / "open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
+        if eval_file.exists():
+            logger.info(f"R2 download successful: {eval_file}")
+            return True
+        # R2 might place files in a subdirectory; search for the pickle
+        for pkl in data_dir.rglob("*.sampled_24576.pkl"):
+            if pkl.name == "open_orca_gpt4_tokenized_llama.sampled_24576.pkl":
+                if pkl.parent != data_dir:
+                    import shutil
+                    shutil.move(str(pkl), str(eval_file))
+                    logger.info(f"Moved dataset to {eval_file}")
+                return True
+        logger.warning("R2 download completed but expected pickle not found")
+        return False
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        logger.warning(f"R2 download failed: {e}")
+        return False
+
+
+def _process_open_orca_local(
+    data_dir: Path,
+    model_name: str = "meta-llama/Llama-2-70b-chat-hf",
+    n_total: int = 24576,
+    n_calibration: int = 1000,
+    rng_seed: int = 1337,
+    calib_rng_seed: int = 12345,
+    hf_token: Optional[str] = None,
+) -> Dict[str, str]:
+    """Process OpenOrca locally following MLCommons processorca.py exactly.
+
+    This is the fallback when R2 download is unavailable.
+    Replicates the exact filtering, tokenization, and sampling logic from:
+      https://github.com/mlcommons/inference/blob/master/language/llama2-70b/processorca.py
+    """
+    import pickle
+
+    import pandas as pd
+    from transformers import AutoTokenizer
+
+    from .model_downloader import _resolve_hf_token
+    token = _resolve_hf_token(hf_token)
+
+    eval_file = data_dir / "open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
+
+    # --- Step 1: Download raw parquet ---
+    logger.info("Loading Open-Orca/OpenOrca GPT-4 parquet from HuggingFace...")
+    try:
+        from datasets import load_dataset
+        dataset = load_dataset(
+            "Open-Orca/OpenOrca", data_files="1M-GPT4-Augmented.parquet", split="train"
+        )
+        df = dataset.to_pandas()
+    except Exception as e:
+        logger.error(f"Failed to load OpenOrca dataset: {e}")
+        raise
+
+    logger.info(f"Loaded {len(df)} raw samples")
+
+    # --- Step 2: Load tokenizer ---
+    logger.info(f"Loading tokenizer: {model_name}")
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        model_max_length=2048,
+        padding_side="left",
+        use_fast=False,
+        token=token,
+    )
+    tokenizer.pad_token = tokenizer.eos_token
+
+    # --- Step 3: Extract origin from id column ---
+    # processorca.py: df["origin"] = df["id"].apply(lambda x: x.split(".")[0])
+    df["origin"] = df["id"].apply(lambda x: str(x).split(".")[0].lower())
+
+    # --- Step 4: Build input column ---
+    # processorca.py: df["input"] = df.apply(lambda x: x["system_prompt"] + "\n" + x["question"], axis=1)
+    df["input"] = df.apply(
+        lambda row: str(row["system_prompt"]) + "\n" + str(row["question"]), axis=1
+    )
+    df["output"] = df["response"]
+
+    # --- Step 5: English (ASCII + allowed Unicode) filter ---
+    # processorca.py allows smart quotes and dashes beyond strict ASCII
+    _ALLOWED_UNICODE = {
+        "\u2019",  # right single quote '
+        "\u2013",  # en-dash –
+        "\u201c",  # left double quote "
+        "\u201d",  # right double quote "
+        "\u2014",  # em-dash —
+    }
+
+    def is_english(text: str) -> bool:
+        for ch in text:
+            if ord(ch) > 127 and ch not in _ALLOWED_UNICODE:
+                return False
+        return True
+
+    df["input_english"] = df["input"].apply(is_english)
+    df["output_english"] = df["output"].apply(is_english)
+    df["all_english"] = df["input_english"] & df["output_english"]
+    n_before = len(df)
+    df = df[df["all_english"]].copy()
+    logger.info(f"English filter: {n_before} -> {len(df)} samples")
+
+    # --- Step 6: Tokenize ---
+    logger.info("Tokenizing inputs and outputs...")
+    df["tok_input"] = df["input"].apply(lambda x: tokenizer.encode(x))
+    df["tok_output"] = df["output"].apply(lambda x: tokenizer.encode(x))
+    df["tok_input_length"] = df["tok_input"].apply(len)
+    df["tok_output_length"] = df["tok_output"].apply(len)
+
+    # --- Step 7: Filter by token length ---
+    # processorca.py: input <= 1024, output >= 3
+    n_before = len(df)
+    df = df[df["tok_input_length"] <= 1024].copy()
+    df = df[df["tok_output_length"] >= 3].copy()
+    logger.info(f"Token length filter: {n_before} -> {len(df)} samples")
+
+    # --- Step 8: Bad prompts filter (NIV + T0 only) ---
+    # processorca.py: exact bad_prompts list
+    bad_prompts = [
+        "",
+        "You are an AI assistant that follows instruction extremely well. "
+        "Help as much as you can.",
+        "You are an AI assistant. Provide a detailed answer so user don\u2019t "
+        "need to search outside to understand the answer.",
+        "You are an AI assistant. Provide a detailed answer so user don\u2019t "
+        "need to search outside to understand the answer.",
+        "User will you give you a task with some instruction. Your job is follow "
+        "the instructions as faithfully as you can. While answering think "
+        "step-by-step and justify your answer.",
+        "Explain how you used the definition to come up with the answer.",
+    ]
+    bad_prompts_set = set(bad_prompts)
+
+    niv_t0_mask = (df["origin"] == "niv") | (df["origin"] == "t0")
+    bad_mask = df["system_prompt"].isin(bad_prompts_set) & niv_t0_mask
+    n_before = len(df)
+    df = df[~bad_mask].copy()
+    logger.info(f"Bad prompt filter: {n_before} -> {len(df)} samples")
+
+    for origin_name in ["cot", "niv", "flan", "t0"]:
+        count = (df["origin"] == origin_name).sum()
+        logger.info(f"  {origin_name}: {count} samples after filtering")
+
+    # --- Step 9: Balanced sampling (processorca.py logic) ---
+    # processorca.py: grouped = df.groupby("origin"), then sample split_size per group
+    dfs_by_origin = dict(tuple(df.groupby("origin")))
+    nways = len(dfs_by_origin)
+    split_size = n_total // nways
+    logger.info(f"Balanced sampling: {split_size} per origin (seed={rng_seed})")
+
+    sampled_dfs = []
+    for origin_name in sorted(dfs_by_origin.keys()):
+        origin_df = dfs_by_origin[origin_name]
+        if len(origin_df) >= split_size:
+            sampled_dfs.append(origin_df.sample(n=split_size, random_state=rng_seed))
+        else:
+            logger.warning(
+                f"  {origin_name}: only {len(origin_df)} samples (need {split_size}), using all"
+            )
+            sampled_dfs.append(origin_df)
+
+    sampled_df = pd.concat(sampled_dfs, ignore_index=True)
+    logger.info(f"Total balanced samples: {len(sampled_df)}")
+
+    # --- Step 10: Save evaluation pickle (DataFrame format, like processorca.py) ---
+    sampled_df.to_pickle(str(eval_file))
+    logger.info(f"Evaluation set: {len(sampled_df)} samples -> {eval_file}")
+
+    # --- Step 11: Save calibration subset ---
+    calib_file = data_dir / "open_orca_gpt4_tokenized_llama.calibration_1000.pkl"
+    calib_df = sampled_df.sample(n=min(n_calibration, len(sampled_df)), random_state=calib_rng_seed)
+    calib_df.to_pickle(str(calib_file))
+    logger.info(f"Calibration set: {len(calib_df)} samples -> {calib_file}")
+
+    return {
+        "data_path": str(data_dir),
+        "eval_file": str(eval_file),
+        "num_samples": len(sampled_df),
+    }
+
+
 def download_open_orca(
     output_dir: str,
     model_name: str = "meta-llama/Llama-2-70b-chat-hf",
     force: bool = False,
     hf_token: Optional[str] = None,
 ) -> Dict[str, str]:
-    """Download and process OpenOrca for MLPerf Llama 2 70B benchmark.
+    """Download OpenOrca dataset for MLPerf Llama 2 70B benchmark.
 
-    Follows the MLCommons Inference reference (processorca.py) exactly:
-    1. Downloads Open-Orca/OpenOrca GPT-4 parquet from HuggingFace
-    2. Filters for ASCII-only characters, removes short responses
-    3. Tokenizes with Llama 2 tokenizer, filters to max 1024 tokens
-    4. Balanced sampling across 4 sub-datasets: COT, NIV, FLAN, T0
-    5. Saves as pickle with 24,576 samples (+ 1,000 calibration)
+    Tries MLCommons R2 storage first (bit-exact for closed division), then
+    falls back to local processing following processorca.py exactly.
 
     Datacenter: 24,576 samples
+    Calibration: 1,000 samples
     """
     import pickle
-    import random
 
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -1564,165 +1763,33 @@ def download_open_orca(
         logger.info(f"OpenOrca dataset already exists: {eval_file}")
         with open(eval_file, "rb") as f:
             data = pickle.load(f)
-        actual_count = len(data) if isinstance(data, list) else 0
+        try:
+            actual_count = len(data)
+        except TypeError:
+            actual_count = 0
         return {
             "data_path": str(data_dir),
             "eval_file": str(eval_file),
             "num_samples": actual_count,
         }
 
-    logger.info("Downloading OpenOrca GPT-4 subset for MLPerf Llama 2 70B benchmark...")
-    logger.info(f"Tokenizer model: {model_name}")
+    logger.info("Downloading OpenOrca for MLPerf Llama 2 70B benchmark...")
 
-    try:
-        import pandas as pd
-        from transformers import AutoTokenizer
-    except ImportError:
-        raise ImportError(
-            "pandas and transformers are required for OpenOrca download. "
-            "Install with: pip install pandas transformers"
-        )
+    # Try R2 download first (closed division compliant, bit-exact)
+    if _download_open_orca_r2(data_dir):
+        eval_file = data_dir / "open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
+        if eval_file.exists():
+            with open(eval_file, "rb") as f:
+                data = pickle.load(f)
+            return {
+                "data_path": str(data_dir),
+                "eval_file": str(eval_file),
+                "num_samples": len(data),
+            }
 
-    from .model_downloader import _resolve_hf_token
-    token = _resolve_hf_token(hf_token)
-    if not token:
-        logger.warning(
-            "No HuggingFace token found. Meta-Llama tokenizer requires authentication. "
-            "Set HF_TOKEN env var or run: huggingface-cli login"
-        )
-
-    # Download the parquet file from HuggingFace
-    logger.info("Loading Open-Orca/OpenOrca GPT-4 parquet from HuggingFace...")
-    try:
-        from datasets import load_dataset
-        dataset = load_dataset("Open-Orca/OpenOrca", data_files="1M-GPT4-Augmented.parquet", split="train")
-        df = dataset.to_pandas()
-    except Exception as e:
-        logger.error(f"Failed to load OpenOrca dataset: {e}")
-        raise
-
-    logger.info(f"Loaded {len(df)} raw samples")
-
-    # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_name,
-        model_max_length=2048,
-        padding_side="left",
-        use_fast=False,
-        token=token,
-    )
-    tokenizer.pad_token = tokenizer.eos_token
-
-    # --- MLCommons processorca.py filtering logic ---
-
-    # Known bad prompts from NIV and T0 subsets
-    NIV_BAD_PROMPTS = {
-        "In this task, you are given a text of the tweet. Your task is to classify the tweet into "
-        "two categories: 1) positive and 2) negative based on the content of the tweet.",
-    }
-    T0_BAD_PROMPTS: set = set()
-
-    def is_ascii(text: str) -> bool:
-        try:
-            text.encode("ascii")
-            return True
-        except UnicodeEncodeError:
-            return False
-
-    # Categorize samples by origin
-    origins = {"cot": [], "niv": [], "flan": [], "t0": []}
-
-    logger.info("Filtering and categorizing samples...")
-    for idx, row in df.iterrows():
-        system_prompt = str(row.get("system_prompt", ""))
-        question = str(row.get("question", ""))
-        response = str(row.get("response", ""))
-        orca_id = str(row.get("id", ""))
-
-        # Determine origin
-        origin_lower = orca_id.split(".")[0].lower() if "." in orca_id else orca_id.lower()
-        if "cot" in origin_lower:
-            origin = "cot"
-        elif "niv" in origin_lower:
-            origin = "niv"
-        elif "flan" in origin_lower:
-            origin = "flan"
-        elif "t0" in origin_lower:
-            origin = "t0"
-        else:
-            origin = "flan"  # default
-
-        # ASCII filter
-        if not is_ascii(question) or not is_ascii(response):
-            continue
-
-        # Short response filter (fewer than 2 words)
-        if len(response.split()) < 2:
-            continue
-
-        # Bad prompt filter
-        if origin == "niv" and system_prompt in NIV_BAD_PROMPTS:
-            continue
-        if origin == "t0" and system_prompt in T0_BAD_PROMPTS:
-            continue
-
-        # Build input text
-        if system_prompt:
-            input_text = f"{system_prompt}\n{question}"
-        else:
-            input_text = question
-
-        # Tokenize and check length
-        tok_input = tokenizer.encode(input_text)
-        tok_output = tokenizer.encode(response)
-
-        if len(tok_input) > 1024:
-            continue
-        if len(tok_output) < 3:
-            continue
-
-        origins[origin].append({
-            "input": input_text,
-            "output": response,
-            "tok_input": tok_input,
-            "tok_output": tok_output,
-        })
-
-    for origin, samples in origins.items():
-        logger.info(f"  {origin}: {len(samples)} samples after filtering")
-
-    # Balanced sampling: 24576 / 4 = 6144 per origin
-    random.seed(42)
-    n_per_origin = 24576 // 4
-    sampled = []
-    for origin in ["cot", "niv", "flan", "t0"]:
-        pool = origins[origin]
-        if len(pool) >= n_per_origin:
-            sampled.extend(random.sample(pool, n_per_origin))
-        else:
-            logger.warning(f"  {origin} has only {len(pool)} samples (need {n_per_origin}), using all")
-            sampled.extend(pool)
-
-    random.shuffle(sampled)
-    logger.info(f"Total balanced samples: {len(sampled)}")
-
-    # Save main evaluation pickle
-    with open(eval_file, "wb") as f:
-        pickle.dump(sampled, f)
-    logger.info(f"Evaluation set: {len(sampled)} samples -> {eval_file}")
-
-    # Save calibration subset (1000 samples)
-    calib_file = data_dir / "open_orca_gpt4_tokenized_llama.calibration_1000.pkl"
-    calib_samples = sampled[:1000]
-    with open(calib_file, "wb") as f:
-        pickle.dump(calib_samples, f)
-    logger.info(f"Calibration set: {len(calib_samples)} samples -> {calib_file}")
-
-    return {
-        "data_path": str(data_dir),
-        "eval_file": str(eval_file),
-        "num_samples": len(sampled),
-    }
+    # Fallback: process locally following processorca.py
+    logger.info("Falling back to local OpenOrca processing (processorca.py logic)...")
+    return _process_open_orca_local(data_dir, model_name=model_name, hf_token=hf_token)
 
 
 def download_dataset(

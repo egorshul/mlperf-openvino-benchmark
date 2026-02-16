@@ -391,6 +391,10 @@ def download_model_cmd(model: str, output_dir: str, format: str, batch_sizes: st
                 hf_token=hf_token,
             )
             click.echo(f"Model downloaded to: {paths['model_path']}")
+            if 'tokenizer_path' in paths:
+                click.echo(f"  Tokenizer: {paths['tokenizer_path']}")
+            if 'detokenizer_path' in paths:
+                click.echo(f"  Detokenizer: {paths['detokenizer_path']}")
         elif model == 'llama2-70b':
             from .utils.model_downloader import download_llama2_70b_model
             if format != 'openvino':
@@ -401,6 +405,10 @@ def download_model_cmd(model: str, output_dir: str, format: str, batch_sizes: st
                 hf_token=hf_token,
             )
             click.echo(f"Model downloaded to: {paths['model_path']}")
+            if 'tokenizer_path' in paths:
+                click.echo(f"  Tokenizer: {paths['tokenizer_path']}")
+            if 'detokenizer_path' in paths:
+                click.echo(f"  Detokenizer: {paths['detokenizer_path']}")
         else:
             model_path = download_model(model, str(output_path), format)
             click.echo(f"Model downloaded to: {model_path}")
@@ -769,8 +777,9 @@ def convert_tokenizer_cmd(model_path: str, model_id: Optional[str], hf_token: Op
     \b
     Examples:
       mlperf-ov convert-tokenizer -p ./models/Llama-3.1-8B-Instruct-openvino-int8
+      mlperf-ov convert-tokenizer -p ./models/Llama-2-70b-chat-hf-openvino-int4
       mlperf-ov convert-tokenizer -p ./models/whisper-large-v3-openvino
-      mlperf-ov convert-tokenizer -p ./model-dir -m meta-llama/Meta-Llama-3.1-8B-Instruct --hf-token $HF_TOKEN
+      mlperf-ov convert-tokenizer -p ./model-dir -m meta-llama/Llama-2-70b-chat-hf --hf-token $HF_TOKEN
     """
     from pathlib import Path as _Path
     from .utils.model_downloader import _convert_tokenizer_to_openvino, _resolve_hf_token
