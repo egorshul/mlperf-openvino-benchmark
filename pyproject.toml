@@ -53,7 +53,7 @@ ssd-resnet34 = [
 ]
 sdxl = [
     "optimum-intel>=1.16.0,<=1.23.1",  # >=1.24 requires openvino>=2025.4
-    "diffusers>=0.25.0",
+    "diffusers>=0.25.0,<0.36",  # 0.36+ requires transformers>=4.47
     "transformers>=4.43,<4.47",  # 4.47+ pulls tokenizers>=0.21 incompatible with openvino-tokenizers 2025.2
     "pytorch-fid>=0.3.0",
     "open_clip_torch>=2.20.0",
