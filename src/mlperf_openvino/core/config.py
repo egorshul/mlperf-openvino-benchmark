@@ -654,7 +654,7 @@ class BenchmarkConfig:
                 server=ScenarioConfig(
                     min_duration_ms=600000,  # MLPerf official: 10 minutes
                     min_query_count=270336,  # MLPerf constants.py
-                    target_latency_ns=20000000000,  # 20s TTFT
+                    target_latency_ns=0,  # mlperf.conf: target_latency=0, uses TTFT/TPOT instead
                     target_qps=1.0,
                 ),
             ),

@@ -357,7 +357,9 @@ models:
       samples_per_query: 1
 
     server:
-      target_latency_ns: 20000000000   # 20s TTFT
+      target_latency_ns: 0            # mlperf.conf: target_latency=0 (uses TTFT/TPOT token latencies)
+      ttft_latency_ms: 2000           # Time to First Token (mlperf.conf)
+      tpot_latency_ms: 200            # Time per Output Token (mlperf.conf)
       target_qps: 1.0
       min_duration_ms: 600000          # 10 minutes (MLPerf official)
       min_query_count: 270336          # MLPerf constants.py

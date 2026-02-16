@@ -1577,6 +1577,7 @@ def _process_open_orca_local(
     model_name: str = "meta-llama/Llama-2-70b-chat-hf",
     n_total: int = 24576,
     n_calibration: int = 1000,
+    io_token_limit: int = 1024,
     rng_seed: int = 1337,
     calib_rng_seed: int = 12345,
     hf_token: Optional[str] = None,
@@ -1586,16 +1587,55 @@ def _process_open_orca_local(
     This is the fallback when R2 download is unavailable.
     Replicates the exact filtering, tokenization, and sampling logic from:
       https://github.com/mlcommons/inference/blob/master/language/llama2-70b/processorca.py
+
+    Key details matched to the reference:
+    - Llama 2 chat template for input formatting ([INST] <<SYS>>...)
+    - LlamaTokenizerFast (not AutoTokenizer with use_fast=False)
+    - Response init token 29871 appended to input tokens
+    - Strict < for seq length filter (not <=), applied to BOTH input and output
+    - Exact bad_prompts list (unicode vs ASCII apostrophe variants)
+    - Origin extracted without lowercasing
     """
     import pickle
+    from functools import partial
 
     import pandas as pd
-    from transformers import AutoTokenizer
 
     from .model_downloader import _resolve_hf_token
     token = _resolve_hf_token(hf_token)
 
     eval_file = data_dir / "open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
+
+    # --- Llama 2 chat template (exact match with processorca.py) ---
+    _LLAMA_PROMPT_SYSTEM = "<s>[INST] <<SYS>>\n{}\n<</SYS>>\n\n{} [/INST]"
+    _LLAMA_PROMPT_NO_SYSTEM = "<s>[INST] {} [/INST]"
+
+    def format_llama_input(row):
+        if row["system_prompt"]:
+            return _LLAMA_PROMPT_SYSTEM.format(row["system_prompt"], row["question"])
+        else:
+            return _LLAMA_PROMPT_NO_SYSTEM.format(row["question"])
+
+    # --- English filter (exact match with processorca.py is_english) ---
+    def is_english(s):
+        for c in s:
+            allowed = c.isascii()
+            allowed = allowed or (
+                c in ["\u2019", "\u2013", "\u201c", "\u201d", "\u2014"]
+            )
+            if not allowed:
+                return False
+        return True
+
+    # --- Tokenize helper (exact match with processorca.py _tokenize_helper) ---
+    def tokenize_helper(x, llama_tokenizer=None, append_response_init_token=True):
+        if not isinstance(x, str):
+            return []
+        tokens = llama_tokenizer(x)["input_ids"]
+        if append_response_init_token:
+            # Workaround from reference: Llama always outputs token 29871 first
+            tokens.append(29871)
+        return tokens
 
     # --- Step 1: Download raw parquet ---
     logger.info("Loading Open-Orca/OpenOrca GPT-4 parquet from HuggingFace...")
@@ -1611,120 +1651,113 @@ def _process_open_orca_local(
 
     logger.info(f"Loaded {len(df)} raw samples")
 
-    # --- Step 2: Load tokenizer ---
-    logger.info(f"Loading tokenizer: {model_name}")
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_name,
-        model_max_length=2048,
-        padding_side="left",
-        use_fast=False,
-        token=token,
+    # --- Step 2: Load tokenizer (LlamaTokenizerFast, like processorca.py) ---
+    logger.info(f"Loading LlamaTokenizerFast: {model_name}")
+    try:
+        from transformers import LlamaTokenizerFast
+        llama_tokenizer = LlamaTokenizerFast.from_pretrained(model_name, token=token)
+    except ImportError:
+        logger.warning("LlamaTokenizerFast not available, falling back to AutoTokenizer")
+        from transformers import AutoTokenizer
+        llama_tokenizer = AutoTokenizer.from_pretrained(model_name, token=token)
+
+    input_tokenizer = partial(
+        tokenize_helper, llama_tokenizer=llama_tokenizer, append_response_init_token=True,
     )
-    tokenizer.pad_token = tokenizer.eos_token
-
-    # --- Step 3: Extract origin from id column ---
-    # processorca.py: df["origin"] = df["id"].apply(lambda x: x.split(".")[0])
-    df["origin"] = df["id"].apply(lambda x: str(x).split(".")[0].lower())
-
-    # --- Step 4: Build input column ---
-    # processorca.py: df["input"] = df.apply(lambda x: x["system_prompt"] + "\n" + x["question"], axis=1)
-    df["input"] = df.apply(
-        lambda row: str(row["system_prompt"]) + "\n" + str(row["question"]), axis=1
+    output_tokenizer = partial(
+        tokenize_helper, llama_tokenizer=llama_tokenizer, append_response_init_token=False,
     )
-    df["output"] = df["response"]
 
-    # --- Step 5: English (ASCII + allowed Unicode) filter ---
-    # processorca.py allows smart quotes and dashes beyond strict ASCII
-    _ALLOWED_UNICODE = {
-        "\u2019",  # right single quote '
-        "\u2013",  # en-dash –
-        "\u201c",  # left double quote "
-        "\u201d",  # right double quote "
-        "\u2014",  # em-dash —
-    }
+    # --- Step 3: Rename columns and build input (exact processorca.py logic) ---
+    df.rename(columns={"response": "output"}, inplace=True)
+    df["input"] = df.apply(format_llama_input, axis=1)
 
-    def is_english(text: str) -> bool:
-        for ch in text:
-            if ord(ch) > 127 and ch not in _ALLOWED_UNICODE:
-                return False
-        return True
+    # --- Step 4: Extract origin (processorca.py: x.split(".")[0], NO lowercasing) ---
+    df["origin"] = df["id"].apply(lambda x: str(x).split(".")[0])
 
+    # --- Step 5: Tokenize input and output ---
+    logger.info("Tokenizing inputs and outputs...")
+    df["tok_input"] = df["input"].apply(input_tokenizer)
+    df["tok_output"] = df["output"].apply(output_tokenizer)
+
+    # --- Step 6: English filter ---
     df["input_english"] = df["input"].apply(is_english)
     df["output_english"] = df["output"].apply(is_english)
     df["all_english"] = df["input_english"] & df["output_english"]
     n_before = len(df)
-    df = df[df["all_english"]].copy()
+    df = df[df["all_english"]].drop(
+        ["input_english", "output_english", "all_english"], axis=1
+    )
+    df = df.reset_index(drop=True)
     logger.info(f"English filter: {n_before} -> {len(df)} samples")
 
-    # --- Step 6: Tokenize ---
-    logger.info("Tokenizing inputs and outputs...")
-    df["tok_input"] = df["input"].apply(lambda x: tokenizer.encode(x))
-    df["tok_output"] = df["output"].apply(lambda x: tokenizer.encode(x))
+    # --- Step 7: Filter by token length (strict < not <=, BOTH input and output) ---
     df["tok_input_length"] = df["tok_input"].apply(len)
     df["tok_output_length"] = df["tok_output"].apply(len)
-
-    # --- Step 7: Filter by token length ---
-    # processorca.py: input <= 1024, output >= 3
     n_before = len(df)
-    df = df[df["tok_input_length"] <= 1024].copy()
-    df = df[df["tok_output_length"] >= 3].copy()
-    logger.info(f"Token length filter: {n_before} -> {len(df)} samples")
+    df = df[df["tok_input_length"] < io_token_limit]
+    df = df[df["tok_output_length"] < io_token_limit]
+    df = df.reset_index(drop=True)
+    logger.info(f"Sequence length filter (< {io_token_limit}): {n_before} -> {len(df)} samples")
 
-    # --- Step 8: Bad prompts filter (NIV + T0 only) ---
-    # processorca.py: exact bad_prompts list
+    # --- Step 8: Short response filter (tok_output_length >= 3) ---
+    n_before = len(df)
+    df = df[df["tok_output_length"] >= 3]
+    df = df.reset_index(drop=True)
+    logger.info(f"Short response filter: {n_before} -> {len(df)} samples")
+
+    # --- Step 9: Bad prompts filter (exact list from processorca.py) ---
+    # NOTE: Entry 3 uses \u2019 (unicode right quote), entry 4 uses ' (ASCII apostrophe)
     bad_prompts = [
         "",
-        "You are an AI assistant that follows instruction extremely well. "
-        "Help as much as you can.",
-        "You are an AI assistant. Provide a detailed answer so user don\u2019t "
-        "need to search outside to understand the answer.",
-        "You are an AI assistant. Provide a detailed answer so user don\u2019t "
-        "need to search outside to understand the answer.",
-        "User will you give you a task with some instruction. Your job is follow "
-        "the instructions as faithfully as you can. While answering think "
-        "step-by-step and justify your answer.",
+        "You are an AI assistant that follows instruction extremely well. Help as much as you can.",
+        "You are an AI assistant. Provide a detailed answer so user don\u2019t need to search outside to understand the answer.",
+        "You are an AI assistant. Provide a detailed answer so user don't need to search outside to understand the answer.",
+        "User will you give you a task with some instruction. Your job is follow the instructions as faithfully as you can. While answering think step-by-step and justify your answer.",
         "Explain how you used the definition to come up with the answer.",
     ]
-    bad_prompts_set = set(bad_prompts)
+    # processorca.py iterates and filters one-by-one (preserves order, handles duplicates)
+    for prompt in bad_prompts:
+        criteria = df["system_prompt"] == prompt
+        criteria = criteria & ((df["origin"] == "niv") | (df["origin"] == "t0"))
+        df = df[~criteria]
+    df = df.reset_index(drop=True)
+    logger.info(f"Bad prompt filter: -> {len(df)} samples")
 
-    niv_t0_mask = (df["origin"] == "niv") | (df["origin"] == "t0")
-    bad_mask = df["system_prompt"].isin(bad_prompts_set) & niv_t0_mask
-    n_before = len(df)
-    df = df[~bad_mask].copy()
-    logger.info(f"Bad prompt filter: {n_before} -> {len(df)} samples")
-
-    for origin_name in ["cot", "niv", "flan", "t0"]:
+    for origin_name in sorted(df["origin"].unique()):
         count = (df["origin"] == origin_name).sum()
         logger.info(f"  {origin_name}: {count} samples after filtering")
 
-    # --- Step 9: Balanced sampling (processorca.py logic) ---
-    # processorca.py: grouped = df.groupby("origin"), then sample split_size per group
+    # --- Step 10: Balanced sampling (exact processorca.py logic) ---
     dfs_by_origin = dict(tuple(df.groupby("origin")))
     nways = len(dfs_by_origin)
     split_size = n_total // nways
     logger.info(f"Balanced sampling: {split_size} per origin (seed={rng_seed})")
 
     sampled_dfs = []
-    for origin_name in sorted(dfs_by_origin.keys()):
-        origin_df = dfs_by_origin[origin_name]
-        if len(origin_df) >= split_size:
-            sampled_dfs.append(origin_df.sample(n=split_size, random_state=rng_seed))
-        else:
-            logger.warning(
-                f"  {origin_name}: only {len(origin_df)} samples (need {split_size}), using all"
+    for origin, origin_df in dfs_by_origin.items():
+        logger.info(f"Sampling {split_size} from {origin}")
+        n = min(origin_df.shape[0], split_size)
+        if n < split_size:
+            raise RuntimeError(
+                f"Not enough samples in {origin}. Has {n}, needs {split_size}."
             )
-            sampled_dfs.append(origin_df)
+        sampled_dfs.append(origin_df.sample(n=n, random_state=rng_seed))
 
-    sampled_df = pd.concat(sampled_dfs, ignore_index=True)
+    sampled_df = pd.concat(sampled_dfs)
+    sampled_df = sampled_df.reset_index(drop=True)
     logger.info(f"Total balanced samples: {len(sampled_df)}")
 
-    # --- Step 10: Save evaluation pickle (DataFrame format, like processorca.py) ---
+    # --- Step 11: Save evaluation pickle (DataFrame format, like processorca.py) ---
     sampled_df.to_pickle(str(eval_file))
     logger.info(f"Evaluation set: {len(sampled_df)} samples -> {eval_file}")
 
-    # --- Step 11: Save calibration subset ---
+    # --- Step 12: Save calibration subset ---
     calib_file = data_dir / "open_orca_gpt4_tokenized_llama.calibration_1000.pkl"
-    calib_df = sampled_df.sample(n=min(n_calibration, len(sampled_df)), random_state=calib_rng_seed)
+    calib_df = sampled_df.sample(
+        n=min(n_calibration, len(sampled_df)), random_state=calib_rng_seed
+    )
+    calib_df = calib_df.reset_index(drop=True)
     calib_df.to_pickle(str(calib_file))
     logger.info(f"Calibration set: {len(calib_df)} samples -> {calib_file}")
 
