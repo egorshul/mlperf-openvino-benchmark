@@ -2,7 +2,6 @@ import hashlib
 import logging
 import os
 import shutil
-import subprocess
 import tarfile
 import urllib.request
 from pathlib import Path
@@ -97,12 +96,7 @@ DATASET_REGISTRY: Dict[str, Dict] = {
     },
     "whisper-mlperf": {
         "description": "Pre-processed LibriSpeech for MLPerf Whisper benchmark",
-        "r2_url": "https://inference.mlcommons-storage.org/metadata/whisper-dataset.uri",
-        "download_cmd": (
-            'bash <(curl -s https://raw.githubusercontent.com/mlcommons/r2-downloader/'
-            'refs/heads/main/mlc-r2-downloader.sh) -d {output_dir} '
-            'https://inference.mlcommons-storage.org/metadata/whisper-dataset.uri'
-        ),
+        "note": "Uses LibriSpeech dev-clean + dev-other (same data as MLCommons reference)",
     },
     "coco2014": {
         "description": "COCO 2014 captions dataset for SDXL text-to-image generation",
@@ -149,12 +143,6 @@ DATASET_REGISTRY: Dict[str, Dict] = {
     },
     "open-orca": {
         "description": "OpenOrca GPT-4 subset for MLPerf LLM benchmark (Llama 2 70B)",
-        "r2_url": "https://inference.mlcommons-storage.org/metadata/llama-2-70b-open-orca-dataset.uri",
-        "download_cmd": (
-            'bash <(curl -s https://raw.githubusercontent.com/mlcommons/r2-downloader/'
-            'refs/heads/main/mlc-r2-downloader.sh) -d {output_dir} '
-            'https://inference.mlcommons-storage.org/metadata/llama-2-70b-open-orca-dataset.uri'
-        ),
         "huggingface": {
             "dataset_id": "Open-Orca/OpenOrca",
             "filename": "1M-GPT4-Augmented.parquet",
@@ -593,26 +581,13 @@ def _process_librispeech(
 
 
 def download_whisper_mlperf(output_dir: str) -> Dict[str, str]:
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
+    """Download MLPerf Whisper dataset (LibriSpeech dev-clean + dev-other).
 
-    cmd = DATASET_REGISTRY["whisper-mlperf"]["download_cmd"].format(
-        output_dir=output_path / "whisper-dataset"
-    )
-
-    logger.info("Downloading MLPerf Whisper dataset using R2 downloader...")
-    logger.info(f"Command: {cmd}")
-
-    try:
-        subprocess.run(cmd, shell=True, check=True)
-        return {
-            "data_path": str(output_path / "whisper-dataset"),
-            "note": "Downloaded using MLCommons R2 downloader",
-        }
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Failed to download: {e}")
-        logger.info("Falling back to manual LibriSpeech download...")
-        return download_librispeech(output_dir, subset="mlperf")
+    Downloads directly from the official LibriSpeech source, which provides
+    the same data used by the MLCommons reference implementation.
+    """
+    logger.info("Downloading MLPerf Whisper dataset (LibriSpeech dev-clean + dev-other)...")
+    return download_librispeech(output_dir, subset="mlperf")
 
 
 def download_squad(
@@ -1538,40 +1513,6 @@ def download_cnn_dailymail(
     }
 
 
-def _download_open_orca_r2(data_dir: Path) -> bool:
-    """Try downloading pre-processed OpenOrca from MLCommons R2 storage.
-
-    This provides the bit-exact dataset required for closed division compliance.
-    Returns True on success, False on failure (caller should fall back to local processing).
-    """
-    cmd = DATASET_REGISTRY["open-orca"]["download_cmd"].format(output_dir=data_dir)
-
-    logger.info("Downloading pre-processed OpenOrca from MLCommons R2 storage...")
-    logger.info("(This provides the exact dataset for closed division compliance)")
-    logger.info(f"Command: {cmd}")
-
-    try:
-        subprocess.run(cmd, shell=True, check=True)
-        # Verify the expected pickle file was downloaded
-        eval_file = data_dir / "open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
-        if eval_file.exists():
-            logger.info(f"R2 download successful: {eval_file}")
-            return True
-        # R2 might place files in a subdirectory; search for the pickle
-        for pkl in data_dir.rglob("*.sampled_24576.pkl"):
-            if pkl.name == "open_orca_gpt4_tokenized_llama.sampled_24576.pkl":
-                if pkl.parent != data_dir:
-                    import shutil
-                    shutil.move(str(pkl), str(eval_file))
-                    logger.info(f"Moved dataset to {eval_file}")
-                return True
-        logger.warning("R2 download completed but expected pickle not found")
-        return False
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        logger.warning(f"R2 download failed: {e}")
-        return False
-
-
 def _process_open_orca_local(
     data_dir: Path,
     model_name: str = "meta-llama/Llama-2-70b-chat-hf",
@@ -1584,7 +1525,6 @@ def _process_open_orca_local(
 ) -> Dict[str, str]:
     """Process OpenOrca locally following MLCommons processorca.py exactly.
 
-    This is the fallback when R2 download is unavailable.
     Replicates the exact filtering, tokenization, and sampling logic from:
       https://github.com/mlcommons/inference/blob/master/language/llama2-70b/processorca.py
 
@@ -1776,8 +1716,8 @@ def download_open_orca(
 ) -> Dict[str, str]:
     """Download OpenOrca dataset for MLPerf Llama 2 70B benchmark.
 
-    Tries MLCommons R2 storage first (bit-exact for closed division), then
-    falls back to local processing following processorca.py exactly.
+    Downloads from HuggingFace and processes locally following MLCommons
+    processorca.py exactly (same filtering, tokenization, and sampling).
 
     Datacenter: 24,576 samples
     Calibration: 1,000 samples
@@ -1807,21 +1747,6 @@ def download_open_orca(
         }
 
     logger.info("Downloading OpenOrca for MLPerf Llama 2 70B benchmark...")
-
-    # Try R2 download first (closed division compliant, bit-exact)
-    if _download_open_orca_r2(data_dir):
-        eval_file = data_dir / "open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
-        if eval_file.exists():
-            with open(eval_file, "rb") as f:
-                data = pickle.load(f)
-            return {
-                "data_path": str(data_dir),
-                "eval_file": str(eval_file),
-                "num_samples": len(data),
-            }
-
-    # Fallback: process locally following processorca.py
-    logger.info("Falling back to local OpenOrca processing (processorca.py logic)...")
     return _process_open_orca_local(data_dir, model_name=model_name, hf_token=hf_token)
 
 
