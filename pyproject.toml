@@ -19,7 +19,7 @@ dependencies = [
     "psutil>=5.9.0",
     "torch==2.4.1",
     "torchvision==0.19.1",
-    "nncf>=2.19.0",
+    "nncf>=2.17.0,<2.18.0",
 ]
 
 [project.optional-dependencies]
@@ -42,14 +42,14 @@ whisper = [
     "soundfile>=0.12.0",
     "librosa>=0.10.0",
     "jiwer>=3.0.0",
-    "optimum-intel>=1.23.0",
+    "optimum-intel>=1.23.0,<1.27.0",
 ]
 ssd-resnet34 = [
     "pycocotools>=2.0.0",
     "opencv-python>=4.5.0",
 ]
 sdxl = [
-    "optimum-intel>=1.23.0",
+    "optimum-intel>=1.23.0,<1.27.0",
     "diffusers>=0.25.0",
     "transformers>=4.43,<=4.51.3",
     "pytorch-fid>=0.3.0",
@@ -58,7 +58,7 @@ sdxl = [
 ]
 llama = [
     "transformers>=4.43,<=4.51.3",
-    "optimum-intel>=1.23.0",
+    "optimum-intel>=1.23.0,<1.27.0",
     "datasets>=2.14.0",
     "rouge-score>=0.1.2",
     "nltk>=3.8.0",
