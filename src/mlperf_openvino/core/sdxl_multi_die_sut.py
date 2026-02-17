@@ -74,7 +74,11 @@ def _sdxl_die_worker_fn(
         pipe.set_scheduler(scheduler)
 
     pipe.reshape(1, image_size, image_size, guidance_scale)
-    pipe.compile(die_name, die_name, die_name)
+
+    # VAE decoder IR has dynamic shapes which the device may not support,
+    # so we always run it on CPU (it is a single forward pass, ~2-3 % of
+    # total SDXL time — the other 97 % is UNet × num_inference_steps).
+    pipe.compile(die_name, die_name, "CPU")
 
     # Warmup (1 step to trigger compilation)
     gen = _ov_genai.TorchGenerator(0)
@@ -296,7 +300,11 @@ class SDXLMultiDieSUT:
             pipe.set_scheduler(scheduler)
 
         pipe.reshape(1, self.image_size, self.image_size, self.guidance_scale)
-        pipe.compile(die, die, die)
+
+        # VAE decoder on CPU — its IR has dynamic shapes unsupported by
+        # accelerators; single forward pass, negligible perf impact.
+        vae_device = "CPU" if die != "CPU" else die
+        pipe.compile(die, die, vae_device)
 
         self._pipeline = pipe
         print(f"[SDXL] 1 die: {die}", file=sys.stderr)
