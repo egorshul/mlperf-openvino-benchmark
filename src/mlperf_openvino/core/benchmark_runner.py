@@ -397,52 +397,16 @@ class BenchmarkRunner:
 
         model_path = Path(self.config.model.model_path)
 
-        # Multi-die accelerator path (NPU, XPU, etc.) — uses GenAI
-        if self.config.openvino.is_accelerator_device():
-            try:
-                from .sdxl_multi_die_sut import SDXLMultiDieSUT, GENAI_SDXL_AVAILABLE
-                if GENAI_SDXL_AVAILABLE and model_path.is_dir():
-                    logger.info(
-                        f"Using SDXL GenAI multi-die SUT on {self.config.openvino.device}"
-                    )
-                    self.sut = SDXLMultiDieSUT(
-                        config=self.config,
-                        model_path=model_path,
-                        qsl=self.qsl,
-                        scenario=self.config.scenario,
-                    )
-                    return
-            except Exception as e:
-                logger.warning(f"Failed to create SDXLMultiDieSUT: {e}")
+        # GenAI path — works on all devices (CPU, NPU, XPU, ...)
+        from .sdxl_multi_die_sut import SDXLMultiDieSUT
 
-        try:
-            from .sdxl_sut import SDXLOptimumSUT, OPTIMUM_SDXL_AVAILABLE
-
-            if OPTIMUM_SDXL_AVAILABLE and model_path.is_dir():
-                config_file = model_path / "model_index.json"
-                if not config_file.exists():
-                    config_file = model_path / "config.json"
-
-                if config_file.exists():
-                    self.sut = SDXLOptimumSUT(
-                        config=self.config,
-                        model_path=model_path,
-                        qsl=self.qsl,
-                        scenario=self.config.scenario,
-                    )
-                    logger.info("SDXL: Using Optimum-Intel pipeline (OVStableDiffusionXLPipeline)")
-                    return
-        except Exception as e:
-            logger.warning(f"Failed to create SDXLOptimumSUT: {e}")
-
-        from .sdxl_sut import SDXLManualSUT
-        self.sut = SDXLManualSUT(
+        logger.info(f"SDXL: Using GenAI pipeline on {self.config.openvino.device}")
+        self.sut = SDXLMultiDieSUT(
             config=self.config,
             model_path=model_path,
             qsl=self.qsl,
             scenario=self.config.scenario,
         )
-        logger.info("SDXL: Using manual pipeline (SDXLManualSUT)")
 
     def _setup_llama3_1_8b(self) -> None:
         """Set up Llama 3.1 8B benchmark (CNN-DailyMail summarization)."""
