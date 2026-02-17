@@ -1,4 +1,4 @@
-"""Stable Diffusion XL Multi-Die System Under Test."""
+"""Stable Diffusion XL Multi-Die System Under Test (OpenVINO GenAI)."""
 
 import array
 import logging
@@ -6,7 +6,6 @@ import re
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Union
 
@@ -20,11 +19,11 @@ except ImportError:
     lg = None
 
 try:
-    from optimum.intel import OVStableDiffusionXLPipeline
-    OPTIMUM_SDXL_AVAILABLE = True
+    import openvino_genai as ov_genai
+    GENAI_SDXL_AVAILABLE = True
 except ImportError:
-    OPTIMUM_SDXL_AVAILABLE = False
-    OVStableDiffusionXLPipeline = None
+    GENAI_SDXL_AVAILABLE = False
+    ov_genai = None
 
 from .config import BenchmarkConfig, Scenario
 from ..datasets.coco_prompts import COCOPromptsQSL
@@ -59,10 +58,11 @@ def _print_progress(completed: int, total: int, start_time: float) -> None:
 
 
 class SDXLMultiDieSUT:
-    """SDXL text-to-image SUT for multi-die accelerators.
+    """SDXL text-to-image SUT for multi-die accelerators (OpenVINO GenAI).
 
-    Loads one OVStableDiffusionXLPipeline per die. Offline mode distributes
-    samples across dies in parallel; Server mode uses round-robin dispatch.
+    Uses openvino_genai.Text2ImagePipeline instead of optimum-intel.
+    Loads one pipeline per die.  Offline mode distributes samples across
+    dies in parallel; Server mode uses round-robin dispatch.
     """
 
     def __init__(
@@ -78,10 +78,10 @@ class SDXLMultiDieSUT:
     ):
         if not LOADGEN_AVAILABLE:
             raise ImportError("MLPerf LoadGen is not installed")
-        if not OPTIMUM_SDXL_AVAILABLE:
+        if not GENAI_SDXL_AVAILABLE:
             raise ImportError(
-                "Optimum-Intel with SDXL support is required. "
-                "Install with: pip install optimum[openvino] diffusers"
+                "openvino-genai is required for SDXL GenAI inference. "
+                "Install with: pip install openvino-genai"
             )
 
         self.config = config
@@ -93,12 +93,6 @@ class SDXLMultiDieSUT:
         self.image_size = image_size
         self.negative_prompt = negative_prompt
 
-        if scenario == Scenario.SERVER:
-            self.batch_size = 1
-        else:
-            bs = config.openvino.batch_size if hasattr(config, 'openvino') else 0
-            self.batch_size = bs if bs > 1 else 1
-
         self._predictions: Dict[int, np.ndarray] = {}
         self._lock = threading.Lock()
         self._completed = 0
@@ -108,18 +102,28 @@ class SDXLMultiDieSUT:
         self._sut_handle = None
         self._qsl_handle = None
 
+        # Each entry: (die_name, pipeline, die_lock)
         self._pipelines: List[Tuple[str, Any, threading.Lock]] = []
         self._pipeline_index = 0
 
         self._setup_pipelines()
 
-    def _discover_device_dies(self, device: str) -> List[str]:
+    # ------------------------------------------------------------------
+    # Device discovery
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _discover_device_dies(device: str) -> List[str]:
         """Return sorted list of sub-device identifiers (e.g. NPU.0, NPU.1)."""
         import openvino as ov
 
         core = ov.Core()
         pattern = re.compile(rf"^{re.escape(device)}\.(\d+)$")
         return sorted(d for d in core.available_devices if pattern.match(d))
+
+    # ------------------------------------------------------------------
+    # Pipeline setup
+    # ------------------------------------------------------------------
 
     def _setup_pipelines(self) -> None:
         target_device = (
@@ -131,7 +135,6 @@ class SDXLMultiDieSUT:
         if target_device == "CPU":
             device_dies = ["CPU"]
         elif "," in target_device:
-            # Comma-separated die selection (e.g., "NPU.0,NPU.2")
             device_dies = [p.strip() for p in target_device.split(",")]
         elif re.match(r"^.+\.\d+$", target_device):
             device_dies = [target_device]
@@ -147,7 +150,7 @@ class SDXLMultiDieSUT:
                 pipeline = self._load_pipeline_for_device(die)
                 self._pipelines.append((die, pipeline, threading.Lock()))
             except Exception as exc:
-                logger.debug("Failed to load pipeline for %s: %s", die, exc)
+                logger.warning("Failed to load pipeline for %s: %s", die, exc)
 
         if not self._pipelines:
             logger.warning("No accelerator pipelines loaded, falling back to CPU")
@@ -155,177 +158,75 @@ class SDXLMultiDieSUT:
             self._pipelines.append(("CPU", pipeline, threading.Lock()))
 
         die_names = [name for name, _, _ in self._pipelines]
-        bs_info = f", batch={self.batch_size}" if self.batch_size > 1 else ""
         print(
-            f"[SDXL] {len(self._pipelines)} die(s): {', '.join(die_names)}{bs_info}",
+            f"[SDXL] {len(self._pipelines)} die(s): {', '.join(die_names)}",
             file=sys.stderr,
         )
 
     def _load_pipeline_for_device(self, die: str) -> Any:
-        is_cpu = die.upper() == "CPU"
+        """Create and compile a Text2ImagePipeline on a single device."""
+        pipe = ov_genai.Text2ImagePipeline(str(self.model_path))
 
-        ov_config = {"EXECUTION_MODE_HINT": "ACCURACY"}
-
-        if is_cpu and self.batch_size <= 1:
-            pipeline = OVStableDiffusionXLPipeline.from_pretrained(
-                str(self.model_path), compile=True, load_in_8bit=False,
-                ov_config=ov_config,
+        # Set EulerDiscrete scheduler (MLCommons reference requirement)
+        scheduler_cfg = self.model_path / "scheduler" / "scheduler_config.json"
+        if scheduler_cfg.exists():
+            scheduler = ov_genai.Scheduler.from_config(
+                str(scheduler_cfg),
+                ov_genai.Scheduler.Type.EULER_DISCRETE,
             )
-        else:
-            pipeline = OVStableDiffusionXLPipeline.from_pretrained(
-                str(self.model_path), compile=False, load_in_8bit=False,
-                ov_config=ov_config,
-            )
-            try:
-                pipeline.reshape(
-                    batch_size=self.batch_size,
-                    height=self.image_size,
-                    width=self.image_size,
-                    num_images_per_prompt=1,
-                )
-                if not is_cpu:
-                    pipeline.to(die)
-                pipeline.compile()
-            except Exception as exc:
-                if self.batch_size > 1:
-                    logger.warning(
-                        "batch=%d failed on %s (%s), falling back to 1",
-                        self.batch_size, die, exc,
-                    )
-                    pipeline = OVStableDiffusionXLPipeline.from_pretrained(
-                        str(self.model_path), compile=False, load_in_8bit=False,
-                        ov_config=ov_config,
-                    )
-                    pipeline.reshape(
-                        batch_size=1,
-                        height=self.image_size,
-                        width=self.image_size,
-                        num_images_per_prompt=1,
-                    )
-                    if not is_cpu:
-                        pipeline.to(die)
-                    pipeline.compile()
-                    self.batch_size = 1
-                else:
-                    raise
+            pipe.set_scheduler(scheduler)
 
-        pipeline.set_progress_bar_config(disable=True)
+        # Reshape for fixed dimensions → enables static-shape optimizations
+        pipe.reshape(
+            1,                    # num_images_per_prompt
+            self.image_size,      # height
+            self.image_size,      # width
+            self.guidance_scale,  # guidance_scale
+        )
 
-        try:
-            from diffusers import EulerDiscreteScheduler
-            pipeline.scheduler = EulerDiscreteScheduler.from_config(
-                pipeline.scheduler.config,
-                timestep_spacing="leading",
-                steps_offset=1,
-                prediction_type="epsilon",
-                use_karras_sigmas=False,
-            )
-        except Exception:
-            logger.warning("Failed to set EulerDiscreteScheduler on %s", die)
+        # Compile all components on the target die
+        pipe.compile(die, die, die)
 
-        if hasattr(pipeline, "watermark"):
-            pipeline.watermark = None
+        return pipe
 
-        return pipeline
+    # ------------------------------------------------------------------
+    # Inference
+    # ------------------------------------------------------------------
 
     def _process_sample(self, sample_idx: int, pipeline: Any) -> np.ndarray:
         features = self.qsl.get_features(sample_idx)
         prompt = features["prompt"]
-        guidance_scale = features.get("guidance_scale", self.guidance_scale)
-        num_steps = features.get("num_inference_steps", self.num_inference_steps)
-        latents = features.get("latents", None)
 
-        if latents is not None:
-            try:
-                import torch
-                if isinstance(latents, np.ndarray):
-                    latents = torch.from_numpy(latents.copy()).float()
-                if latents.dim() == 3:
-                    latents = latents.unsqueeze(0)
-                if latents.shape[1] != 4:
-                    latents = None
-            except ImportError:
-                latents = None
+        # Fresh TorchGenerator(0) per sample → identical initial noise for
+        # every sample, matching MLCommons latents.pt (seed=0).
+        generator = ov_genai.TorchGenerator(0)
 
-        pipe_kwargs = {
-            "prompt": prompt,
-            "negative_prompt": self.negative_prompt,
-            "guidance_scale": guidance_scale,
-            "num_inference_steps": num_steps,
-            "height": self.image_size,
-            "width": self.image_size,
-            "output_type": "np",
-        }
-        if latents is not None:
-            pipe_kwargs["latents"] = latents
-        else:
-            try:
-                import torch
-                pipe_kwargs["generator"] = torch.Generator().manual_seed(sample_idx)
-            except ImportError:
-                pass
+        image_tensor = pipeline.generate(
+            prompt,
+            negative_prompt=self.negative_prompt,
+            guidance_scale=self.guidance_scale,
+            num_inference_steps=self.num_inference_steps,
+            width=self.image_size,
+            height=self.image_size,
+            generator=generator,
+        )
 
-        image = pipeline(**pipe_kwargs).images[0]
-
-        if isinstance(image, np.ndarray):
+        # GenAI returns ov.Tensor [N, H, W, 3] uint8 — take first image
+        image = np.array(image_tensor.data[0], copy=False)
+        if image.dtype != np.uint8:
             if image.max() <= 1.0:
                 image = (image * 255).round().astype(np.uint8)
-            elif image.dtype != np.uint8:
+            else:
                 image = image.astype(np.uint8)
-        else:
-            image = np.array(image)
 
         return image
 
-    def _process_batch(self, sample_indices: List[int], pipeline: Any) -> List[np.ndarray]:
-        import torch
-
-        prompts = []
-        latents_list = []
-
-        for idx in sample_indices:
-            features = self.qsl.get_features(idx)
-            prompts.append(features["prompt"])
-            latent = features.get("latents", None)
-            if latent is not None:
-                if isinstance(latent, np.ndarray):
-                    t = torch.from_numpy(latent.copy()).float()
-                else:
-                    t = torch.tensor(latent).float()
-                if t.dim() == 3:
-                    t = t.unsqueeze(0)
-                latents_list.append(t)
-
-        pipe_kwargs = {
-            "prompt": prompts,
-            "negative_prompt": [self.negative_prompt] * len(prompts),
-            "guidance_scale": self.guidance_scale,
-            "num_inference_steps": self.num_inference_steps,
-            "height": self.image_size,
-            "width": self.image_size,
-            "output_type": "np",
-        }
-        if latents_list and len(latents_list) == len(prompts):
-            pipe_kwargs["latents"] = torch.cat(latents_list, dim=0)
-
-        result = pipeline(**pipe_kwargs)
-
-        images = []
-        for img in result.images:
-            if isinstance(img, np.ndarray):
-                if img.max() <= 1.0:
-                    img = (img * 255).round().astype(np.uint8)
-                elif img.dtype != np.uint8:
-                    img = img.astype(np.uint8)
-            else:
-                img = np.array(img)
-            images.append(img)
-
-        return images
+    # ------------------------------------------------------------------
+    # Query dispatch
+    # ------------------------------------------------------------------
 
     @property
     def _sample_count(self) -> int:
-        # Exposes completed count under the name expected by benchmark_runner.
         return self._completed
 
     def issue_queries(self, query_samples: List[Any]) -> None:
@@ -356,30 +257,17 @@ class SDXLMultiDieSUT:
 
         def _die_worker(die_idx: int, batch: List[Tuple[Any, int]]):
             _name, pipeline, die_lock = self._pipelines[die_idx]
-            bs = self.batch_size
-            for i in range(0, len(batch), bs):
-                chunk = batch[i:i + bs]
-                indices = [idx for _, idx in chunk]
-
-                if len(indices) < bs:
-                    indices_padded = indices + [indices[-1]] * (bs - len(indices))
-                else:
-                    indices_padded = indices
-
+            for sample, sample_idx in batch:
                 with die_lock:
-                    if bs > 1:
-                        images = self._process_batch(indices_padded, pipeline)
-                        images = images[:len(chunk)]
-                    else:
-                        images = [self._process_sample(indices[0], pipeline)]
+                    image = self._process_sample(sample_idx, pipeline)
 
-                for (sample, sample_idx), image in zip(chunk, images):
-                    with self._lock:
-                        self._predictions[sample_idx] = image
-                        self._completed += 1
-                    with results_lock:
-                        all_results.append((sample, sample_idx, image))
+                with self._lock:
+                    self._predictions[sample_idx] = image
+                    self._completed += 1
+                with results_lock:
+                    all_results.append((sample, sample_idx, image))
 
+        from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=num_dies) as pool:
             futures = [
                 pool.submit(_die_worker, idx, batch)
@@ -408,26 +296,12 @@ class SDXLMultiDieSUT:
         all_results: List[Tuple[Any, int, np.ndarray]] = []
 
         _, pipeline, _ = self._pipelines[0]
-        bs = self.batch_size
-        for i in range(0, total, bs):
-            chunk = query_samples[i:i + bs]
-            indices = [s.index for s in chunk]
+        for sample in query_samples:
+            image = self._process_sample(sample.index, pipeline)
 
-            if len(indices) < bs:
-                indices_padded = indices + [indices[-1]] * (bs - len(indices))
-            else:
-                indices_padded = indices
-
-            if bs > 1:
-                images = self._process_batch(indices_padded, pipeline)
-                images = images[:len(chunk)]
-            else:
-                images = [self._process_sample(indices[0], pipeline)]
-
-            for sample, image in zip(chunk, images):
-                self._predictions[sample.index] = image
-                self._completed += 1
-                all_results.append((sample, sample.index, image))
+            self._predictions[sample.index] = image
+            self._completed += 1
+            all_results.append((sample, sample.index, image))
             _print_progress(self._completed, total, self._start_time)
 
         _print_progress(total, total, self._start_time)
@@ -451,12 +325,15 @@ class SDXLMultiDieSUT:
             bi = response_array.buffer_info()
             lg.QuerySamplesComplete([lg.QuerySampleResponse(sample.id, bi[0], bi[1])])
 
+    # ------------------------------------------------------------------
+    # LoadGen helpers
+    # ------------------------------------------------------------------
+
     @staticmethod
     def _send_loadgen_responses(
         results: List[Tuple[Any, int, np.ndarray]],
     ) -> None:
         responses = []
-        # array.array objects must stay alive until QuerySamplesComplete returns.
         arrays = []
         for sample, _idx, image in sorted(results, key=lambda r: r[1]):
             response_data = np.array(image.shape, dtype=np.int64)

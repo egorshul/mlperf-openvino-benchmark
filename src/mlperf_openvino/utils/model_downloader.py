@@ -621,6 +621,7 @@ def _export_sdxl_to_openvino(output_dir: str, model_id: str) -> Dict[str, str]:
         vae_path = ov_model_path / "vae_decoder" / "openvino_model.xml"
 
         if unet_path.exists() and vae_path.exists():
+            _ensure_sdxl_tokenizer_files(ov_model_path, model_id)
             logger.info(f"OpenVINO model already exists at {ov_model_path}")
             return {
                 "model_path": str(ov_model_path),
@@ -646,6 +647,8 @@ def _export_sdxl_to_openvino(output_dir: str, model_id: str) -> Dict[str, str]:
 
     pipeline.save_pretrained(str(ov_model_path))
 
+    _ensure_sdxl_tokenizer_files(ov_model_path, model_id)
+
     logger.info(f"OpenVINO model saved to {ov_model_path}")
 
     return {
@@ -655,6 +658,65 @@ def _export_sdxl_to_openvino(output_dir: str, model_id: str) -> Dict[str, str]:
         "text_encoder_path": str(ov_model_path / "text_encoder" / "openvino_model.xml"),
         "text_encoder_2_path": str(ov_model_path / "text_encoder_2" / "openvino_model.xml"),
     }
+
+
+def _ensure_sdxl_tokenizer_files(ov_model_path: Path, model_id: str) -> None:
+    """Ensure tokenizer files exist for GenAI Text2ImagePipeline compatibility.
+
+    GenAI reads CLIP tokenizers from HuggingFace-format files (vocab.json,
+    merges.txt, etc.) in tokenizer/ and tokenizer_2/ directories.
+    If missing, re-save them from the HuggingFace model.
+    """
+    tokenizer_dir = ov_model_path / "tokenizer"
+    tokenizer_2_dir = ov_model_path / "tokenizer_2"
+    scheduler_cfg = ov_model_path / "scheduler" / "scheduler_config.json"
+
+    # Check minimum required files
+    tok1_ok = (tokenizer_dir / "vocab.json").exists()
+    tok2_ok = (tokenizer_2_dir / "vocab.json").exists()
+    sched_ok = scheduler_cfg.exists()
+
+    if tok1_ok and tok2_ok and sched_ok:
+        return
+
+    logger.info("Saving missing tokenizer/scheduler files for GenAI compatibility...")
+
+    try:
+        from transformers import CLIPTokenizer
+    except ImportError:
+        logger.warning("transformers not installed, cannot save tokenizer files")
+        return
+
+    if not tok1_ok:
+        try:
+            tokenizer = CLIPTokenizer.from_pretrained(model_id, subfolder="tokenizer")
+            tokenizer_dir.mkdir(parents=True, exist_ok=True)
+            tokenizer.save_pretrained(str(tokenizer_dir))
+            logger.info(f"Saved tokenizer to {tokenizer_dir}")
+        except Exception as e:
+            logger.warning(f"Failed to save tokenizer: {e}")
+
+    if not tok2_ok:
+        try:
+            tokenizer_2 = CLIPTokenizer.from_pretrained(model_id, subfolder="tokenizer_2")
+            tokenizer_2_dir.mkdir(parents=True, exist_ok=True)
+            tokenizer_2.save_pretrained(str(tokenizer_2_dir))
+            logger.info(f"Saved tokenizer_2 to {tokenizer_2_dir}")
+        except Exception as e:
+            logger.warning(f"Failed to save tokenizer_2: {e}")
+
+    if not sched_ok:
+        try:
+            from diffusers import EulerDiscreteScheduler
+            scheduler = EulerDiscreteScheduler.from_pretrained(
+                model_id, subfolder="scheduler"
+            )
+            scheduler_dir = ov_model_path / "scheduler"
+            scheduler_dir.mkdir(parents=True, exist_ok=True)
+            scheduler.save_pretrained(str(scheduler_dir))
+            logger.info(f"Saved scheduler config to {scheduler_dir}")
+        except Exception as e:
+            logger.warning(f"Failed to save scheduler config: {e}")
 
 
 def download_retinanet_model(

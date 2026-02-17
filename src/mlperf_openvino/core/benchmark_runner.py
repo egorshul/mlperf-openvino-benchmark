@@ -397,13 +397,13 @@ class BenchmarkRunner:
 
         model_path = Path(self.config.model.model_path)
 
-        # Multi-die accelerator path (NPU, XPU, etc.)
+        # Multi-die accelerator path (NPU, XPU, etc.) — uses GenAI
         if self.config.openvino.is_accelerator_device():
             try:
-                from .sdxl_multi_die_sut import SDXLMultiDieSUT, OPTIMUM_SDXL_AVAILABLE
-                if OPTIMUM_SDXL_AVAILABLE and model_path.is_dir():
+                from .sdxl_multi_die_sut import SDXLMultiDieSUT, GENAI_SDXL_AVAILABLE
+                if GENAI_SDXL_AVAILABLE and model_path.is_dir():
                     logger.info(
-                        f"Using SDXL multi-die SUT on {self.config.openvino.device}"
+                        f"Using SDXL GenAI multi-die SUT on {self.config.openvino.device}"
                     )
                     self.sut = SDXLMultiDieSUT(
                         config=self.config,
