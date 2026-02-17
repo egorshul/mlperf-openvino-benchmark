@@ -1,10 +1,16 @@
-"""Stable Diffusion XL Multi-Die System Under Test (OpenVINO GenAI)."""
+"""Stable Diffusion XL System Under Test (OpenVINO GenAI).
+
+Each die runs in a separate process.  In Offline mode all workers share
+a single input queue so a faster die naturally picks up more work
+(work-stealing).  Server mode uses a single in-process pipeline.
+"""
 
 import array
 import logging
+import multiprocessing
+import queue
 import re
 import sys
-import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Union
@@ -38,6 +44,84 @@ DEFAULT_NEGATIVE_PROMPT = (
 )
 
 
+# ------------------------------------------------------------------
+# Worker process entry point
+# ------------------------------------------------------------------
+
+def _sdxl_die_worker_fn(
+    die_name: str,
+    model_path: str,
+    image_size: int,
+    guidance_scale: float,
+    num_inference_steps: int,
+    negative_prompt: str,
+    input_queue,
+    output_queue,
+    ready_event,
+) -> None:
+    """Worker: load Text2ImagePipeline on *die_name*, then process samples."""
+    import openvino_genai as _ov_genai
+    from pathlib import Path as _Path
+
+    pipe = _ov_genai.Text2ImagePipeline(model_path)
+
+    scheduler_cfg = _Path(model_path) / "scheduler" / "scheduler_config.json"
+    if scheduler_cfg.exists():
+        scheduler = _ov_genai.Scheduler.from_config(
+            str(scheduler_cfg),
+            _ov_genai.Scheduler.Type.EULER_DISCRETE,
+        )
+        pipe.set_scheduler(scheduler)
+
+    pipe.reshape(1, image_size, image_size, guidance_scale)
+    pipe.compile(die_name, die_name, die_name)
+
+    # Warmup (1 step to trigger compilation)
+    gen = _ov_genai.TorchGenerator(0)
+    pipe.generate(
+        "warmup",
+        negative_prompt=negative_prompt,
+        guidance_scale=guidance_scale,
+        num_inference_steps=1,
+        width=image_size,
+        height=image_size,
+        generator=gen,
+    )
+
+    ready_event.set()
+
+    while True:
+        item = input_queue.get()
+        if item is None:
+            break
+
+        item_idx, sample_id, prompt = item
+
+        generator = _ov_genai.TorchGenerator(0)
+        image_tensor = pipe.generate(
+            prompt,
+            negative_prompt=negative_prompt,
+            guidance_scale=guidance_scale,
+            num_inference_steps=num_inference_steps,
+            width=image_size,
+            height=image_size,
+            generator=generator,
+        )
+
+        image = np.array(image_tensor.data[0], copy=False)
+        if image.dtype != np.uint8:
+            if image.max() <= 1.0:
+                image = (image * 255).round().astype(np.uint8)
+            else:
+                image = image.astype(np.uint8)
+
+        output_queue.put((item_idx, sample_id, image.tobytes(), image.shape))
+
+
+# ------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------
+
 def _fmt_time(seconds: float) -> str:
     if seconds < 60:
         return f"{seconds:.0f}s"
@@ -57,12 +141,16 @@ def _print_progress(completed: int, total: int, start_time: float) -> None:
         print(line, end="", file=sys.stderr, flush=True)
 
 
-class SDXLMultiDieSUT:
-    """SDXL text-to-image SUT for multi-die accelerators (OpenVINO GenAI).
+# ------------------------------------------------------------------
+# SUT
+# ------------------------------------------------------------------
 
-    Uses openvino_genai.Text2ImagePipeline instead of optimum-intel.
-    Loads one pipeline per die.  Offline mode distributes samples across
-    dies in parallel; Server mode uses round-robin dispatch.
+class SDXLMultiDieSUT:
+    """SDXL text-to-image SUT (OpenVINO GenAI).
+
+    Offline + multiple dies  → one worker *process* per die, shared queue.
+    Offline + single die     → in-process, sequential.
+    Server (any die count)   → in-process, sequential.
     """
 
     def __init__(
@@ -94,7 +182,6 @@ class SDXLMultiDieSUT:
         self.negative_prompt = negative_prompt
 
         self._predictions: Dict[int, np.ndarray] = {}
-        self._lock = threading.Lock()
         self._completed = 0
         self._query_count = 0
         self._start_time = 0.0
@@ -102,11 +189,15 @@ class SDXLMultiDieSUT:
         self._sut_handle = None
         self._qsl_handle = None
 
-        # Each entry: (die_name, pipeline, die_lock)
-        self._pipelines: List[Tuple[str, Any, threading.Lock]] = []
-        self._pipeline_index = 0
+        # Multi-process state (Offline, >1 die)
+        self._workers: List[Tuple[str, multiprocessing.Process]] = []
+        self._input_queue = None
+        self._output_queue = None
 
-        self._setup_pipelines()
+        # In-process state (single die / Server)
+        self._pipeline = None
+
+        self._setup()
 
     # ------------------------------------------------------------------
     # Device discovery
@@ -122,10 +213,10 @@ class SDXLMultiDieSUT:
         return sorted(d for d in core.available_devices if pattern.match(d))
 
     # ------------------------------------------------------------------
-    # Pipeline setup
+    # Setup
     # ------------------------------------------------------------------
 
-    def _setup_pipelines(self) -> None:
+    def _setup(self) -> None:
         target_device = (
             self.config.openvino.device
             if hasattr(self.config, "openvino")
@@ -144,30 +235,58 @@ class SDXLMultiDieSUT:
                 logger.warning("No %s dies found, using single device", target_device)
                 device_dies = [target_device]
 
-        for die in device_dies:
-            try:
-                print(f"[SDXL] Compiling on {die} ...", file=sys.stderr, flush=True)
-                pipeline = self._load_pipeline_for_device(die)
-                self._pipelines.append((die, pipeline, threading.Lock()))
-            except Exception as exc:
-                logger.warning("Failed to load pipeline for %s: %s", die, exc)
+        if self.scenario == Scenario.OFFLINE and len(device_dies) > 1:
+            self._setup_workers(device_dies)
+        else:
+            self._setup_pipeline_inprocess(device_dies[0])
 
-        if not self._pipelines:
-            logger.warning("No accelerator pipelines loaded, falling back to CPU")
-            pipeline = self._load_pipeline_for_device("CPU")
-            self._pipelines.append(("CPU", pipeline, threading.Lock()))
+    def _setup_workers(self, device_dies: List[str]) -> None:
+        """Spawn one worker process per die with a shared input queue."""
+        ctx = multiprocessing.get_context("spawn")
+        self._input_queue = ctx.Queue()
+        self._output_queue = ctx.Queue()
 
-        die_names = [name for name, _, _ in self._pipelines]
-        print(
-            f"[SDXL] {len(self._pipelines)} die(s): {', '.join(die_names)}",
-            file=sys.stderr,
-        )
+        logger.info(f"[SDXL] Spawning {len(device_dies)} worker process(es)...")
 
-    def _load_pipeline_for_device(self, die: str) -> Any:
-        """Create and compile a Text2ImagePipeline on a single device."""
+        pending: List[Tuple[str, multiprocessing.Process, Any]] = []
+
+        for die_name in device_dies:
+            ready = ctx.Event()
+            p = ctx.Process(
+                target=_sdxl_die_worker_fn,
+                args=(
+                    die_name,
+                    str(self.model_path),
+                    self.image_size,
+                    self.guidance_scale,
+                    self.num_inference_steps,
+                    self.negative_prompt,
+                    self._input_queue,
+                    self._output_queue,
+                    ready,
+                ),
+                daemon=True,
+            )
+            p.start()
+            pending.append((die_name, p, ready))
+            logger.info(f"  {die_name}: spawned (pid={p.pid})")
+
+        for die_name, p, ready in pending:
+            if not ready.wait(timeout=600):
+                raise RuntimeError(
+                    f"Worker for {die_name} did not become ready in 600 s"
+                )
+            self._workers.append((die_name, p))
+            logger.info(f"  {die_name}: compiled & warmed up")
+
+        logger.info(f"[SDXL] {len(self._workers)} worker(s) ready")
+
+    def _setup_pipeline_inprocess(self, die: str) -> None:
+        """Create and compile a single Text2ImagePipeline in the current process."""
+        print(f"[SDXL] Compiling on {die} ...", file=sys.stderr, flush=True)
+
         pipe = ov_genai.Text2ImagePipeline(str(self.model_path))
 
-        # Set EulerDiscrete scheduler (MLCommons reference requirement)
         scheduler_cfg = self.model_path / "scheduler" / "scheduler_config.json"
         if scheduler_cfg.exists():
             scheduler = ov_genai.Scheduler.from_config(
@@ -176,32 +295,23 @@ class SDXLMultiDieSUT:
             )
             pipe.set_scheduler(scheduler)
 
-        # Reshape for fixed dimensions → enables static-shape optimizations
-        pipe.reshape(
-            1,                    # num_images_per_prompt
-            self.image_size,      # height
-            self.image_size,      # width
-            self.guidance_scale,  # guidance_scale
-        )
-
-        # Compile all components on the target die
+        pipe.reshape(1, self.image_size, self.image_size, self.guidance_scale)
         pipe.compile(die, die, die)
 
-        return pipe
+        self._pipeline = pipe
+        print(f"[SDXL] 1 die: {die}", file=sys.stderr)
 
     # ------------------------------------------------------------------
     # Inference
     # ------------------------------------------------------------------
 
-    def _process_sample(self, sample_idx: int, pipeline: Any) -> np.ndarray:
+    def _process_sample(self, sample_idx: int) -> np.ndarray:
+        """Generate one image with the in-process pipeline."""
         features = self.qsl.get_features(sample_idx)
         prompt = features["prompt"]
 
-        # Fresh TorchGenerator(0) per sample → identical initial noise for
-        # every sample, matching MLCommons latents.pt (seed=0).
         generator = ov_genai.TorchGenerator(0)
-
-        image_tensor = pipeline.generate(
+        image_tensor = self._pipeline.generate(
             prompt,
             negative_prompt=self.negative_prompt,
             guidance_scale=self.guidance_scale,
@@ -211,7 +321,6 @@ class SDXLMultiDieSUT:
             generator=generator,
         )
 
-        # GenAI returns ov.Tensor [N, H, W, 3] uint8 — take first image
         image = np.array(image_tensor.data[0], copy=False)
         if image.dtype != np.uint8:
             if image.max() <= 1.0:
@@ -225,10 +334,6 @@ class SDXLMultiDieSUT:
     # Query dispatch
     # ------------------------------------------------------------------
 
-    @property
-    def _sample_count(self) -> int:
-        return self._completed
-
     def issue_queries(self, query_samples: List[Any]) -> None:
         self._query_count += len(query_samples)
         if self.scenario == Scenario.OFFLINE:
@@ -238,87 +343,98 @@ class SDXLMultiDieSUT:
 
     def _issue_queries_offline(self, query_samples: List[Any]) -> None:
         total = len(query_samples)
-        num_dies = len(self._pipelines)
         self._start_time = time.time()
         self._completed = 0
 
-        print(f"[Offline] {total} samples, {num_dies} die(s)", file=sys.stderr)
+        if self._workers:
+            print(
+                f"[Offline] {total} samples, {len(self._workers)} worker process(es)",
+                file=sys.stderr,
+            )
+            self._issue_offline_multiprocess(query_samples)
+        else:
+            print(f"[Offline] {total} samples, 1 die (in-process)", file=sys.stderr)
+            self._issue_offline_sequential(query_samples)
 
-        if num_dies <= 1:
-            self._issue_queries_offline_sequential(query_samples)
-            return
+    def _issue_offline_multiprocess(self, query_samples: List[Any]) -> None:
+        total = len(query_samples)
 
-        die_batches: List[List[Tuple[Any, int]]] = [[] for _ in range(num_dies)]
+        # Enqueue all samples into the shared queue
         for i, sample in enumerate(query_samples):
-            die_batches[i % num_dies].append((sample, sample.index))
+            prompt = self.qsl.get_features(sample.index)["prompt"]
+            self._input_queue.put((i, sample.id, prompt))
 
-        all_results: List[Tuple[Any, int, np.ndarray]] = []
-        results_lock = threading.Lock()
+        # Collect results
+        collected: Dict[int, Tuple] = {}
 
-        def _die_worker(die_idx: int, batch: List[Tuple[Any, int]]):
-            _name, pipeline, die_lock = self._pipelines[die_idx]
-            for sample, sample_idx in batch:
-                with die_lock:
-                    image = self._process_sample(sample_idx, pipeline)
+        while len(collected) < total:
+            # Check worker health
+            for die_name, p in self._workers:
+                if not p.is_alive():
+                    raise RuntimeError(
+                        f"Worker {die_name} died (exit code {p.exitcode})"
+                    )
 
-                with self._lock:
-                    self._predictions[sample_idx] = image
-                    self._completed += 1
-                with results_lock:
-                    all_results.append((sample, sample_idx, image))
+            # Drain output queue
+            try:
+                while True:
+                    result = self._output_queue.get_nowait()
+                    collected[result[0]] = result
+            except queue.Empty:
+                pass
 
-        from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=num_dies) as pool:
-            futures = [
-                pool.submit(_die_worker, idx, batch)
-                for idx, batch in enumerate(die_batches)
-                if batch
-            ]
-            while True:
-                done = sum(1 for f in futures if f.done())
-                with self._lock:
-                    completed = self._completed
-                _print_progress(completed, total, self._start_time)
-                if done == len(futures):
-                    break
+            self._completed = len(collected)
+            _print_progress(self._completed, total, self._start_time)
+
+            if len(collected) < total:
                 time.sleep(0.5)
 
-            for f in futures:
-                f.result()
-
         _print_progress(total, total, self._start_time)
-        self._send_loadgen_responses(all_results)
 
-    def _issue_queries_offline_sequential(
-        self, query_samples: List[Any],
-    ) -> None:
+        # Build LoadGen responses in original order
+        responses = []
+        arrays = []
+        for i, sample in enumerate(query_samples):
+            _, _, image_bytes, image_shape = collected[i]
+            image = np.frombuffer(image_bytes, dtype=np.uint8).reshape(image_shape)
+
+            self._predictions[sample.index] = image
+
+            response_data = np.array(image_shape, dtype=np.int64)
+            arr = array.array("B", response_data.tobytes())
+            arrays.append(arr)
+            bi = arr.buffer_info()
+            responses.append(lg.QuerySampleResponse(sample.id, bi[0], bi[1]))
+
+        lg.QuerySamplesComplete(responses)
+
+    def _issue_offline_sequential(self, query_samples: List[Any]) -> None:
         total = len(query_samples)
-        all_results: List[Tuple[Any, int, np.ndarray]] = []
+        responses = []
+        arrays = []
 
-        _, pipeline, _ = self._pipelines[0]
         for sample in query_samples:
-            image = self._process_sample(sample.index, pipeline)
+            image = self._process_sample(sample.index)
 
             self._predictions[sample.index] = image
             self._completed += 1
-            all_results.append((sample, sample.index, image))
+
+            response_data = np.array(image.shape, dtype=np.int64)
+            arr = array.array("B", response_data.tobytes())
+            arrays.append(arr)
+            bi = arr.buffer_info()
+            responses.append(lg.QuerySampleResponse(sample.id, bi[0], bi[1]))
             _print_progress(self._completed, total, self._start_time)
 
         _print_progress(total, total, self._start_time)
-        self._send_loadgen_responses(all_results)
+        lg.QuerySamplesComplete(responses)
 
     def _issue_queries_server(self, query_samples: List[Any]) -> None:
         for sample in query_samples:
-            sample_idx = sample.index
-            _name, pipeline, die_lock = self._pipelines[self._pipeline_index]
-            self._pipeline_index = (self._pipeline_index + 1) % len(self._pipelines)
+            image = self._process_sample(sample.index)
 
-            with die_lock:
-                image = self._process_sample(sample_idx, pipeline)
-
-            with self._lock:
-                self._predictions[sample_idx] = image
-                self._completed += 1
+            self._predictions[sample.index] = image
+            self._completed += 1
 
             response_data = np.array(image.shape, dtype=np.int64)
             response_array = array.array("B", response_data.tobytes())
@@ -326,22 +442,8 @@ class SDXLMultiDieSUT:
             lg.QuerySamplesComplete([lg.QuerySampleResponse(sample.id, bi[0], bi[1])])
 
     # ------------------------------------------------------------------
-    # LoadGen helpers
+    # LoadGen interface
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _send_loadgen_responses(
-        results: List[Tuple[Any, int, np.ndarray]],
-    ) -> None:
-        responses = []
-        arrays = []
-        for sample, _idx, image in sorted(results, key=lambda r: r[1]):
-            response_data = np.array(image.shape, dtype=np.int64)
-            arr = array.array("B", response_data.tobytes())
-            arrays.append(arr)
-            bi = arr.buffer_info()
-            responses.append(lg.QuerySampleResponse(sample.id, bi[0], bi[1]))
-        lg.QuerySamplesComplete(responses)
 
     def flush_queries(self) -> None:
         pass
@@ -379,4 +481,16 @@ class SDXLMultiDieSUT:
         self._predictions.clear()
         self._completed = 0
         self._query_count = 0
-        self._pipeline_index = 0
+
+    def shutdown(self) -> None:
+        """Send poison pills and join worker processes."""
+        for _ in self._workers:
+            try:
+                self._input_queue.put_nowait(None)
+            except Exception:
+                pass
+        for _, p in self._workers:
+            p.join(timeout=15)
+            if p.is_alive():
+                p.terminate()
+        self._workers.clear()
