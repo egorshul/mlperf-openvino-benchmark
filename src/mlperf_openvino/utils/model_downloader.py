@@ -347,10 +347,9 @@ def _convert_tokenizer_to_openvino(
 ) -> Dict[str, str]:
     """Convert HuggingFace tokenizer to OpenVINO tokenizer/detokenizer models.
 
-    This bypasses optimum-intel's ``maybe_convert_tokenizers()`` which fails
-    when the externally-provided openvino-tokenizers reports a non-PEP-440
-    version string (e.g. ``-1-85be884``).  Instead we call
-    ``openvino_tokenizers.convert_tokenizer`` directly.
+    Calls ``openvino_tokenizers.convert_tokenizer`` directly to produce
+    openvino_tokenizer.xml and openvino_detokenizer.xml in the model directory.
+    Skips conversion if both files already exist.
 
     Args:
         ov_model_path: Directory containing the exported OpenVINO model.
@@ -1032,6 +1031,18 @@ def _download_llama_from_hf(
     return {"model_path": str(model_path)}
 
 
+def _llama_export_result(ov_model_path: Path) -> Dict[str, str]:
+    """Build result dict for an exported Llama model directory."""
+    result = {"model_path": str(ov_model_path)}
+    tokenizer_xml = ov_model_path / "openvino_tokenizer.xml"
+    detokenizer_xml = ov_model_path / "openvino_detokenizer.xml"
+    if tokenizer_xml.exists():
+        result["tokenizer_path"] = str(tokenizer_xml)
+    if detokenizer_xml.exists():
+        result["detokenizer_path"] = str(detokenizer_xml)
+    return result
+
+
 def _export_llama_to_openvino(
     output_dir: str,
     model_id: str,
@@ -1041,16 +1052,12 @@ def _export_llama_to_openvino(
     """Export Llama model to OpenVINO IR using optimum-intel.
 
     Uses OVModelForCausalLM.from_pretrained(export=True) for conversion,
-    with NNCF weight compression for INT8/INT4 formats.
+    with NNCF weight compression for INT8/INT4 formats.  Tokenizer
+    conversion to OpenVINO IR is handled by optimum-intel's
+    save_pretrained() automatically.
     """
-    try:
-        from optimum.intel.openvino import OVModelForCausalLM
-        from transformers import AutoTokenizer
-    except ImportError:
-        raise ImportError(
-            "optimum-intel is required for Llama export. "
-            "Install with: pip install optimum[openvino] nncf"
-        )
+    from optimum.intel.openvino import OVModelForCausalLM
+    from transformers import AutoTokenizer
 
     _configure_hf_download()
 
@@ -1063,59 +1070,38 @@ def _export_llama_to_openvino(
         xml_files = list(ov_model_path.glob("*.xml"))
         if config_file.exists() and xml_files:
             logger.info(f"OpenVINO model already exists at {ov_model_path}")
-            result = {"model_path": str(ov_model_path)}
-            tok_result = _convert_tokenizer_to_openvino(
-                ov_model_path, model_id, token=token,
-            )
-            result.update(tok_result)
-            return result
+            return _llama_export_result(ov_model_path)
 
     logger.info(f"Exporting {model_id} to OpenVINO IR (weight_format={weight_format})...")
     logger.info("This may take a long time for large models...")
 
-    ov_export_kwargs: Dict[str, Any] = {
+    export_kwargs: Dict[str, Any] = {
         "export": True,
         "compile": False,
         "token": token,
     }
 
     if weight_format in ("int8", "int4"):
-        try:
-            from optimum.intel import OVWeightQuantizationConfig
+        from optimum.intel import OVWeightQuantizationConfig
 
-            ov_export_kwargs["quantization_config"] = OVWeightQuantizationConfig(
-                bits=8 if weight_format == "int8" else 4,
-                sym=True if weight_format == "int4" else False,
-            )
-            logger.info(f"Using NNCF weight-only compression: {weight_format}")
-        except ImportError:
-            logger.warning(
-                "NNCF not available for weight compression. "
-                "Exporting with FP16 weights instead. "
-                "Install with: pip install nncf"
-            )
-            weight_format = "fp16"
+        export_kwargs["quantization_config"] = OVWeightQuantizationConfig(
+            bits=8 if weight_format == "int8" else 4,
+            sym=weight_format == "int4",
+        )
+        logger.info(f"Using NNCF weight compression: {weight_format}")
 
     def do_export():
-        return OVModelForCausalLM.from_pretrained(
-            model_id,
-            **ov_export_kwargs,
-        )
+        return OVModelForCausalLM.from_pretrained(model_id, **export_kwargs)
 
     model = _download_with_retry(do_export, max_retries=3)
     model.save_pretrained(str(ov_model_path))
 
+    # Ensure HF tokenizer files are present (needed by openvino-genai LLMPipeline)
     tokenizer = AutoTokenizer.from_pretrained(model_id, token=token)
     tokenizer.save_pretrained(str(ov_model_path))
 
     logger.info(f"OpenVINO model saved to {ov_model_path}")
-
-    result = {"model_path": str(ov_model_path)}
-    tok_result = _convert_tokenizer_to_openvino(
-        ov_model_path, model_id, token=token,
-    )
-    result.update(tok_result)
-    return result
+    return _llama_export_result(ov_model_path)
 
 
 def download_llama2_70b_model(
