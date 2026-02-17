@@ -684,7 +684,7 @@ def _ensure_sdxl_tokenizer_files(ov_model_path: Path, model_id: str) -> None:
         return
 
     try:
-        from transformers import AutoTokenizer, CLIPTokenizer
+        from transformers import CLIPTokenizer
     except ImportError:
         logger.warning("transformers not installed, cannot save tokenizer files")
         return
@@ -744,20 +744,23 @@ def _ensure_sdxl_tokenizer_files(ov_model_path: Path, model_id: str) -> None:
         if already_ok:
             continue
         try:
-            # convert_tokenizer requires a fast tokenizer;
-            # CLIPTokenizer is slow, so load via AutoTokenizer(use_fast=True)
-            hf_tok = AutoTokenizer.from_pretrained(
-                model_id, subfolder=subfolder, use_fast=True,
+            # convert_tokenizer requires a fast tokenizer.
+            # CLIP models only ship a slow CLIPTokenizer (no tokenizer.json),
+            # so AutoTokenizer(use_fast=True) still returns the slow version.
+            # Convert slow -> fast explicitly via convert_slow_tokenizer.
+            from transformers import PreTrainedTokenizerFast
+            from transformers.convert_slow_tokenizer import convert_slow_tokenizer
+
+            slow_tok = CLIPTokenizer.from_pretrained(
+                model_id, subfolder=subfolder,
             )
-            if not getattr(hf_tok, "is_fast", False):
-                logger.warning(
-                    f"Fast tokenizer not available for {subfolder}, "
-                    "skipping OpenVINO conversion"
-                )
-                continue
+            fast_backend = convert_slow_tokenizer(slow_tok)
+            fast_tok = PreTrainedTokenizerFast(
+                tokenizer_object=fast_backend,
+            )
 
             ov_tokenizer, ov_detokenizer = convert_tokenizer(
-                hf_tok, with_detokenizer=True,
+                fast_tok, with_detokenizer=True,
             )
             out_dir.mkdir(parents=True, exist_ok=True)
             ov.save_model(ov_tokenizer, str(out_dir / "openvino_tokenizer.xml"))
