@@ -727,93 +727,142 @@ def _ensure_sdxl_tokenizer_files(ov_model_path: Path, model_id: str) -> None:
     if tok1_ov_ok and tok2_ov_ok:
         return
 
-    try:
-        import openvino as ov
-        from openvino_tokenizers import convert_tokenizer
-    except ImportError:
-        logger.warning(
-            "openvino-tokenizers not installed, skipping OpenVINO tokenizer "
-            "conversion. Install with: pip install openvino-tokenizers"
-        )
-        return
-
     for subfolder, out_dir, already_ok in [
         ("tokenizer", tokenizer_dir, tok1_ov_ok),
         ("tokenizer_2", tokenizer_2_dir, tok2_ov_ok),
     ]:
         if already_ok:
             continue
+
+        # Approach 1: convert locally via openvino_tokenizers
+        if _try_convert_clip_tokenizer_to_ov(model_id, subfolder, out_dir):
+            continue
+
+        # Approach 2: download pre-built OV tokenizer from HuggingFace
+        if _try_download_prebuilt_sdxl_ov_tokenizer(ov_model_path, subfolder):
+            continue
+
+        logger.warning(
+            f"Could not produce openvino_tokenizer.xml for {subfolder}. "
+            "Ensure openvino, openvino-tokenizers, and openvino-genai versions "
+            "match (same MAJOR.MINOR.PATCH). "
+            "Fix: pip install -U openvino openvino-tokenizers openvino-genai"
+        )
+
+
+def _try_convert_clip_tokenizer_to_ov(
+    model_id: str, subfolder: str, out_dir: Path,
+) -> bool:
+    """Try converting a CLIP tokenizer to OpenVINO IR locally.
+
+    Returns True if openvino_tokenizer.xml was created successfully.
+    """
+    try:
+        import openvino as ov
+        from openvino_tokenizers import convert_tokenizer
+        from transformers import CLIPTokenizer, PreTrainedTokenizerFast
+        from transformers.convert_slow_tokenizer import convert_slow_tokenizer
+    except ImportError:
+        return False
+
+    slow_tok = CLIPTokenizer.from_pretrained(model_id, subfolder=subfolder)
+    fast_backend = convert_slow_tokenizer(slow_tok)
+    fast_tok = PreTrainedTokenizerFast(tokenizer_object=fast_backend)
+
+    # Build list of kwarg sets to try — fewer BPE node inputs first.
+    import inspect
+    sig = inspect.signature(convert_tokenizer)
+    attempts = []
+    if "handle_special_tokens_with_re" in sig.parameters:
+        attempts.append(
+            {"with_detokenizer": True, "handle_special_tokens_with_re": False}
+        )
+    attempts.append({"with_detokenizer": True})
+
+    for kwargs in attempts:
         try:
-            # convert_tokenizer requires a fast tokenizer.
-            # CLIP models only ship a slow CLIPTokenizer (no tokenizer.json),
-            # so AutoTokenizer(use_fast=True) still returns the slow version.
-            # Convert slow -> fast explicitly via convert_slow_tokenizer.
-            from transformers import PreTrainedTokenizerFast
-            from transformers.convert_slow_tokenizer import convert_slow_tokenizer
-
-            slow_tok = CLIPTokenizer.from_pretrained(
-                model_id, subfolder=subfolder,
-            )
-            fast_backend = convert_slow_tokenizer(slow_tok)
-            fast_tok = PreTrainedTokenizerFast(
-                tokenizer_object=fast_backend,
-            )
-
-            # Some older openvino_tokenizers C++ extensions don't support
-            # the number of BPE node inputs produced by newer Python converter
-            # when handle_special_tokens_with_re is enabled. Try conversion
-            # with it disabled first (fewer inputs), then fall back to default.
-            import inspect
-            convert_sig = inspect.signature(convert_tokenizer)
-            convert_attempts = []
-            if "handle_special_tokens_with_re" in convert_sig.parameters:
-                convert_attempts.append(
-                    {"with_detokenizer": True, "handle_special_tokens_with_re": False}
-                )
-            convert_attempts.append({"with_detokenizer": True})
-
-            last_err = None
-            for kwargs in convert_attempts:
-                try:
-                    ov_tokenizer, ov_detokenizer = convert_tokenizer(
-                        fast_tok, **kwargs,
-                    )
-                    last_err = None
-                    break
-                except Exception as e:
-                    last_err = e
-
-            if last_err is not None:
-                raise last_err
+            result = convert_tokenizer(fast_tok, **kwargs)
+            if isinstance(result, tuple):
+                ov_tok, ov_detok = result
+            else:
+                ov_tok, ov_detok = result, None
 
             out_dir.mkdir(parents=True, exist_ok=True)
-            ov.save_model(ov_tokenizer, str(out_dir / "openvino_tokenizer.xml"))
-            ov.save_model(
-                ov_detokenizer, str(out_dir / "openvino_detokenizer.xml"),
+            ov.save_model(ov_tok, str(out_dir / "openvino_tokenizer.xml"))
+            if ov_detok is not None:
+                ov.save_model(ov_detok, str(out_dir / "openvino_detokenizer.xml"))
+            logger.info(f"Converted {subfolder} tokenizer to OpenVINO IR")
+            return True
+        except Exception:
+            continue
+
+    return False
+
+
+# Pre-built OpenVINO SDXL repos on HuggingFace (tried in order).
+_OV_SDXL_FALLBACK_REPOS = [
+    "OpenVINO/stable-diffusion-xl-base-1.0-int8-ov",
+]
+
+
+def _try_download_prebuilt_sdxl_ov_tokenizer(
+    ov_model_path: Path, subfolder: str,
+) -> bool:
+    """Download pre-built OV tokenizer files from HuggingFace and validate.
+
+    Returns True if openvino_tokenizer.xml was downloaded and loads correctly.
+    """
+    try:
+        import openvino as ov
+        from huggingface_hub import hf_hub_download
+    except ImportError:
+        return False
+
+    for repo_id in _OV_SDXL_FALLBACK_REPOS:
+        out_dir = ov_model_path / subfolder
+        try:
+            # Download tokenizer XML + BIN (required)
+            for fname in ("openvino_tokenizer.xml", "openvino_tokenizer.bin"):
+                hf_hub_download(
+                    repo_id=repo_id,
+                    filename=f"{subfolder}/{fname}",
+                    local_dir=str(ov_model_path),
+                    local_dir_use_symlinks=False,
+                )
+
+            # Validate: make sure the C++ runtime can load this model
+            core = ov.Core()
+            core.read_model(str(out_dir / "openvino_tokenizer.xml"))
+
+            # Download detokenizer (optional, best-effort)
+            for fname in ("openvino_detokenizer.xml", "openvino_detokenizer.bin"):
+                try:
+                    hf_hub_download(
+                        repo_id=repo_id,
+                        filename=f"{subfolder}/{fname}",
+                        local_dir=str(ov_model_path),
+                        local_dir_use_symlinks=False,
+                    )
+                except Exception:
+                    pass
+
+            logger.info(
+                f"Downloaded pre-built OV tokenizer for {subfolder} "
+                f"from {repo_id}"
             )
-            logger.info(f"Saved OpenVINO tokenizer IR to {out_dir}")
+            return True
         except Exception as e:
-            logger.warning(f"Failed to convert {subfolder} to OpenVINO IR: {e}")
-            # Fallback: save tokenizer.json so that OpenVINO GenAI can load
-            # the tokenizer via the HuggingFace tokenizers library directly.
-            try:
-                tok_json = out_dir / "tokenizer.json"
-                if not tok_json.exists():
-                    from transformers.convert_slow_tokenizer import (
-                        convert_slow_tokenizer as _convert,
-                    )
-                    _slow = CLIPTokenizer.from_pretrained(
-                        model_id, subfolder=subfolder,
-                    )
-                    _fast_backend = _convert(_slow)
-                    out_dir.mkdir(parents=True, exist_ok=True)
-                    _fast_backend.save(str(tok_json))
-                    logger.info(
-                        f"Saved tokenizer.json fallback to {out_dir} "
-                        "(update openvino-tokenizers for native OV IR support)"
-                    )
-            except Exception as e2:
-                logger.warning(f"Fallback tokenizer.json save also failed: {e2}")
+            # Clean up partial downloads
+            for fname in (
+                "openvino_tokenizer.xml", "openvino_tokenizer.bin",
+                "openvino_detokenizer.xml", "openvino_detokenizer.bin",
+            ):
+                (out_dir / fname).unlink(missing_ok=True)
+            logger.debug(
+                f"Pre-built OV tokenizer from {repo_id} not usable: {e}"
+            )
+
+    return False
 
 
 def download_retinanet_model(
