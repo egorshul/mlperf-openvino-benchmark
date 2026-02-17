@@ -663,23 +663,25 @@ def _export_sdxl_to_openvino(output_dir: str, model_id: str) -> Dict[str, str]:
 def _ensure_sdxl_tokenizer_files(ov_model_path: Path, model_id: str) -> None:
     """Ensure tokenizer files exist for GenAI Text2ImagePipeline compatibility.
 
-    GenAI reads CLIP tokenizers from HuggingFace-format files (vocab.json,
-    merges.txt, etc.) in tokenizer/ and tokenizer_2/ directories.
-    If missing, re-save them from the HuggingFace model.
+    Saves both HuggingFace-format files (vocab.json, merges.txt, etc.)
+    and OpenVINO IR tokenizer models (openvino_tokenizer.xml) for
+    tokenizer/ and tokenizer_2/ directories.
     """
     tokenizer_dir = ov_model_path / "tokenizer"
     tokenizer_2_dir = ov_model_path / "tokenizer_2"
     scheduler_cfg = ov_model_path / "scheduler" / "scheduler_config.json"
 
-    # Check minimum required files
-    tok1_ok = (tokenizer_dir / "vocab.json").exists()
-    tok2_ok = (tokenizer_2_dir / "vocab.json").exists()
+    # Check HuggingFace tokenizer files
+    tok1_hf_ok = (tokenizer_dir / "vocab.json").exists()
+    tok2_hf_ok = (tokenizer_2_dir / "vocab.json").exists()
     sched_ok = scheduler_cfg.exists()
 
-    if tok1_ok and tok2_ok and sched_ok:
-        return
+    # Check OpenVINO tokenizer IR models
+    tok1_ov_ok = (tokenizer_dir / "openvino_tokenizer.xml").exists()
+    tok2_ov_ok = (tokenizer_2_dir / "openvino_tokenizer.xml").exists()
 
-    logger.info("Saving missing tokenizer/scheduler files for GenAI compatibility...")
+    if tok1_hf_ok and tok2_hf_ok and sched_ok and tok1_ov_ok and tok2_ov_ok:
+        return
 
     try:
         from transformers import CLIPTokenizer
@@ -687,20 +689,26 @@ def _ensure_sdxl_tokenizer_files(ov_model_path: Path, model_id: str) -> None:
         logger.warning("transformers not installed, cannot save tokenizer files")
         return
 
-    if not tok1_ok:
+    # --- Save HuggingFace tokenizer files if missing ---
+
+    hf_tokenizers = {}  # subfolder -> CLIPTokenizer (reused for OV conversion)
+
+    if not tok1_hf_ok:
         try:
-            tokenizer = CLIPTokenizer.from_pretrained(model_id, subfolder="tokenizer")
+            tok = CLIPTokenizer.from_pretrained(model_id, subfolder="tokenizer")
             tokenizer_dir.mkdir(parents=True, exist_ok=True)
-            tokenizer.save_pretrained(str(tokenizer_dir))
+            tok.save_pretrained(str(tokenizer_dir))
+            hf_tokenizers["tokenizer"] = tok
             logger.info(f"Saved tokenizer to {tokenizer_dir}")
         except Exception as e:
             logger.warning(f"Failed to save tokenizer: {e}")
 
-    if not tok2_ok:
+    if not tok2_hf_ok:
         try:
-            tokenizer_2 = CLIPTokenizer.from_pretrained(model_id, subfolder="tokenizer_2")
+            tok = CLIPTokenizer.from_pretrained(model_id, subfolder="tokenizer_2")
             tokenizer_2_dir.mkdir(parents=True, exist_ok=True)
-            tokenizer_2.save_pretrained(str(tokenizer_2_dir))
+            tok.save_pretrained(str(tokenizer_2_dir))
+            hf_tokenizers["tokenizer_2"] = tok
             logger.info(f"Saved tokenizer_2 to {tokenizer_2_dir}")
         except Exception as e:
             logger.warning(f"Failed to save tokenizer_2: {e}")
@@ -717,6 +725,46 @@ def _ensure_sdxl_tokenizer_files(ov_model_path: Path, model_id: str) -> None:
             logger.info(f"Saved scheduler config to {scheduler_dir}")
         except Exception as e:
             logger.warning(f"Failed to save scheduler config: {e}")
+
+    # --- Convert tokenizers to OpenVINO IR format ---
+
+    if tok1_ov_ok and tok2_ov_ok:
+        return
+
+    try:
+        import openvino as ov
+        from openvino_tokenizers import convert_tokenizer
+    except ImportError:
+        logger.warning(
+            "openvino-tokenizers not installed, skipping OpenVINO tokenizer "
+            "conversion. Install with: pip install openvino-tokenizers"
+        )
+        return
+
+    for subfolder, out_dir, already_ok in [
+        ("tokenizer", tokenizer_dir, tok1_ov_ok),
+        ("tokenizer_2", tokenizer_2_dir, tok2_ov_ok),
+    ]:
+        if already_ok:
+            continue
+        try:
+            hf_tok = hf_tokenizers.get(subfolder)
+            if hf_tok is None:
+                hf_tok = CLIPTokenizer.from_pretrained(
+                    model_id, subfolder=subfolder
+                )
+
+            ov_tokenizer, ov_detokenizer = convert_tokenizer(
+                hf_tok, with_detokenizer=True,
+            )
+            out_dir.mkdir(parents=True, exist_ok=True)
+            ov.save_model(ov_tokenizer, str(out_dir / "openvino_tokenizer.xml"))
+            ov.save_model(
+                ov_detokenizer, str(out_dir / "openvino_detokenizer.xml"),
+            )
+            logger.info(f"Saved OpenVINO tokenizer to {out_dir}")
+        except Exception as e:
+            logger.warning(f"Failed to convert {subfolder} to OpenVINO: {e}")
 
 
 def download_retinanet_model(
