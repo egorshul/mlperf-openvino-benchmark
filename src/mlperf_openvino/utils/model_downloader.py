@@ -684,21 +684,18 @@ def _ensure_sdxl_tokenizer_files(ov_model_path: Path, model_id: str) -> None:
         return
 
     try:
-        from transformers import CLIPTokenizer
+        from transformers import AutoTokenizer, CLIPTokenizer
     except ImportError:
         logger.warning("transformers not installed, cannot save tokenizer files")
         return
 
     # --- Save HuggingFace tokenizer files if missing ---
 
-    hf_tokenizers = {}  # subfolder -> CLIPTokenizer (reused for OV conversion)
-
     if not tok1_hf_ok:
         try:
             tok = CLIPTokenizer.from_pretrained(model_id, subfolder="tokenizer")
             tokenizer_dir.mkdir(parents=True, exist_ok=True)
             tok.save_pretrained(str(tokenizer_dir))
-            hf_tokenizers["tokenizer"] = tok
             logger.info(f"Saved tokenizer to {tokenizer_dir}")
         except Exception as e:
             logger.warning(f"Failed to save tokenizer: {e}")
@@ -708,7 +705,6 @@ def _ensure_sdxl_tokenizer_files(ov_model_path: Path, model_id: str) -> None:
             tok = CLIPTokenizer.from_pretrained(model_id, subfolder="tokenizer_2")
             tokenizer_2_dir.mkdir(parents=True, exist_ok=True)
             tok.save_pretrained(str(tokenizer_2_dir))
-            hf_tokenizers["tokenizer_2"] = tok
             logger.info(f"Saved tokenizer_2 to {tokenizer_2_dir}")
         except Exception as e:
             logger.warning(f"Failed to save tokenizer_2: {e}")
@@ -748,11 +744,17 @@ def _ensure_sdxl_tokenizer_files(ov_model_path: Path, model_id: str) -> None:
         if already_ok:
             continue
         try:
-            hf_tok = hf_tokenizers.get(subfolder)
-            if hf_tok is None:
-                hf_tok = CLIPTokenizer.from_pretrained(
-                    model_id, subfolder=subfolder
+            # convert_tokenizer requires a fast tokenizer;
+            # CLIPTokenizer is slow, so load via AutoTokenizer(use_fast=True)
+            hf_tok = AutoTokenizer.from_pretrained(
+                model_id, subfolder=subfolder, use_fast=True,
+            )
+            if not getattr(hf_tok, "is_fast", False):
+                logger.warning(
+                    f"Fast tokenizer not available for {subfolder}, "
+                    "skipping OpenVINO conversion"
                 )
+                continue
 
             ov_tokenizer, ov_detokenizer = convert_tokenizer(
                 hf_tok, with_detokenizer=True,
