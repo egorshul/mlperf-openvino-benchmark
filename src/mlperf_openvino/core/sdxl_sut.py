@@ -1,5 +1,3 @@
-"""Stable Diffusion XL System Under Test."""
-
 import array
 import logging
 import sys
@@ -56,7 +54,6 @@ def _print_progress(completed: int, total: int, start_time: float) -> None:
 
 
 class SDXLOptimumSUT:
-    """SDXL SUT using Optimum-Intel OVStableDiffusionXLPipeline."""
 
     def __init__(
         self,

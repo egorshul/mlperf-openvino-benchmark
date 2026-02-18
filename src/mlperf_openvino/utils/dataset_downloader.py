@@ -43,7 +43,6 @@ DATASET_REGISTRY: Dict[str, Dict] = {
     "openimages": {
         "description": "OpenImages validation set for RetinaNet Object Detection",
         "annotations": {
-            # V5 validation annotations work for V6 as well
             "url": "https://storage.googleapis.com/openimages/v5/validation-annotations-bbox.csv",
             "filename": "validation-annotations-bbox.csv",
             "size_mb": 24,
@@ -53,7 +52,7 @@ DATASET_REGISTRY: Dict[str, Dict] = {
             "filename": "class-descriptions-boxable.csv",
             "size_mb": 0.02,
         },
-        "num_samples": 24781,  # Official MLPerf count from 264 class filtering
+        "num_samples": 24781,
         "note": "Images downloaded from AWS S3 open-images-dataset bucket",
     },
     "librispeech": {
@@ -90,7 +89,6 @@ DATASET_REGISTRY: Dict[str, Dict] = {
             "num_samples": 2939,
             "md5": "d09c181bba5cf717b3dee7d4d592af11",
         },
-        # MLPerf Whisper uses dev-clean + dev-other
         "mlperf_subsets": ["dev-clean", "dev-other"],
         "mlperf_num_samples": 5567,
     },
@@ -110,14 +108,12 @@ DATASET_REGISTRY: Dict[str, Dict] = {
             "filename": "val2014.zip",
             "size_gb": 6.0,
         },
-        # MLCommons pre-computed files for official submission
         "fid_statistics": {
             "url": "https://github.com/mlcommons/inference/raw/master/text_to_image/tools/val2014.npz",
             "filename": "val2014.npz",
             "size_mb": 10,
         },
         "latents": {
-            # Single shared latent tensor (1, 4, 128, 128) ~256KB
             "url": "https://github.com/mlcommons/inference/raw/master/text_to_image/tools/latents.pt",
             "filename": "latents.pt",
             "size_mb": 1,
@@ -127,7 +123,7 @@ DATASET_REGISTRY: Dict[str, Dict] = {
             "filename": "captions_source.tsv",
             "size_mb": 1,
         },
-        "num_samples": 5000,  # MLPerf uses 5000 samples
+        "num_samples": 5000,
         "note": "For MLPerf SDXL benchmark (closed division)",
     },
     "cnn-dailymail": {
@@ -153,7 +149,7 @@ DATASET_REGISTRY: Dict[str, Dict] = {
             "filename": "annotations_trainval2017.zip",
             "size_mb": 252,
         },
-        "num_samples": 5000,  # COCO 2017 val set
+        "num_samples": 5000,
         "note": "For MLPerf SSD-ResNet34 benchmark",
     },
 }
@@ -188,7 +184,6 @@ def _download_file(
         else:
             urllib.request.urlretrieve(url, destination)
 
-        # Validate download: check file exists and meets minimum size
         dest_path = Path(destination)
         if not dest_path.exists():
             raise RuntimeError(f"Download completed but file not found: {destination}")
@@ -203,7 +198,6 @@ def _download_file(
         logger.info(f"Downloaded to {destination} ({actual_size / (1024*1024):.1f} MB)")
 
     except URLError as e:
-        # Clean up partial download
         dest_path = Path(destination)
         if dest_path.exists():
             dest_path.unlink()
@@ -324,7 +318,7 @@ def _preprocess_imagenet(
 
     resize_size = 256
     crop_size = 224
-    mean = np.array([123.68, 116.78, 103.94], dtype=np.float32)  # RGB
+    mean = np.array([123.68, 116.78, 103.94], dtype=np.float32)
 
     with open(val_map_file, 'r') as f:
         lines = f.readlines()
@@ -469,7 +463,6 @@ def _download_librispeech_subset(
 
     _extract_archive(str(archive_path), str(output_path))
 
-    # Reorganize from LibriSpeech/dev-clean to librispeech/dev-clean
     extracted_dir = output_path / dataset_info["extracted_dir"]
 
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -494,9 +487,6 @@ def _process_librispeech(
     transcript_file: Path,
     manifest_file: Optional[Path] = None
 ) -> int:
-    # LibriSpeech directory format:
-    #   speaker_id/chapter_id/speaker_id-chapter_id-utterance_id.flac
-    #   speaker_id/chapter_id/speaker_id-chapter_id.trans.txt
     import json
 
     try:
@@ -570,11 +560,6 @@ def _process_librispeech(
 
 
 def download_whisper_mlperf(output_dir: str) -> Dict[str, str]:
-    """Download MLPerf Whisper dataset (LibriSpeech dev-clean + dev-other).
-
-    Downloads directly from the official LibriSpeech source, which provides
-    the same data used by the MLCommons reference implementation.
-    """
     logger.info("Downloading MLPerf Whisper dataset (LibriSpeech dev-clean + dev-other)...")
     return download_librispeech(output_dir, subset="mlperf")
 
@@ -630,7 +615,6 @@ def _download_openimages_image(args) -> Optional[str]:
         from botocore import UNSIGNED
         from botocore.config import Config
     except ImportError:
-        # Fallback to HTTP download
         url = f"https://s3.amazonaws.com/open-images-dataset/validation/{image_id}.jpg"
         dest = images_dir / f"{image_id}.jpg"
         try:
@@ -666,8 +650,6 @@ def download_openimages(
 
     existing_images = list(images_dir.glob("*.jpg"))
     coco_annotations = annotations_dir / "openimages-mlperf.json"
-    # Only use quick check if max_images is explicitly specified;
-    # otherwise we need to filter by MLPerf classes to determine actual count
     if max_images and len(existing_images) >= max_images and coco_annotations.exists() and not force:
         logger.info(f"OpenImages already downloaded: {len(existing_images)} images")
         return {
@@ -690,8 +672,6 @@ def download_openimages(
         logger.info("Downloading class descriptions...")
         _download_file(CLASS_NAMES_URL, str(class_names_file))
 
-    # Official MLPerf 264 classes
-    # See: https://github.com/mlcommons/inference/blob/master/vision/classification_and_detection/tools/openimages_mlperf.sh
     MLPERF_CLASSES = [
         "Airplane", "Antelope", "Apple", "Backpack", "Balloon", "Banana",
         "Barrel", "Baseball bat", "Baseball glove", "Bee", "Beer", "Bench",
@@ -834,7 +814,6 @@ def _download_openimages_from_s3(
     import urllib.request
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    # Disable SSL verification for this download
     ssl_context = ssl.create_default_context()
     ssl_context.check_hostname = False
     ssl_context.verify_mode = ssl.CERT_NONE
@@ -883,7 +862,6 @@ def _download_openimages_from_s3(
                         response.raise_for_status()
                         content = response.content
                     else:
-                        # Fallback with SSL disabled
                         req = urllib.request.Request(url)
                         with urllib.request.urlopen(req, context=ssl_context, timeout=60) as resp:
                             content = resp.read()
@@ -961,13 +939,9 @@ def _convert_openimages_to_coco(
     images_dir: Path,
     output_file: Path,
 ) -> None:
-    """Uses only the 264 MLPerf classes with sequential category_ids (1-264).
-    This matches the MLPerf RetinaNet model output format where class indices
-    correspond to the alphabetically sorted MLPerf class list."""
     import csv
     import json
 
-    # MLPerf 264 classes, alphabetically sorted (this is the model's class order)
     MLPERF_CLASSES = [
         "Airplane", "Antelope", "Apple", "Backpack", "Balloon", "Banana",
         "Barrel", "Baseball bat", "Baseball glove", "Bee", "Beer", "Bench",
@@ -1027,14 +1001,13 @@ def _convert_openimages_to_coco(
                 label_name, display_name = row[0], row[1]
                 display_to_label[display_name] = label_name
 
-    # Sequential category_ids (1-264) matching model output class indices (0-263) + 1
     class_map = {}
     class_names = {}
 
     for idx, display_name in enumerate(MLPERF_CLASSES):
         if display_name in display_to_label:
             label_name = display_to_label[display_name]
-            class_id = idx + 1  # 1-indexed
+            class_id = idx + 1
             class_map[label_name] = class_id
             class_names[class_id] = display_name
 
@@ -1088,7 +1061,6 @@ def _convert_openimages_to_coco(
             with Image.open(img_path) as img:
                 width, height = img.size
         except Exception:
-            # Default dimensions if can't read
             width, height = 800, 600
 
         coco['images'].append({
@@ -1103,7 +1075,6 @@ def _convert_openimages_to_coco(
             if label_name not in class_map:
                 continue
 
-            # Convert normalized coords to pixels
             x_min = ann['XMin'] * width
             y_min = ann['YMin'] * height
             x_max = ann['XMax'] * width
@@ -1235,7 +1206,6 @@ def download_coco2014(
         with open(captions_file, 'r') as f:
             coco_data = json.load(f)
 
-        # Get one caption per image (first caption)
         image_to_caption = {}
         for ann in coco_data['annotations']:
             image_id = ann['image_id']
@@ -1246,7 +1216,6 @@ def download_coco2014(
         for img in coco_data['images']:
             id_to_filename[img['id']] = img['file_name']
 
-        # TSV format: image_id<tab>caption
         with open(prompts_file, 'w', encoding='utf-8') as tsv_f, \
              open(prompts_txt, 'w', encoding='utf-8') as txt_f:
 
@@ -1288,13 +1257,11 @@ def download_coco2014(
             _resize_coco_images(val_dir, images_dir, prompts_file, target_size=1024)
 
     fid_stats_file = data_dir / "val2014.npz"
-    # MLCommons expects latents/latents.pt (subdirectory)
     latents_dir = data_dir / "latents"
     latents_dir.mkdir(parents=True, exist_ok=True)
     latents_file = latents_dir / "latents.pt"
     mlcommons_captions = data_dir / "captions_source.tsv"
 
-    # Required for MLCommons-compliant FID computation
     if "fid_statistics" in dataset_info:
         if not fid_stats_file.exists() or force:
             logger.info("Downloading MLCommons FID statistics (val2014.npz)...")
@@ -1308,8 +1275,6 @@ def download_coco2014(
                 logger.warning(f"Failed to download FID statistics: {e}")
                 logger.warning("FID computation will use reference images instead (not MLCommons-compliant)")
 
-    # Required for reproducibility in closed division
-    # MLCommons latents.pt is a single tensor (1, 4, 128, 128) ~256KB, shared by all samples
     if "latents" in dataset_info:
         if not latents_file.exists() or force:
             logger.info("Downloading MLCommons pre-generated latents...")
@@ -1323,7 +1288,6 @@ def download_coco2014(
                 logger.warning(f"Failed to download latents: {e}")
                 logger.warning("Latents will be generated locally at first run (seed=0)")
 
-    # For closed division, the EXACT MLCommons prompts must be used
     if "captions_tsv" in dataset_info:
         if not mlcommons_captions.exists() or force:
             logger.info("Downloading MLCommons official captions file...")
@@ -1337,8 +1301,6 @@ def download_coco2014(
                 logger.warning(f"Failed to download MLCommons captions: {e}")
                 logger.warning("Using locally generated captions file")
 
-        # Convert captions_source.tsv (7 columns) to simple format (id<tab>caption)
-        # captions_source.tsv: id, image_id, caption, height, width, file_name, coco_url
         if mlcommons_captions.exists():
             count = 0
             with open(mlcommons_captions, 'r', encoding='utf-8') as src, \
@@ -1351,7 +1313,6 @@ def download_coco2014(
                     if parts[0] == 'id':
                         continue
                     if len(parts) >= 3:
-                        # Use image_id (col 1) and caption (col 2)
                         image_id = parts[1]
                         caption = parts[2]
                         dst.write(f"{image_id}\t{caption}\n")
@@ -1382,17 +1343,6 @@ def download_cnn_dailymail(
     force: bool = False,
     hf_token: Optional[str] = None,
 ) -> Dict[str, str]:
-    """Download and process CNN-DailyMail for MLPerf Llama 3.1 8B benchmark.
-
-    Follows the MLCommons Inference v5.1 reference (download_cnndm.py) exactly:
-    1. Downloads cnn_dailymail v3.0.0 validation split from HuggingFace
-    2. Applies instruction template (plain text, NOT chat template)
-    3. Pre-tokenizes inputs with tokenizer.encode() (adds BOS implicitly)
-    4. NO token length filtering — all samples included (closed division)
-    5. Saves as JSON with fields: instruction, input, tok_input, output
-
-    Datacenter: 13,368 samples | Edge: 5,000 samples (shuffle seed=42)
-    """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -1529,7 +1479,6 @@ def download_dataset(
 
 
 def _is_valid_zip(path: Path) -> bool:
-    """Check if a file is a valid ZIP archive."""
     import zipfile
     if not path.exists():
         return False
@@ -1537,7 +1486,6 @@ def _is_valid_zip(path: Path) -> bool:
         return False
     try:
         with zipfile.ZipFile(str(path), 'r') as zf:
-            # testzip() returns the name of the first bad file, or None if OK
             return zf.testzip() is None
     except (zipfile.BadZipFile, Exception):
         return False
@@ -1551,12 +1499,10 @@ def _download_and_extract_zip(
     expected_size_mb: float,
     force: bool = False,
 ) -> None:
-    """Download a ZIP file and extract it, with validation and auto-retry."""
     import zipfile
 
     need_download = force or not zip_path.exists()
 
-    # If file exists but is not a valid ZIP, delete and re-download
     if zip_path.exists() and not need_download:
         if not _is_valid_zip(zip_path):
             logger.warning(f"Existing {zip_path.name} is corrupted, re-downloading...")
@@ -1565,11 +1511,9 @@ def _download_and_extract_zip(
 
     if need_download:
         logger.info(f"Downloading {description} (~{expected_size_mb:.0f}MB)...")
-        # Expect at least 1MB for any real dataset file
         _download_file(url, str(zip_path), expected_size_mb=expected_size_mb,
                         min_size_bytes=1024 * 1024)
 
-        # Validate the download is a valid ZIP
         if not _is_valid_zip(zip_path):
             size_kb = zip_path.stat().st_size / 1024
             zip_path.unlink()
@@ -1589,7 +1533,6 @@ def download_coco2017(
     output_dir: str,
     force: bool = False,
 ) -> Dict[str, str]:
-    """Download COCO 2017 validation dataset for SSD-ResNet34."""
     registry = DATASET_REGISTRY["coco2017"]
 
     output_path = Path(output_dir) / "coco2017"
@@ -1597,7 +1540,6 @@ def download_coco2017(
     images_dir = output_path / "val2017"
     annotations_dir = output_path / "annotations"
 
-    # Download and extract images
     if not images_dir.exists() or force:
         img_info = registry["images"]
         zip_path = output_path / img_info["filename"]
@@ -1613,7 +1555,6 @@ def download_coco2017(
         num_images = len(list(images_dir.glob("*.jpg")))
         logger.info(f"COCO 2017 images already exist: {num_images} images")
 
-    # Download and extract annotations
     if not annotations_dir.exists() or not (annotations_dir / "instances_val2017.json").exists() or force:
         ann_info = registry["annotations"]
         zip_path = output_path / ann_info["filename"]

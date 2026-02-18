@@ -1,12 +1,8 @@
-# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
-
-# C extensions
 *.so
 
-# Distribution / packaging
 .Python
 build/
 develop-eggs/
@@ -26,15 +22,12 @@ share/python-wheels/
 *.egg
 MANIFEST
 
-# PyInstaller
 *.manifest
 *.spec
 
-# Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
 
-# Unit test / coverage reports
 htmlcov/
 .tox/
 .nox/
@@ -49,11 +42,9 @@ coverage.xml
 .pytest_cache/
 cover/
 
-# Translations
 *.mo
 *.pot
 
-# Environments
 .env
 .venv
 env/
@@ -62,7 +53,6 @@ ENV/
 env.bak/
 venv.bak/
 
-# IDEs
 .idea/
 .vscode/
 *.swp
@@ -72,45 +62,34 @@ venv.bak/
 .pydevproject
 .settings/
 
-# Jupyter Notebook
 .ipynb_checkpoints
 
-# mypy
 .mypy_cache/
 .dmypy.json
 dmypy.json
 
-# Ruff
 .ruff_cache/
 
-# Project specific
-# Models (downloaded)
 models/
 !models/.gitkeep
 
-# Datasets
 data/*
 !data/.gitkeep
 
-# Results and logs
 results/*
 !results/.gitkeep
 logs/
 *.log
 
-# OpenVINO cache
 cache/
 *.blob
 
-# MLPerf LoadGen outputs
 mlperf_log_*
 audit.config
 
-# C++ build artifacts (auto-downloaded)
 src/mlperf_openvino/cpp/thirdparty/
 src/mlperf_openvino/cpp/build/
 
-# Temporary files
 *.tmp
 *.temp
 .DS_Store
