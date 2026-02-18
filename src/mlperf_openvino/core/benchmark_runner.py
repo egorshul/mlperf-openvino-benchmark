@@ -396,31 +396,53 @@ class BenchmarkRunner:
             )
 
         model_path = Path(self.config.model.model_path)
-        device = self.config.openvino.device if hasattr(self.config, "openvino") else "CPU"
 
-        # Optimum-Intel path — compiles each sub-model individually,
-        # then moves to target device via pipeline.to(device).
-        from .sdxl_sut import SDXLOptimumSUT, OPTIMUM_SDXL_AVAILABLE
+        # Multi-die accelerator path (NPU, XPU, etc.)
+        if self.config.openvino.is_accelerator_device():
+            try:
+                from .sdxl_multi_die_sut import SDXLMultiDieSUT, OPTIMUM_SDXL_AVAILABLE
+                if OPTIMUM_SDXL_AVAILABLE and model_path.is_dir():
+                    logger.info(
+                        f"Using SDXL multi-die SUT on {self.config.openvino.device}"
+                    )
+                    self.sut = SDXLMultiDieSUT(
+                        config=self.config,
+                        model_path=model_path,
+                        qsl=self.qsl,
+                        scenario=self.config.scenario,
+                    )
+                    return
+            except Exception as e:
+                logger.warning(f"Failed to create SDXLMultiDieSUT: {e}")
 
-        if OPTIMUM_SDXL_AVAILABLE:
-            logger.info(f"SDXL: Using Optimum-Intel pipeline → .to({device})")
-            self.sut = SDXLOptimumSUT(
-                config=self.config,
-                model_path=model_path,
-                qsl=self.qsl,
-                scenario=self.config.scenario,
-            )
-        else:
-            # Fallback to GenAI if optimum-intel is not installed
-            from .sdxl_multi_die_sut import SDXLMultiDieSUT
+        try:
+            from .sdxl_sut import SDXLOptimumSUT, OPTIMUM_SDXL_AVAILABLE
 
-            logger.info(f"SDXL: Using GenAI pipeline on {device}")
-            self.sut = SDXLMultiDieSUT(
-                config=self.config,
-                model_path=model_path,
-                qsl=self.qsl,
-                scenario=self.config.scenario,
-            )
+            if OPTIMUM_SDXL_AVAILABLE and model_path.is_dir():
+                config_file = model_path / "model_index.json"
+                if not config_file.exists():
+                    config_file = model_path / "config.json"
+
+                if config_file.exists():
+                    self.sut = SDXLOptimumSUT(
+                        config=self.config,
+                        model_path=model_path,
+                        qsl=self.qsl,
+                        scenario=self.config.scenario,
+                    )
+                    logger.info("SDXL: Using Optimum-Intel pipeline (OVStableDiffusionXLPipeline)")
+                    return
+        except Exception as e:
+            logger.warning(f"Failed to create SDXLOptimumSUT: {e}")
+
+        from .sdxl_sut import SDXLManualSUT
+        self.sut = SDXLManualSUT(
+            config=self.config,
+            model_path=model_path,
+            qsl=self.qsl,
+            scenario=self.config.scenario,
+        )
+        logger.info("SDXL: Using manual pipeline (SDXLManualSUT)")
 
     def _setup_llama3_1_8b(self) -> None:
         """Set up Llama 3.1 8B benchmark (CNN-DailyMail summarization)."""

@@ -314,56 +314,6 @@ models:
       min_duration_ms: 600000          # 10 minutes (MLPerf v5.1)
       min_query_count: 270336          # MLPerf constants.py min-queries Server
 
-  llama2-70b:
-    name: "Llama-2-70B"
-    task: "text_generation"
-    dataset: "open-orca"
-    input_shape: [1, 1024]  # (batch, max_seq_length per MLCommons reference)
-    input_name: "input_ids"
-    output_name: "logits"
-    data_format: "NC"
-    dtype: "FP16"
-
-    # Generation parameters (MLCommons Inference reference)
-    # Task: text generation (OpenOrca)
-    generation:
-      max_new_tokens: 1024     # Much longer generation than Llama 3.1 8B (128)
-      min_new_tokens: 1
-      do_sample: false         # Greedy decoding per MLPerf spec
-      num_beams: 1
-      early_stopping: true
-
-    # MLPerf accuracy targets (ROUGE fmeasure * 100)
-    # Reference values from FP16 DGX-H100 baseline; 99% threshold applied
-    accuracy_target: 0.0      # Composite - individual ROUGE thresholds below
-    accuracy_threshold: 0.99
-
-    accuracy_metrics:
-      rouge1: 44.4312          # FP16 reference (99% = 43.9869)
-      rouge2: 22.0352          # FP16 reference (99% = 21.8148)
-      rougeL: 28.6162          # FP16 reference (99% = 28.3300)
-      tokens_per_sample: 294.45  # 90%-110% window (265.005 - 323.895)
-
-    sources:
-      huggingface_model_id: "meta-llama/Llama-2-70b-chat-hf"
-
-    # MLPerf LoadGen settings
-    performance_sample_count: 24576    # = total OpenOrca eval samples
-    use_token_latencies: true          # Required for LLM benchmarks
-
-    offline:
-      min_duration_ms: 600000          # 10 minutes (MLPerf official)
-      min_query_count: 24576
-      samples_per_query: 1
-
-    server:
-      target_latency_ns: 0            # mlperf.conf: target_latency=0 (uses TTFT/TPOT token latencies)
-      ttft_latency_ms: 2000           # Time to First Token (mlperf.conf)
-      tpot_latency_ms: 200            # Time per Output Token (mlperf.conf)
-      target_qps: 1.0
-      min_duration_ms: 600000          # 10 minutes (MLPerf official)
-      min_query_count: 270336          # MLPerf constants.py
-
 # OpenVINO specific settings
 openvino:
   device: "CPU"
@@ -440,11 +390,6 @@ datasets:
     path: "./data/cnn-dailymail"
     eval_file: "cnn_eval.json"          # 13,368 samples (datacenter)
     edge_file: "sample_cnn_eval_5000.json"  # 5,000 samples (edge)
-
-  open-orca:
-    path: "./data/open-orca"
-    eval_file: "open_orca_gpt4_tokenized_llama.sampled_24576.pkl"  # 24,576 samples
-    calibration_file: "open_orca_gpt4_tokenized_llama.calibration_1000.pkl"  # 1,000 samples
 
 # Output settings
 output:

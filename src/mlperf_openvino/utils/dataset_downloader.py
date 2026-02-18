@@ -141,17 +141,6 @@ DATASET_REGISTRY: Dict[str, Dict] = {
         "eval_file": "cnn_eval.json",
         "note": "MLCommons Inference v5.1 — text summarization task for Llama 3.1 8B",
     },
-    "open-orca": {
-        "description": "OpenOrca GPT-4 subset for MLPerf LLM benchmark (Llama 2 70B)",
-        "huggingface": {
-            "dataset_id": "Open-Orca/OpenOrca",
-            "filename": "1M-GPT4-Augmented.parquet",
-        },
-        "num_samples": 24576,
-        "eval_file": "open_orca_gpt4_tokenized_llama.sampled_24576.pkl",
-        "calibration_file": "open_orca_gpt4_tokenized_llama.calibration_1000.pkl",
-        "note": "MLCommons Inference — text generation task for Llama 2 70B",
-    },
     "coco2017": {
         "description": "COCO 2017 validation set for SSD-ResNet34 Object Detection",
         "images": {
@@ -1513,242 +1502,6 @@ def download_cnn_dailymail(
     }
 
 
-def _process_open_orca_local(
-    data_dir: Path,
-    model_name: str = "meta-llama/Llama-2-70b-chat-hf",
-    n_total: int = 24576,
-    n_calibration: int = 1000,
-    io_token_limit: int = 1024,
-    rng_seed: int = 1337,
-    calib_rng_seed: int = 12345,
-    hf_token: Optional[str] = None,
-) -> Dict[str, str]:
-    """Process OpenOrca locally following MLCommons processorca.py exactly.
-
-    Replicates the exact filtering, tokenization, and sampling logic from:
-      https://github.com/mlcommons/inference/blob/master/language/llama2-70b/processorca.py
-
-    Key details matched to the reference:
-    - Llama 2 chat template for input formatting ([INST] <<SYS>>...)
-    - LlamaTokenizerFast (not AutoTokenizer with use_fast=False)
-    - Response init token 29871 appended to input tokens
-    - Strict < for seq length filter (not <=), applied to BOTH input and output
-    - Exact bad_prompts list (unicode vs ASCII apostrophe variants)
-    - Origin extracted without lowercasing
-    """
-    import pickle
-    from functools import partial
-
-    import pandas as pd
-
-    from .model_downloader import _resolve_hf_token
-    token = _resolve_hf_token(hf_token)
-
-    eval_file = data_dir / "open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
-
-    # --- Llama 2 chat template (exact match with processorca.py) ---
-    _LLAMA_PROMPT_SYSTEM = "<s>[INST] <<SYS>>\n{}\n<</SYS>>\n\n{} [/INST]"
-    _LLAMA_PROMPT_NO_SYSTEM = "<s>[INST] {} [/INST]"
-
-    def format_llama_input(row):
-        if row["system_prompt"]:
-            return _LLAMA_PROMPT_SYSTEM.format(row["system_prompt"], row["question"])
-        else:
-            return _LLAMA_PROMPT_NO_SYSTEM.format(row["question"])
-
-    # --- English filter (exact match with processorca.py is_english) ---
-    def is_english(s):
-        for c in s:
-            allowed = c.isascii()
-            allowed = allowed or (
-                c in ["\u2019", "\u2013", "\u201c", "\u201d", "\u2014"]
-            )
-            if not allowed:
-                return False
-        return True
-
-    # --- Tokenize helper (exact match with processorca.py _tokenize_helper) ---
-    def tokenize_helper(x, llama_tokenizer=None, append_response_init_token=True):
-        if not isinstance(x, str):
-            return []
-        tokens = llama_tokenizer(x)["input_ids"]
-        if append_response_init_token:
-            # Workaround from reference: Llama always outputs token 29871 first
-            tokens.append(29871)
-        return tokens
-
-    # --- Step 1: Download raw parquet ---
-    logger.info("Loading Open-Orca/OpenOrca GPT-4 parquet from HuggingFace...")
-    try:
-        from datasets import load_dataset
-        dataset = load_dataset(
-            "Open-Orca/OpenOrca", data_files="1M-GPT4-Augmented.parquet", split="train"
-        )
-        df = dataset.to_pandas()
-    except Exception as e:
-        logger.error(f"Failed to load OpenOrca dataset: {e}")
-        raise
-
-    logger.info(f"Loaded {len(df)} raw samples")
-
-    # --- Step 2: Load tokenizer (LlamaTokenizerFast, like processorca.py) ---
-    logger.info(f"Loading LlamaTokenizerFast: {model_name}")
-    try:
-        from transformers import LlamaTokenizerFast
-        llama_tokenizer = LlamaTokenizerFast.from_pretrained(model_name, token=token)
-    except ImportError:
-        logger.warning("LlamaTokenizerFast not available, falling back to AutoTokenizer")
-        from transformers import AutoTokenizer
-        llama_tokenizer = AutoTokenizer.from_pretrained(model_name, token=token)
-
-    input_tokenizer = partial(
-        tokenize_helper, llama_tokenizer=llama_tokenizer, append_response_init_token=True,
-    )
-    output_tokenizer = partial(
-        tokenize_helper, llama_tokenizer=llama_tokenizer, append_response_init_token=False,
-    )
-
-    # --- Step 3: Rename columns and build input (exact processorca.py logic) ---
-    df.rename(columns={"response": "output"}, inplace=True)
-    df["input"] = df.apply(format_llama_input, axis=1)
-
-    # --- Step 4: Extract origin (processorca.py: x.split(".")[0], NO lowercasing) ---
-    df["origin"] = df["id"].apply(lambda x: str(x).split(".")[0])
-
-    # --- Step 5: Tokenize input and output ---
-    logger.info("Tokenizing inputs and outputs...")
-    df["tok_input"] = df["input"].apply(input_tokenizer)
-    df["tok_output"] = df["output"].apply(output_tokenizer)
-
-    # --- Step 6: English filter ---
-    df["input_english"] = df["input"].apply(is_english)
-    df["output_english"] = df["output"].apply(is_english)
-    df["all_english"] = df["input_english"] & df["output_english"]
-    n_before = len(df)
-    df = df[df["all_english"]].drop(
-        ["input_english", "output_english", "all_english"], axis=1
-    )
-    df = df.reset_index(drop=True)
-    logger.info(f"English filter: {n_before} -> {len(df)} samples")
-
-    # --- Step 7: Filter by token length (strict < not <=, BOTH input and output) ---
-    df["tok_input_length"] = df["tok_input"].apply(len)
-    df["tok_output_length"] = df["tok_output"].apply(len)
-    n_before = len(df)
-    df = df[df["tok_input_length"] < io_token_limit]
-    df = df[df["tok_output_length"] < io_token_limit]
-    df = df.reset_index(drop=True)
-    logger.info(f"Sequence length filter (< {io_token_limit}): {n_before} -> {len(df)} samples")
-
-    # --- Step 8: Short response filter (tok_output_length >= 3) ---
-    n_before = len(df)
-    df = df[df["tok_output_length"] >= 3]
-    df = df.reset_index(drop=True)
-    logger.info(f"Short response filter: {n_before} -> {len(df)} samples")
-
-    # --- Step 9: Bad prompts filter (exact list from processorca.py) ---
-    # NOTE: Entry 3 uses \u2019 (unicode right quote), entry 4 uses ' (ASCII apostrophe)
-    bad_prompts = [
-        "",
-        "You are an AI assistant that follows instruction extremely well. Help as much as you can.",
-        "You are an AI assistant. Provide a detailed answer so user don\u2019t need to search outside to understand the answer.",
-        "You are an AI assistant. Provide a detailed answer so user don't need to search outside to understand the answer.",
-        "User will you give you a task with some instruction. Your job is follow the instructions as faithfully as you can. While answering think step-by-step and justify your answer.",
-        "Explain how you used the definition to come up with the answer.",
-    ]
-    # processorca.py iterates and filters one-by-one (preserves order, handles duplicates)
-    for prompt in bad_prompts:
-        criteria = df["system_prompt"] == prompt
-        criteria = criteria & ((df["origin"] == "niv") | (df["origin"] == "t0"))
-        df = df[~criteria]
-    df = df.reset_index(drop=True)
-    logger.info(f"Bad prompt filter: -> {len(df)} samples")
-
-    for origin_name in sorted(df["origin"].unique()):
-        count = (df["origin"] == origin_name).sum()
-        logger.info(f"  {origin_name}: {count} samples after filtering")
-
-    # --- Step 10: Balanced sampling (exact processorca.py logic) ---
-    dfs_by_origin = dict(tuple(df.groupby("origin")))
-    nways = len(dfs_by_origin)
-    split_size = n_total // nways
-    logger.info(f"Balanced sampling: {split_size} per origin (seed={rng_seed})")
-
-    sampled_dfs = []
-    for origin, origin_df in dfs_by_origin.items():
-        logger.info(f"Sampling {split_size} from {origin}")
-        n = min(origin_df.shape[0], split_size)
-        if n < split_size:
-            raise RuntimeError(
-                f"Not enough samples in {origin}. Has {n}, needs {split_size}."
-            )
-        sampled_dfs.append(origin_df.sample(n=n, random_state=rng_seed))
-
-    sampled_df = pd.concat(sampled_dfs)
-    sampled_df = sampled_df.reset_index(drop=True)
-    logger.info(f"Total balanced samples: {len(sampled_df)}")
-
-    # --- Step 11: Save evaluation pickle (DataFrame format, like processorca.py) ---
-    sampled_df.to_pickle(str(eval_file))
-    logger.info(f"Evaluation set: {len(sampled_df)} samples -> {eval_file}")
-
-    # --- Step 12: Save calibration subset ---
-    calib_file = data_dir / "open_orca_gpt4_tokenized_llama.calibration_1000.pkl"
-    calib_df = sampled_df.sample(
-        n=min(n_calibration, len(sampled_df)), random_state=calib_rng_seed
-    )
-    calib_df = calib_df.reset_index(drop=True)
-    calib_df.to_pickle(str(calib_file))
-    logger.info(f"Calibration set: {len(calib_df)} samples -> {calib_file}")
-
-    return {
-        "data_path": str(data_dir),
-        "eval_file": str(eval_file),
-        "num_samples": len(sampled_df),
-    }
-
-
-def download_open_orca(
-    output_dir: str,
-    model_name: str = "meta-llama/Llama-2-70b-chat-hf",
-    force: bool = False,
-    hf_token: Optional[str] = None,
-) -> Dict[str, str]:
-    """Download OpenOrca dataset for MLPerf Llama 2 70B benchmark.
-
-    Downloads from HuggingFace and processes locally following MLCommons
-    processorca.py exactly (same filtering, tokenization, and sampling).
-
-    Datacenter: 24,576 samples
-    Calibration: 1,000 samples
-    """
-    import pickle
-
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-
-    data_dir = output_path / "open-orca"
-    data_dir.mkdir(parents=True, exist_ok=True)
-
-    eval_file = data_dir / "open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
-
-    if eval_file.exists() and not force:
-        logger.info(f"OpenOrca dataset already exists: {eval_file}")
-        with open(eval_file, "rb") as f:
-            data = pickle.load(f)
-        try:
-            actual_count = len(data)
-        except TypeError:
-            actual_count = 0
-        return {
-            "data_path": str(data_dir),
-            "eval_file": str(eval_file),
-            "num_samples": actual_count,
-        }
-
-    logger.info("Downloading OpenOrca for MLPerf Llama 2 70B benchmark...")
-    return _process_open_orca_local(data_dir, model_name=model_name, hf_token=hf_token)
-
 
 def download_dataset(
     dataset_name: str,
@@ -1771,8 +1524,6 @@ def download_dataset(
         return download_coco2014(output_dir, force)
     elif dataset_name == "cnn-dailymail":
         return download_cnn_dailymail(output_dir, force=force, hf_token=hf_token)
-    elif dataset_name == "open-orca":
-        return download_open_orca(output_dir, force=force, hf_token=hf_token)
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
@@ -1897,7 +1648,6 @@ def list_available_datasets() -> Dict[str, str]:
         "coco2014": DATASET_REGISTRY["coco2014"]["description"],
         "coco2017": DATASET_REGISTRY["coco2017"]["description"],
         "cnn-dailymail": DATASET_REGISTRY["cnn-dailymail"]["description"],
-        "open-orca": DATASET_REGISTRY["open-orca"]["description"],
     }
 
 

@@ -38,14 +38,12 @@ def get_default_config(model: str) -> BenchmarkConfig:
         return BenchmarkConfig.default_ssd_resnet34()
     elif model == 'llama3.1-8b':
         return BenchmarkConfig.default_llama3_1_8b()
-    elif model == 'llama2-70b':
-        return BenchmarkConfig.default_llama2_70b()
     else:
         return BenchmarkConfig.default_resnet50()
 
 
 @main.command()
-@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl', 'ssd-resnet34', 'llama3.1-8b', 'llama2-70b']),
+@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl', 'ssd-resnet34', 'llama3.1-8b']),
               default='resnet50', help='Model to benchmark')
 @click.option('--scenario', '-s', type=click.Choice(['Offline', 'Server']),
               default='Offline', help='Test scenario')
@@ -160,7 +158,7 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
             actual_hint = None
         elif scenario == 'Offline':
             actual_hint = 'THROUGHPUT'
-            if batch_size is None and model not in ('sdxl', 'ssd-resnet34', 'llama3.1-8b', 'llama2-70b'):
+            if batch_size is None and model not in ('sdxl', 'ssd-resnet34', 'llama3.1-8b'):
                 batch_size = 32
         else:
             actual_hint = 'THROUGHPUT'
@@ -168,7 +166,7 @@ def run(model: str, scenario: str, mode: str, model_path: Optional[str],
         actual_hint = performance_hint
 
     if batch_size is None:
-        batch_size = 1 if model in ('sdxl', 'llama3.1-8b', 'llama2-70b') else 0
+        batch_size = 1 if model in ('sdxl', 'llama3.1-8b') else 0
 
     benchmark_config.openvino.num_streams = num_streams
     benchmark_config.openvino.batch_size = batch_size
@@ -316,13 +314,10 @@ def _print_dataset_help(model: str) -> None:
     elif model == 'llama3.1-8b':
         click.echo("Please download the CNN-DailyMail dataset.")
         click.echo("Run: mlperf-ov download-dataset --dataset cnn-dailymail")
-    elif model == 'llama2-70b':
-        click.echo("Please download the OpenOrca dataset.")
-        click.echo("Run: mlperf-ov download-dataset --dataset open-orca")
 
 
 @main.command('download-model')
-@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl', 'ssd-resnet34', 'llama3.1-8b', 'llama2-70b']),
+@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl', 'ssd-resnet34', 'llama3.1-8b']),
               default='resnet50', help='Model to download')
 @click.option('--output-dir', '-o', type=click.Path(),
               default='./models', help='Output directory')
@@ -331,7 +326,7 @@ def _print_dataset_help(model: str) -> None:
 @click.option('--batch-sizes', type=str, default='1,2,4,8',
               help='Batch sizes for RetinaNet (comma-separated, default: 1,2,4,8)')
 @click.option('--weight-format', '-w', type=click.Choice(['fp32', 'fp16', 'int8', 'int4']),
-              default=None, help='Weight format for Llama models (default: int8 for 8B, int4 for 70B)')
+              default=None, help='Weight format for Llama models (default: int8)')
 @click.option('--hf-token', type=str, default=None, envvar='HF_TOKEN',
               help='HuggingFace access token (for gated models like Meta-Llama). Also reads HF_TOKEN env var.')
 def download_model_cmd(model: str, output_dir: str, format: str, batch_sizes: str,
@@ -390,23 +385,6 @@ def download_model_cmd(model: str, output_dir: str, format: str, batch_sizes: st
                 click.echo("  Note: Llama requires OpenVINO format, using --format openvino")
             wf = weight_format or 'int8'
             paths = download_llama_model(
-                str(output_path),
-                export_to_openvino=True,
-                weight_format=wf,
-                hf_token=hf_token,
-            )
-            click.echo(f"  Weight format: {wf}")
-            click.echo(f"Model downloaded to: {paths['model_path']}")
-            if 'tokenizer_path' in paths:
-                click.echo(f"  Tokenizer: {paths['tokenizer_path']}")
-            if 'detokenizer_path' in paths:
-                click.echo(f"  Detokenizer: {paths['detokenizer_path']}")
-        elif model == 'llama2-70b':
-            from .utils.model_downloader import download_llama2_70b_model
-            if format != 'openvino':
-                click.echo("  Note: Llama 2 70B requires OpenVINO format, using --format openvino")
-            wf = weight_format or 'int4'
-            paths = download_llama2_70b_model(
                 str(output_path),
                 export_to_openvino=True,
                 weight_format=wf,
@@ -484,11 +462,10 @@ def info():
     click.echo("  - Whisper (Speech Recognition)")
     click.echo("  - SDXL (Text-to-Image Generation)")
     click.echo("  - Llama 3.1 8B (Text Generation)")
-    click.echo("  - Llama 2 70B (Text Generation)")
 
 
 @main.command('download-dataset')
-@click.option('--dataset', '-d', type=click.Choice(['imagenet', 'librispeech', 'squad', 'openimages', 'coco2014', 'coco2017', 'cnn-dailymail', 'open-orca']),
+@click.option('--dataset', '-d', type=click.Choice(['imagenet', 'librispeech', 'squad', 'openimages', 'coco2014', 'coco2017', 'cnn-dailymail']),
               required=True, help='Dataset to download')
 @click.option('--output-dir', '-o', type=click.Path(),
               default='./data', help='Output directory')
@@ -553,20 +530,20 @@ def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str],
 
 
 @main.command('setup')
-@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl', 'ssd-resnet34', 'llama3.1-8b', 'llama2-70b']),
+@click.option('--model', '-m', type=click.Choice(['resnet50', 'bert', 'retinanet', 'whisper', 'sdxl', 'ssd-resnet34', 'llama3.1-8b']),
               required=True, help='Model to set up')
 @click.option('--output-dir', '-o', type=click.Path(),
               default='.', help='Base output directory')
 @click.option('--format', '-f', type=click.Choice(['onnx', 'openvino']),
               default='onnx', help='Model format')
 @click.option('--weight-format', '-w', type=click.Choice(['fp32', 'fp16', 'int8', 'int4']),
-              default=None, help='Weight format for Llama models (default: int8 for 8B, int4 for 70B)')
+              default=None, help='Weight format for Llama models (default: int8)')
 @click.option('--hf-token', type=str, default=None, envvar='HF_TOKEN',
               help='HuggingFace access token (for gated models like Meta-Llama). Also reads HF_TOKEN env var.')
 def setup_cmd(model: str, output_dir: str, format: str, weight_format: Optional[str], hf_token: Optional[str]):
     """Download both model and dataset for a benchmark."""
     from .utils.model_downloader import download_model, download_whisper_model, download_sdxl_model
-    from .utils.model_downloader import download_retinanet_model, download_llama_model, download_llama2_70b_model
+    from .utils.model_downloader import download_retinanet_model, download_llama_model
     from .utils.dataset_downloader import download_dataset
 
     output_path = Path(output_dir)
@@ -620,18 +597,6 @@ def setup_cmd(model: str, output_dir: str, format: str, weight_format: Optional[
                 hf_token=hf_token,
             )
             model_path = model_paths['model_path']
-        elif model == 'llama2-70b':
-            if format != 'openvino':
-                click.echo("  Note: Llama 2 70B requires OpenVINO format, using --format openvino")
-            wf = weight_format or 'int4'
-            click.echo(f"  Weight format: {wf}")
-            model_paths = download_llama2_70b_model(
-                str(models_dir),
-                export_to_openvino=True,
-                weight_format=wf,
-                hf_token=hf_token,
-            )
-            model_path = model_paths['model_path']
         else:
             model_path = download_model(model, str(models_dir), format)
         click.echo(f"  Model: {model_path}\n")
@@ -657,9 +622,6 @@ def setup_cmd(model: str, output_dir: str, format: str, weight_format: Optional[
         elif model == 'llama3.1-8b':
             from .utils.dataset_downloader import download_cnn_dailymail
             dataset_paths = download_cnn_dailymail(str(data_dir), hf_token=hf_token)
-        elif model == 'llama2-70b':
-            from .utils.dataset_downloader import download_open_orca
-            dataset_paths = download_open_orca(str(data_dir), hf_token=hf_token)
 
         click.echo(f"  Dataset: {dataset_paths.get('data_path', 'N/A')}\n")
     except Exception as e:
@@ -750,15 +712,6 @@ def list_models():
             'metric': 'ROUGE-1/2/L/Lsum',
             'target': '38.7792 / 15.9075 / 24.4957 / 35.793',
         },
-        {
-            'name': 'Llama 2 70B',
-            'id': 'llama2-70b',
-            'type': ModelType.LLAMA2_70B,
-            'task': 'Text Generation',
-            'dataset': 'OpenOrca (24,576 samples)',
-            'metric': 'ROUGE-1/2/L',
-            'target': '44.4312 / 22.0352 / 28.6162',
-        },
     ]
 
     for m in models:
@@ -775,61 +728,6 @@ def list_models():
     click.echo("  mlperf-ov setup --model <model_id>")
     click.echo("  mlperf-ov run --model <model_id> --mode both")
     click.echo("")
-
-
-@main.command('convert-tokenizer')
-@click.option('--model-path', '-p', type=click.Path(exists=True), required=True,
-              help='Path to exported OpenVINO model directory')
-@click.option('--model-id', '-m', type=str, default=None,
-              help='HuggingFace model ID (auto-detected from config.json if omitted)')
-@click.option('--hf-token', type=str, default=None, envvar='HF_TOKEN',
-              help='HuggingFace access token (for gated models). Also reads HF_TOKEN env var.')
-def convert_tokenizer_cmd(model_path: str, model_id: Optional[str], hf_token: Optional[str]):
-    """Convert HuggingFace tokenizer to OpenVINO format.
-
-    Use this after exporting a model with optimum-cli when the tokenizer
-    was not converted automatically (e.g. due to a non-standard
-    openvino-tokenizers version string).
-
-    \b
-    Examples:
-      mlperf-ov convert-tokenizer -p ./models/Llama-3.1-8B-Instruct-openvino-int8
-      mlperf-ov convert-tokenizer -p ./models/Llama-2-70b-chat-hf-openvino-int4
-      mlperf-ov convert-tokenizer -p ./models/whisper-large-v3-openvino
-      mlperf-ov convert-tokenizer -p ./model-dir -m meta-llama/Llama-2-70b-chat-hf --hf-token $HF_TOKEN
-    """
-    from pathlib import Path as _Path
-    from .utils.model_downloader import _convert_tokenizer_to_openvino, _resolve_hf_token
-
-    model_dir = _Path(model_path)
-
-    if model_id is None:
-        config_file = model_dir / "config.json"
-        if config_file.exists():
-            import json
-            with open(config_file) as f:
-                cfg = json.load(f)
-            model_id = cfg.get("_name_or_path")
-            if model_id:
-                click.echo(f"Auto-detected model ID: {model_id}")
-
-    if not model_id:
-        click.echo("Error: Could not detect model ID. Please specify --model-id.")
-        sys.exit(1)
-
-    token = _resolve_hf_token(hf_token)
-
-    click.echo(f"Converting tokenizer for: {model_id}")
-    click.echo(f"Model directory: {model_dir}")
-
-    result = _convert_tokenizer_to_openvino(model_dir, model_id, token=token)
-
-    if result.get("tokenizer_path"):
-        click.echo(f"Tokenizer:   {result['tokenizer_path']}")
-        click.echo(f"Detokenizer: {result['detokenizer_path']}")
-    else:
-        click.echo("Error: Tokenizer conversion failed. Check logs above.")
-        sys.exit(1)
 
 
 if __name__ == "__main__":
