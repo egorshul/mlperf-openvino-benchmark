@@ -50,7 +50,7 @@ def main():
     # ── 3. Compile on target device ────────────────────────────────────────
     print(f"Compiling on {DEVICE} ...", file=sys.stderr, flush=True)
 
-    pipe.compile(DEVICE)
+    pipe.compile(DEVICE, config={"LOG_LEVEL": "LOG_DEBUG"})
 
     # ── 4. Progress callback ───────────────────────────────────────────────
     def callback(step, num_steps, latent):
