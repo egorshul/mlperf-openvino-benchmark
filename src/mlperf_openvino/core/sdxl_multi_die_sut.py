@@ -75,10 +75,9 @@ def _sdxl_die_worker_fn(
 
     pipe.reshape(1, image_size, image_size, guidance_scale)
 
-    # VAE decoder IR has dynamic shapes which the device may not support,
-    # so we always run it on CPU (it is a single forward pass, ~2-3 % of
-    # total SDXL time — the other 97 % is UNet × num_inference_steps).
-    pipe.compile(die_name, die_name, "CPU")
+    # After reshape() all models (text_encoder, unet, vae_decoder) have
+    # fully static shapes, so compile everything on the target device.
+    pipe.compile(die_name, die_name, die_name)
 
     # Warmup (1 step to trigger compilation)
     gen = _ov_genai.TorchGenerator(0)
@@ -301,10 +300,9 @@ class SDXLMultiDieSUT:
 
         pipe.reshape(1, self.image_size, self.image_size, self.guidance_scale)
 
-        # VAE decoder on CPU — its IR has dynamic shapes unsupported by
-        # accelerators; single forward pass, negligible perf impact.
-        vae_device = "CPU" if die != "CPU" else die
-        pipe.compile(die, die, vae_device)
+        # After reshape() all models have fully static shapes —
+        # compile everything on the target device.
+        pipe.compile(die, die, die)
 
         self._pipeline = pipe
         print(f"[SDXL] 1 die: {die}", file=sys.stderr)
