@@ -161,6 +161,28 @@ class SDXLMultiDieSUT:
             file=sys.stderr,
         )
 
+    @staticmethod
+    def _configure_scheduler(pipeline, die_name: str = "") -> None:
+        from diffusers import EulerDiscreteScheduler
+        pipeline.scheduler = EulerDiscreteScheduler.from_config(
+            pipeline.scheduler.config,
+            beta_start=0.00085,
+            beta_end=0.012,
+            beta_schedule="scaled_linear",
+            timestep_spacing="leading",
+            steps_offset=1,
+            prediction_type="epsilon",
+            use_karras_sigmas=False,
+            num_train_timesteps=1000,
+        )
+
+    @staticmethod
+    def _disable_watermark(pipeline) -> None:
+        if hasattr(pipeline, "watermark"):
+            pipeline.watermark = None
+        if hasattr(pipeline, "safety_checker"):
+            pipeline.safety_checker = None
+
     def _load_pipeline_for_device(self, die: str) -> Any:
         is_cpu = die.upper() == "CPU"
 
@@ -210,42 +232,37 @@ class SDXLMultiDieSUT:
                     raise
 
         pipeline.set_progress_bar_config(disable=True)
-
-        try:
-            from diffusers import EulerDiscreteScheduler
-            pipeline.scheduler = EulerDiscreteScheduler.from_config(
-                pipeline.scheduler.config,
-                timestep_spacing="leading",
-                steps_offset=1,
-                prediction_type="epsilon",
-                use_karras_sigmas=False,
-            )
-        except Exception:
-            logger.warning("Failed to set EulerDiscreteScheduler on %s", die)
-
-        if hasattr(pipeline, "watermark"):
-            pipeline.watermark = None
+        self._configure_scheduler(pipeline, die)
+        self._disable_watermark(pipeline)
 
         return pipeline
+
+    @staticmethod
+    def _prepare_latents(raw_latents):
+        import torch
+        if isinstance(raw_latents, np.ndarray):
+            latents = torch.from_numpy(raw_latents.copy()).float()
+        else:
+            latents = raw_latents.clone().float()
+        if latents.dim() == 3:
+            latents = latents.unsqueeze(0)
+        if latents.shape[1] != 4:
+            return None
+        return latents
+
+    @staticmethod
+    def _to_uint8(image) -> np.ndarray:
+        if isinstance(image, np.ndarray):
+            if image.dtype == np.uint8:
+                return image
+            return (np.clip(image, 0.0, 1.0) * 255).round().astype(np.uint8)
+        return np.array(image)
 
     def _process_sample(self, sample_idx: int, pipeline: Any) -> np.ndarray:
         features = self.qsl.get_features(sample_idx)
         prompt = features["prompt"]
         guidance_scale = features.get("guidance_scale", self.guidance_scale)
         num_steps = features.get("num_inference_steps", self.num_inference_steps)
-        latents = features.get("latents", None)
-
-        if latents is not None:
-            try:
-                import torch
-                if isinstance(latents, np.ndarray):
-                    latents = torch.from_numpy(latents.copy()).float()
-                if latents.dim() == 3:
-                    latents = latents.unsqueeze(0)
-                if latents.shape[1] != 4:
-                    latents = None
-            except ImportError:
-                latents = None
 
         pipe_kwargs = {
             "prompt": prompt,
@@ -256,9 +273,15 @@ class SDXLMultiDieSUT:
             "width": self.image_size,
             "output_type": "np",
         }
-        if latents is not None:
-            pipe_kwargs["latents"] = latents
-        else:
+
+        raw_latents = features.get("latents", None)
+        if raw_latents is not None:
+            try:
+                pipe_kwargs["latents"] = self._prepare_latents(raw_latents)
+            except ImportError:
+                pass
+
+        if "latents" not in pipe_kwargs:
             try:
                 import torch
                 pipe_kwargs["generator"] = torch.Generator().manual_seed(sample_idx)
@@ -266,16 +289,7 @@ class SDXLMultiDieSUT:
                 pass
 
         image = pipeline(**pipe_kwargs).images[0]
-
-        if isinstance(image, np.ndarray):
-            if image.max() <= 1.0:
-                image = (image * 255).round().astype(np.uint8)
-            elif image.dtype != np.uint8:
-                image = image.astype(np.uint8)
-        else:
-            image = np.array(image)
-
-        return image
+        return self._to_uint8(image)
 
     def _process_batch(self, sample_indices: List[int], pipeline: Any) -> List[np.ndarray]:
         import torch
@@ -286,15 +300,11 @@ class SDXLMultiDieSUT:
         for idx in sample_indices:
             features = self.qsl.get_features(idx)
             prompts.append(features["prompt"])
-            latent = features.get("latents", None)
-            if latent is not None:
-                if isinstance(latent, np.ndarray):
-                    t = torch.from_numpy(latent.copy()).float()
-                else:
-                    t = torch.tensor(latent).float()
-                if t.dim() == 3:
-                    t = t.unsqueeze(0)
-                latents_list.append(t)
+            raw = features.get("latents", None)
+            if raw is not None:
+                prepared = self._prepare_latents(raw)
+                if prepared is not None:
+                    latents_list.append(prepared)
 
         pipe_kwargs = {
             "prompt": prompts,
@@ -309,19 +319,7 @@ class SDXLMultiDieSUT:
             pipe_kwargs["latents"] = torch.cat(latents_list, dim=0)
 
         result = pipeline(**pipe_kwargs)
-
-        images = []
-        for img in result.images:
-            if isinstance(img, np.ndarray):
-                if img.max() <= 1.0:
-                    img = (img * 255).round().astype(np.uint8)
-                elif img.dtype != np.uint8:
-                    img = img.astype(np.uint8)
-            else:
-                img = np.array(img)
-            images.append(img)
-
-        return images
+        return [self._to_uint8(img) for img in result.images]
 
     @property
     def _sample_count(self) -> int:

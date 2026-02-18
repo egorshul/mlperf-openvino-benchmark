@@ -568,22 +568,19 @@ class COCOPromptsDataset(BaseDataset):
                         img = Image.open(item).convert('RGB')
                     else:
                         if isinstance(item, np.ndarray):
-                            img = Image.fromarray(item.astype(np.uint8))
+                            img = Image.fromarray(item.astype(np.uint8)).convert('RGB')
                         else:
                             img = item
-                        if hasattr(img, 'mode') and img.mode != 'RGB':
-                            img = img.convert('RGB')
+                            if hasattr(img, 'mode') and img.mode != 'RGB':
+                                img = img.convert('RGB')
 
                     tensor = transform(img).unsqueeze(0).to(device)
                     with torch.no_grad():
-                        feat = model(tensor)
-                        # pytorch_fid returns list of feature tensors per block
-                        if isinstance(feat, list):
-                            feat = feat[0]
-                        if feat.dim() > 2:
-                            feat = torch.nn.functional.adaptive_avg_pool2d(feat, (1, 1))
-                        feat = feat.squeeze().cpu().numpy()
-                    features.append(feat)
+                        pred = model(tensor)[0]
+                        if pred.size(2) != 1 or pred.size(3) != 1:
+                            pred = torch.nn.functional.adaptive_avg_pool2d(pred, output_size=(1, 1))
+                        pred = pred.squeeze(3).squeeze(2).cpu().numpy()
+                    features.append(pred.squeeze())
                 return np.array(features)
 
             gen_features = get_features(generated_images, is_path=False)
@@ -610,29 +607,20 @@ class COCOPromptsDataset(BaseDataset):
                 sigma_ref = np.cov(ref_features, rowvar=False)
 
             diff = mu_gen - mu_ref
-            mean_term = float(diff @ diff)
-            tr_gen = float(np.trace(sigma_gen))
-            tr_ref = float(np.trace(sigma_ref))
 
-            if num_gen < 2048:
-                logger.debug(
-                    "FID: %d samples — covariance rank limited, FID may differ from 5000-sample target",
-                    num_gen,
-                )
-
-            covmean, _ = linalg.sqrtm(sigma_gen @ sigma_ref, disp=False)
+            eps = 1e-6
+            covmean, _ = linalg.sqrtm(sigma_gen.dot(sigma_ref), disp=False)
+            if not np.isfinite(covmean).all():
+                offset = np.eye(sigma_gen.shape[0]) * eps
+                covmean = linalg.sqrtm((sigma_gen + offset).dot(sigma_ref + offset))
             if np.iscomplexobj(covmean):
                 if not np.allclose(np.diagonal(covmean).imag, 0, atol=1e-3):
-                    logger.warning("FID: Significant complex values in sqrtm")
+                    logger.warning("FID: Significant imaginary component %.4f", np.max(np.abs(covmean.imag)))
                 covmean = covmean.real
 
-            tr_covmean = float(np.trace(covmean))
-            trace_term = tr_gen + tr_ref - 2 * tr_covmean
-            fid = mean_term + trace_term
+            fid = float(diff.dot(diff) + np.trace(sigma_gen) + np.trace(sigma_ref) - 2 * np.trace(covmean))
 
-            logger.debug(
-                "FID=%.4f (mean_diff=%.4f + trace=%.4f)", fid, mean_term, trace_term,
-            )
+            logger.debug("FID=%.4f", fid)
 
             return float(fid)
 
