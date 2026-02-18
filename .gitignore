@@ -85,11 +85,7 @@ dmypy.json
 
 # Project specific
 # Models (downloaded)
-models/*.onnx
-models/*.xml
-models/*.bin
-models/*.pt
-models/*.safetensors
+models/
 !models/.gitkeep
 
 # Datasets
