@@ -543,7 +543,7 @@ class BenchmarkConfig:
                 input_name="input_ids",
                 output_name="sample",
                 data_format="NC",
-                dtype="FP32",
+                dtype="FP16",
                 accuracy_target=31.68632,
                 accuracy_threshold=1.0,
                 accuracy_metrics={

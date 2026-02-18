@@ -639,7 +639,7 @@ def _export_sdxl_to_openvino(output_dir: str, model_id: str) -> Dict[str, str]:
             export=True,
             compile=False,
             load_in_8bit=False,
-            torch_dtype=torch.float32,
+            torch_dtype=torch.float16,
         )
 
     pipeline = _download_with_retry(do_export, max_retries=3)
