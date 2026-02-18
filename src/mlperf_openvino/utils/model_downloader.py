@@ -613,6 +613,7 @@ def _export_sdxl_to_openvino(output_dir: str, model_id: str) -> Dict[str, str]:
         vae_path = ov_model_path / "vae_decoder" / "openvino_model.xml"
 
         if unet_path.exists() and vae_path.exists():
+            _ensure_sdxl_tokenizer_files(ov_model_path, model_id)
             logger.info(f"OpenVINO model already exists at {ov_model_path}")
             return {
                 "model_path": str(ov_model_path),
@@ -638,6 +639,8 @@ def _export_sdxl_to_openvino(output_dir: str, model_id: str) -> Dict[str, str]:
 
     pipeline.save_pretrained(str(ov_model_path))
 
+    _ensure_sdxl_tokenizer_files(ov_model_path, model_id)
+
     logger.info(f"OpenVINO model saved to {ov_model_path}")
 
     return {
@@ -647,6 +650,201 @@ def _export_sdxl_to_openvino(output_dir: str, model_id: str) -> Dict[str, str]:
         "text_encoder_path": str(ov_model_path / "text_encoder" / "openvino_model.xml"),
         "text_encoder_2_path": str(ov_model_path / "text_encoder_2" / "openvino_model.xml"),
     }
+
+
+def _ensure_sdxl_tokenizer_files(ov_model_path: Path, model_id: str) -> None:
+    """Ensure tokenizer files exist in the exported SDXL model directory.
+
+    Saves both HuggingFace-format files (vocab.json, merges.txt, etc.)
+    and OpenVINO IR tokenizer models (openvino_tokenizer.xml) for
+    tokenizer/ and tokenizer_2/ directories.
+    """
+    tokenizer_dir = ov_model_path / "tokenizer"
+    tokenizer_2_dir = ov_model_path / "tokenizer_2"
+    scheduler_cfg = ov_model_path / "scheduler" / "scheduler_config.json"
+
+    tok1_hf_ok = (tokenizer_dir / "vocab.json").exists()
+    tok2_hf_ok = (tokenizer_2_dir / "vocab.json").exists()
+    sched_ok = scheduler_cfg.exists()
+
+    tok1_ov_ok = (tokenizer_dir / "openvino_tokenizer.xml").exists()
+    tok2_ov_ok = (tokenizer_2_dir / "openvino_tokenizer.xml").exists()
+
+    if tok1_hf_ok and tok2_hf_ok and sched_ok and tok1_ov_ok and tok2_ov_ok:
+        return
+
+    try:
+        from transformers import CLIPTokenizer
+    except ImportError:
+        logger.warning("transformers not installed, cannot save tokenizer files")
+        return
+
+    # --- Save HuggingFace tokenizer files if missing ---
+
+    if not tok1_hf_ok:
+        try:
+            tok = CLIPTokenizer.from_pretrained(model_id, subfolder="tokenizer")
+            tokenizer_dir.mkdir(parents=True, exist_ok=True)
+            tok.save_pretrained(str(tokenizer_dir))
+            logger.info(f"Saved tokenizer to {tokenizer_dir}")
+        except Exception as e:
+            logger.warning(f"Failed to save tokenizer: {e}")
+
+    if not tok2_hf_ok:
+        try:
+            tok = CLIPTokenizer.from_pretrained(model_id, subfolder="tokenizer_2")
+            tokenizer_2_dir.mkdir(parents=True, exist_ok=True)
+            tok.save_pretrained(str(tokenizer_2_dir))
+            logger.info(f"Saved tokenizer_2 to {tokenizer_2_dir}")
+        except Exception as e:
+            logger.warning(f"Failed to save tokenizer_2: {e}")
+
+    if not sched_ok:
+        try:
+            from diffusers import EulerDiscreteScheduler
+            scheduler = EulerDiscreteScheduler.from_pretrained(
+                model_id, subfolder="scheduler"
+            )
+            scheduler_dir = ov_model_path / "scheduler"
+            scheduler_dir.mkdir(parents=True, exist_ok=True)
+            scheduler.save_pretrained(str(scheduler_dir))
+            logger.info(f"Saved scheduler config to {scheduler_dir}")
+        except Exception as e:
+            logger.warning(f"Failed to save scheduler config: {e}")
+
+    # --- Convert tokenizers to OpenVINO IR format ---
+
+    if tok1_ov_ok and tok2_ov_ok:
+        return
+
+    for subfolder, out_dir, already_ok in [
+        ("tokenizer", tokenizer_dir, tok1_ov_ok),
+        ("tokenizer_2", tokenizer_2_dir, tok2_ov_ok),
+    ]:
+        if already_ok:
+            continue
+
+        if _try_convert_clip_tokenizer_to_ov(model_id, subfolder, out_dir):
+            continue
+
+        if _try_download_prebuilt_sdxl_ov_tokenizer(ov_model_path, subfolder):
+            continue
+
+        logger.warning(
+            f"Could not produce openvino_tokenizer.xml for {subfolder}. "
+            "Ensure openvino, openvino-tokenizers, and openvino-genai versions "
+            "match (same MAJOR.MINOR.PATCH). "
+            "Fix: pip install -U openvino openvino-tokenizers openvino-genai"
+        )
+
+
+def _try_convert_clip_tokenizer_to_ov(
+    model_id: str, subfolder: str, out_dir: Path,
+) -> bool:
+    """Try converting a CLIP tokenizer to OpenVINO IR locally.
+
+    Returns True if openvino_tokenizer.xml was created successfully.
+    """
+    try:
+        import openvino as ov
+        from openvino_tokenizers import convert_tokenizer
+        from transformers import CLIPTokenizer, PreTrainedTokenizerFast
+        from transformers.convert_slow_tokenizer import convert_slow_tokenizer
+    except ImportError:
+        return False
+
+    slow_tok = CLIPTokenizer.from_pretrained(model_id, subfolder=subfolder)
+    fast_backend = convert_slow_tokenizer(slow_tok)
+    fast_tok = PreTrainedTokenizerFast(tokenizer_object=fast_backend)
+
+    import inspect
+    sig = inspect.signature(convert_tokenizer)
+    attempts = []
+    if "handle_special_tokens_with_re" in sig.parameters:
+        attempts.append(
+            {"with_detokenizer": True, "handle_special_tokens_with_re": False}
+        )
+    attempts.append({"with_detokenizer": True})
+
+    for kwargs in attempts:
+        try:
+            result = convert_tokenizer(fast_tok, **kwargs)
+            if isinstance(result, tuple):
+                ov_tok, ov_detok = result
+            else:
+                ov_tok, ov_detok = result, None
+
+            out_dir.mkdir(parents=True, exist_ok=True)
+            ov.save_model(ov_tok, str(out_dir / "openvino_tokenizer.xml"))
+            if ov_detok is not None:
+                ov.save_model(ov_detok, str(out_dir / "openvino_detokenizer.xml"))
+            logger.info(f"Converted {subfolder} tokenizer to OpenVINO IR")
+            return True
+        except Exception:
+            continue
+
+    return False
+
+
+_OV_SDXL_FALLBACK_REPOS = [
+    "OpenVINO/stable-diffusion-xl-base-1.0-int8-ov",
+]
+
+
+def _try_download_prebuilt_sdxl_ov_tokenizer(
+    ov_model_path: Path, subfolder: str,
+) -> bool:
+    """Download pre-built OV tokenizer files from HuggingFace as fallback.
+
+    Returns True if openvino_tokenizer.xml was downloaded and loads correctly.
+    """
+    try:
+        import openvino as ov
+        from huggingface_hub import hf_hub_download
+    except ImportError:
+        return False
+
+    for repo_id in _OV_SDXL_FALLBACK_REPOS:
+        out_dir = ov_model_path / subfolder
+        try:
+            for fname in ("openvino_tokenizer.xml", "openvino_tokenizer.bin"):
+                hf_hub_download(
+                    repo_id=repo_id,
+                    filename=f"{subfolder}/{fname}",
+                    local_dir=str(ov_model_path),
+                    local_dir_use_symlinks=False,
+                )
+
+            core = ov.Core()
+            core.read_model(str(out_dir / "openvino_tokenizer.xml"))
+
+            for fname in ("openvino_detokenizer.xml", "openvino_detokenizer.bin"):
+                try:
+                    hf_hub_download(
+                        repo_id=repo_id,
+                        filename=f"{subfolder}/{fname}",
+                        local_dir=str(ov_model_path),
+                        local_dir_use_symlinks=False,
+                    )
+                except Exception:
+                    pass
+
+            logger.info(
+                f"Downloaded pre-built OV tokenizer for {subfolder} "
+                f"from {repo_id}"
+            )
+            return True
+        except Exception as e:
+            for fname in (
+                "openvino_tokenizer.xml", "openvino_tokenizer.bin",
+                "openvino_detokenizer.xml", "openvino_detokenizer.bin",
+            ):
+                (out_dir / fname).unlink(missing_ok=True)
+            logger.debug(
+                f"Pre-built OV tokenizer from {repo_id} not usable: {e}"
+            )
+
+    return False
 
 
 def download_retinanet_model(
