@@ -48,9 +48,14 @@ def main():
     pipe.reshape(NUM_IMAGES, IMAGE_SIZE, IMAGE_SIZE, GUIDANCE_SCALE)
 
     # ── 3. Compile on target device ────────────────────────────────────────
-    print(f"Compiling on {DEVICE} ...", file=sys.stderr, flush=True)
+    #   NPU compiler crashes on VAE decoder's MKSliceFusion pass
+    #   (slice 1x1024x1024x128 → 1x1024x1024x3), so route VAE to CPU.
+    #   VAE runs once per image vs UNet's 20 iterations — minimal perf impact.
+    vae_device = "CPU" if "NPU" in DEVICE else DEVICE
+    print(f"Compiling: text_encoder={DEVICE}, unet={DEVICE}, "
+          f"vae={vae_device} ...", file=sys.stderr, flush=True)
 
-    pipe.compile(DEVICE, config={"LOG_LEVEL": "LOG_DEBUG"})
+    pipe.compile(DEVICE, DEVICE, vae_device)
 
     # ── 4. Progress callback ───────────────────────────────────────────────
     def callback(step, num_steps, latent):
