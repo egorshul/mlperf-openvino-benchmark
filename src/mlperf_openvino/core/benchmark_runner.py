@@ -415,34 +415,23 @@ class BenchmarkRunner:
             except Exception as e:
                 logger.warning(f"Failed to create SDXLMultiDieSUT: {e}")
 
-        try:
-            from .sdxl_sut import SDXLOptimumSUT, OPTIMUM_SDXL_AVAILABLE
+        from .sdxl_sut import SDXLOptimumSUT, OPTIMUM_SDXL_AVAILABLE
 
-            if OPTIMUM_SDXL_AVAILABLE and model_path.is_dir():
-                config_file = model_path / "model_index.json"
-                if not config_file.exists():
-                    config_file = model_path / "config.json"
+        if not OPTIMUM_SDXL_AVAILABLE:
+            raise RuntimeError(
+                "Optimum-Intel with SDXL support is required. "
+                "Install with: pip install optimum[openvino] diffusers"
+            )
+        if not model_path.is_dir():
+            raise RuntimeError(f"SDXL model directory not found: {model_path}")
 
-                if config_file.exists():
-                    self.sut = SDXLOptimumSUT(
-                        config=self.config,
-                        model_path=model_path,
-                        qsl=self.qsl,
-                        scenario=self.config.scenario,
-                    )
-                    logger.info("SDXL: Using Optimum-Intel pipeline (OVStableDiffusionXLPipeline)")
-                    return
-        except Exception as e:
-            logger.warning(f"Failed to create SDXLOptimumSUT: {e}")
-
-        from .sdxl_sut import SDXLManualSUT
-        self.sut = SDXLManualSUT(
+        self.sut = SDXLOptimumSUT(
             config=self.config,
             model_path=model_path,
             qsl=self.qsl,
             scenario=self.config.scenario,
         )
-        logger.info("SDXL: Using manual pipeline (SDXLManualSUT)")
+        logger.info("SDXL: Using Optimum-Intel pipeline (OVStableDiffusionXLPipeline)")
 
     def _setup_llama3_1_8b(self) -> None:
         """Set up Llama 3.1 8B benchmark (CNN-DailyMail summarization)."""
