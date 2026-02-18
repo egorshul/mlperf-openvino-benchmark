@@ -1026,6 +1026,20 @@ def _llama_export_result(ov_model_path: Path) -> Dict[str, str]:
     return result
 
 
+def _ensure_llama_ov_tokenizer(
+    ov_model_path: Path, model_id: str, token: Optional[str] = None,
+) -> None:
+    """Ensure OpenVINO IR tokenizer exists in the Llama model directory.
+
+    Calls _convert_tokenizer_to_openvino if openvino_tokenizer.xml is missing.
+    """
+    tok_xml = ov_model_path / "openvino_tokenizer.xml"
+    if tok_xml.exists():
+        return
+    logger.info("OpenVINO tokenizer not found, converting...")
+    _convert_tokenizer_to_openvino(ov_model_path, model_id, token=token)
+
+
 def _export_llama_to_openvino(
     output_dir: str,
     model_id: str,
@@ -1053,6 +1067,7 @@ def _export_llama_to_openvino(
         xml_files = list(ov_model_path.glob("*.xml"))
         if config_file.exists() and xml_files:
             logger.info(f"OpenVINO model already exists at {ov_model_path}")
+            _ensure_llama_ov_tokenizer(ov_model_path, model_id, token)
             return _llama_export_result(ov_model_path)
 
     logger.info(f"Exporting {model_id} to OpenVINO IR (weight_format={weight_format})...")
@@ -1082,6 +1097,8 @@ def _export_llama_to_openvino(
     # Ensure HF tokenizer files are present (needed by openvino-genai LLMPipeline)
     tokenizer = AutoTokenizer.from_pretrained(model_id, token=token)
     tokenizer.save_pretrained(str(ov_model_path))
+
+    _ensure_llama_ov_tokenizer(ov_model_path, model_id, token)
 
     logger.info(f"OpenVINO model saved to {ov_model_path}")
     return _llama_export_result(ov_model_path)
