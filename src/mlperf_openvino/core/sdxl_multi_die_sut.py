@@ -75,10 +75,9 @@ def _sdxl_die_worker_fn(
 
     pipe.reshape(1, image_size, image_size, guidance_scale)
 
-    # After reshape() all models have fully static shapes.
-    # VAE decoder is compiled on CPU to avoid NPU slice-fusion issues
-    # (the final 128→3 channel slice is not supported by some NPU compilers).
-    pipe.compile(die_name, die_name, "CPU")
+    # After reshape() all models have fully static shapes —
+    # compile everything on the target device.
+    pipe.compile(die_name, die_name, die_name)
 
     # Warmup (1 step to trigger compilation)
     gen = _ov_genai.TorchGenerator(0)
@@ -301,13 +300,12 @@ class SDXLMultiDieSUT:
 
         pipe.reshape(1, self.image_size, self.image_size, self.guidance_scale)
 
-        # After reshape() all models have fully static shapes.
-        # VAE decoder runs on CPU to avoid NPU slice-fusion issues.
-        vae_device = "CPU" if die != "CPU" else die
-        pipe.compile(die, die, vae_device)
+        # After reshape() all models have fully static shapes —
+        # compile everything on the target device.
+        pipe.compile(die, die, die)
 
         self._pipeline = pipe
-        print(f"[SDXL] 1 die: {die} (vae_decoder: {vae_device})", file=sys.stderr)
+        print(f"[SDXL] 1 die: {die}", file=sys.stderr)
 
     # ------------------------------------------------------------------
     # Inference
