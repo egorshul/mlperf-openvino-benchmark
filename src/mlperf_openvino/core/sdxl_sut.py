@@ -154,6 +154,11 @@ class SDXLOptimumSUT:
             else:
                 raise RuntimeError(f"Cannot load SDXL model: {e}")
 
+        # Move all sub-models to the target device (recompiles each individually)
+        if device != "CPU":
+            logger.info("Moving SDXL pipeline to %s ...", device)
+            self.pipeline.to(device)
+
         self.pipeline.set_progress_bar_config(disable=True)
 
         try:

@@ -396,17 +396,31 @@ class BenchmarkRunner:
             )
 
         model_path = Path(self.config.model.model_path)
+        device = self.config.openvino.device if hasattr(self.config, "openvino") else "CPU"
 
-        # GenAI path — works on all devices (CPU, NPU, XPU, ...)
-        from .sdxl_multi_die_sut import SDXLMultiDieSUT
+        # Optimum-Intel path — compiles each sub-model individually,
+        # then moves to target device via pipeline.to(device).
+        from .sdxl_sut import SDXLOptimumSUT, OPTIMUM_SDXL_AVAILABLE
 
-        logger.info(f"SDXL: Using GenAI pipeline on {self.config.openvino.device}")
-        self.sut = SDXLMultiDieSUT(
-            config=self.config,
-            model_path=model_path,
-            qsl=self.qsl,
-            scenario=self.config.scenario,
-        )
+        if OPTIMUM_SDXL_AVAILABLE:
+            logger.info(f"SDXL: Using Optimum-Intel pipeline → .to({device})")
+            self.sut = SDXLOptimumSUT(
+                config=self.config,
+                model_path=model_path,
+                qsl=self.qsl,
+                scenario=self.config.scenario,
+            )
+        else:
+            # Fallback to GenAI if optimum-intel is not installed
+            from .sdxl_multi_die_sut import SDXLMultiDieSUT
+
+            logger.info(f"SDXL: Using GenAI pipeline on {device}")
+            self.sut = SDXLMultiDieSUT(
+                config=self.config,
+                model_path=model_path,
+                qsl=self.qsl,
+                scenario=self.config.scenario,
+            )
 
     def _setup_llama3_1_8b(self) -> None:
         """Set up Llama 3.1 8B benchmark (CNN-DailyMail summarization)."""
