@@ -10,13 +10,13 @@ Usage:
 import sys
 import time
 
-import numpy as np
 from PIL import Image
 
 # ── MLCommons-mandated parameters ──────────────────────────────────────────
 MODEL_PATH = "./models/stable-diffusion-xl-base-1.0-openvino"
 DEVICE = "NPU.0"
 IMAGE_SIZE = 1024
+NUM_IMAGES = 1
 GUIDANCE_SCALE = 8.0
 NUM_INFERENCE_STEPS = 20
 NEGATIVE_PROMPT = (
@@ -33,20 +33,31 @@ def main():
 
     prompt = sys.argv[1]
 
-    # ── 1. Create pipeline ─────────────────────────────────────────────────
+    # ── 1. Create pipeline (no device → no auto-compile) ──────────────────
     import openvino_genai
 
-    print(f"Loading model from {MODEL_PATH} on {DEVICE} ...",
-          file=sys.stderr, flush=True)
+    print(f"Loading model from {MODEL_PATH} ...", file=sys.stderr, flush=True)
 
-    pipe = openvino_genai.Text2ImagePipeline(MODEL_PATH, DEVICE)
+    pipe = openvino_genai.Text2ImagePipeline(MODEL_PATH)
 
-    # ── 2. Progress callback ───────────────────────────────────────────────
+    # ── 2. Reshape to static shapes (required for NPU) ────────────────────
+    #   reshape(num_images_per_prompt, height, width, guidance_scale)
+    print(f"Reshaping to {NUM_IMAGES}×{IMAGE_SIZE}×{IMAGE_SIZE}, "
+          f"guidance_scale={GUIDANCE_SCALE} ...", file=sys.stderr, flush=True)
+
+    pipe.reshape(NUM_IMAGES, IMAGE_SIZE, IMAGE_SIZE, GUIDANCE_SCALE)
+
+    # ── 3. Compile on target device ────────────────────────────────────────
+    print(f"Compiling on {DEVICE} ...", file=sys.stderr, flush=True)
+
+    pipe.compile(DEVICE)
+
+    # ── 4. Progress callback ───────────────────────────────────────────────
     def callback(step, num_steps, latent):
         print(f"\r  Step {step + 1}/{num_steps}", end="", file=sys.stderr, flush=True)
         return False  # don't interrupt
 
-    # ── 3. Inference ───────────────────────────────────────────────────────
+    # ── 5. Inference ───────────────────────────────────────────────────────
     print(f"Generating: \"{prompt}\" ...", file=sys.stderr, flush=True)
     t0 = time.time()
 
@@ -57,7 +68,7 @@ def main():
         height=IMAGE_SIZE,
         num_inference_steps=NUM_INFERENCE_STEPS,
         guidance_scale=GUIDANCE_SCALE,
-        num_images_per_prompt=1,
+        num_images_per_prompt=NUM_IMAGES,
         rng_seed=SEED,
         callback=callback,
     )
@@ -65,7 +76,7 @@ def main():
     elapsed = time.time() - t0
     print(f"\n  Done in {elapsed:.1f}s", file=sys.stderr)
 
-    # ── 4. Save ────────────────────────────────────────────────────────────
+    # ── 6. Save ────────────────────────────────────────────────────────────
     image = Image.fromarray(image_tensor.data[0])
     image.save(OUTPUT_FILE)
     print(f"Saved {OUTPUT_FILE}")
