@@ -103,10 +103,7 @@ class SDXLOptimumSUT:
         device = self.config.openvino.device if hasattr(self.config, "openvino") else "CPU"
         print(f"[SDXL] Compiling on {device} ...", file=sys.stderr, flush=True)
 
-        ov_config = {
-            "EXECUTION_MODE_HINT": "ACCURACY",
-            "INFERENCE_PRECISION_HINT": "f32",
-        }
+        ov_config = {"EXECUTION_MODE_HINT": "ACCURACY"}
 
         try:
             if self.batch_size > 1:
