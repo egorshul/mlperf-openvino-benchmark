@@ -186,7 +186,10 @@ class SDXLMultiDieSUT:
     def _load_pipeline_for_device(self, die: str) -> Any:
         is_cpu = die.upper() == "CPU"
 
-        ov_config = {"EXECUTION_MODE_HINT": "ACCURACY"}
+        ov_config = {
+            "EXECUTION_MODE_HINT": "ACCURACY",
+            "INFERENCE_PRECISION_HINT": "f32",
+        }
 
         if is_cpu and self.batch_size <= 1:
             pipeline = OVStableDiffusionXLPipeline.from_pretrained(

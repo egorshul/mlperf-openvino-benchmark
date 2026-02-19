@@ -607,10 +607,10 @@ class COCOPromptsDataset(BaseDataset):
             diff = mu_gen - mu_ref
 
             eps = 1e-6
-            covmean, _ = linalg.sqrtm(sigma_ref.dot(sigma_gen), disp=False)
+            covmean, _ = linalg.sqrtm(sigma_gen.dot(sigma_ref), disp=False)
             if not np.isfinite(covmean).all():
-                offset = np.eye(sigma_ref.shape[0]) * eps
-                covmean = linalg.sqrtm((sigma_ref + offset).dot(sigma_gen + offset))
+                offset = np.eye(sigma_gen.shape[0]) * eps
+                covmean = linalg.sqrtm((sigma_gen + offset).dot(sigma_ref + offset))
             if np.iscomplexobj(covmean):
                 if not np.allclose(np.diagonal(covmean).imag, 0, atol=1e-3):
                     logger.warning("FID: Significant imaginary component %.4f", np.max(np.abs(covmean.imag)))
