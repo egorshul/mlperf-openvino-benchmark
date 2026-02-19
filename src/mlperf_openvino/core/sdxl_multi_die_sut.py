@@ -13,6 +13,13 @@ from typing import Any, Dict, List, Tuple, Union
 import numpy as np
 
 try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    torch = None
+
+try:
     import mlperf_loadgen as lg
     LOADGEN_AVAILABLE = True
 except ImportError:
@@ -27,6 +34,7 @@ except ImportError:
     OVStableDiffusionXLPipeline = None
 
 from .config import BenchmarkConfig, Scenario
+from .sdxl_sut import _encode_prompt_pytorch
 from ..datasets.coco_prompts import COCOPromptsQSL
 
 logger = logging.getLogger(__name__)
@@ -107,6 +115,9 @@ class SDXLMultiDieSUT:
 
         self._sut_handle = None
         self._qsl_handle = None
+
+        self._pt_encoder_cache: Dict[str, Any] = {}
+        self._prompt_cache: Dict[str, Tuple] = {}
 
         self._pipelines: List[Tuple[str, Any, threading.Lock]] = []
         self._pipeline_index = 0
@@ -258,15 +269,28 @@ class SDXLMultiDieSUT:
             return (np.clip(image, 0.0, 1.0) * 255).round().astype(np.uint8)
         return np.array(image)
 
+    def _get_prompt_embeds(self, prompt: str) -> Tuple:
+        if prompt not in self._prompt_cache:
+            self._prompt_cache[prompt] = _encode_prompt_pytorch(
+                prompt, self.negative_prompt,
+                cache=self._pt_encoder_cache,
+            )
+        return self._prompt_cache[prompt]
+
     def _process_sample(self, sample_idx: int, pipeline: Any) -> np.ndarray:
         features = self.qsl.get_features(sample_idx)
         prompt = features["prompt"]
         guidance_scale = features.get("guidance_scale", self.guidance_scale)
         num_steps = features.get("num_inference_steps", self.num_inference_steps)
 
+        embeds = self._get_prompt_embeds(prompt)
+        p_emb, n_emb, pool_emb, n_pool_emb = embeds
+
         pipe_kwargs = {
-            "prompt": prompt,
-            "negative_prompt": self.negative_prompt,
+            "prompt_embeds": p_emb,
+            "negative_prompt_embeds": n_emb,
+            "pooled_prompt_embeds": pool_emb,
+            "negative_pooled_prompt_embeds": n_pool_emb,
             "guidance_scale": guidance_scale,
             "num_inference_steps": num_steps,
             "height": self.image_size,
@@ -276,32 +300,29 @@ class SDXLMultiDieSUT:
 
         raw_latents = features.get("latents", None)
         if raw_latents is not None:
-            try:
-                prepared = self._prepare_latents(raw_latents)
-                if prepared is not None:
-                    pipe_kwargs["latents"] = prepared
-            except ImportError:
-                pass
+            prepared = self._prepare_latents(raw_latents)
+            if prepared is not None:
+                pipe_kwargs["latents"] = prepared
 
         if "latents" not in pipe_kwargs:
-            try:
-                import torch
-                pipe_kwargs["generator"] = torch.Generator().manual_seed(sample_idx)
-            except ImportError:
-                pass
+            pipe_kwargs["generator"] = torch.Generator().manual_seed(sample_idx)
 
         image = pipeline(**pipe_kwargs).images[0]
         return self._to_uint8(image)
 
     def _process_batch(self, sample_indices: List[int], pipeline: Any) -> List[np.ndarray]:
-        import torch
-
-        prompts = []
+        all_p_emb, all_n_emb, all_pool, all_n_pool = [], [], [], []
         latents_list = []
 
         for idx in sample_indices:
             features = self.qsl.get_features(idx)
-            prompts.append(features["prompt"])
+            prompt = features["prompt"]
+            p_emb, n_emb, pool_emb, n_pool_emb = self._get_prompt_embeds(prompt)
+            all_p_emb.append(p_emb)
+            all_n_emb.append(n_emb)
+            all_pool.append(pool_emb)
+            all_n_pool.append(n_pool_emb)
+
             raw = features.get("latents", None)
             if raw is not None:
                 prepared = self._prepare_latents(raw)
@@ -309,15 +330,17 @@ class SDXLMultiDieSUT:
                     latents_list.append(prepared)
 
         pipe_kwargs = {
-            "prompt": prompts,
-            "negative_prompt": [self.negative_prompt] * len(prompts),
+            "prompt_embeds": torch.cat(all_p_emb, dim=0),
+            "negative_prompt_embeds": torch.cat(all_n_emb, dim=0),
+            "pooled_prompt_embeds": torch.cat(all_pool, dim=0),
+            "negative_pooled_prompt_embeds": torch.cat(all_n_pool, dim=0),
             "guidance_scale": self.guidance_scale,
             "num_inference_steps": self.num_inference_steps,
             "height": self.image_size,
             "width": self.image_size,
             "output_type": "np",
         }
-        if latents_list and len(latents_list) == len(prompts):
+        if latents_list and len(latents_list) == len(sample_indices):
             pipe_kwargs["latents"] = torch.cat(latents_list, dim=0)
 
         result = pipeline(**pipe_kwargs)

@@ -3,9 +3,16 @@ import logging
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
+
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    torch = None
 
 try:
     import mlperf_loadgen as lg
@@ -32,6 +39,83 @@ DEFAULT_IMAGE_SIZE = 1024
 DEFAULT_NEGATIVE_PROMPT = (
     "normal quality, low quality, worst quality, low res, blurry, nsfw, nude"
 )
+SDXL_MODEL_ID = "stabilityai/stable-diffusion-xl-base-1.0"
+
+
+def _encode_prompt_pytorch(
+    prompt: str,
+    negative_prompt: str,
+    model_id: str = SDXL_MODEL_ID,
+    cache: Optional[Dict] = None,
+) -> Tuple:
+    """Encode prompt using PyTorch CLIP text encoders (matches MLCommons reference).
+
+    Returns (prompt_embeds, negative_prompt_embeds,
+             pooled_prompt_embeds, negative_pooled_prompt_embeds).
+    """
+    from transformers import CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer
+
+    if cache is None:
+        cache = {}
+
+    if "tokenizer" not in cache:
+        cache["tokenizer"] = CLIPTokenizer.from_pretrained(model_id, subfolder="tokenizer")
+        cache["tokenizer_2"] = CLIPTokenizer.from_pretrained(model_id, subfolder="tokenizer_2")
+        cache["text_encoder"] = CLIPTextModel.from_pretrained(
+            model_id, subfolder="text_encoder"
+        ).eval()
+        cache["text_encoder_2"] = CLIPTextModelWithProjection.from_pretrained(
+            model_id, subfolder="text_encoder_2"
+        ).eval()
+
+    tokenizer = cache["tokenizer"]
+    tokenizer_2 = cache["tokenizer_2"]
+    text_encoder = cache["text_encoder"]
+    text_encoder_2 = cache["text_encoder_2"]
+
+    tokenizers = [tokenizer, tokenizer_2]
+    text_encoders = [text_encoder, text_encoder_2]
+
+    prompt_embeds_list = []
+    for tok, enc in zip(tokenizers, text_encoders):
+        text_input = tok(
+            prompt,
+            padding="max_length",
+            max_length=tok.model_max_length,
+            truncation=True,
+            return_tensors="pt",
+        )
+        with torch.no_grad():
+            output = enc(text_input.input_ids, output_hidden_states=True)
+        hidden = output.hidden_states[-2]
+        prompt_embeds_list.append(hidden)
+
+    prompt_embeds = torch.cat(prompt_embeds_list, dim=-1)
+    pooled_prompt_embeds = output.text_embeds
+
+    neg_embeds_list = []
+    for tok, enc in zip(tokenizers, text_encoders):
+        text_input = tok(
+            negative_prompt,
+            padding="max_length",
+            max_length=tok.model_max_length,
+            truncation=True,
+            return_tensors="pt",
+        )
+        with torch.no_grad():
+            output = enc(text_input.input_ids, output_hidden_states=True)
+        hidden = output.hidden_states[-2]
+        neg_embeds_list.append(hidden)
+
+    negative_prompt_embeds = torch.cat(neg_embeds_list, dim=-1)
+    negative_pooled_prompt_embeds = output.text_embeds
+
+    return (
+        prompt_embeds,
+        negative_prompt_embeds,
+        pooled_prompt_embeds,
+        negative_pooled_prompt_embeds,
+    )
 
 
 def _fmt_time(seconds: float) -> str:
@@ -96,6 +180,9 @@ class SDXLOptimumSUT:
 
         self._sut_handle = None
         self._qsl_handle = None
+
+        self._pt_encoder_cache: Dict[str, Any] = {}
+        self._prompt_cache: Dict[str, Tuple] = {}
 
         self._load_pipeline()
 
@@ -181,15 +268,28 @@ class SDXLOptimumSUT:
             return (np.clip(image, 0.0, 1.0) * 255).round().astype(np.uint8)
         return np.array(image)
 
+    def _get_prompt_embeds(self, prompt: str) -> Tuple:
+        if prompt not in self._prompt_cache:
+            self._prompt_cache[prompt] = _encode_prompt_pytorch(
+                prompt, self.negative_prompt,
+                cache=self._pt_encoder_cache,
+            )
+        return self._prompt_cache[prompt]
+
     def _process_sample(self, sample_idx: int) -> np.ndarray:
         features = self.qsl.get_features(sample_idx)
         prompt = features["prompt"]
         guidance_scale = features.get("guidance_scale", self.guidance_scale)
         num_steps = features.get("num_inference_steps", self.num_inference_steps)
 
+        embeds = self._get_prompt_embeds(prompt)
+        p_emb, n_emb, pool_emb, n_pool_emb = embeds
+
         pipe_kwargs = {
-            "prompt": prompt,
-            "negative_prompt": self.negative_prompt,
+            "prompt_embeds": p_emb,
+            "negative_prompt_embeds": n_emb,
+            "pooled_prompt_embeds": pool_emb,
+            "negative_pooled_prompt_embeds": n_pool_emb,
             "guidance_scale": guidance_scale,
             "num_inference_steps": num_steps,
             "height": self.image_size,
@@ -199,32 +299,29 @@ class SDXLOptimumSUT:
 
         raw_latents = features.get("latents", None)
         if raw_latents is not None:
-            try:
-                prepared = self._prepare_latents(raw_latents)
-                if prepared is not None:
-                    pipe_kwargs["latents"] = prepared
-            except ImportError:
-                pass
+            prepared = self._prepare_latents(raw_latents)
+            if prepared is not None:
+                pipe_kwargs["latents"] = prepared
 
         if "latents" not in pipe_kwargs:
-            try:
-                import torch
-                pipe_kwargs["generator"] = torch.Generator().manual_seed(sample_idx)
-            except ImportError:
-                pass
+            pipe_kwargs["generator"] = torch.Generator().manual_seed(sample_idx)
 
         image = self.pipeline(**pipe_kwargs).images[0]
         return self._to_uint8(image)
 
     def _process_batch(self, sample_indices: List[int]) -> List[np.ndarray]:
-        import torch
-
-        prompts = []
+        all_p_emb, all_n_emb, all_pool, all_n_pool = [], [], [], []
         latents_list = []
 
         for idx in sample_indices:
             features = self.qsl.get_features(idx)
-            prompts.append(features["prompt"])
+            prompt = features["prompt"]
+            p_emb, n_emb, pool_emb, n_pool_emb = self._get_prompt_embeds(prompt)
+            all_p_emb.append(p_emb)
+            all_n_emb.append(n_emb)
+            all_pool.append(pool_emb)
+            all_n_pool.append(n_pool_emb)
+
             raw = features.get("latents", None)
             if raw is not None:
                 prepared = self._prepare_latents(raw)
@@ -232,15 +329,17 @@ class SDXLOptimumSUT:
                     latents_list.append(prepared)
 
         pipe_kwargs = {
-            "prompt": prompts,
-            "negative_prompt": [self.negative_prompt] * len(prompts),
+            "prompt_embeds": torch.cat(all_p_emb, dim=0),
+            "negative_prompt_embeds": torch.cat(all_n_emb, dim=0),
+            "pooled_prompt_embeds": torch.cat(all_pool, dim=0),
+            "negative_pooled_prompt_embeds": torch.cat(all_n_pool, dim=0),
             "guidance_scale": self.guidance_scale,
             "num_inference_steps": self.num_inference_steps,
             "height": self.image_size,
             "width": self.image_size,
             "output_type": "np",
         }
-        if latents_list and len(latents_list) == len(prompts):
+        if latents_list and len(latents_list) == len(sample_indices):
             pipe_kwargs["latents"] = torch.cat(latents_list, dim=0)
 
         result = self.pipeline(**pipe_kwargs)
