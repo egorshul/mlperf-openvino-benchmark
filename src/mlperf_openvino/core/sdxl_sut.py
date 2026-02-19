@@ -200,7 +200,9 @@ class SDXLOptimumSUT:
         raw_latents = features.get("latents", None)
         if raw_latents is not None:
             try:
-                pipe_kwargs["latents"] = self._prepare_latents(raw_latents)
+                prepared = self._prepare_latents(raw_latents)
+                if prepared is not None:
+                    pipe_kwargs["latents"] = prepared
             except ImportError:
                 pass
 

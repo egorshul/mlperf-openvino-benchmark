@@ -459,10 +459,9 @@ class COCOPromptsDataset(BaseDataset):
 
         try:
             model, _, preprocess = open_clip.create_model_and_transforms(
-                'ViT-B-32-quickgelu',
+                'ViT-B/32',
                 pretrained='openai'
             )
-            tokenizer = open_clip.get_tokenizer('ViT-B-32-quickgelu')
             model.eval()
 
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -496,16 +495,15 @@ class COCOPromptsDataset(BaseDataset):
                     pil_img = pil_img.convert('RGB')
 
                 image_input = preprocess(pil_img).unsqueeze(0).to(device)
-                text_input = tokenizer([prompt]).to(device)
+                text_input = open_clip.tokenize([prompt]).to(device)
 
                 with torch.no_grad():
-                    image_features = model.encode_image(image_input)
-                    text_features = model.encode_text(text_input)
+                    image_features = model.encode_image(image_input).float()
+                    text_features = model.encode_text(text_input).float()
 
-                    image_features = image_features / image_features.norm(dim=-1, keepdim=True)
-                    text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+                    image_features /= image_features.norm(dim=-1, keepdim=True)
+                    text_features /= text_features.norm(dim=-1, keepdim=True)
 
-                    # Cosine similarity scaled by 100
                     score = (image_features @ text_features.T).item() * 100
                     scores.append(score)
                     logger.debug("CLIP[%d]: %.2f", idx, score)
