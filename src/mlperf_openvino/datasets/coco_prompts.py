@@ -459,9 +459,10 @@ class COCOPromptsDataset(BaseDataset):
 
         try:
             model, _, preprocess = open_clip.create_model_and_transforms(
-                'ViT-B/32',
+                'ViT-B-32-quickgelu',
                 pretrained='openai'
             )
+            tokenizer = open_clip.get_tokenizer('ViT-B-32-quickgelu')
             model.eval()
 
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -481,10 +482,8 @@ class COCOPromptsDataset(BaseDataset):
                         img = img.astype(np.uint8)
 
                     if img.ndim == 2:
-                        # Grayscale to RGB
                         img = np.stack([img, img, img], axis=-1)
                     elif img.ndim == 3 and img.shape[0] == 3:
-                        # CHW to HWC
                         img = np.transpose(img, (1, 2, 0))
 
                     pil_img = Image.fromarray(img)
@@ -495,14 +494,14 @@ class COCOPromptsDataset(BaseDataset):
                     pil_img = pil_img.convert('RGB')
 
                 image_input = preprocess(pil_img).unsqueeze(0).to(device)
-                text_input = open_clip.tokenize([prompt]).to(device)
+                text_input = tokenizer([prompt]).to(device)
 
                 with torch.no_grad():
-                    image_features = model.encode_image(image_input).float()
-                    text_features = model.encode_text(text_input).float()
+                    image_features = model.encode_image(image_input)
+                    text_features = model.encode_text(text_input)
 
-                    image_features /= image_features.norm(dim=-1, keepdim=True)
-                    text_features /= text_features.norm(dim=-1, keepdim=True)
+                    image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+                    text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
                     score = (image_features @ text_features.T).item() * 100
                     scores.append(score)
@@ -607,10 +606,10 @@ class COCOPromptsDataset(BaseDataset):
             diff = mu_gen - mu_ref
 
             eps = 1e-6
-            covmean, _ = linalg.sqrtm(sigma_gen.dot(sigma_ref), disp=False)
+            covmean, _ = linalg.sqrtm(sigma_ref.dot(sigma_gen), disp=False)
             if not np.isfinite(covmean).all():
-                offset = np.eye(sigma_gen.shape[0]) * eps
-                covmean = linalg.sqrtm((sigma_gen + offset).dot(sigma_ref + offset))
+                offset = np.eye(sigma_ref.shape[0]) * eps
+                covmean = linalg.sqrtm((sigma_ref + offset).dot(sigma_gen + offset))
             if np.iscomplexobj(covmean):
                 if not np.allclose(np.diagonal(covmean).imag, 0, atol=1e-3):
                     logger.warning("FID: Significant imaginary component %.4f", np.max(np.abs(covmean.imag)))
