@@ -1,5 +1,3 @@
-"""Stable Diffusion XL Multi-Die System Under Test."""
-
 import array
 import logging
 import re
@@ -67,11 +65,6 @@ def _print_progress(completed: int, total: int, start_time: float) -> None:
 
 
 class SDXLMultiDieSUT:
-    """SDXL text-to-image SUT for multi-die accelerators.
-
-    Loads one OVStableDiffusionXLPipeline per die. Offline mode distributes
-    samples across dies in parallel; Server mode uses round-robin dispatch.
-    """
 
     def __init__(
         self,
@@ -125,7 +118,6 @@ class SDXLMultiDieSUT:
         self._setup_pipelines()
 
     def _discover_device_dies(self, device: str) -> List[str]:
-        """Return sorted list of sub-device identifiers (e.g. NPU.0, NPU.1)."""
         import openvino as ov
 
         core = ov.Core()
@@ -142,7 +134,6 @@ class SDXLMultiDieSUT:
         if target_device == "CPU":
             device_dies = ["CPU"]
         elif "," in target_device:
-            # Comma-separated die selection (e.g., "NPU.0,NPU.2")
             device_dies = [p.strip() for p in target_device.split(",")]
         elif re.match(r"^.+\.\d+$", target_device):
             device_dies = [target_device]
@@ -348,7 +339,6 @@ class SDXLMultiDieSUT:
 
     @property
     def _sample_count(self) -> int:
-        # Exposes completed count under the name expected by benchmark_runner.
         return self._completed
 
     def issue_queries(self, query_samples: List[Any]) -> None:
@@ -479,7 +469,6 @@ class SDXLMultiDieSUT:
         results: List[Tuple[Any, int, np.ndarray]],
     ) -> None:
         responses = []
-        # array.array objects must stay alive until QuerySamplesComplete returns.
         arrays = []
         for sample, _idx, image in sorted(results, key=lambda r: r[1]):
             response_data = np.array(image.shape, dtype=np.int64)

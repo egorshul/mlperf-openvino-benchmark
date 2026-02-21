@@ -48,11 +48,6 @@ def _encode_prompt_pytorch(
     model_id: str = SDXL_MODEL_ID,
     cache: Optional[Dict] = None,
 ) -> Tuple:
-    """Encode prompt using PyTorch CLIP text encoders (matches MLCommons reference).
-
-    Returns (prompt_embeds, negative_prompt_embeds,
-             pooled_prompt_embeds, negative_pooled_prompt_embeds).
-    """
     from transformers import CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer
 
     if cache is None:

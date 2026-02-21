@@ -1,5 +1,3 @@
-"""COCO 2014 Captions dataset for Stable Diffusion XL benchmark."""
-
 import json
 import logging
 import os
@@ -67,7 +65,6 @@ class COCOPromptsDataset(BaseDataset):
 
         loaded = False
 
-        # Format 1: MLCommons TSV format
         tsv_file = self.data_path / "coco-1024.tsv"
         if not tsv_file.exists():
             tsv_file = self.data_path / "captions_source.tsv"
@@ -77,7 +74,6 @@ class COCOPromptsDataset(BaseDataset):
             self._load_from_tsv(tsv_file)
             loaded = True
 
-        # Format 2: COCO JSON annotations
         if not loaded:
             json_candidates = [
                 self.data_path / "captions" / "captions_val2014.json",
@@ -91,7 +87,6 @@ class COCOPromptsDataset(BaseDataset):
                     loaded = True
                     break
 
-        # Format 3: Simple text file (one caption per line)
         if not loaded:
             txt_candidates = [
                 self.data_path / "prompts.txt",
@@ -112,7 +107,6 @@ class COCOPromptsDataset(BaseDataset):
             logger.info("")
             logger.info("Or use mlperf-ov download-dataset --dataset coco2014")
 
-        # MLPerf uses 5000 samples
         if self.count and self.count < len(self._samples):
             self._samples = self._samples[:self.count]
 
@@ -140,7 +134,6 @@ class COCOPromptsDataset(BaseDataset):
                     continue
 
                 if is_mlcommons_format and len(parts) >= 3:
-                    # captions_source.tsv: id, image_id, caption, height, width, ...
                     image_id = parts[1]
                     caption = parts[2]
                 elif len(parts) >= 2:
@@ -169,7 +162,6 @@ class COCOPromptsDataset(BaseDataset):
             for img in data['images']:
                 id_to_filename[img['id']] = img.get('file_name', '')
 
-        # Take the first caption for each image (MLPerf uses one caption per image)
         seen_images = set()
         annotations = data.get('annotations', [])
 
@@ -239,7 +231,6 @@ class COCOPromptsDataset(BaseDataset):
         return None
 
     def _load_latents(self) -> None:
-        # MLCommons: ALL samples share the SAME latent (1, 4, 128, 128), generated with seed=0
         search_paths = [
             self.data_path / "latents" / "latents.pt",
             self.data_path / "latents" / "latents.npy",
@@ -282,7 +273,6 @@ class COCOPromptsDataset(BaseDataset):
 
             logger.debug("Latent tensor shape: %s", latent.shape)
 
-            # Same latent for ALL samples
             self._shared_latent = latent
             for idx in range(len(self._samples)):
                 self._latents_cache[idx] = latent.squeeze(0)
@@ -298,8 +288,6 @@ class COCOPromptsDataset(BaseDataset):
             self._generate_latents()
 
     def _generate_latents(self) -> None:
-        # MLCommons latent.py: randn_tensor((1, 4, 128, 128), seed=0)
-        # Same latent is used for ALL samples
         try:
             import torch
             generator = torch.Generator("cpu")
@@ -523,8 +511,6 @@ class COCOPromptsDataset(BaseDataset):
         reference_paths: List[str],
         statistics_path: Optional[str] = None
     ) -> float:
-        # CRITICAL: Must use pytorch-fid InceptionV3 weights (pt_inception-2015-12-05-6726825d.pth),
-        # NOT torchvision weights. val2014.npz statistics were computed with these exact weights.
         try:
             from scipy import linalg
             import torch
