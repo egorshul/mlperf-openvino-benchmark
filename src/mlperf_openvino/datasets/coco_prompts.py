@@ -1,5 +1,3 @@
-"""COCO 2014 Captions dataset for Stable Diffusion XL benchmark."""
-
 import json
 import logging
 import os
@@ -67,7 +65,6 @@ class COCOPromptsDataset(BaseDataset):
 
         loaded = False
 
-        # Format 1: MLCommons TSV format
         tsv_file = self.data_path / "coco-1024.tsv"
         if not tsv_file.exists():
             tsv_file = self.data_path / "captions_source.tsv"
@@ -77,7 +74,6 @@ class COCOPromptsDataset(BaseDataset):
             self._load_from_tsv(tsv_file)
             loaded = True
 
-        # Format 2: COCO JSON annotations
         if not loaded:
             json_candidates = [
                 self.data_path / "captions" / "captions_val2014.json",
@@ -91,7 +87,6 @@ class COCOPromptsDataset(BaseDataset):
                     loaded = True
                     break
 
-        # Format 3: Simple text file (one caption per line)
         if not loaded:
             txt_candidates = [
                 self.data_path / "prompts.txt",
@@ -112,7 +107,6 @@ class COCOPromptsDataset(BaseDataset):
             logger.info("")
             logger.info("Or use mlperf-ov download-dataset --dataset coco2014")
 
-        # MLPerf uses 5000 samples
         if self.count and self.count < len(self._samples):
             self._samples = self._samples[:self.count]
 
@@ -140,7 +134,6 @@ class COCOPromptsDataset(BaseDataset):
                     continue
 
                 if is_mlcommons_format and len(parts) >= 3:
-                    # captions_source.tsv: id, image_id, caption, height, width, ...
                     image_id = parts[1]
                     caption = parts[2]
                 elif len(parts) >= 2:
@@ -169,7 +162,6 @@ class COCOPromptsDataset(BaseDataset):
             for img in data['images']:
                 id_to_filename[img['id']] = img.get('file_name', '')
 
-        # Take the first caption for each image (MLPerf uses one caption per image)
         seen_images = set()
         annotations = data.get('annotations', [])
 
@@ -239,7 +231,6 @@ class COCOPromptsDataset(BaseDataset):
         return None
 
     def _load_latents(self) -> None:
-        # MLCommons: ALL samples share the SAME latent (1, 4, 128, 128), generated with seed=0
         search_paths = [
             self.data_path / "latents" / "latents.pt",
             self.data_path / "latents" / "latents.npy",
@@ -282,7 +273,6 @@ class COCOPromptsDataset(BaseDataset):
 
             logger.debug("Latent tensor shape: %s", latent.shape)
 
-            # Same latent for ALL samples
             self._shared_latent = latent
             for idx in range(len(self._samples)):
                 self._latents_cache[idx] = latent.squeeze(0)
@@ -298,8 +288,6 @@ class COCOPromptsDataset(BaseDataset):
             self._generate_latents()
 
     def _generate_latents(self) -> None:
-        # MLCommons latent.py: randn_tensor((1, 4, 128, 128), seed=0)
-        # Same latent is used for ALL samples
         try:
             import torch
             generator = torch.Generator("cpu")
@@ -482,10 +470,8 @@ class COCOPromptsDataset(BaseDataset):
                         img = img.astype(np.uint8)
 
                     if img.ndim == 2:
-                        # Grayscale to RGB
                         img = np.stack([img, img, img], axis=-1)
                     elif img.ndim == 3 and img.shape[0] == 3:
-                        # CHW to HWC
                         img = np.transpose(img, (1, 2, 0))
 
                     pil_img = Image.fromarray(img)
@@ -505,7 +491,6 @@ class COCOPromptsDataset(BaseDataset):
                     image_features = image_features / image_features.norm(dim=-1, keepdim=True)
                     text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
-                    # Cosine similarity scaled by 100
                     score = (image_features @ text_features.T).item() * 100
                     scores.append(score)
                     logger.debug("CLIP[%d]: %.2f", idx, score)
@@ -526,8 +511,6 @@ class COCOPromptsDataset(BaseDataset):
         reference_paths: List[str],
         statistics_path: Optional[str] = None
     ) -> float:
-        # CRITICAL: Must use pytorch-fid InceptionV3 weights (pt_inception-2015-12-05-6726825d.pth),
-        # NOT torchvision weights. val2014.npz statistics were computed with these exact weights.
         try:
             from scipy import linalg
             import torch
@@ -568,22 +551,19 @@ class COCOPromptsDataset(BaseDataset):
                         img = Image.open(item).convert('RGB')
                     else:
                         if isinstance(item, np.ndarray):
-                            img = Image.fromarray(item.astype(np.uint8))
+                            img = Image.fromarray(item.astype(np.uint8)).convert('RGB')
                         else:
                             img = item
-                        if hasattr(img, 'mode') and img.mode != 'RGB':
-                            img = img.convert('RGB')
+                            if hasattr(img, 'mode') and img.mode != 'RGB':
+                                img = img.convert('RGB')
 
                     tensor = transform(img).unsqueeze(0).to(device)
                     with torch.no_grad():
-                        feat = model(tensor)
-                        # pytorch_fid returns list of feature tensors per block
-                        if isinstance(feat, list):
-                            feat = feat[0]
-                        if feat.dim() > 2:
-                            feat = torch.nn.functional.adaptive_avg_pool2d(feat, (1, 1))
-                        feat = feat.squeeze().cpu().numpy()
-                    features.append(feat)
+                        pred = model(tensor)[0]
+                        if pred.size(2) != 1 or pred.size(3) != 1:
+                            pred = torch.nn.functional.adaptive_avg_pool2d(pred, output_size=(1, 1))
+                        pred = pred.squeeze(3).squeeze(2).cpu().numpy()
+                    features.append(pred.squeeze())
                 return np.array(features)
 
             gen_features = get_features(generated_images, is_path=False)
@@ -610,29 +590,20 @@ class COCOPromptsDataset(BaseDataset):
                 sigma_ref = np.cov(ref_features, rowvar=False)
 
             diff = mu_gen - mu_ref
-            mean_term = float(diff @ diff)
-            tr_gen = float(np.trace(sigma_gen))
-            tr_ref = float(np.trace(sigma_ref))
 
-            if num_gen < 2048:
-                logger.debug(
-                    "FID: %d samples — covariance rank limited, FID may differ from 5000-sample target",
-                    num_gen,
-                )
-
-            covmean, _ = linalg.sqrtm(sigma_gen @ sigma_ref, disp=False)
+            eps = 1e-6
+            covmean, _ = linalg.sqrtm(sigma_ref.dot(sigma_gen), disp=False)
+            if not np.isfinite(covmean).all():
+                offset = np.eye(sigma_ref.shape[0]) * eps
+                covmean = linalg.sqrtm((sigma_ref + offset).dot(sigma_gen + offset))
             if np.iscomplexobj(covmean):
                 if not np.allclose(np.diagonal(covmean).imag, 0, atol=1e-3):
-                    logger.warning("FID: Significant complex values in sqrtm")
+                    logger.warning("FID: Significant imaginary component %.4f", np.max(np.abs(covmean.imag)))
                 covmean = covmean.real
 
-            tr_covmean = float(np.trace(covmean))
-            trace_term = tr_gen + tr_ref - 2 * tr_covmean
-            fid = mean_term + trace_term
+            fid = float(diff.dot(diff) + np.trace(sigma_gen) + np.trace(sigma_ref) - 2 * np.trace(covmean))
 
-            logger.debug(
-                "FID=%.4f (mean_diff=%.4f + trace=%.4f)", fid, mean_term, trace_term,
-            )
+            logger.debug("FID=%.4f", fid)
 
             return float(fid)
 

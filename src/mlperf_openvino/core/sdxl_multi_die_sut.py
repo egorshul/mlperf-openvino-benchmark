@@ -1,5 +1,3 @@
-"""Stable Diffusion XL Multi-Die System Under Test."""
-
 import array
 import logging
 import re
@@ -11,6 +9,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple, Union
 
 import numpy as np
+
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    torch = None
 
 try:
     import mlperf_loadgen as lg
@@ -27,6 +32,7 @@ except ImportError:
     OVStableDiffusionXLPipeline = None
 
 from .config import BenchmarkConfig, Scenario
+from .sdxl_sut import _encode_prompt_pytorch
 from ..datasets.coco_prompts import COCOPromptsQSL
 
 logger = logging.getLogger(__name__)
@@ -59,11 +65,6 @@ def _print_progress(completed: int, total: int, start_time: float) -> None:
 
 
 class SDXLMultiDieSUT:
-    """SDXL text-to-image SUT for multi-die accelerators.
-
-    Loads one OVStableDiffusionXLPipeline per die. Offline mode distributes
-    samples across dies in parallel; Server mode uses round-robin dispatch.
-    """
 
     def __init__(
         self,
@@ -108,13 +109,15 @@ class SDXLMultiDieSUT:
         self._sut_handle = None
         self._qsl_handle = None
 
+        self._pt_encoder_cache: Dict[str, Any] = {}
+        self._prompt_cache: Dict[str, Tuple] = {}
+
         self._pipelines: List[Tuple[str, Any, threading.Lock]] = []
         self._pipeline_index = 0
 
         self._setup_pipelines()
 
     def _discover_device_dies(self, device: str) -> List[str]:
-        """Return sorted list of sub-device identifiers (e.g. NPU.0, NPU.1)."""
         import openvino as ov
 
         core = ov.Core()
@@ -131,7 +134,6 @@ class SDXLMultiDieSUT:
         if target_device == "CPU":
             device_dies = ["CPU"]
         elif "," in target_device:
-            # Comma-separated die selection (e.g., "NPU.0,NPU.2")
             device_dies = [p.strip() for p in target_device.split(",")]
         elif re.match(r"^.+\.\d+$", target_device):
             device_dies = [target_device]
@@ -160,6 +162,28 @@ class SDXLMultiDieSUT:
             f"[SDXL] {len(self._pipelines)} die(s): {', '.join(die_names)}{bs_info}",
             file=sys.stderr,
         )
+
+    @staticmethod
+    def _configure_scheduler(pipeline, die_name: str = "") -> None:
+        from diffusers import EulerDiscreteScheduler
+        pipeline.scheduler = EulerDiscreteScheduler.from_config(
+            pipeline.scheduler.config,
+            beta_start=0.00085,
+            beta_end=0.012,
+            beta_schedule="scaled_linear",
+            timestep_spacing="leading",
+            steps_offset=1,
+            prediction_type="epsilon",
+            use_karras_sigmas=False,
+            num_train_timesteps=1000,
+        )
+
+    @staticmethod
+    def _disable_watermark(pipeline) -> None:
+        if hasattr(pipeline, "watermark"):
+            pipeline.watermark = None
+        if hasattr(pipeline, "safety_checker"):
+            pipeline.safety_checker = None
 
     def _load_pipeline_for_device(self, die: str) -> Any:
         is_cpu = die.upper() == "CPU"
@@ -210,122 +234,111 @@ class SDXLMultiDieSUT:
                     raise
 
         pipeline.set_progress_bar_config(disable=True)
-
-        try:
-            from diffusers import EulerDiscreteScheduler
-            pipeline.scheduler = EulerDiscreteScheduler.from_config(
-                pipeline.scheduler.config,
-                timestep_spacing="leading",
-                steps_offset=1,
-                prediction_type="epsilon",
-                use_karras_sigmas=False,
-            )
-        except Exception:
-            logger.warning("Failed to set EulerDiscreteScheduler on %s", die)
-
-        if hasattr(pipeline, "watermark"):
-            pipeline.watermark = None
+        self._configure_scheduler(pipeline, die)
+        self._disable_watermark(pipeline)
 
         return pipeline
+
+    @staticmethod
+    def _prepare_latents(raw_latents):
+        import torch
+        if isinstance(raw_latents, np.ndarray):
+            latents = torch.from_numpy(raw_latents.copy()).float()
+        else:
+            latents = raw_latents.clone().float()
+        if latents.dim() == 3:
+            latents = latents.unsqueeze(0)
+        if latents.shape[1] != 4:
+            return None
+        return latents
+
+    @staticmethod
+    def _to_uint8(image) -> np.ndarray:
+        if isinstance(image, np.ndarray):
+            if image.dtype == np.uint8:
+                return image
+            return (np.clip(image, 0.0, 1.0) * 255).round().astype(np.uint8)
+        return np.array(image)
+
+    def _get_prompt_embeds(self, prompt: str) -> Tuple:
+        if prompt not in self._prompt_cache:
+            self._prompt_cache[prompt] = _encode_prompt_pytorch(
+                prompt, self.negative_prompt,
+                cache=self._pt_encoder_cache,
+            )
+        return self._prompt_cache[prompt]
 
     def _process_sample(self, sample_idx: int, pipeline: Any) -> np.ndarray:
         features = self.qsl.get_features(sample_idx)
         prompt = features["prompt"]
         guidance_scale = features.get("guidance_scale", self.guidance_scale)
         num_steps = features.get("num_inference_steps", self.num_inference_steps)
-        latents = features.get("latents", None)
 
-        if latents is not None:
-            try:
-                import torch
-                if isinstance(latents, np.ndarray):
-                    latents = torch.from_numpy(latents.copy()).float()
-                if latents.dim() == 3:
-                    latents = latents.unsqueeze(0)
-                if latents.shape[1] != 4:
-                    latents = None
-            except ImportError:
-                latents = None
+        embeds = self._get_prompt_embeds(prompt)
+        p_emb, n_emb, pool_emb, n_pool_emb = embeds
 
         pipe_kwargs = {
-            "prompt": prompt,
-            "negative_prompt": self.negative_prompt,
+            "prompt_embeds": p_emb,
+            "negative_prompt_embeds": n_emb,
+            "pooled_prompt_embeds": pool_emb,
+            "negative_pooled_prompt_embeds": n_pool_emb,
             "guidance_scale": guidance_scale,
             "num_inference_steps": num_steps,
             "height": self.image_size,
             "width": self.image_size,
             "output_type": "np",
         }
-        if latents is not None:
-            pipe_kwargs["latents"] = latents
-        else:
-            try:
-                import torch
-                pipe_kwargs["generator"] = torch.Generator().manual_seed(sample_idx)
-            except ImportError:
-                pass
+
+        raw_latents = features.get("latents", None)
+        if raw_latents is not None:
+            prepared = self._prepare_latents(raw_latents)
+            if prepared is not None:
+                pipe_kwargs["latents"] = prepared
+
+        if "latents" not in pipe_kwargs:
+            pipe_kwargs["generator"] = torch.Generator().manual_seed(sample_idx)
 
         image = pipeline(**pipe_kwargs).images[0]
-
-        if isinstance(image, np.ndarray):
-            if image.max() <= 1.0:
-                image = (image * 255).round().astype(np.uint8)
-            elif image.dtype != np.uint8:
-                image = image.astype(np.uint8)
-        else:
-            image = np.array(image)
-
-        return image
+        return self._to_uint8(image)
 
     def _process_batch(self, sample_indices: List[int], pipeline: Any) -> List[np.ndarray]:
-        import torch
-
-        prompts = []
+        all_p_emb, all_n_emb, all_pool, all_n_pool = [], [], [], []
         latents_list = []
 
         for idx in sample_indices:
             features = self.qsl.get_features(idx)
-            prompts.append(features["prompt"])
-            latent = features.get("latents", None)
-            if latent is not None:
-                if isinstance(latent, np.ndarray):
-                    t = torch.from_numpy(latent.copy()).float()
-                else:
-                    t = torch.tensor(latent).float()
-                if t.dim() == 3:
-                    t = t.unsqueeze(0)
-                latents_list.append(t)
+            prompt = features["prompt"]
+            p_emb, n_emb, pool_emb, n_pool_emb = self._get_prompt_embeds(prompt)
+            all_p_emb.append(p_emb)
+            all_n_emb.append(n_emb)
+            all_pool.append(pool_emb)
+            all_n_pool.append(n_pool_emb)
+
+            raw = features.get("latents", None)
+            if raw is not None:
+                prepared = self._prepare_latents(raw)
+                if prepared is not None:
+                    latents_list.append(prepared)
 
         pipe_kwargs = {
-            "prompt": prompts,
-            "negative_prompt": [self.negative_prompt] * len(prompts),
+            "prompt_embeds": torch.cat(all_p_emb, dim=0),
+            "negative_prompt_embeds": torch.cat(all_n_emb, dim=0),
+            "pooled_prompt_embeds": torch.cat(all_pool, dim=0),
+            "negative_pooled_prompt_embeds": torch.cat(all_n_pool, dim=0),
             "guidance_scale": self.guidance_scale,
             "num_inference_steps": self.num_inference_steps,
             "height": self.image_size,
             "width": self.image_size,
             "output_type": "np",
         }
-        if latents_list and len(latents_list) == len(prompts):
+        if latents_list and len(latents_list) == len(sample_indices):
             pipe_kwargs["latents"] = torch.cat(latents_list, dim=0)
 
         result = pipeline(**pipe_kwargs)
-
-        images = []
-        for img in result.images:
-            if isinstance(img, np.ndarray):
-                if img.max() <= 1.0:
-                    img = (img * 255).round().astype(np.uint8)
-                elif img.dtype != np.uint8:
-                    img = img.astype(np.uint8)
-            else:
-                img = np.array(img)
-            images.append(img)
-
-        return images
+        return [self._to_uint8(img) for img in result.images]
 
     @property
     def _sample_count(self) -> int:
-        # Exposes completed count under the name expected by benchmark_runner.
         return self._completed
 
     def issue_queries(self, query_samples: List[Any]) -> None:
@@ -456,7 +469,6 @@ class SDXLMultiDieSUT:
         results: List[Tuple[Any, int, np.ndarray]],
     ) -> None:
         responses = []
-        # array.array objects must stay alive until QuerySamplesComplete returns.
         arrays = []
         for sample, _idx, image in sorted(results, key=lambda r: r[1]):
             response_data = np.array(image.shape, dtype=np.int64)

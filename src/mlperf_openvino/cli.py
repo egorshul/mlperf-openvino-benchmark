@@ -325,9 +325,12 @@ def _print_dataset_help(model: str) -> None:
               default='onnx', help='Model format')
 @click.option('--batch-sizes', type=str, default='1,2,4,8',
               help='Batch sizes for RetinaNet (comma-separated, default: 1,2,4,8)')
+@click.option('--weight-format', '-w', type=click.Choice(['fp32', 'fp16', 'int8', 'int4']),
+              default=None, help='Weight format for Llama models (default: int8)')
 @click.option('--hf-token', type=str, default=None, envvar='HF_TOKEN',
               help='HuggingFace access token (for gated models like Meta-Llama). Also reads HF_TOKEN env var.')
-def download_model_cmd(model: str, output_dir: str, format: str, batch_sizes: str, hf_token: Optional[str]):
+def download_model_cmd(model: str, output_dir: str, format: str, batch_sizes: str,
+                       weight_format: Optional[str], hf_token: Optional[str]):
     """Download model files."""
     click.echo(f"Downloading {model} model...")
 
@@ -380,12 +383,19 @@ def download_model_cmd(model: str, output_dir: str, format: str, batch_sizes: st
             from .utils.model_downloader import download_llama_model
             if format != 'openvino':
                 click.echo("  Note: Llama requires OpenVINO format, using --format openvino")
+            wf = weight_format or 'int8'
             paths = download_llama_model(
                 str(output_path),
                 export_to_openvino=True,
+                weight_format=wf,
                 hf_token=hf_token,
             )
+            click.echo(f"  Weight format: {wf}")
             click.echo(f"Model downloaded to: {paths['model_path']}")
+            if 'tokenizer_path' in paths:
+                click.echo(f"  Tokenizer: {paths['tokenizer_path']}")
+            if 'detokenizer_path' in paths:
+                click.echo(f"  Detokenizer: {paths['detokenizer_path']}")
         else:
             model_path = download_model(model, str(output_path), format)
             click.echo(f"Model downloaded to: {model_path}")
@@ -526,9 +536,11 @@ def download_dataset_cmd(dataset: str, output_dir: str, subset: Optional[str],
               default='.', help='Base output directory')
 @click.option('--format', '-f', type=click.Choice(['onnx', 'openvino']),
               default='onnx', help='Model format')
+@click.option('--weight-format', '-w', type=click.Choice(['fp32', 'fp16', 'int8', 'int4']),
+              default=None, help='Weight format for Llama models (default: int8)')
 @click.option('--hf-token', type=str, default=None, envvar='HF_TOKEN',
               help='HuggingFace access token (for gated models like Meta-Llama). Also reads HF_TOKEN env var.')
-def setup_cmd(model: str, output_dir: str, format: str, hf_token: Optional[str]):
+def setup_cmd(model: str, output_dir: str, format: str, weight_format: Optional[str], hf_token: Optional[str]):
     """Download both model and dataset for a benchmark."""
     from .utils.model_downloader import download_model, download_whisper_model, download_sdxl_model
     from .utils.model_downloader import download_retinanet_model, download_llama_model
@@ -576,9 +588,12 @@ def setup_cmd(model: str, output_dir: str, format: str, hf_token: Optional[str])
         elif model == 'llama3.1-8b':
             if format != 'openvino':
                 click.echo("  Note: Llama requires OpenVINO format, using --format openvino")
+            wf = weight_format or 'int8'
+            click.echo(f"  Weight format: {wf}")
             model_paths = download_llama_model(
                 str(models_dir),
                 export_to_openvino=True,
+                weight_format=wf,
                 hf_token=hf_token,
             )
             model_path = model_paths['model_path']
@@ -713,60 +728,6 @@ def list_models():
     click.echo("  mlperf-ov setup --model <model_id>")
     click.echo("  mlperf-ov run --model <model_id> --mode both")
     click.echo("")
-
-
-@main.command('convert-tokenizer')
-@click.option('--model-path', '-p', type=click.Path(exists=True), required=True,
-              help='Path to exported OpenVINO model directory')
-@click.option('--model-id', '-m', type=str, default=None,
-              help='HuggingFace model ID (auto-detected from config.json if omitted)')
-@click.option('--hf-token', type=str, default=None, envvar='HF_TOKEN',
-              help='HuggingFace access token (for gated models). Also reads HF_TOKEN env var.')
-def convert_tokenizer_cmd(model_path: str, model_id: Optional[str], hf_token: Optional[str]):
-    """Convert HuggingFace tokenizer to OpenVINO format.
-
-    Use this after exporting a model with optimum-cli when the tokenizer
-    was not converted automatically (e.g. due to a non-standard
-    openvino-tokenizers version string).
-
-    \b
-    Examples:
-      mlperf-ov convert-tokenizer -p ./models/Llama-3.1-8B-Instruct-openvino-int8
-      mlperf-ov convert-tokenizer -p ./models/whisper-large-v3-openvino
-      mlperf-ov convert-tokenizer -p ./model-dir -m meta-llama/Meta-Llama-3.1-8B-Instruct --hf-token $HF_TOKEN
-    """
-    from pathlib import Path as _Path
-    from .utils.model_downloader import _convert_tokenizer_to_openvino, _resolve_hf_token
-
-    model_dir = _Path(model_path)
-
-    if model_id is None:
-        config_file = model_dir / "config.json"
-        if config_file.exists():
-            import json
-            with open(config_file) as f:
-                cfg = json.load(f)
-            model_id = cfg.get("_name_or_path")
-            if model_id:
-                click.echo(f"Auto-detected model ID: {model_id}")
-
-    if not model_id:
-        click.echo("Error: Could not detect model ID. Please specify --model-id.")
-        sys.exit(1)
-
-    token = _resolve_hf_token(hf_token)
-
-    click.echo(f"Converting tokenizer for: {model_id}")
-    click.echo(f"Model directory: {model_dir}")
-
-    result = _convert_tokenizer_to_openvino(model_dir, model_id, token=token)
-
-    if result.get("tokenizer_path"):
-        click.echo(f"Tokenizer:   {result['tokenizer_path']}")
-        click.echo(f"Detokenizer: {result['detokenizer_path']}")
-    else:
-        click.echo("Error: Tokenizer conversion failed. Check logs above.")
-        sys.exit(1)
 
 
 if __name__ == "__main__":

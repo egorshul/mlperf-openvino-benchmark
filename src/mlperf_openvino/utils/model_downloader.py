@@ -11,16 +11,6 @@ logger = logging.getLogger(__name__)
 
 
 def _resolve_hf_token(token: Optional[str] = None) -> Optional[str]:
-    """Resolve HuggingFace authentication token.
-
-    Checks (in order):
-    1. Explicitly passed token argument
-    2. HF_TOKEN environment variable
-    3. HUGGING_FACE_HUB_TOKEN environment variable (legacy)
-    4. Cached token from `huggingface-cli login`
-
-    Returns None if no token is found.
-    """
     if token:
         return token
 
@@ -267,7 +257,6 @@ def _download_whisper_from_hf(output_dir: str, model_id: str) -> Dict[str, str]:
 
 
 def _configure_hf_download() -> None:
-    """Configure HuggingFace Hub for reliable large file downloads."""
     try:
         from huggingface_hub import constants
         import os
@@ -338,22 +327,6 @@ def _convert_tokenizer_to_openvino(
     model_id: str,
     token: Optional[str] = None,
 ) -> Dict[str, str]:
-    """Convert HuggingFace tokenizer to OpenVINO tokenizer/detokenizer models.
-
-    This bypasses optimum-intel's ``maybe_convert_tokenizers()`` which fails
-    when the externally-provided openvino-tokenizers reports a non-PEP-440
-    version string (e.g. ``-1-85be884``).  Instead we call
-    ``openvino_tokenizers.convert_tokenizer`` directly.
-
-    Args:
-        ov_model_path: Directory containing the exported OpenVINO model.
-        model_id: HuggingFace model ID (e.g. "openai/whisper-large-v3").
-        token: Optional HuggingFace access token for gated models.
-
-    Returns:
-        Dict with tokenizer_path and detokenizer_path if successful,
-        empty dict otherwise.
-    """
     result: Dict[str, str] = {}
 
     tokenizer_xml = ov_model_path / "openvino_tokenizer.xml"
@@ -614,6 +587,7 @@ def _export_sdxl_to_openvino(output_dir: str, model_id: str) -> Dict[str, str]:
         vae_path = ov_model_path / "vae_decoder" / "openvino_model.xml"
 
         if unet_path.exists() and vae_path.exists():
+            _ensure_sdxl_tokenizer_files(ov_model_path, model_id)
             logger.info(f"OpenVINO model already exists at {ov_model_path}")
             return {
                 "model_path": str(ov_model_path),
@@ -639,6 +613,8 @@ def _export_sdxl_to_openvino(output_dir: str, model_id: str) -> Dict[str, str]:
 
     pipeline.save_pretrained(str(ov_model_path))
 
+    _ensure_sdxl_tokenizer_files(ov_model_path, model_id)
+
     logger.info(f"OpenVINO model saved to {ov_model_path}")
 
     return {
@@ -648,6 +624,183 @@ def _export_sdxl_to_openvino(output_dir: str, model_id: str) -> Dict[str, str]:
         "text_encoder_path": str(ov_model_path / "text_encoder" / "openvino_model.xml"),
         "text_encoder_2_path": str(ov_model_path / "text_encoder_2" / "openvino_model.xml"),
     }
+
+
+def _ensure_sdxl_tokenizer_files(ov_model_path: Path, model_id: str) -> None:
+    tokenizer_dir = ov_model_path / "tokenizer"
+    tokenizer_2_dir = ov_model_path / "tokenizer_2"
+    scheduler_cfg = ov_model_path / "scheduler" / "scheduler_config.json"
+
+    tok1_hf_ok = (tokenizer_dir / "vocab.json").exists()
+    tok2_hf_ok = (tokenizer_2_dir / "vocab.json").exists()
+    sched_ok = scheduler_cfg.exists()
+
+    tok1_ov_ok = (tokenizer_dir / "openvino_tokenizer.xml").exists()
+    tok2_ov_ok = (tokenizer_2_dir / "openvino_tokenizer.xml").exists()
+
+    if tok1_hf_ok and tok2_hf_ok and sched_ok and tok1_ov_ok and tok2_ov_ok:
+        return
+
+    try:
+        from transformers import CLIPTokenizer
+    except ImportError:
+        logger.warning("transformers not installed, cannot save tokenizer files")
+        return
+
+    if not tok1_hf_ok:
+        try:
+            tok = CLIPTokenizer.from_pretrained(model_id, subfolder="tokenizer")
+            tokenizer_dir.mkdir(parents=True, exist_ok=True)
+            tok.save_pretrained(str(tokenizer_dir))
+            logger.info(f"Saved tokenizer to {tokenizer_dir}")
+        except Exception as e:
+            logger.warning(f"Failed to save tokenizer: {e}")
+
+    if not tok2_hf_ok:
+        try:
+            tok = CLIPTokenizer.from_pretrained(model_id, subfolder="tokenizer_2")
+            tokenizer_2_dir.mkdir(parents=True, exist_ok=True)
+            tok.save_pretrained(str(tokenizer_2_dir))
+            logger.info(f"Saved tokenizer_2 to {tokenizer_2_dir}")
+        except Exception as e:
+            logger.warning(f"Failed to save tokenizer_2: {e}")
+
+    if not sched_ok:
+        try:
+            from diffusers import EulerDiscreteScheduler
+            scheduler = EulerDiscreteScheduler.from_pretrained(
+                model_id, subfolder="scheduler"
+            )
+            scheduler_dir = ov_model_path / "scheduler"
+            scheduler_dir.mkdir(parents=True, exist_ok=True)
+            scheduler.save_pretrained(str(scheduler_dir))
+            logger.info(f"Saved scheduler config to {scheduler_dir}")
+        except Exception as e:
+            logger.warning(f"Failed to save scheduler config: {e}")
+
+    if tok1_ov_ok and tok2_ov_ok:
+        return
+
+    for subfolder, out_dir, already_ok in [
+        ("tokenizer", tokenizer_dir, tok1_ov_ok),
+        ("tokenizer_2", tokenizer_2_dir, tok2_ov_ok),
+    ]:
+        if already_ok:
+            continue
+
+        if _try_convert_clip_tokenizer_to_ov(model_id, subfolder, out_dir):
+            continue
+
+        if _try_download_prebuilt_sdxl_ov_tokenizer(ov_model_path, subfolder):
+            continue
+
+        logger.warning(
+            f"Could not produce openvino_tokenizer.xml for {subfolder}. "
+            "Ensure openvino, openvino-tokenizers, and openvino-genai versions "
+            "match (same MAJOR.MINOR.PATCH). "
+            "Fix: pip install -U openvino openvino-tokenizers openvino-genai"
+        )
+
+
+def _try_convert_clip_tokenizer_to_ov(
+    model_id: str, subfolder: str, out_dir: Path,
+) -> bool:
+    try:
+        import openvino as ov
+        from openvino_tokenizers import convert_tokenizer
+        from transformers import CLIPTokenizer, PreTrainedTokenizerFast
+        from transformers.convert_slow_tokenizer import convert_slow_tokenizer
+    except ImportError:
+        return False
+
+    slow_tok = CLIPTokenizer.from_pretrained(model_id, subfolder=subfolder)
+    fast_backend = convert_slow_tokenizer(slow_tok)
+    fast_tok = PreTrainedTokenizerFast(tokenizer_object=fast_backend)
+
+    import inspect
+    sig = inspect.signature(convert_tokenizer)
+    attempts = []
+    if "handle_special_tokens_with_re" in sig.parameters:
+        attempts.append(
+            {"with_detokenizer": True, "handle_special_tokens_with_re": False}
+        )
+    attempts.append({"with_detokenizer": True})
+
+    for kwargs in attempts:
+        try:
+            result = convert_tokenizer(fast_tok, **kwargs)
+            if isinstance(result, tuple):
+                ov_tok, ov_detok = result
+            else:
+                ov_tok, ov_detok = result, None
+
+            out_dir.mkdir(parents=True, exist_ok=True)
+            ov.save_model(ov_tok, str(out_dir / "openvino_tokenizer.xml"))
+            if ov_detok is not None:
+                ov.save_model(ov_detok, str(out_dir / "openvino_detokenizer.xml"))
+            logger.info(f"Converted {subfolder} tokenizer to OpenVINO IR")
+            return True
+        except Exception:
+            continue
+
+    return False
+
+
+_OV_SDXL_FALLBACK_REPOS = [
+    "OpenVINO/stable-diffusion-xl-base-1.0-int8-ov",
+]
+
+
+def _try_download_prebuilt_sdxl_ov_tokenizer(
+    ov_model_path: Path, subfolder: str,
+) -> bool:
+    try:
+        import openvino as ov
+        from huggingface_hub import hf_hub_download
+    except ImportError:
+        return False
+
+    for repo_id in _OV_SDXL_FALLBACK_REPOS:
+        out_dir = ov_model_path / subfolder
+        try:
+            for fname in ("openvino_tokenizer.xml", "openvino_tokenizer.bin"):
+                hf_hub_download(
+                    repo_id=repo_id,
+                    filename=f"{subfolder}/{fname}",
+                    local_dir=str(ov_model_path),
+                    local_dir_use_symlinks=False,
+                )
+
+            core = ov.Core()
+            core.read_model(str(out_dir / "openvino_tokenizer.xml"))
+
+            for fname in ("openvino_detokenizer.xml", "openvino_detokenizer.bin"):
+                try:
+                    hf_hub_download(
+                        repo_id=repo_id,
+                        filename=f"{subfolder}/{fname}",
+                        local_dir=str(ov_model_path),
+                        local_dir_use_symlinks=False,
+                    )
+                except Exception:
+                    pass
+
+            logger.info(
+                f"Downloaded pre-built OV tokenizer for {subfolder} "
+                f"from {repo_id}"
+            )
+            return True
+        except Exception as e:
+            for fname in (
+                "openvino_tokenizer.xml", "openvino_tokenizer.bin",
+                "openvino_detokenizer.xml", "openvino_detokenizer.bin",
+            ):
+                (out_dir / fname).unlink(missing_ok=True)
+            logger.debug(
+                f"Pre-built OV tokenizer from {repo_id} not usable: {e}"
+            )
+
+    return False
 
 
 def download_retinanet_model(
@@ -741,21 +894,6 @@ def download_llama_model(
     weight_format: str = "int8",
     hf_token: Optional[str] = None,
 ) -> Dict[str, str]:
-    """Download and export Llama model to OpenVINO IR format.
-
-    Uses optimum-intel OVModelForCausalLM to export the model from
-    HuggingFace to OpenVINO IR, with optional weight compression via NNCF.
-
-    Args:
-        output_dir: Directory to save the exported model.
-        model_id: HuggingFace model ID.
-        export_to_openvino: If True, export to OpenVINO IR (recommended).
-        weight_format: Weight format for compression: "fp32", "fp16", "int8", "int4".
-        hf_token: HuggingFace access token (for gated models like Meta-Llama).
-
-    Returns:
-        Dict with model_path and metadata.
-    """
     token = _resolve_hf_token(hf_token)
     if not token:
         logger.warning(
@@ -777,7 +915,6 @@ def download_llama_model(
 def _download_llama_from_hf(
     output_dir: str, model_id: str, token: Optional[str] = None
 ) -> Dict[str, str]:
-    """Download Llama model from HuggingFace (safetensors/PyTorch format)."""
     try:
         from transformers import AutoModelForCausalLM, AutoTokenizer
     except ImportError:
@@ -817,25 +954,35 @@ def _download_llama_from_hf(
     return {"model_path": str(model_path)}
 
 
+def _llama_export_result(ov_model_path: Path) -> Dict[str, str]:
+    result = {"model_path": str(ov_model_path)}
+    tokenizer_xml = ov_model_path / "openvino_tokenizer.xml"
+    detokenizer_xml = ov_model_path / "openvino_detokenizer.xml"
+    if tokenizer_xml.exists():
+        result["tokenizer_path"] = str(tokenizer_xml)
+    if detokenizer_xml.exists():
+        result["detokenizer_path"] = str(detokenizer_xml)
+    return result
+
+
+def _ensure_llama_ov_tokenizer(
+    ov_model_path: Path, model_id: str, token: Optional[str] = None,
+) -> None:
+    tok_xml = ov_model_path / "openvino_tokenizer.xml"
+    if tok_xml.exists():
+        return
+    logger.info("OpenVINO tokenizer not found, converting...")
+    _convert_tokenizer_to_openvino(ov_model_path, model_id, token=token)
+
+
 def _export_llama_to_openvino(
     output_dir: str,
     model_id: str,
     weight_format: str = "int8",
     token: Optional[str] = None,
 ) -> Dict[str, str]:
-    """Export Llama model to OpenVINO IR using optimum-intel.
-
-    Uses OVModelForCausalLM.from_pretrained(export=True) for conversion,
-    with NNCF weight compression for INT8/INT4 formats.
-    """
-    try:
-        from optimum.intel.openvino import OVModelForCausalLM
-        from transformers import AutoTokenizer
-    except ImportError:
-        raise ImportError(
-            "optimum-intel is required for Llama export. "
-            "Install with: pip install optimum[openvino] nncf"
-        )
+    from optimum.intel.openvino import OVModelForCausalLM
+    from transformers import AutoTokenizer
 
     _configure_hf_download()
 
@@ -848,44 +995,29 @@ def _export_llama_to_openvino(
         xml_files = list(ov_model_path.glob("*.xml"))
         if config_file.exists() and xml_files:
             logger.info(f"OpenVINO model already exists at {ov_model_path}")
-            result = {"model_path": str(ov_model_path)}
-            tok_result = _convert_tokenizer_to_openvino(
-                ov_model_path, model_id, token=token,
-            )
-            result.update(tok_result)
-            return result
+            _ensure_llama_ov_tokenizer(ov_model_path, model_id, token)
+            return _llama_export_result(ov_model_path)
 
     logger.info(f"Exporting {model_id} to OpenVINO IR (weight_format={weight_format})...")
     logger.info("This may take a long time for large models...")
 
-    ov_export_kwargs: Dict[str, Any] = {
+    export_kwargs: Dict[str, Any] = {
         "export": True,
         "compile": False,
         "token": token,
     }
 
     if weight_format in ("int8", "int4"):
-        try:
-            from optimum.intel import OVWeightQuantizationConfig
+        from optimum.intel import OVWeightQuantizationConfig
 
-            ov_export_kwargs["quantization_config"] = OVWeightQuantizationConfig(
-                bits=8 if weight_format == "int8" else 4,
-                sym=True if weight_format == "int4" else False,
-            )
-            logger.info(f"Using NNCF weight-only compression: {weight_format}")
-        except ImportError:
-            logger.warning(
-                "NNCF not available for weight compression. "
-                "Exporting with FP16 weights instead. "
-                "Install with: pip install nncf"
-            )
-            weight_format = "fp16"
+        export_kwargs["quantization_config"] = OVWeightQuantizationConfig(
+            bits=8 if weight_format == "int8" else 4,
+            sym=weight_format == "int4",
+        )
+        logger.info(f"Using NNCF weight compression: {weight_format}")
 
     def do_export():
-        return OVModelForCausalLM.from_pretrained(
-            model_id,
-            **ov_export_kwargs,
-        )
+        return OVModelForCausalLM.from_pretrained(model_id, **export_kwargs)
 
     model = _download_with_retry(do_export, max_retries=3)
     model.save_pretrained(str(ov_model_path))
@@ -893,14 +1025,10 @@ def _export_llama_to_openvino(
     tokenizer = AutoTokenizer.from_pretrained(model_id, token=token)
     tokenizer.save_pretrained(str(ov_model_path))
 
-    logger.info(f"OpenVINO model saved to {ov_model_path}")
+    _ensure_llama_ov_tokenizer(ov_model_path, model_id, token)
 
-    result = {"model_path": str(ov_model_path)}
-    tok_result = _convert_tokenizer_to_openvino(
-        ov_model_path, model_id, token=token,
-    )
-    result.update(tok_result)
-    return result
+    logger.info(f"OpenVINO model saved to {ov_model_path}")
+    return _llama_export_result(ov_model_path)
 
 
 def get_retinanet_model_path(

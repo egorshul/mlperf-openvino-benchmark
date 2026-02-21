@@ -1,5 +1,3 @@
-"""MLPerf OpenVINO Benchmark runner."""
-
 import json
 import logging
 import time
@@ -26,7 +24,6 @@ logger = logging.getLogger(__name__)
 
 
 class BenchmarkRunner:
-    """Main class for running MLPerf benchmarks."""
 
     def __init__(self, config: BenchmarkConfig):
         if not LOADGEN_AVAILABLE:
@@ -44,7 +41,6 @@ class BenchmarkRunner:
         self._accuracy_results: Dict[str, Any] = {}
 
     def setup(self) -> None:
-        """Set up benchmark components based on model type."""
         Path(self.config.results_dir).mkdir(parents=True, exist_ok=True)
         Path(self.config.logs_dir).mkdir(parents=True, exist_ok=True)
 
@@ -90,7 +86,6 @@ class BenchmarkRunner:
             raise ValueError(f"Unsupported model type: {model_type}")
 
     def _create_backend(self) -> Union["OpenVINOBackend", "MultiDeviceBackend"]:
-        """Create the appropriate backend based on device configuration."""
         from ..backends.multi_device_backend import MultiDeviceBackend
 
         device = self.config.openvino.device
@@ -121,7 +116,6 @@ class BenchmarkRunner:
         self,
         qsl: QuerySampleLibrary,
     ) -> Any:
-        """Create appropriate SUT based on backend type."""
         from ..backends.multi_device_backend import MultiDeviceBackend
         from .sut import OpenVINOSUT
 
@@ -143,7 +137,6 @@ class BenchmarkRunner:
             )
 
     def _setup_resnet50(self) -> None:
-        """Set up ResNet50 benchmark."""
         from ..datasets.imagenet import ImageNetQSL
         from .cpp_sut_wrapper import create_sut
 
@@ -167,7 +160,6 @@ class BenchmarkRunner:
             )
 
     def _setup_bert(self) -> None:
-        """Set up BERT benchmark."""
         from ..datasets.squad import SQuADQSL
         from .cpp_sut_wrapper import create_bert_sut
 
@@ -192,11 +184,10 @@ class BenchmarkRunner:
             )
 
     def _setup_retinanet(self) -> None:
-        """Set up RetinaNet benchmark."""
         from ..datasets.openimages import OpenImagesQSL
         from .cpp_sut_wrapper import create_retinanet_sut
 
-        output_layout = "NHWC"  # Default NHWC, model handles conversion via PrePostProcessor
+        output_layout = "NHWC"
         if hasattr(self.config.model, 'preprocessing') and self.config.model.preprocessing:
             output_layout = getattr(self.config.model.preprocessing, 'output_layout', 'NHWC')
 
@@ -204,7 +195,6 @@ class BenchmarkRunner:
             data_path=self.config.dataset.path,
             annotations_file=self.config.dataset.val_map,
             count=self.config.dataset.num_samples if self.config.dataset.num_samples > 0 else None,
-            # performance_sample_count uses MLPerf official default (64) from OpenImagesQSL
             output_layout=output_layout,
         )
         self.qsl.load()
@@ -222,7 +212,6 @@ class BenchmarkRunner:
             )
 
     def _setup_ssd_resnet34(self) -> None:
-        """Set up SSD-ResNet34 benchmark."""
         from ..datasets.coco import COCOQSL
         from .cpp_sut_wrapper import create_ssd_resnet34_sut
 
@@ -253,7 +242,6 @@ class BenchmarkRunner:
             )
 
     def _setup_whisper(self) -> None:
-        """Set up Whisper benchmark."""
         from ..datasets.librispeech import LibriSpeechQSL
 
         self.qsl = LibriSpeechQSL(
@@ -369,7 +357,6 @@ class BenchmarkRunner:
         )
 
     def _setup_sdxl(self) -> None:
-        """Set up Stable Diffusion XL benchmark."""
         from ..datasets.coco_prompts import COCOPromptsQSL
 
         self.qsl = COCOPromptsQSL(
@@ -379,7 +366,6 @@ class BenchmarkRunner:
         )
         self.qsl.load()
 
-        # Check latents availability (critical for accuracy)
         latents_loaded = len(self.qsl.dataset._latents_cache)
         total_samples = self.qsl.dataset.total_count
         if latents_loaded == total_samples:
@@ -397,7 +383,6 @@ class BenchmarkRunner:
 
         model_path = Path(self.config.model.model_path)
 
-        # Multi-die accelerator path (NPU, XPU, etc.)
         if self.config.openvino.is_accelerator_device():
             try:
                 from .sdxl_multi_die_sut import SDXLMultiDieSUT, OPTIMUM_SDXL_AVAILABLE
@@ -415,37 +400,25 @@ class BenchmarkRunner:
             except Exception as e:
                 logger.warning(f"Failed to create SDXLMultiDieSUT: {e}")
 
-        try:
-            from .sdxl_sut import SDXLOptimumSUT, OPTIMUM_SDXL_AVAILABLE
+        from .sdxl_sut import SDXLOptimumSUT, OPTIMUM_SDXL_AVAILABLE
 
-            if OPTIMUM_SDXL_AVAILABLE and model_path.is_dir():
-                config_file = model_path / "model_index.json"
-                if not config_file.exists():
-                    config_file = model_path / "config.json"
+        if not OPTIMUM_SDXL_AVAILABLE:
+            raise RuntimeError(
+                "Optimum-Intel with SDXL support is required. "
+                "Install with: pip install optimum[openvino] diffusers"
+            )
+        if not model_path.is_dir():
+            raise RuntimeError(f"SDXL model directory not found: {model_path}")
 
-                if config_file.exists():
-                    self.sut = SDXLOptimumSUT(
-                        config=self.config,
-                        model_path=model_path,
-                        qsl=self.qsl,
-                        scenario=self.config.scenario,
-                    )
-                    logger.info("SDXL: Using Optimum-Intel pipeline (OVStableDiffusionXLPipeline)")
-                    return
-        except Exception as e:
-            logger.warning(f"Failed to create SDXLOptimumSUT: {e}")
-
-        from .sdxl_sut import SDXLManualSUT
-        self.sut = SDXLManualSUT(
+        self.sut = SDXLOptimumSUT(
             config=self.config,
             model_path=model_path,
             qsl=self.qsl,
             scenario=self.config.scenario,
         )
-        logger.info("SDXL: Using manual pipeline (SDXLManualSUT)")
+        logger.info("SDXL: Using Optimum-Intel pipeline (OVStableDiffusionXLPipeline)")
 
     def _setup_llama3_1_8b(self) -> None:
-        """Set up Llama 3.1 8B benchmark (CNN-DailyMail summarization)."""
         from ..datasets.cnn_dailymail import CnnDailyMailQSL
 
         self.qsl = CnnDailyMailQSL(
@@ -481,7 +454,6 @@ class BenchmarkRunner:
             )
 
     def _get_test_settings(self) -> "lg.TestSettings":
-        """Create LoadGen test settings."""
         settings = lg.TestSettings()
 
         if self.config.scenario == Scenario.OFFLINE:
@@ -500,9 +472,7 @@ class BenchmarkRunner:
         else:
             settings.mode = lg.TestMode.PerformanceOnly
 
-        # For Closed Division: load official MLPerf settings from config files.
-        # These override any programmatic settings below (min_duration, seeds, etc.).
-        scenario_str = self.config.scenario.value  # "offline" or "server"
+        scenario_str = self.config.scenario.value
         model_name = self.config.model.model_type.value if self.config.model.model_type else ""
 
         if self.config.mlperf_conf:
@@ -521,7 +491,6 @@ class BenchmarkRunner:
             else:
                 logger.warning(f"user.conf not found: {conf_path}")
 
-        # Programmatic defaults (used when config files are not provided)
         scenario_config = self.config.get_scenario_config()
         if not self.config.mlperf_conf:
             settings.min_duration_ms = scenario_config.min_duration_ms
@@ -554,7 +523,6 @@ class BenchmarkRunner:
         return settings
 
     def _get_log_settings(self) -> "lg.LogSettings":
-        """Create LoadGen log settings."""
         log_settings = lg.LogSettings()
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -568,7 +536,6 @@ class BenchmarkRunner:
         return log_settings
 
     def run(self) -> Dict[str, Any]:
-        """Run the benchmark."""
         if self.sut is None:
             self.setup()
 
@@ -581,7 +548,6 @@ class BenchmarkRunner:
 
         start_time = time.time()
 
-        # Check if SUT supports native C++ benchmark (bypasses Python in hot path)
         use_native = (
             hasattr(self.sut, 'supports_native_benchmark') and
             self.sut.supports_native_benchmark()
@@ -683,7 +649,6 @@ class BenchmarkRunner:
         logger.info(f"MLPerf accuracy log saved to {accuracy_log_path}")
 
     def _compute_accuracy(self) -> None:
-        """Compute accuracy metrics based on model type."""
         if self.sut is None or self.qsl is None:
             return
 
@@ -705,7 +670,6 @@ class BenchmarkRunner:
             self._compute_llama_accuracy()
 
     def _compute_resnet50_accuracy(self) -> None:
-        """Compute ResNet50 accuracy (Top-1)."""
         predictions = self.sut.get_predictions()
         total_samples = self.qsl.total_sample_count
 
@@ -740,26 +704,22 @@ class BenchmarkRunner:
         logger.info(f"Top-1 Accuracy: {acc:.4f} ({correct}/{total})")
 
     def _compute_bert_accuracy(self) -> None:
-        """Compute BERT accuracy (F1 and Exact Match)."""
         self._accuracy_results = self.sut.compute_accuracy()
 
         logger.info(f"F1 Score: {self._accuracy_results.get('f1', 0):.2f}")
         logger.info(f"Exact Match: {self._accuracy_results.get('exact_match', 0):.2f}")
 
     def _compute_retinanet_accuracy(self) -> None:
-        """Compute RetinaNet accuracy (mAP)."""
         self._accuracy_results = self.sut.compute_accuracy()
 
         logger.info(f"mAP: {self._accuracy_results.get('mAP', 0):.4f}")
 
     def _compute_ssd_resnet34_accuracy(self) -> None:
-        """Compute SSD-ResNet34 accuracy (mAP on COCO 2017)."""
         self._accuracy_results = self.sut.compute_accuracy()
 
         logger.info(f"mAP: {self._accuracy_results.get('mAP', 0):.4f}")
 
     def _compute_whisper_accuracy(self) -> None:
-        """Compute Whisper accuracy (Word Accuracy - MLPerf v5.1 metric)."""
         predictions = self.sut.get_predictions()
 
         if not predictions:
@@ -785,7 +745,6 @@ class BenchmarkRunner:
         logger.info(f"WER: {self._accuracy_results.get('wer', 0):.4f}")
 
     def _compute_sdxl_accuracy(self) -> None:
-        """Compute SDXL accuracy (CLIP Score and FID - MLPerf v5.1 metrics)."""
         self._accuracy_results = self.sut.compute_accuracy()
 
         clip_score = self._accuracy_results.get('clip_score', 0.0)
@@ -813,7 +772,6 @@ class BenchmarkRunner:
                 logger.warning(f"  FID Score {fid_score:.4f} not in [{fid_min}, {fid_max}]")
 
     def _compute_llama_accuracy(self) -> None:
-        """Compute Llama accuracy (ROUGE scores per MLCommons specification)."""
         predictions = self.sut.get_predictions()
 
         if not predictions:
@@ -854,7 +812,6 @@ class BenchmarkRunner:
         )
 
     def save_results(self, output_path: Optional[str] = None) -> str:
-        """Save benchmark results to file."""
         if output_path is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             output_path = Path(self.config.results_dir) / f"results_{timestamp}.json"
@@ -869,7 +826,6 @@ class BenchmarkRunner:
         return str(output_path)
 
     def print_summary(self) -> None:
-        """Print accuracy summary to console."""
         if "accuracy" not in self._results:
             return
 
@@ -885,30 +841,25 @@ class BenchmarkRunner:
             accuracy = acc.get('top1_accuracy', 0)
             correct = acc.get('correct', 0)
             total = acc.get('total', 0)
-            # MLPerf ResNet50 threshold: 75.69% (99% of 76.46%)
             status = "PASS" if accuracy >= 0.7569 else "FAIL"
             print(f"Top-1: {accuracy:.4f} ({correct}/{total}) [{status}]")
         elif model_type == 'bert':
             f1 = acc.get('f1', 0)
             em = acc.get('exact_match', 0)
-            # MLPerf BERT threshold: F1 >= 89.965 (99% of 90.874)
             status = "PASS" if f1 >= 89.965 else "FAIL"
             print(f"F1: {f1:.2f} [{status}]")
             print(f"EM: {em:.2f}")
         elif model_type == 'retinanet':
             mAP = acc.get('mAP', 0)
-            # MLPerf RetinaNet threshold: 37.19% mAP (99% of 37.57%)
             status = "PASS" if mAP >= 0.3719 else "FAIL"
             print(f"mAP: {mAP:.4f} [{status}]")
         elif model_type == 'ssd-resnet34':
             mAP = acc.get('mAP', 0)
-            # MLPerf SSD-ResNet34 threshold: 19.8% mAP (99% of 20.0%)
             status = "PASS" if mAP >= 0.198 else "FAIL"
             print(f"mAP: {mAP:.4f} [{status}]")
         elif model_type == 'whisper':
             word_acc = acc.get('word_accuracy', 0)
             wer = acc.get('wer', 0)
-            # MLPerf Whisper threshold: 96.94% word accuracy (99% of 97.93%)
             status = "PASS" if word_acc >= 0.9694 else "FAIL"
             print(f"Word Accuracy: {word_acc:.4f} [{status}]")
             print(f"WER: {wer:.4f}")
